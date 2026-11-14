@@ -11,6 +11,9 @@ export type ErrorAction = {
   /** 为什么这一步必须做：必做动作块要向人说清代价，不只说缺什么。 */
   why?: string;
   action?: { label: string; target: ErrorActionTarget };
+  /** 当 action 的落点页就是用户当前所在页时改指的动作：真正的上游前置。
+   *  例如分集未确认出现在剧本统筹页本身，此时真正缺的是第 1 阶段的大纲确认。 */
+  selfLoopAction?: { label: string; target: ErrorActionTarget };
 };
 
 export const ERROR_ACTIONS: Record<string, ErrorAction> = {
@@ -28,7 +31,14 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   MATERIAL_IDENTITY_AMBIGUOUS: { reason: '同一人物在多场外观描述不一致', action: { label: '按单场拆分计划', target: 'split-plan' } },
   // 「去剧本统筹」必须真的落到剧本统筹（#d/assets）。它原来指向导演包（#d/package），
   //  恢复动作把用户送到比来源更靠后的阶段，绕圈而不推进。
-  EPISODE_PLAN_NOT_CONFIRMED: { reason: '分集方案尚未确认', action: { label: '去剧本统筹', target: 'plan-stage' } },
+  EPISODE_PLAN_NOT_CONFIRMED: {
+    reason: '分集方案尚未确认',
+    action: { label: '去剧本统筹', target: 'plan-stage' },
+    // 这个阻塞就出现在剧本统筹页本身：此时「去剧本统筹」是零进展的自环，
+    // 真正的上游前置是第 1 阶段的大纲确认（该页点「生成分镜书」返回
+    // 422 SCRIPT_OUTLINE_NOT_CONFIRMED，/journey 的 script.outline_confirmed=false）。
+    selfLoopAction: { label: '去第 1 阶段确认大纲', target: 'creative-stage' },
+  },
   PACKAGE_NOT_CONFIRMED: { reason: '导演包尚未确认', action: { label: '去导演包', target: 'package-stage' } },
   NO_PACKAGE: { reason: '尚未生成导演包', action: { label: '去导演包', target: 'package-stage' } },
   SCRIPT_NOT_PREPARED: { reason: '还没有剧本', action: { label: '去创意与剧本', target: 'creative-stage' } },
@@ -58,8 +68,15 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
 export function describeBlocker(
   code: string | undefined,
   message: string,
-): { reason: string; why?: string; action?: { label: string; target: ErrorActionTarget } } {
+): {
+  reason: string;
+  why?: string;
+  action?: { label: string; target: ErrorActionTarget };
+  selfLoopAction?: { label: string; target: ErrorActionTarget };
+} {
   const known = code ? ERROR_ACTIONS[code] : undefined;
-  if (known) return { reason: known.reason, why: known.why, action: known.action };
+  if (known) {
+    return { reason: known.reason, why: known.why, action: known.action, selfLoopAction: known.selfLoopAction };
+  }
   return { reason: message || code || '需要处理' };
 }
