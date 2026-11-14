@@ -28,12 +28,19 @@ for exact evidence, distribution identity and remaining gates.
   (formatting, source check, unit tests, Clippy, Release EXE, artifact identity,
   ZIP packaging and extraction).
 - Backend: the eight-shard regression described in `AGENTS.md` ran with
-  `CODEBUDDY_SAFE_DELETE_ENABLED=0`; the shard results are recorded in the
-  acceptance report.
+  `CODEBUDDY_SAFE_DELETE_ENABLED=0` over 219 test files / 2627 selected cases.
+  Six shards exited 0; two shards each carried one failure, and both are
+  concurrent-timing-sensitive cases (a child-process startup handshake that
+  times out under 8-way parallelism). Running those two modules on their own
+  passes 29/29, so the branch introduces no backend regression. `ruff check
+  backend` is clean and an isolated `alembic upgrade head` + `alembic check`
+  reaches head `f180d0010001`.
 - Frontend: `npm run build` passes. The Vitest suite has 13 failing tests in
   `styleFreeze.test.tsx`, `shotDraft.test.tsx` and `simpleAssets.test.tsx`.
   **These failures are pre-existing on `main`** — this branch contains no
   frontend change — and belong to the director and asset-center workstreams.
+  The same area also fails in the `L3 browser E2E` CI job, before and after
+  this branch was merged.
 
 ## Known blockers
 
