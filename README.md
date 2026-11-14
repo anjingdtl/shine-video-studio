@@ -11,6 +11,18 @@
 
 **Current status: M1 hardened; M2/M3 offline foundations implemented and tested; the offline production loop is closed and reproducible.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter with strict reference-media transfer, Fake ComfyUI server, five named quality gates, request-revision repair engine, automatic recovery of finished external tasks, and the Offline Production E2E all run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation. See [`docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md`](docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md).
 
+## 最新 tester 安装包（2026-11-14 · H3 资源自整备 V2.0 收尾）
+
+**下载**：[GitHub Release v0.1.0-test.20261114](https://github.com/anjingdtl/shine-video-studio/releases/tag/v0.1.0-test.20261114)
+（`ShineVideoStudio-20261114-5926239-win64.zip` + 同名 `.sha256`）。
+
+- 源码提交 `5926239`，`TEST_BUILD / PARTIAL`，由 `scripts/build_test_package.ps1 -Verify` 从已提交树构建并逐文件 SHA-256 校验。
+- 包内**不含**模型权重、数据库、密钥、生成视频与验收证据；完整目录约 60.8 GB 需在向导中经明确确认后从固定上游下载。
+- 解压后双击 `一键安装并启动.cmd`（文件名乱码时用 `SETUP.cmd`）；支持 Windows 10/11 x64 · NVIDIA ≥15.3 GiB 显存 · ≥30 GiB 内存 · 非系统盘 ≥180 GiB 空闲。
+- 本轮收口：低显存候选 **W6A8 可选择并准备资源**（可选择准备 ≠ 可开拍）、新装机离线整备不再要求先有受管 ComfyUI（阶段 A/B 拆分）、W6A8 动态图锁定完整模型栈、旧 Edge WebView 不再误报断线、最新 CI 失败修复。
+- **边界**：W6A8 / RTX 4070 真机试镜、RelayVSR X2 真实超分、真实网络跨源下载恢复均 NOT_RUN/BLOCKED；本包不代表低显存候选或人工审片验收通过。
+- 验收文档：[工程收尾报告](docs/H3_V2_FINAL_CLOSEOUT_REPORT_20261114.md) · [T01–T24 逐项验收](docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md)。
+
 ## 导演模式 V2.0（当前主线）
 
 给**没有 AI 技术背景**的人用的一条路：导入小说／剧本 → 做少量创作确认 → 导演模式逐集产出并交付真正的 AI 短剧。
@@ -237,6 +249,8 @@ V1.3 adds isolated instance lifecycle and read-only external backup, pinned offl
 - [V1.3 cloud Codex full implementation brief](docs/V1.3_云端Codex实施总提示词.md)
 
 ## Documentation
+- [2026-11-14 H3 资源自整备 V2.0 工程收尾报告](docs/H3_V2_FINAL_CLOSEOUT_REPORT_20261114.md)
+- [2026-11-14 T01–T24 逐项验收与场景 A–F](docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md)
 - [2026-10-25 本机最终收尾补充报告（含仍未关闭的产品验收）](docs/LOCAL_FINAL_CLOSEOUT_20261025.md)
 - [V1.1 产品修订方案](docs/V1.1_影视专业Agent与H3官方规范中心_修订方案.md)
 - [V1.1 contracts and API](docs/v1.1-contracts.md)
