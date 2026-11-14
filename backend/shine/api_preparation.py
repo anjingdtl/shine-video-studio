@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
@@ -368,19 +368,8 @@ def approve_install(identity: str, body: Decision, actor: Operator, db: DBSessio
     if row.status != "AWAITING_APPROVAL":
         raise HTTPException(409, "INSTALL_STATE_INVALID")
     approval.consume(db, actor, "install", row, body.grant_id, body.snapshot)
-    for package in row.payload["packages"]:
-        if package["spec"]["license_id"].lower() in {"unknown", "unverified"}:
-            raise HTTPException(409, "LICENSE_NOT_APPROVED")
-        if package["spec"]["usage"] == "commercial" and "research" in package["spec"]["license_id"].lower():
-            raise HTTPException(409, "LICENSE_NOT_APPROVED")
-    row.status = "APPROVED"
-    row.payload = {
-        **row.payload,
-        "approved_by": actor,
-        "approval_evidence": body.evidence,
-        "execute_before": (utcnow() + timedelta(minutes=30)).isoformat(),
-    }
-    row.sha256 = graph_hash(row.payload)
+    from shine.comfyops.instances import approve_lifecycle_plan
+    approve_lifecycle_plan(db, row, actor=actor, evidence=body.evidence)
     audit(db, actor, "INSTALL_PLAN_APPROVED", row)
     db.commit()
     return public(row)

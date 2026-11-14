@@ -1570,3 +1570,60 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   亦未执行。Qwen Image 清单自身要求 15GB 显存 / 32GB 内存，4070 **下载得到但跑不动**，
   是否降档出图方案属产品裁定，不得私换模型。本轮未改 `worker.py`/`preproduction.py`，
   不触发 VLM 重校准义务。
+
+## 2026-11-15 模拟测评团队轮（MiniMax Bot）
+
+- **团队已建成**：MiniMax Bot 插件内的「Shine 实景测评组」（group `grp_e251e930ccd2`，admin=Chief，
+  reply_mode=admin，用 `@名字` 交接）。名册：Chief（模拟测评总控，派发与汇总）、小导演（视频七阶段
+  主线测评）、美术师（素材与图片链路测评）、修复师（缺陷定位与修复，**唯一改代码**）、质检员
+  （只读复核与全量回归）。操作手册见 `docs/EVAL_TEAM_MINIMAX_BOT.md`。
+- **拟人化实操是硬要求**：成员在真实浏览器里以普通用户身份点按钮、填表单、逐个确认弹窗；命令行
+  只用于起停本机服务、只读查日志台账、改代码、跑回归。**禁止用 API 绕过界面推进业务**。
+- **隔离运行**：测评一律用 `.local-acceptance/<run-id>/` 数据目录与独立端口，不碰 `.local-data/` 里
+  用户的真实项目；浏览器驱动用 `uv run --with playwright==1.64.1`（Chromium 在 `%LOCALAPPDATA%\ms-playwright`）。
+- **所有权唯一**：代码只由 修复师 改（一次一个缺陷、必带定向回归）；测评员只写 `docs/TEST_REPORT_*`；
+  质检员只写 `docs/ACCEPTANCE_*`、只读复核，不合格即退回。
+- **诚实边界**：本机 mock 可用但 `h3_connected=false`、`production_mode=BLOCKED`；离线结果标"离线模拟"，
+  不得声称真实 H3 渲染或成片验收；未跑到的阶段写"未运行"。
+- **团队记忆**：成员用 `recall/remember(scope=team)` 共享运行配方、导航结构、已知坑点与回归口径
+  （键：`shine.env` / `shine.team` / `shine.journey` / `shine.rules` / `shine.language`）。
+- **沟通语言**：该团队一律使用**全中文**沟通与答复（群内发言、回执、报告、缺陷描述、结论）；
+  仅代码标识符、文件路径、命令、API 路径、错误码原文与产品专名保持原样不译。
+- **用户直接指挥**：用户可在「Shine 实景测评组」群里或与 Chief 单聊直接下达测评要求，
+  Chief 负责拆解、派发、汇总与回话；也可 @成员 或与某成员单聊，成员不擅自行动。
+- **共享环境红线（2026-11-15 事故）**：**绝不执行 `npm ci` / `npm install`**——它会先删掉
+  `frontend/node_modules`，本机在跑的 vite 占用 `esbuild.exe` 导致 Windows EPERM 失败，并会洗掉共享依赖、
+  打断用户与其他 agent 正在运行的工作台（该事故曾使 8000/5173 工作台掉线，后用 `npm --prefix frontend ci`
+  按锁文件还原修复）。**绝不抢占他人端口**（8010/5180 可能被别的 agent 建设占用，先查端口）。
+  要装依赖或起停工作栈，先问用户。隔离实例用 `scripts/start_eval_instance.ps1`（复用现有依赖，不重装）。
+
+## 2026-11-15 工作栈生命周期与全流程依赖一键整备轮
+
+- **页面 presence + 空闲自动退出**：App 根组件每 20s 向监督进程报 presence；watchdog
+  在「页面曾打开又关闭 + 无活工作」超过宽限（`SHINE_IDLE_SHUTDOWN_MINUTES`，默认 5，
+  0 关闭）后自动 `stop_shine.py` + `release_residual_backends.py`。活工作 = idle gate ∪
+  媒体活工作 ∪ 创意任务 ∪ 交付单 ∪ 安装 attempt；**在途生产不打断，无头/脚本用法不自动退**。
+  `WorkStackMonitor` 提供「停止后台并退出」与 Worker 停/启（行内二次确认）。
+- **Worker 级停/启**：supervisor `/stop-worker` 用临时单 entry manifest 做身份核验停止，
+  **不改真实 manifest**（整栈 stop 跳过 GONE、下次启动器对账重启）；`/start-worker` 持
+  startup guard 原子写回 owners。服务复核验可在产品内到达「API 活着 + Worker 停止」；
+  心跳 30s 自然过期，不伪造。
+- **节点白名单按磁盘目录解析**：`resolve_node_pack_dirs`（精确名 → 唯一归一化别名 →
+  missing 具名）；`generate_configuration` 白名单用目录名，H3 能力缺包具名
+  `NODE_PACK_DIRECTORY_MISSING`；adoption 指纹与 inventory 同口径，强度不放宽。
+  受管启动日志经 `SHINE_COMFY_LOG_FILE` + bootstrap `dup2` 落盘（env 不进 argv，
+  不改 recipe 身份）；`LIVE_WORKFLOW_CONTRACT_FAILED` 带 `renderer_log` 与 import 摘录；
+  新增只读 `GET /setup/renderer-log`。
+- **一键整备 INSTANCE 步**：`setup_preparation` 在单授权下驱动
+  CREATE→INSTALL_NODE→BIND_MODELS（`approve_lifecycle_plan` 与 API 审批共用许可规则），
+  下载字节进缓存后才批准（30 分钟执行窗不空烧），NEEDS_REVIEW 具名停交对账、不盲重试；
+  `prepare-plan` 增 `runtime_gap`（source/wheel/node 闭包 + 阶梯只读预览）。
+  导演 `#d/setup` 嵌入完整 `SetupCenter`（用户裁定），不建第二套安装器。
+- **迁移阻塞对象化**：`GET /settings/output-directory` 增 `blocker_details` 与
+  `worker_online`；面板列具体任务、给启动 Worker 与深链；安全门不变。
+- 本轮**未改** `client_review_identity` 钉住文件，不触发 VLM 重校准；历史校准未完成，
+  不得声称已校准。回归：新增 `test_supervisor_lifecycle` / `test_node_pack_whitelist` /
+  `test_setup_preparation_instance` + 定向 `test_output_directory` /
+  `test_setup_capability_gates`；前端全量 vitest / tsc / build；Ruff 干净。
+  真机边界：自动退出与 Worker 停启在开发机验证；裸机全链真实下载与收编机 L4 封存
+  在用户机执行并如实报告。证据 `docs/ACCEPTANCE_20261115_SETUP_LIFECYCLE_DEPENDENCIES.md`。

@@ -34,7 +34,27 @@ def verify_before_listen(server, adapter_file, expected_sha256, modules):
     return True
 
 
+def _redirect_output_to_log() -> None:
+    # The owned process group launches us without inherited std handles, so
+    # without this the custom-node import log would be lost exactly when a
+    # node pack fails to load and the reason must be diagnosable.
+    log_file = os.environ.get("SHINE_COMFY_LOG_FILE", "")
+    if not log_file:
+        return
+    path = Path(log_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.dup2(handle, 1)
+        os.dup2(handle, 2)
+    finally:
+        os.close(handle)
+    sys.stdout = os.fdopen(1, "w", buffering=1)
+    sys.stderr = os.fdopen(2, "w", buffering=1)
+
+
 def main():
+    _redirect_output_to_log()
     root = Path(os.environ.get("SHINE_COMFY_BOOTSTRAP_ROOT", ""))
     adapter_file = Path(os.environ.get("SHINE_COMFY_ADAPTER_FILE", ""))
     digest = os.environ.get("SHINE_COMFY_EXPECTED_ADAPTER_SHA256", "")

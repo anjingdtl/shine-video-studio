@@ -363,6 +363,25 @@ def _refuse_start_under_managed_lifecycle(factory, installation_id: str) -> None
             raise HTTPException(409, "INSTANCE_LIFECYCLE_LEASE_ACTIVE")
 
 
+def approve_lifecycle_plan(db, plan, *, actor: str, evidence: str) -> None:
+    """License checks + approval fields, shared by the API grant path and the
+    authorized preparation task. The human authorization is the evidence."""
+    from datetime import timedelta
+    for package in plan.payload["packages"]:
+        if package["spec"]["license_id"].lower() in {"unknown", "unverified"}:
+            raise HTTPException(409, "LICENSE_NOT_APPROVED")
+        if package["spec"]["usage"] == "commercial" and "research" in package["spec"]["license_id"].lower():
+            raise HTTPException(409, "LICENSE_NOT_APPROVED")
+    plan.status = "APPROVED"
+    plan.payload = {
+        **plan.payload,
+        "approved_by": actor,
+        "approval_evidence": evidence,
+        "execute_before": (utcnow() + timedelta(minutes=30)).isoformat(),
+    }
+    plan.sha256 = graph_hash(plan.payload)
+
+
 def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None):
     checkpoint = checkpoint or (lambda stage: None)
     runner = runner or ProcessRunner()

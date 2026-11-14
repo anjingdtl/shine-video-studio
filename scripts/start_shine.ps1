@@ -29,7 +29,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $launchEnv = Join-Path $repoRoot '.env'
 if (Test-Path -LiteralPath $launchEnv) {
     $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
-        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER', 'SHINE_ENABLE_LOCAL_EXECUTION')
+        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER', 'SHINE_ENABLE_LOCAL_EXECUTION',
+        'SHINE_IDLE_SHUTDOWN_MINUTES')
     foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
             $key, $value = $Matches[1], $Matches[2].Trim()
@@ -317,7 +318,17 @@ try {
 
         $backendLock = Join-Path $repoRoot 'backend/uv.lock'
         $backendFingerprint = Get-FileFingerprint $backendLock
-        if ($Install -or -not (Test-Path $backendEnv) -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
+        # A lock receipt only proves a past install. The editable install links
+        # this venv to the checkout it was created from, so a checkout that was
+        # moved or deleted leaves a venv that cannot import `shine` while the
+        # receipt still matches. Ask the interpreter itself, then resync.
+        $backendImportable = $true
+        if (Test-Path $backendEnv) {
+            & $venvPython -c 'import shine' 2>$null | Out-Null
+            $backendImportable = ($LASTEXITCODE -eq 0)
+        }
+        if ($Install -or -not (Test-Path $backendEnv) -or -not $backendImportable -or
+            -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
             Invoke-Native 'Python dependency installation' {
                 & uv sync --project (Join-Path $repoRoot 'backend') --locked
             }
@@ -325,7 +336,13 @@ try {
         }
         $frontendLock = Join-Path $repoRoot 'frontend/package-lock.json'
         $frontendFingerprint = Get-FileFingerprint $frontendLock
+        # A receipt proves a past install, not a present tree. A cleanup or an
+        # interrupted install can leave node_modules empty while the receipt
+        # still matches, and the launcher then reports a started Web process
+        # that has already died on the missing vite entry.
+        $frontendEntry = Join-Path $repoRoot 'frontend/node_modules/vite/bin/vite.js'
         if ($Install -or -not (Test-Path (Join-Path $repoRoot 'frontend/node_modules')) -or
+            -not (Test-Path -LiteralPath $frontendEntry) -or
             -not (Test-ShineReceipt 'frontend_dependencies' $frontendFingerprint)) {
             $frontendInstallRoot = Join-Path $repoRoot 'frontend'
             if ($env:SHINE_BOOTSTRAP_ROOT) {

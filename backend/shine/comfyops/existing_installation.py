@@ -76,6 +76,43 @@ def _git_commit(path: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
+def _pack_alias(name: str) -> str:
+    lowered = re.sub(r"[^a-z0-9]", "", name.lower())
+    return lowered[len("comfyui"):] if lowered.startswith("comfyui") else lowered
+
+
+def resolve_node_pack_dirs(root: Path, catalog: dict) -> tuple[dict[str, str], list[str]]:
+    """Map catalog node packs to the custom_nodes directory names really on disk.
+
+    ComfyUI's --whitelist-custom-nodes matches directory names, not repository
+    names: an adopted installation keeps upstream defaults (KJNodes) while the
+    catalog pins repo ids (ComfyUI-KJNodes). Exact names win; an alias match is
+    accepted only when exactly one directory normalizes to the pack's alias.
+    """
+    custom = root / "custom_nodes"
+    dirs: list[str] = []
+    if custom.is_dir():
+        dirs = [entry.name for entry in sorted(custom.iterdir())
+                if entry.is_dir() and not entry.is_symlink()
+                and not entry.name.startswith((".", "__"))]
+    mapping: dict[str, str] = {}
+    missing: list[str] = []
+    for component in catalog.get("components", []):
+        if component.get("kind") != "node":
+            continue
+        cid = component["component_id"]
+        if cid in dirs:
+            mapping[cid] = cid
+            continue
+        alias = _pack_alias(cid)
+        hits = [name for name in dirs if alias and _pack_alias(name) == alias]
+        if len(hits) == 1:
+            mapping[cid] = hits[0]
+        else:
+            missing.append(cid)
+    return mapping, missing
+
+
 def node_package_inventory(root: Path, catalog: dict) -> dict:
     """Every custom node package on disk, with the evidence it really has.
 
@@ -209,7 +246,8 @@ def _source_software_state(root: Path, catalog: dict) -> dict:
     python = next((path.resolve() for path in python_candidates if path.is_file()), None)
     expected_nodes = [c["component_id"] for c in catalog.get("components", [])
                       if c.get("kind") == "node"]
-    nodes = {node: (root / "custom_nodes" / node).is_dir() for node in expected_nodes}
+    pack_dirs, _missing = resolve_node_pack_dirs(root, catalog)
+    nodes = {node: node in pack_dirs for node in expected_nodes}
     return {
         "installed": True,
         "version_status": version_status,

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
 import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
-import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
+import { SetupCenter } from './SetupCenter';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { GuideTip } from './GuideTip';
@@ -77,7 +77,7 @@ function gib(bytes?: number | null): string {
  */
 export default function DirectorSetupPanel({
   focusTab = 'env', projectId, projectTitle, setProjectTitle, createProject,
-  system, refreshEpoch, onRefresh, onOpenSettings,
+  system, refreshEpoch, onRefresh,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
@@ -193,22 +193,12 @@ export default function DirectorSetupPanel({
 
     {tab === 'env' && <div className="setup-tab-body">
       {/*
-        导演页只展示同一个服务端事实的只读摘要。完整整备在「设置 → 制作环境」
-        一处完成：这里不再生成第二套安装计划，也不再独立判定「已就绪」。
+        完整整备收进导演页（用户裁定）：SetupCenter 自带状态区、检测、一次确认、
+        下载、实例创建、登记、核验与激活，与专家层共用同一服务端事实，
+        不建第二套安装器，也不重复渲染状态区。
       */}
-      <SetupEnvironmentStatus
-        projectId={projectId}
-        readOnly
-        refreshEpoch={refreshEpoch}
-        onGoSettings={() => onOpenSettings?.()}
-      />
-      {onOpenSettings && <section className="card section-card setup-needs-project">
-        <div>
-          <b>完整整备在「设置 → 制作环境」</b>
-          <p>检测、核验、登记、下载、运行配置与真实试镜都在那一处收束；这里只显示结论。</p>
-        </div>
-        <button type="button" className="btn-secondary" onClick={() => onOpenSettings()}>打开设置</button>
-      </section>}
+      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch} onRefresh={onRefresh}
+        onNeedProject={createProject} />
       <OutputDirectoryPanel />
     </div>}
 

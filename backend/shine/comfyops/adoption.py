@@ -55,13 +55,11 @@ def _node_tree_fingerprint(directory: Path) -> str:
 
 
 def _node_fingerprints(root: Path, catalog: dict) -> dict[str, str]:
+    from shine.comfyops.existing_installation import resolve_node_pack_dirs
+    pack_dirs, _missing = resolve_node_pack_dirs(root, catalog)
     result = {}
-    for component in catalog.get("components", []):
-        if component.get("kind") != "node":
-            continue
-        candidate = root / "custom_nodes" / component["component_id"]
-        if candidate.exists():
-            result[component["component_id"]] = _node_tree_fingerprint(candidate)
+    for component_id, directory in pack_dirs.items():
+        result[component_id] = _node_tree_fingerprint(root / "custom_nodes" / directory)
     sampling_node = root / "custom_nodes" / "shine_h3_sampling_mode.py"
     if sampling_node.is_file() and not sampling_node.is_symlink():
         result["shine_h3_sampling_mode.py"] = hashlib.sha256(sampling_node.read_bytes()).hexdigest()

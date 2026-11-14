@@ -43,6 +43,7 @@ TASK_KEY = "setup-preparation-task"
 LEASE_SECONDS = 300
 
 STEP_LABELS = {
+    "INSTANCE": "创建/补全本机 ComfyUI 实例",
     "TARGET": "确认本机安装与端口",
     "RECIPE": "生成受管运行配置",
     "IMAGE_BIND": "对齐出图运行时",
@@ -53,7 +54,7 @@ STEP_LABELS = {
 
 
 def _steps_for(capabilities: list[str], *, verify_runtime: bool) -> list[str]:
-    steps = ["TARGET", "RECIPE"]
+    steps = ["INSTANCE", "TARGET", "RECIPE"]
     if "image" in capabilities:
         steps.append("IMAGE_BIND")
     if "h3" in capabilities:
@@ -291,6 +292,7 @@ def _message_of(exc: Exception) -> str:
 
 def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str, Any]:
     handler = {
+        "INSTANCE": _step_instance,
         "TARGET": _step_target,
         "RECIPE": _step_recipe,
         "IMAGE_BIND": _step_image_bind,
@@ -299,6 +301,69 @@ def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str
         "IMAGE_VERIFY": _step_image_verify,
     }[step_id]
     return handler(factory, settings, task)
+
+
+def _step_instance(factory, settings, task) -> dict[str, Any]:
+    """Drive the instance ladder under the single frozen authorization.
+
+    A machine that already has a usable installation skips the ladder entirely
+    (adopted installations are never mutated here). A bare machine gets
+    CREATE -> INSTALL_NODE -> BIND_MODELS, one sub-action per tick, each plan
+    approved with the preparation task as evidence and executed by the same
+    identity-verified executor the API uses. Bytes must be in the verified
+    cache before approval, so the 30-minute execute window never burns while
+    a download is still running.
+    """
+    from datetime import datetime as _dt
+
+    from shine.comfyops import deployment, instances
+    from shine.comfyops.installer import ControlledDownloader, PackageFile
+    from shine.comfyops.models import InstallationPlan
+    from shine.comfyops.setup_summary import resolve_installation
+    from shine.services import add_audit
+
+    request = task.get("request") or {}
+    project_id = str(task.get("project_id"))
+    with factory() as db:
+        resolved = resolve_installation(db, settings, path=request.get("installation_path"))
+        selected = resolved.get("selected") or {}
+    if selected.get("instance_id"):
+        return {"status": "DONE", "detail": "已有可用安装，无需创建实例。"}
+    port = int(request.get("port") or 8188)
+    with factory() as db:
+        plan, action = deployment.next_instance_plan(
+            db, settings, deployment.load_default_catalog(), project_id,
+            instance_name="shine-h3", port=port, mode="local")
+    if plan is None:
+        return {"status": "DONE", "detail": "实例阶梯已完成。"}
+    with factory.begin() as db:
+        row = db.get(InstallationPlan, plan.id)
+        if row.status in {"INSTALLING", "NEEDS_REVIEW"}:
+            return {"status": "FAILED", "code": "INSTANCE_REQUIRES_RECONCILIATION",
+                    "detail": "实例操作中断待对账；请在制作环境里核对后继续，不会盲目重试。"}
+        cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+        missing = [f["sha256"] for p in row.payload["packages"]
+                   for f in p["spec"]["files"]
+                   if not (cache / f["sha256"]).is_file()
+                   or not ControlledDownloader.valid(cache / f["sha256"], PackageFile.model_validate(f))]
+        if missing:
+            return {"status": "PENDING",
+                    "detail": f"等待 {len(missing)} 个文件下载完成（关闭页面也会继续）。"}
+        try:
+            expired = _dt.fromisoformat(row.payload.get("execute_before", "")) <= utcnow()
+        except ValueError:
+            expired = True
+        if row.status == "AWAITING_APPROVAL" or expired:
+            instances.approve_lifecycle_plan(
+                db, row, actor="worker:setup",
+                evidence=f"setup-preparation:{task.get('task_id')}")
+            add_audit(db, "worker:setup", "SETUP_PREPARATION_INSTANCE_APPROVED",
+                      "installation_plan", row.id,
+                      {"task_id": task.get("task_id"), "action": action},
+                      project_id=project_id)
+        digest = row.sha256
+    instances.execute_operation(factory, settings, plan.id, digest, "worker:setup")
+    return {"status": "PENDING", "detail": f"实例操作 {action} 已执行，继续下一步阶梯。"}
 
 
 def _step_target(factory, settings, task) -> dict[str, Any]:

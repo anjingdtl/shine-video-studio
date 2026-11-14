@@ -884,8 +884,22 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     whitelist = ["shine_comfy_handoff"]
     if sampling_node.is_file() or capability == 'h3':
         whitelist.append("shine_h3_sampling_mode.py")
-    node_packs = [cid for cid, c in _component_map(load_default_catalog()).items() if c["kind"] == "node"]
-    whitelist.extend(sorted(node_packs))
+    # ComfyUI matches the whitelist against on-disk directory names; an adopted
+    # installation keeps upstream defaults, so catalog repo ids must resolve to
+    # the directories that really exist before they can be whitelisted.
+    from shine.comfyops.existing_installation import resolve_node_pack_dirs
+    pack_dirs, missing_packs = resolve_node_pack_dirs(root, load_default_catalog())
+    if missing_packs and capability == 'h3':
+        raise HTTPException(409, {
+            "code": "NODE_PACK_DIRECTORY_MISSING",
+            "missing": missing_packs,
+            "message": "这些节点包在安装的 custom_nodes 里找不到对应目录；"
+                       "请先在「安装与下载」补装节点，再重新生成运行配置。",
+        })
+    whitelist.extend(sorted(pack_dirs.values()))
+    log_dir = settings.comfyops_dir / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    renderer_log = str((log_dir / f"renderer-{instance.id}.log").resolve())
     argv = [
         "{python}", str(REPO_ROOT / "scripts" / "managed_comfy_bootstrap.py"),
         "--listen", "127.0.0.1", "--port", "{port}",
@@ -905,6 +919,8 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     ])
     renderer = {
         "instance_id": instance.id,
+        "node_pack_dirs": pack_dirs,
+        "log_file": renderer_log,
         "installation": {"id": instance.id, "sha256": instance.sha256},
         "python": venv_python,
         "root": str(root),
