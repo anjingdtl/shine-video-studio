@@ -2,7 +2,8 @@
 
 - 基准主线：`21f3e728e5f0e34fefe7b22bb84efc3265540aff`
 - 开发分支：`fix/shine-new-machine-adoption-runtime-v2-20261114`
-- 最终提交：`972afbd`
+- 功能提交：`972afbd`
+- 同步 main 的合并提交：`98711d4`（合入 PR #23 的按能力门禁解耦）
 - Pull Request：https://github.com/anjingdtl/shine-video-studio/pull/24
 - 验证环境：Linux 云端沙箱（无 Windows、无 NVIDIA GPU、无真实 ComfyUI）
 - 审计样本：Windows 11 / RTX 4070 12282 MiB / ComfyUI 0.39.0 / 43.97GB H3 权重
