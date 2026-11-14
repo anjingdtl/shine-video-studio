@@ -1,13 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ChevronRight, Cpu, Download, Image as ImageIcon, Loader2, Mic,
-  MonitorCheck, RefreshCw, Video,
+  AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
+  MonitorCheck, Video,
 } from 'lucide-react';
 import { api, json, timeoutSignal, ApiError } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
+import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
+import type { CapabilityKey as EnvironmentKey, SetupSummary } from './SetupEnvironmentStatus';
 import {
-  approveAndExecuteSetupPlan, isQueuedInstallation, waitForInstallationAttempt,
+  approveAndExecuteSetupPlan, isQueuedInstallation,
 } from '../setupExecution';
 import type { InstallationAttemptView } from '../setupExecution';
 
@@ -134,7 +136,7 @@ type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr';
 type CapabilityOutcome = {
   key: CapabilityKey;
   label: string;
-  status: 'READY' | 'FILES_READY' | 'REUSED' | 'BLOCKED' | 'FAILED';
+  status: 'READY' | 'FILES_READY' | 'REUSED' | 'QUEUED' | 'BLOCKED' | 'FAILED';
   note: string;
 };
 
@@ -223,9 +225,10 @@ type Props = {
 };
 
 export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProject }: Props) {
-  // 检测只由用户点击触发；结果存快照，切页/刷新回来直接读快照，不重复检测。
+  // 打开页面就自动检测：不再要求先点「检测本机」才看到环境。
+  // 结果存快照只是为了不空屏；资格判定永远来自服务端。
   const [restored] = useState<DetectionSnapshot | null>(() => readSnapshot());
-  const [phase, setPhase] = useState<'idle' | 'detecting' | 'ready' | 'error'>(restored ? 'ready' : 'idle');
+  const [phase, setPhase] = useState<'idle' | 'detecting' | 'ready' | 'error'>('detecting');
   const [problem, setProblem] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(restored?.env ?? null);
   const [storage, setStorage] = useState<Storage | null>(restored?.storage ?? null);
@@ -255,6 +258,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   /** 每项能力各自的结论：一项没准备好，不影响其它项。 */
   const [outcomes, setOutcomes] = useState<CapabilityOutcome[]>([]);
   const [imageTesting, setImageTesting] = useState('');
+  /** 服务端唯一事实视图；界面的资格判定只读它。 */
+  const [summary, setSummary] = useState<SetupSummary | null>(null);
   /** 二次确认就在卡片里完成，不弹系统对话框：看到体积与目录，再点一次开始。 */
   const [confirming, setConfirming] = useState(false);
   const mounted = useRef(true);
@@ -323,8 +328,15 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     }
   }, [projectId]);
 
-  // 挂载不自动检测：有快照读快照，没有就等用户点「检测本机」。
-  // 「刷新全部状态」（refreshEpoch 变化）是用户动作，才重新检测。
+  // 挂载即检测一次；作品 id 变化时再检测一次（生成方案是项目级事实）。
+  // 「刷新全部状态」（refreshEpoch 变化）是用户动作，也重新检测。
+  const detectKey = useRef<string | null>(null);
+  useEffect(() => {
+    if (detectKey.current === projectId) return;
+    detectKey.current = projectId;
+    void detect();
+  }, [projectId, detect]);
+
   const epochRef = useRef(refreshEpoch);
   useEffect(() => {
     if (epochRef.current === refreshEpoch) return;
@@ -445,7 +457,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   // asked for (a machine with no installable H3 scheme stays able to prepare
   // the other - legal - capabilities).
   const canPrepare = !!projectId && !envBlocked && !running && !!storage && !storage.requires_selection
-    && (!caps.h3 || !!selectedVariant);
+    && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
+  /** 后台准备是否在推进：它不依赖这个页面，所以按钮文案要如实说明。 */
+  const preparation = summary?.preparation;
+  const preparing = preparation?.status === 'QUEUED' || preparation?.status === 'RUNNING';
 
   /**
    * Plan-scoped download admission (C-01).
@@ -478,288 +493,205 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     }
   };
 
-  async function prepare() {
+  /**
+   * 一次授权 → 后台持续推进。
+   *
+   * 这里只做三件短事：核对事实（只读）、把缺的文件交给既有安装计划、把
+   * 「补齐运行配置/绑定/登记/核对服务」交给持久 Worker。下载和整备都不再
+   * 由浏览器串行驱动，所以关掉页面、切到导演模式、Worker 重启都不会中断。
+   */
+  async function prepare(requested?: EnvironmentKey[]) {
     if (!projectId) { onNeedProject?.(); return; }
-    if (!canPrepare) return;
+    const wants = (key: CapabilityKey) => (requested ? requested.includes(key) : caps[key]);
     setConfirming(false);
-    setRunning({ label: '检查本机环境…', note: '' });
+    setRunning({ label: '核对本机环境…', note: '' });
     setResult('');
     setProblem('');
     setOutcomes([]);
     const report: CapabilityOutcome[] = [];
     try {
-      const ensure = () => { if (!mounted.current) throw new Error('页面已切换，自动准备已停止；已执行的记录都保留。'); };
-      const environment = await api<EnvReport>('/setup/environment');
-      ensure();
-      const freshBlocking = (environment.findings ?? []).filter((finding) =>
-        finding.repairability !== 'AUTO_REPAIRABLE'
-        && finding.repairability !== 'ALREADY_AVAILABLE'
-        && (finding.scopes ?? finding.scope ?? []).includes('RESOURCE_PREPARATION'));
-      if (environment.findings ? freshBlocking.length > 0 : environment.blockers.length > 0) {
-        throw new Error(environment.findings
-          ? `本机还有需要先处理的条件：${freshBlocking.map((finding) => finding.message ?? finding.code).join('；')}`
-          : '本机还有阻断项，先处理上面的提示。');
+      const ensure = () => { if (!mounted.current) throw new Error('页面已切换；后台准备继续在服务器上执行。'); };
+      const fresh = await api<SetupSummary>(`/setup/summary?project_id=${encodeURIComponent(projectId)}`);
+      setSummary(fresh);
+      if (fresh.installation.choice_required) {
+        throw new Error('这台电脑上找到不止一套 ComfyUI：先在上面选一次要用的那套，系统会记住。');
       }
-      const port = environment.port?.selected ?? environment.port?.port;
-      if (!port) throw new Error('服务端口状态读取不到，不能安全地准备 ComfyUI。');
-      /**
-       * One install plan, one capability.
-       *
-       * The plan carries that capability's own components and nothing else.
-       * That is what keeps an unrelated hardware gate away from an unrelated
-       * download: the H3 production admission never reaches the image weights,
-       * because the image weights are not in the H3 plan.
-       */
-      const runPlan = async (label: string, body: Record<string, unknown>, note: string) => {
-        setRunning({ label: `${label}…`, note });
-        const plan = await api<{
-          plan_id: string; sha256: string; status: string; download_bytes: number;
-          runtime_advisories?: Array<{ code?: string; message?: string }>;
-        }>(
-          '/setup/install-plan', json('POST', body),
-        );
-        ensure();
-        const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, ensure, { wait: false });
-        let stage = '';
-        if (isQueuedInstallation(queued)) {
-          // The attempt's own terminal stage is the honest outcome: files
-          // verified is not runtime verified, and the capability's result
-          // below must not blur the two (C-03).
-          const view = await waitForInstallationAttempt(queued.attempt_id, (progress) => {
-            if (mounted.current) {
-              setAttempt(progress);
-              setRunning({ label: `${label}…`, note: `${gib(progress.confirmed_bytes)} / ${gib(progress.total_bytes)}` });
-            }
-          });
-          stage = String(view.stage ?? '');
-        }
-        return { plan, stage };
-      };
+      const installation = fresh.installation.selected;
+      const port = installation?.port ?? env?.port?.selected ?? env?.port?.port ?? null;
 
-      /** A refusal keeps its own words; the other capabilities keep going. */
-      const failed = (key: CapabilityKey, label: string, error: unknown): CapabilityOutcome => ({
-        key,
-        label,
-        status: error instanceof ApiError ? 'BLOCKED' : 'FAILED',
-        note: error instanceof ApiError ? error.message
-          : (error instanceof Error ? error.message : String(error)),
-      });
-
-      // ---- 1. H3 视频资源：只有勾选了 H3 能力才会准备 ------------------
-      let h3Ready = false;
-      if (caps.h3) {
-        const label = CAP_LABELS.h3;
-        const weightsOnDisk = h3Complete && !force.h3;
-        let reused = false;
-        let skipDownload = false;
-        let note = '';
-        if (weightsOnDisk) {
-          // 本机已经有这套权重：只做只读哈希核验 + 登记，不复制、不下载。
-          // 几十 GB 的权重不会因为"还没核验"就被重新下载一遍。
-          if (!comfyInstalled || !scan) {
-            skipDownload = true;
-            note = '本机已有这套权重，但没有找到可以登记的 ComfyUI 安装；'
-              + '本次没有重复下载几十 GB 的权重。请到专业设置里核对或导入这套安装。';
-          } else {
-            setRunning({ label: '核验本机已有权重…', note: '只读哈希，不复制、不修改你的 ComfyUI' });
-            try {
-              const verify = await api<{ status: string; rejected?: unknown[]; verified?: unknown[] }>(
-                '/setup/existing-installations/verify',
-                { ...json('POST', { path: scan.root, snapshot: scan.snapshot }), signal: timeoutSignal(3_600_000) },
-              );
-              ensure();
-              if (verify.status === 'VERIFYING') {
-                skipDownload = true;
-                note = '本机这套权重正在核验中，稍等一会儿再点一次；本次没有重复下载。';
-              } else if ((verify.rejected?.length ?? 0) > 0) {
-                // The bytes on disk are not the pinned bytes: they are prepared
-                // again from the fixed list.
-                note = '本机这套权重没有通过逐字节核验，已按固定清单重新准备。';
-              } else {
-                setRunning({ label: '登记这套已有安装…', note: '不复制、不覆盖' });
-                await api('/setup/existing-installations/adopt', json('POST', {
-                  project_id: projectId, path: scan.root, snapshot: scan.snapshot,
-                  instance_name: 'shine-h3', port,
-                }));
-                ensure();
-                reused = true;
-              }
-            } catch (error) {
-              skipDownload = true;
-              note = `复用已有安装没有成功：${error instanceof Error ? error.message : String(error)}。`
-                + '本次没有重复下载权重。';
-            }
-          }
-        }
-        let outcome: CapabilityOutcome;
-        if (reused) {
-          outcome = { key: 'h3', label, status: 'REUSED', note: '已登记本机已有的权重（只读核验，没有复制或覆盖）。' };
-        } else if (skipDownload) {
-          outcome = { key: 'h3', label, status: 'BLOCKED', note };
-        } else {
-          const components = new Set<string>(STRUCTURE_COMPONENTS);
-          for (const id of selectedVariant ? weightIdsOf(selectedVariant) : []) components.add(id);
-          const body = {
-            catalog: selectedVariant?.catalog_id ?? 'h3-ref2va-windows-x64',
-            components: [...components],
-            project_id: projectId,
-            disk_free: storage?.free_bytes ?? 0,
-            variant_id: selectedVariant?.variant_id,
-            candidate_download_acknowledged: !!selectedVariant && !selectedVariant.auto_download_allowed,
-          };
-          try {
-            // Only the sources this plan's own components download from may
-            // block this plan; an unrelated host outage stays diagnostic.
-            const blockedNote = await preflightSources(body);
-            if (blockedNote) {
-              outcome = { key: 'h3', label, status: 'BLOCKED', note: blockedNote };
-            } else {
-              const { stage } = await runPlan(`准备${label}`, body, `约 ${gib(h3Bytes)}`);
-              outcome = stage === 'FILES_VERIFIED_PENDING_RUNTIME'
-                ? {
-                  key: 'h3', label, status: 'FILES_READY',
-                  note: note || '权重文件已下载并逐字节核验；能否在这台机器上出片，要等受管运行环境启动核验。',
-                }
-                : { key: 'h3', label, status: 'READY', note: note || '权重已下载并逐字节核验。' };
-            }
-          } catch (error) {
-            outcome = failed('h3', label, error);
-          }
-        }
-        h3Ready = outcome.status === 'READY' || outcome.status === 'FILES_READY' || outcome.status === 'REUSED';
-        report.push(outcome);
-      }
-
-      // ---- 2. 独立能力：素材出图 / 画面审片 / 语音核对 ------------------
-      const independent: Array<{ key: CapabilityKey; label: string; bytes: number; body: Record<string, unknown> }> = [];
-      if (imageWant) {
-        independent.push({
-          key: 'image', label: CAP_LABELS.image, bytes: imageBytes,
-          body: {
-            catalog: IMAGE_CATALOG, components: IMAGE_COMPONENTS, project_id: projectId,
-            disk_free: storage?.free_bytes ?? 0,
-          },
-        });
-      }
-      if (vlmWant) {
-        independent.push({
-          key: 'vlm', label: CAP_LABELS.vlm, bytes: REVIEW_BYTES.vlm,
-          body: {
-            catalog: 'h3-ref2va-windows-x64', components: [REVIEW_COMPONENTS.vlm], project_id: projectId,
-            disk_free: storage?.free_bytes ?? 0,
-          },
-        });
-      }
-      if (asrWant) {
-        independent.push({
-          key: 'asr', label: CAP_LABELS.asr, bytes: REVIEW_BYTES.asr,
-          body: {
-            catalog: 'h3-ref2va-windows-x64', components: [REVIEW_COMPONENTS.asr], project_id: projectId,
-            disk_free: storage?.free_bytes ?? 0,
-          },
-        });
-      }
-      for (const item of independent) {
+      // 1) 已有字节：只读核验 + 自动登记（必要时一次性确认复用这套安装）。
+      const reconcile = async (capability: 'h3' | 'image') => {
+        if (!installation?.root) return null;
+        setRunning({ label: '核验并登记本机已有资源…', note: '只读哈希；不复制、不改你的 ComfyUI' });
         try {
-          // Same plan-scoped admission as H3: only this capability's own
-          // sources can stop it, and a refusal keeps its own words.
-          const blockedNote = await preflightSources(item.body);
-          if (blockedNote) {
-            report.push({ key: item.key, label: item.label, status: 'BLOCKED', note: blockedNote });
-            continue;
-          }
-          const { plan, stage } = await runPlan(`准备${item.label}`, item.body, `约 ${gib(item.bytes)}`);
-          // The capability's own runtime floor is reported next to the result:
-          // the bytes are on disk, and the card still says what this machine
-          // cannot do with them yet.
-          const advisories = (plan.runtime_advisories ?? [])
-            .map((row) => row.message ?? row.code ?? '').filter(Boolean).join('；');
-          const filesOnly = stage === 'FILES_VERIFIED_PENDING_RUNTIME';
-          report.push({
-            key: item.key, label: item.label, status: filesOnly ? 'FILES_READY' : 'READY',
-            note: (filesOnly
-              ? '文件已下载并逐字节核验；运行验证还没做，第一次使用时会自动核验。'
-              : '资源已下载并逐字节核验。') + (advisories ? advisories : ''),
-          });
+          return await api<{ status: string; complete?: boolean; registered?: string[];
+            missing_components?: string[]; adoption?: { status?: string; code?: string } }>(
+            '/setup/reconcile',
+            { ...json('POST', {
+              path: installation.root, project_id: projectId, capability, adopt: true,
+              port: port ?? undefined,
+            }), signal: timeoutSignal(3_600_000) },
+          );
         } catch (error) {
-          report.push(failed(item.key, item.label, error));
+          return { status: 'FAILED', adoption: { status: 'REFUSED',
+            code: error instanceof Error ? error.message : String(error) } };
+        }
+      };
+      const reconciled: Record<string, Awaited<ReturnType<typeof reconcile>>> = {};
+      if (wants('h3')) {
+        reconciled.h3 = await reconcile('h3');
+        ensure();
+        const complete = !!reconciled.h3?.complete || fresh.capabilities.h3?.facts?.FILES_VERIFIED;
+        if (reconciled.h3?.adoption?.status === 'ADOPTED' || reconciled.h3?.adoption?.status === 'ALREADY_ADOPTED') {
+          report.push({ key: 'h3', label: CAP_LABELS.h3, status: 'REUSED',
+            note: '已复用本机这套安装（只读核验，没有复制或覆盖）。' });
+        } else if (complete) {
+          report.push({ key: 'h3', label: CAP_LABELS.h3, status: 'FILES_READY',
+            note: '权重已逐字节核验并登记；运行配置由后台补齐。' });
+        }
+      }
+      if (wants('image')) {
+        reconciled.image = await reconcile('image');
+        ensure();
+        if (reconciled.image?.complete) {
+          report.push({ key: 'image', label: CAP_LABELS.image, status: 'FILES_READY',
+            note: '出图权重已核验并登记；运行配置由后台补齐。' });
         }
       }
       setOutcomes([...report]);
 
-      // ---- 3. 生产激活：只在 H3 能力被勾选且资源就绪时进行 -------------
-      if (caps.h3 && h3Ready) {
-        if (adoptedRoot) {
-          // 已经采用的本机安装就是运行环境：不再创建第二个受管实例。
-          setRunning({ label: '复用本机已采用的安装…', note: adoptedRoot });
-        } else {
-          setRunning({ label: '准备受管运行环境…', note: '' });
+      // 2) 缺的文件：交给既有安装计划与 Worker（唯一准入口）。
+      const runPlan = async (label: string, body: Record<string, unknown>, note: string) => {
+        setRunning({ label: `${label}…`, note });
+        const plan = await api<{
+          plan_id: string; sha256: string; status: string; download_bytes: number;
+        }>('/setup/install-plan', json('POST', body));
+        ensure();
+        const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, ensure, { wait: false });
+        if (isQueuedInstallation(queued)) {
+          setAttempt({ attempt_id: queued.attempt_id, plan_id: queued.plan_id ?? plan.plan_id,
+            stage: queued.stage, status: queued.status, confirmed_bytes: 0,
+            total_bytes: plan.download_bytes, speed_bps: 0, retry_count: 0,
+            cancel_requested: false, pause_requested: false, terminal: false, resumable: true } as
+            InstallationAttemptView);
+        }
+        return plan;
+      };
+
+      const planCapability = async (key: CapabilityKey) => {
+        const label = CAP_LABELS[key];
+        // 本机已有字节时绝不重新下载：核验进行中等待、已核验直接登记。
+        const inspected = key === 'h3' || key === 'image' ? reconciled[key] : undefined;
+        if (inspected?.status === 'IN_PROGRESS') {
+          report.push({ key, label, status: 'FILES_READY',
+            note: '本机这套文件正在核验中，没有重复下载；核完后会自动登记。' });
+          return;
+        }
+        if (inspected?.complete) {
+          report.push({ key, label, status: 'FILES_READY',
+            note: '本机已有这套文件并已核验登记，没有重复下载。' });
+          return;
+        }
+        const components = key === 'h3'
+          ? [...new Set([...STRUCTURE_COMPONENTS, ...(selectedVariant ? weightIdsOf(selectedVariant) : [])])]
+          : key === 'image' ? IMAGE_COMPONENTS
+            : [key === 'vlm' ? REVIEW_COMPONENTS.vlm : REVIEW_COMPONENTS.asr];
+        const catalog = key === 'image' ? IMAGE_CATALOG : (selectedVariant?.catalog_id ?? 'h3-ref2va-windows-x64');
+        const body = {
+          catalog, components, project_id: projectId, disk_free: storage?.free_bytes ?? 0,
+          ...(key === 'h3' && selectedVariant ? {
+            variant_id: selectedVariant.variant_id,
+            candidate_download_acknowledged: !selectedVariant.auto_download_allowed,
+          } : {}),
+        };
+        const blockedNote = await preflightSources(body);
+        ensure();
+        if (blockedNote) {
+          report.push({ key, label, status: 'BLOCKED', note: blockedNote });
+          return;
+        }
+        try {
+          const plan = await runPlan(`准备${label}`, body, `约 ${gib(key === 'h3' ? h3Bytes
+            : key === 'image' ? imageBytes : key === 'vlm' ? REVIEW_BYTES.vlm : REVIEW_BYTES.asr)}`);
+          report.push({ key, label, status: 'QUEUED',
+            note: `已开始下载并安装（约 ${gib(plan.download_bytes)}）；关闭页面也会继续。` });
+        } catch (error) {
+          report.push({
+            key, label,
+            status: error instanceof ApiError ? 'BLOCKED' : 'FAILED',
+            note: error instanceof Error ? error.message : String(error),
+          });
+        }
+      };
+
+      const missingTargets = (['h3', 'image', 'vlm', 'asr'] as CapabilityKey[])
+        .filter((key) => {
+          const capability = fresh.capabilities[key];
+          if (!wants(key) || !capability) return false;
+          // Plan a download when the bytes are not all here.  "No listed file"
+          // alone is not proof that the capability is present: a resource that
+          // the summary could not inspect must still be planned, not skipped.
+          return (capability.missing_files?.length ?? 0) > 0 || !capability.facts?.FILES_FOUND;
+        });
+      for (const key of missingTargets) {
+        if (key === 'h3' && !selectedVariant) {
+          report.push({ key: 'h3', label: CAP_LABELS.h3, status: 'BLOCKED',
+            note: '还没有选定 H3 生成方案。' });
+          continue;
+        }
+        await planCapability(key);
+        ensure();
+      }
+      setOutcomes([...report]);
+
+      // 3) 运行环境：没有实例时先按既有生命周期创建（短链，仍需审批）。
+      //    这一步失败不会丢掉已经授权的整备：后台任务会在 TARGET 步骤具名报告
+      //    缺什么，而不是让整轮准备白做。
+      //     只准备素材出图时不去创建 H3 受管实例：那会把视频节点一起拉进来，
+      //     和「不因没装 H3 就不能准备图片」正好相反。资源准备本身不需要实例。
+      if (!fresh.installation.selected?.instance_id && wants('h3')) {
+        setRunning({ label: '准备受管运行环境…', note: '创建实例目录、安装节点、绑定模型' });
+        try {
           let complete = false;
           for (let step = 0; step < 8; step += 1) {
-            const plan = await api<{ complete: boolean; plan_id?: string; sha256?: string; status?: string; action?: string; port?: number }>(
+            const plan = await api<{ complete: boolean; plan_id?: string; sha256?: string;
+              status?: string; action?: string; port?: number }>(
               '/setup/next-instance-plan', json('POST', {
-                project_id: projectId, instance_name: 'shine-h3', port, mode: 'local',
+                project_id: projectId, instance_name: 'shine-h3', mode: 'local',
+                ...(port ? { port } : {}),
                 ...(selectedVariant ? { catalog: selectedVariant.catalog_id, variant_id: selectedVariant.variant_id } : {}),
               }),
             );
             ensure();
             if (plan.complete) { complete = true; break; }
-            await approveAndExecuteSetupPlan({ plan_id: plan.plan_id!, sha256: plan.sha256!, status: plan.status ?? 'AWAITING_APPROVAL', kind: 'INSTANCE_LIFECYCLE' }, ensure);
+            await approveAndExecuteSetupPlan({ plan_id: plan.plan_id!, sha256: plan.sha256!,
+              status: plan.status ?? 'AWAITING_APPROVAL', kind: 'INSTANCE_LIFECYCLE' }, ensure);
           }
           if (!complete) throw new Error('环境准备步骤超过预期，已停止。');
+        } catch (error) {
+          report.push({ key: 'h3', label: CAP_LABELS.h3, status: 'BLOCKED',
+            note: `运行环境还没有创建（${error instanceof Error ? error.message : String(error)}）；`
+              + '后台任务会继续报出缺的那一步。' });
+          setOutcomes([...report]);
         }
+      }
 
-        setRunning({ label: '自动登记生成方案…', note: '不需要你手动选择' });
-        await api('/setup/profiles', json('POST', { project_id: projectId }));
-        ensure();
-        const current = await api<RuntimeState>('/setup/runtime');
-        if (current.status === 'ACTIVE' && current.services_verified
-            && current.candidate?.project_id === projectId) {
-          // 这部作品的配置已经激活并核验过：不重复启动服务、不打断正在跑的 Worker。
-          setRunning({ label: '完成', note: '' });
-          await onRefresh();
-          await detect();
-          setResult('制作环境已就绪：本机配置已激活并通过服务核验，生成方案已自动登记。可以回到制作流程继续。');
-          return;
-        }
-        setRunning({ label: '生成受管配置…', note: '' });
-        await api('/setup/configuration', json('POST', { project_id: projectId }));
-        const state = await api<RuntimeState>('/setup/runtime');
-        ensure();
-        if (!state.candidate || state.candidate.project_id !== projectId) {
-          throw new Error('没有生成匹配的运行配置，请重新检测后再试。');
-        }
-        setRunning({ label: '启动服务核对工作流，完成后自动停止…', note: '第一次会慢一些' });
-        const validated = await api<{ status: string }>('/setup/services/validate', {
-          ...json('POST', { project_id: projectId, recipe_sha256: state.candidate.recipe_sha256 }),
-          signal: timeoutSignal(3_600_000),
-        });
-        if (validated.status !== 'READY') throw new Error(`服务检测没有通过（${validated.status}）。`);
-        await api('/setup/runtime/activate', json('POST', {
-          project_id: projectId, recipe_sha256: state.candidate.recipe_sha256,
+      // 4) 剩下的整备交给持久 Worker：生成配方、对齐出图绑定、登记方案、核对服务。
+      setRunning({ label: '交给后台继续…', note: '关闭页面不会中断' });
+      const capabilities = (['h3', 'image', 'vlm', 'asr'] as CapabilityKey[]).filter((key) => wants(key));
+      const task = await api<{ status: string; task_id: string; steps: string[] }>(
+        '/setup/prepare/execute', json('POST', {
+          project_id: projectId, capabilities,
+          installation_path: installation?.root ?? undefined,
+          port: port ?? undefined,
+          variant_id: selectedVariant?.variant_id,
+          verify_runtime: true,
         }));
-        setRunning({ label: '完成', note: '' });
-        await onRefresh();
-        await detect();
-        setResult('制作环境已就绪：生成方案已自动登记、服务已核验、配置已激活。可以回到制作流程继续。');
-        return;
-      }
-
-      // ---- 4. 没有进入生产激活：如实报告每项能力的结论 -----------------
-      // 「文件已核验」与「已就绪」是两个结论：文件就绪不说成能力就绪。
-      const ready = report.filter((row) => row.status === 'READY' || row.status === 'FILES_READY' || row.status === 'REUSED');
-      const blocked = report.filter((row) => row.status === 'BLOCKED' || row.status === 'FAILED');
-      if (!ready.length) {
-        setProblem(blocked.map((row) => `${row.label}：${row.note}`).join('\n') || '这次没有需要准备的能力。');
-        return;
-      }
-      const done = ready.map((row) => row.status === 'FILES_READY'
-        ? `${row.label}文件已核验（运行待验证）`
-        : `${row.label}已就绪`).join('、');
-      const rest = blocked.length
-        ? `；${blocked.map((row) => `${row.label}未完成（${row.note}）`).join('；')}`
-        : '';
-      setResult(`${done}。${rest}可以取消勾选没准备成功的那一项，再准备其它能力。`);
+      ensure();
+      await onRefresh();
+      setResult(`已交给后台准备（${task.steps.length} 步）。可以离开这个页面：下载、登记、运行配置和核对都会继续，`
+        + '回到这里会看到最新进度。');
+      await loadImage();
     } catch (error) {
       setOutcomes([...report]);
       setProblem(error instanceof Error ? error.message : String(error));
@@ -842,22 +774,30 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       <div>
         <div className="section-kicker">00 / 制作环境</div>
         <h2>制作环境</h2>
-        <p>检测一次，看清这台电脑能跑什么；确认一次，剩下的自动完成。</p>
+        <p>打开这一页就开始检查；确认一次，剩下的交给后台。</p>
       </div>
-      <div className="setup-detect-bar">
-        <button type="button" className="btn-secondary" disabled={phase === 'detecting' || !!running}
-          onClick={() => void detect()}>
-          {phase === 'detecting' ? <RefreshCw size={13} className="spin" /> : <Cpu size={13} />}
-          {phase === 'ready' ? '重新检测' : '检测本机'}
-        </button>
-        {phase === 'ready' && detectedAt && <span className="run-hint">上次检测 {new Date(detectedAt).toLocaleTimeString()}</span>}
-        {phase === 'idle' && <GuideTip>只读检测，不下载、不启动任何东西；检测一次后结果保留，切页不再重复检测</GuideTip>}
-      </div>
+      {detectedAt && <span className="run-hint">上次检测 {new Date(detectedAt).toLocaleTimeString()}</span>}
     </div>
+
+    <SetupEnvironmentStatus
+      projectId={projectId}
+      refreshEpoch={refreshEpoch}
+      onSummary={setSummary}
+      onGoSettings={() => window.setTimeout(() => document.getElementById('setup')?.scrollIntoView({ block: 'start' }), 40)}
+      onPrepare={(capability) => prepare([capability])}
+      onReconcile={async (capability) => {
+        await api('/setup/reconcile', { ...json('POST', {
+          project_id: projectId || undefined,
+          capability: capability === 'image' ? 'image' : 'h3',
+          adopt: false,
+        }), signal: timeoutSignal(3_600_000) });
+        await detect();
+      }}
+      onTrial={(capability) => (capability === 'image' ? void testImage() : undefined)}
+    />
 
     {phase === 'error' && <p className="form-error" role="alert">检测没有完成：{problem}</p>}
     {phase === 'detecting' && <p className="run-hint">正在读取显卡、显存、磁盘和已有安装…</p>}
-    {phase === 'idle' && <p className="run-hint">点「检测本机」看清这台电脑能跑什么；检测只在你点击时运行。</p>}
 
     {phase === 'ready' && <>
       <p className="setup-verdict"><b>{verdict}</b></p>
@@ -1030,6 +970,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       </div>}
 
       {running && <p className="run-hint" role="status">{running.label}{running.note ? ` · ${running.note}` : ''}</p>}
+      {preparing && <p className="run-hint" role="status" data-testid="setup-background">
+        后台正在准备（{preparation?.current ?? '排队中'}）：{preparation?.message ?? '关闭页面也会继续'}
+      </p>}
       {attempt && !attempt.terminal && <p className="run-hint">
         {attempt.stage === 'WAITING_FOR_TARGET' || attempt.waiting_for_target
           ? '正在等待前面的资源安装任务完成；轮到这个任务时会自动开始，不需要你重复点击。'
@@ -1043,7 +986,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
             ? '资源已就绪'
             : row.status === 'FILES_READY'
               ? '文件已核验 · 运行待验证'
-              : row.status === 'REUSED' ? '已复用本机已有资源' : '未完成'}</span>
+              : row.status === 'REUSED' ? '已复用本机已有资源'
+              : row.status === 'QUEUED' ? '已排队，后台继续'
+                : '未完成'}</span>
           <em>{row.note}</em>
         </li>)}
       </ul>}
@@ -1068,6 +1013,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         <div className="setup-detail-body">
           <p>已有安装：{scan ? scan.root : '常见目录未发现 ComfyUI（可以只安装受管环境）'}
             {scan?.software ? ` · ${comfyInstalled ? '主程序已安装' : '主程序未识别'}` : ''}</p>
+          {adoptedRoot && <p>已采用的安装（只读复用）：{adoptedRoot}</p>}
           <p>扫描 {scan?.scanned_files ?? 0} 个文件 · 找到候选 {scan?.matches.length ?? 0} 项 ·
             还缺固定版本文件 {scan?.missing.length ?? 0} 项</p>
           <p>服务状态：{runtime?.status === 'ACTIVE' && runtime.services_verified ? '配置已激活，服务已核验' : '待配置或待核验'}
