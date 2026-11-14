@@ -112,6 +112,12 @@ INT8 基线动态逐镜工作流、8 步/20 步、真二采、素材中心、历
 
 证据：`.local-data/v2-closeout/chunk-*.log`（首轮）、`chunk-aa.clean.log`/`chunk-ae.clean.log`（干净复跑）、`final-modules.txt`（汇总）。
 
+### 4.2 GitHub CI（PR #16）
+
+- 修复前 run 43491015993（main）：Ruff UP037 + Windows GPU 释放/权重证据 + 浏览器 E2E 失败。
+- 本轮修复后（run 43535307086，含 L1 FFmpeg 补齐）：**L1 backend quick SUCCESS、L2 backend integration SUCCESS、Frontend build SUCCESS**，整体 conclusion=success。L3 全量/浏览器 E2E 在 PR 上按 workflow 规则跳过（仅 main 推送触发）。
+- L1 quick 曾失败 `test_v13_preparation` 两项（`CANDIDATE_NOT_APPROVED`），根因为 L1 job 缺 FFmpeg 的预存配置缺口（见 §1.6），补齐后转绿；同一 quick 命令本机 Windows 始终通过。
+
 ## 5. 主分支合并风险评估
 
 - 改动集中在 `api_setup.py`（variant-availability/resources）、`resource_resolver.py`、导演拍摄前端与超时信号；未触及 `worker.py`/`preproduction.py`/handoff 客户端源码，**不触发 VLM 重校准义务**。
