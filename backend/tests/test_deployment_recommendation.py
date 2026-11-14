@@ -48,7 +48,7 @@ def _env(*, vram: int = 16303, ram: int = 65536, free_gb: float = 400.0, gpu_sta
                 if gpu_status == "OK" else {"status": gpu_status, "reason": "NVIDIA_DRIVER_UNAVAILABLE"}),
         "cuda": ({"status": "OK", "compute_capability": cuda} if cuda
                  else {"status": "UNKNOWN", "reason": "CUDA_COMPUTE_CAPABILITY_UNKNOWN"}),
-        "ram": {"status": "OK", "ram_mb": ram, "ram_available_mb": ram // 2},
+        "ram": {"status": "OK", "ram_mb": ram, "ram_available_mb": ram // 2, "installed_mb": ram},
         "commit": {"status": "OK", "commit_total_mb": commit, "commit_available_mb": commit // 2,
                    "page_file_status": "PAGE_FILE_PRESENT"},
         "disk": {"status": "OK", "free_gb": free_gb},
@@ -90,6 +90,15 @@ def test_an_unreadable_ram_is_unknown_and_never_supported():
     result = evaluate(CATALOG, env)
     assert result["status"] == "UNKNOWN"
     assert "RAM_UNKNOWN" in [row["code"] for row in result["unknowns"]]
+
+
+def test_reported_low_ram_without_measured_inventory_is_unknown():
+    env = _env(ram=16000)
+    del env["ram"]["installed_mb"]
+    result = evaluate(CATALOG, env)
+    assert result["status"] == "UNKNOWN"
+    assert [row["code"] for row in result["unknowns"]] == ["RAM_UNVERIFIED"]
+    assert result["blockers"] == []
 
 
 def test_an_unreadable_commit_is_unknown_and_never_supported():

@@ -47,23 +47,22 @@ def _crew_responder(master_id: str, seen: list[dict]):
             return {"schema_version": "1.0", "summary": "一次离家与归来。",
                     "story_line": ["开端", "发展"], "timeline": ["按原文顺序"],
                     "relationships": [], "questions": []}
-        if title == "ScriptBreakdown":
-            # The crew contract checks the locked facts it was asked to carry.
+        if title == "ScriptStructure":
             facts = payload.get("locked_story_facts") or FACTS
-            # A Chinese locked fact needs its English prompt translation.
-            return {"locked_story_facts": facts,
-                    "prompt_story_facts": ["A locked fact of the script." for _ in facts],
-                    "beats": [{"id": "B1", "description": "She waits beside a sealed letter.",
-                               "characters": ["Lin"],
-                               "dialogue": [{"speaker_id": "Lin", "text": "你来了。",
-                                             "start_s": 1, "end_s": 2}]}]}
-        if title == "DirectorialPlan":
-            return {"shots": [{"id": "I1", "beat_id": "B1",
-                               "visual_description": "A woman waits beside a sealed letter at a wooden table.",
-                               "duration_s": 7, "asset_ids": [master_id]}]}
-        if title == "CameraPlan":
-            return {"shots": [{"intent_id": "I1", "composition": "Medium shot",
-                               "movement": "Static", "lighting": "Soft key", "axis": "Keep axis"}]}
+            return {"character_names": {}, "ranges": [{"id": "B1", "last_fragment": len(payload["fragments"])}],
+                    "prompt_story_facts": ["A locked fact of the script." for _ in facts]}
+        if title == "SceneBeat":
+            return {"id": payload["beat_id"], "description": "She waits beside a sealed letter.",
+                    "characters": ["Lin"], "dialogue": [{"speaker_id": "Lin", "text": "你来了。",
+                                                         "start_s": 1, "end_s": 2}]}
+        if title == "DirectorStructure":
+            return {"segments": [{"id": "I1", "beat_id": "B1", "duration_s": 7}]}
+        if title == "ShotDetails":
+            return {"visual_description": "A woman waits beside a sealed letter at a wooden table.",
+                    "asset_ids": [master_id], "cut_descriptions": []}
+        if title == "CameraShot":
+            return {"intent_id": payload["segment"]["id"], "composition": "Medium shot",
+                    "movement": "Static", "lighting": "Soft key", "axis": "Keep axis"}
         if title == "ContinuityReport":
             return {"issues": [], "recommendation": "proceed_to_preflight"}
         if title == "EditIntentPlan":
@@ -154,7 +153,7 @@ def test_only_the_selected_section_is_produced_and_the_context_is_verified(api, 
         assert storyboard["status"] == "PROPOSED"
 
     # The crew chain only ever saw the selected range.
-    crew_calls = [entry for entry in seen if entry["title"] == "ScriptBreakdown"]
+    crew_calls = [entry for entry in seen if entry["title"] in {"ScriptStructure", "SceneBeat"}]
     assert crew_calls, seen
     for entry in crew_calls:
         assert FIRST_MARKER in json.dumps(entry["payload"], ensure_ascii=False)
