@@ -7,6 +7,7 @@
 修法不是删门禁，而是给门禁一个明确的模式：生产默认 enforce（缺包必须 409），
 夹具用 diagnose 降级为可诊断提示——缺失必须被如实记录，不是静默通过。
 """
+# ruff: noqa: F811 - the shared "prep" fixture is imported on purpose
 
 import os
 from dataclasses import replace
