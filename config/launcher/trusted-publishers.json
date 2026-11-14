@@ -2,5 +2,20 @@
   "schema_version": 1,
   "signature_algorithm": "ed25519",
   "policy": "fail-closed-if-key-is-not-listed",
-  "keys": []
+  "keys": [
+    {
+      "key_id": "shine-studio-release-2026",
+      "public_key_base64": "biAZB+I16UlxA/zMbNf9CNgJ3Jd7WiwBPNFujoH5Hes=",
+      "products": [
+        "studio"
+      ]
+    },
+    {
+      "key_id": "shine-launcher-release-2026",
+      "public_key_base64": "qfMK1jTH/osdLbElklJp6eaZ8UpO7h81ky+6uYlHF34=",
+      "products": [
+        "launcher"
+      ]
+    }
+  ]
 }
