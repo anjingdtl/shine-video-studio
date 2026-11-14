@@ -86,7 +86,12 @@ function Get-FreePort([int]$Start) {
 function Test-ApiAlive([int]$Port) {
     if (-not $Port) { return $false }
     try {
-        $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3
+        # /health answers a live stack, but it is not free: the runtime report
+        # inspects the adopted ComfyUI installation and can exceed three
+        # seconds on a cold file cache. A three second budget reported a fully
+        # started stack as failed. A refused connection still returns at once,
+        # so a dead port costs nothing here.
+        $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 10
         return [bool]$health
     } catch {
         return $false
@@ -151,7 +156,15 @@ if (-not (Test-Path -LiteralPath $frontendModules)) {
     if (-not $KeepOpen) { Read-Host '按回车关闭' | Out-Null }
     exit 2
 }
-Write-Ok '后端环境与前端依赖已就位'
+# An existing directory is not an installed tree: a cleanup can empty it while
+# package-lock.json stays unchanged. Say so here instead of claiming a ready
+# environment and failing later on a missing vite entry. start_shine.ps1
+# reinstalls when the entry is gone, so this is a warning, not a hard stop.
+if (-not (Test-Path -LiteralPath (Join-Path $frontendModules 'vite/bin/vite.js'))) {
+    Write-Warn '前端依赖不完整（缺少 vite），启动时会自动按 package-lock.json 重装'
+} else {
+    Write-Ok '后端环境与前端依赖已就位'
+}
 
 $storedData = Get-EnvValue $envFile 'SHINE_DATA_DIR'
 if ($storedData) { $dataDir = $storedData }

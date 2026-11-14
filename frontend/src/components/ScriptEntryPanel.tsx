@@ -26,10 +26,12 @@ const TASK_STATUS_LABELS: Record<string, string> = {
  * 入口 B（导入）：上传现成剧本原文（原文与哈希先入库，规范化/歧义确认
  * 由已有的大纲链路完成）。
  */
-export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
+export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady, onGoSetupModels }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onDocumentReady?: () => void;
+  /** 编剧角色没配模型时，送到导演模式内的文本模型配置页。 */
+  onGoSetupModels?: () => void;
 }) {
   const [briefs, setBriefs] = useState<CreativeBrief[]>([]);
   const [documents, setDocuments] = useState<Array<{ id: string; filename: string; sha256: string; source_format: string }>>([]);
@@ -221,6 +223,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady }: {
       documentId={selectedDocumentId}
       documentHash={documents.find((row) => row.id === selectedDocumentId)?.sha256 ?? ''}
       onMessage={onMessage}
+      onGoSetupModels={onGoSetupModels}
     />}
     {problem && <p className="form-error">{problem}</p>}
   </section>;

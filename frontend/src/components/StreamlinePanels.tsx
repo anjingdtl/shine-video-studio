@@ -13,6 +13,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Film, ListChecks, Play, RefreshCw, Sparkles, TriangleAlert, Upload } from 'lucide-react';
+import { RequiredActionNotice } from './RequiredActionNotice';
+import type { ErrorActionTarget } from '../errorActions';
 import {
   ApiError,
   api,
@@ -76,11 +78,13 @@ function describeError(error: unknown): string {
 
 /* ============================ ② 分镜书 ============================ */
 
-export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConfirmed }: {
+export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConfirmed, onGoStage }: {
   projectId: string;
   currentStyle?: { version: number } | null;
   onMessage?: (message: string) => void;
   onConfirmed?: () => void;
+  /** 必做动作失败时，把「下一步」送到对应阶段。 */
+  onGoStage?: (target: ErrorActionTarget) => void;
 }) {
   const [catalog, setCatalog] = useState<StyleCatalogEntry[]>([]);
   const [profileId, setProfileId] = useState('');
@@ -92,6 +96,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [book, setBook] = useState<StoryboardBook | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+  /** 最近一次失败：必做块据此给出原因与可点的下一步。 */
+  const [failure, setFailure] = useState<unknown>(null);
   const [confirmedPlan, setConfirmedPlan] = useState<{ version: number } | null>(null);
   /** 比已确认版本更新的一版草稿：需要重新生成预览并确认。 */
   const [pendingDraft, setPendingDraft] = useState<number | null>(null);
@@ -123,7 +129,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   }, [projectId]);
 
   async function generate() {
-    setBusy(true); setProblem('');
+    setBusy(true); setProblem(''); setFailure(null);
     try {
       const body = await generateStoryboardBook(projectId, {
         episode_count: episodeCount, target_seconds: targetSeconds, tolerance_seconds: 30,
@@ -133,7 +139,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       setConfirmedPlan(null);
       setPendingDraft(null);
       onMessage?.('分镜书已生成；确认后即冻结分集与风格。');
-    } catch (error) { setProblem(describeError(error)); }
+    } catch (error) { setFailure(error); setProblem(describeError(error)); }
     finally { setBusy(false); }
   }
 
@@ -232,6 +238,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     </div>
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
+    {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
 
     {book && <div className="book-preview">
       <div className="book-preview-head">
@@ -283,16 +290,20 @@ const EPISODE_STATUS_LABELS: Record<string, string> = {
   PENDING: '待生成', IN_PROGRESS: '生成中', APPLIED: '可确认', BLOCKED: '被阻塞',
 };
 
-export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh }: {
+export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh, onGoStage }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onJourneyRefresh?: () => void;
+  /** 必做动作失败时，把「下一步」送到对应阶段。 */
+  onGoStage?: (target: ErrorActionTarget) => void;
 }) {
   const [state, setState] = useState<EpisodeStoryboardState | null>(null);
   const [tables, setTables] = useState<Record<string, { shots: EpisodeShotRow[]; total: number }>>({});
   const [editing, setEditing] = useState<{ shotId: string; duration: string } | null>(null);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
+  /** 最近一次失败：必做块据此给出原因与可点的下一步。 */
+  const [failure, setFailure] = useState<unknown>(null);
   const [confirmedEpisodes, setConfirmedEpisodes] = useState<Record<string, number>>({});
   const [promptTarget, setPromptTarget] = useState<EpisodeShotRow | null>(null);
   const [assetTarget, setAssetTarget] = useState<EpisodeShotRow | null>(null);
@@ -341,12 +352,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
   async function act(key: string, call: () => Promise<void>, success?: string) {
     if (submitting.current) return;
     submitting.current = true;
-    setBusy(key); setProblem('');
+    setBusy(key); setProblem(''); setFailure(null);
     try {
       await call();
       await load();
       if (success) onMessage?.(success);
     } catch (error) {
+      setFailure(error);
       setProblem(describeError(error));
       await load().catch(() => undefined);
     } finally {
@@ -469,6 +481,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh 
       </span>}
     </div>
     {problem && <p role="alert" className="form-error">{problem}</p>}
+    {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
     {subtitleResult && <p className="run-hint ok-hint"><Check size={12} /> {subtitleResult}</p>}
 
     {episodes.map((episode) => {
@@ -643,15 +656,19 @@ const FAMILY_LABEL: Record<string, string> = {
   character: '人物', scene: '场景', prop: '道具',
 };
 
-export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
+export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoStage }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onOpenLibrary?: () => void;
+  /** 必做动作失败时，把「下一步」送到对应阶段。 */
+  onGoStage?: (target: ErrorActionTarget) => void;
 }) {
   const [view, setView] = useState<DirectorMaterialsView | null>(null);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
+  /** 最近一次失败：必做块据此给出原因与可点的下一步。 */
+  const [failure, setFailure] = useState<unknown>(null);
   const [result, setResult] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [promptTarget, setPromptTarget] = useState<DirectorMaterialRequirement | null>(null);
@@ -685,7 +702,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
   async function derive() {
     if (submitting.current) return;
     submitting.current = true;
-    setBusy('derive'); setProblem(''); setResult(null);
+    setBusy('derive'); setProblem(''); setResult(null); setFailure(null);
     try {
       const body = await deriveShotMaterials(projectId, null);
       apply({
@@ -699,6 +716,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
       });
       onMessage?.('素材清单已按已确认镜头生成；每一项都标了用在哪些镜头。');
     } catch (error) {
+      setFailure(error);
       setProblem(describeError(error));
     } finally {
       submitting.current = false;
@@ -828,6 +846,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary }: {
     </p>}
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
+    {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
     {result && <p className="run-hint ok-hint"><Check size={12} /> {result}
       {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>去素材中心</button>}
     </p>}

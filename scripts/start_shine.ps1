@@ -450,12 +450,43 @@ try {
             }
         }
 
+        # A child that reads stdin must not inherit the launcher's console handle:
+        # when the parent shell exits, that pipe breaks and the child dies of an
+        # unhandled EPIPE (vite reads stdin for its shortcuts, so the whole stack
+        # vanished after the launcher returned).  An empty file is the empty
+        # device: the child reads EOF at once, every time.
+        function Get-ShineEmptyStdin {
+            $path = Join-Path $logDir 'stdin.empty'
+            if (-not (Test-Path -LiteralPath $path)) {
+                [System.IO.File]::WriteAllText($path, '')
+            }
+            return $path
+        }
+
         function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
             $stdout = Join-Path $logDir "$Name.out.log"
             $stderr = Join-Path $logDir "$Name.err.log"
-            $process = Start-Process -PassThru -WindowStyle Hidden -FilePath $FilePath `
-                -ArgumentList ($Arguments | ForEach-Object { '"' + $_ + '"' }) -WorkingDirectory $WorkingDirectory `
-                -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            # A child must never inherit the launcher's stdin.  When the parent
+            # shell exits, that pipe breaks and the child dies of an unhandled
+            # EPIPE: vite reads stdin for its shortcuts, so the whole stack (the
+            # API included) vanished right after the launcher returned.
+            $startArgs = @{
+                PassThru              = $true
+                WindowStyle           = 'Hidden'
+                FilePath              = $FilePath
+                ArgumentList          = ($Arguments | ForEach-Object { '"' + $_ + '"' })
+                WorkingDirectory      = $WorkingDirectory
+                RedirectStandardOutput = $stdout
+                RedirectStandardError = $stderr
+            }
+            if ($PSVersionTable.PSVersion.Major -ge 6) {
+                # PowerShell resolves a device name such as 'NUL' to a normal path
+                # and then refuses it, so the empty device is a real empty file:
+                # the child reads EOF at once and never sees the launcher's
+                # console handle.
+                $startArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
+            }
+            $process = Start-Process @startArgs
             $info = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
             $entry = [ordered]@{
                 name = $Name
@@ -590,15 +621,24 @@ try {
         if (-not $supervisorAlive) {
             $supLog = Join-Path $logDir 'supervisor.out.log'
             $supErr = Join-Path $logDir 'supervisor.err.log'
-            Start-Process -WindowStyle Hidden -FilePath $venvPython `
-                -ArgumentList @(
+            $supArgs = @{
+                WindowStyle           = 'Hidden'
+                FilePath              = $venvPython
+                ArgumentList          = @(
                     (Join-Path $PSScriptRoot 'shine_supervisor.py'),
                     '--data-dir', $env:SHINE_DATA_DIR,
                     '--port', "$SupervisorPort",
                     '--api-port', "$ApiPort",
                     '--web-port', "$WebPort"
-                ) -WorkingDirectory $repoRoot `
-                -RedirectStandardOutput $supLog -RedirectStandardError $supErr | Out-Null
+                )
+                WorkingDirectory      = $repoRoot
+                RedirectStandardOutput = $supLog
+                RedirectStandardError = $supErr
+            }
+            if ($PSVersionTable.PSVersion.Major -ge 6) {
+                $supArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
+            }
+            Start-Process @supArgs | Out-Null
             Write-Host "Started supervisor on port $SupervisorPort (page can restart the stack)"
         }
     }
