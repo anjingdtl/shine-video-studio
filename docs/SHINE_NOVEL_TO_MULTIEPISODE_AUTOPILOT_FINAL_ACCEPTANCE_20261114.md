@@ -151,4 +151,8 @@
 
 ### 11.1 同输入编剧实测
 
-同一已确认小说单元、同一 MiniMax-M3.1-flash 路由，在两个 SQLite 快照中串行比较。整单 1 次调用，438.42 秒，10,512 reasoning tokens，6 个 beat 通过合同校验。逐 beat 到第一条填充返回时，结构 377.981 秒 / 8,013 reasoning tokens，首 beat 364.865 秒 / 3,142 reasoning tokens，已完成调用累计 **742.846 秒 / 11,155 reasoning tokens**，至少比整单耗时多 **69.4%**，仍有后续 beat。两次长时等待均计入真实墙钟。该样本已证伪本次串行细分能降低总时延，不能把单次输出更小或从截断恢复写作提速通过。导演同输入 A/B 尚未完成。
+同一已确认小说单元、同一 MiniMax-M3.1-flash 路由，在两个 SQLite 快照中串行比较。整单 1 次调用，438.42 秒，10,512 reasoning tokens，6 个 beat 通过合同校验。逐 beat 到第一条填充返回时，结构 377.981 秒 / 8,013 reasoning tokens，首 beat 364.865 秒 / 3,142 reasoning tokens，已完成调用累计 **742.846 秒 / 11,155 reasoning tokens**，至少比整单耗时多 **69.4%**，仍有后续 beat。复查时，结构与前三条 beat 已累计 **1,424.760 秒 / 15,782 reasoning tokens**，基准耗时的 **3.25 倍**。远端等待计入真实墙钟。该样本已证伪本次串行细分能降低总时延，不能把单次输出更小或从截断恢复写作提速通过。导演同输入 A/B 尚未完成。
+
+- 第 4 单元真实编剧逐 beat 通过原合同，11 次调用、1,275.354 秒、37,842 reasoning tokens。该单元无匹配整单基线。后续导演结构调用 `3442cd42-9ee6-4fc4-a95b-b6fddf2171c5` 断连，父任务 `2c7b1244-e956-412c-bc4e-ed11d14c4a87` 继承 UNKNOWN，API 核对回执返回同一子任务 ID。此次未授权重发。ep-01 为 APPLIED（17 镜），ep-02 为 BLOCKED（已落 7 镜）。
+- 最终源码的 8 个后端分片全部退出 0，零 `FAILED` / `ERROR` 摘要，共选中 2,721 项（含按现有条件跳过的用例）。按文件排序后 `split -n r/8`，各分片执行 `python -m pytest -q -p no:cacheprovider <文件列表>`，启用 `CODEBUDDY_SAFE_DELETE_ENABLED=0` 并从子进程环境去掉 `NO_PROXY`。后端、前端和静态检查提供离线工程证据。
+- 人物验证小样与项目「女人」候选均为真实 Qwen 出图，两批 COMPLETED，`renderer_owned=true`、`is_mock=false`，文件 SHA 与台账一致，技术 QC 和全解码通过。项目候选 `0f2981af-aa07-4f33-9ca2-cc54ddb5db83` 的 SHA-256 为 `765bf0905fa0fad7488f98e647484c2ae9e63b380832e9995f77954c2996634d`。目检着装为绿外套，原设定为灰雨衣，保留 READY_FOR_REVIEW。受管出图实例经自身停止接口确认零活动进程，未开始 H3。
