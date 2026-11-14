@@ -1747,9 +1747,10 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
             # One plan covers the bare-machine closure: weights plus the runtime
             # (source / wheels / node packs) the instance ladder will install.
             components = sorted(set(components) | set(gap["missing_components"]))
-        catalog = (deployment.load_deployment_catalog(report["catalog"])
-                   if report.get("catalog") else None)
-        cmap = deployment._component_map(catalog) if catalog else {}
+        from shine.comfyops.setup_summary import IMAGE_CATALOG
+        catalog = (deployment.load_deployment_catalog(IMAGE_CATALOG)
+                   if capability == "image" else deployment.load_default_catalog())
+        cmap = deployment._component_map(catalog)
         plans.append({
             "capability": capability,
             "label": report["label"],
