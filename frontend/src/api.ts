@@ -25,6 +25,10 @@ export const QA_CHECK_LABELS: Record<string, string> = {
 };
 
 export const ERROR_CODE_LABELS: Record<string, string> = {
+  HOST_NOT_QUALIFIED: '这台电脑没有通过这套 H3 方案的硬件准入。基础工具补装和独立图片、审片权重的下载不受影响，可以继续准备其它能力。',
+  CAPABILITY_CATALOG_MISMATCH: '这次请求声明的能力和资源清单实际所属的能力不一致，已拒绝。',
+  VARIANT_CATALOG_MISMATCH: '这套方案和这次要下载的资源清单不是同一套，已拒绝。',
+  VARIANT_NOT_DOWNLOADABLE: '这个方案还没有进入自动安装路径，需要先显式确认候选权重。',
   RESOURCE_IMPORT_IN_PROGRESS: '同一批本机文件正在准备，请等待完成后再检查。',
   RESOURCE_INVENTORY_CHANGED: '本机文件或模型清单已经变化，请重新检测后再复用。',
   RESOURCE_SNAPSHOT_CHANGED_OR_INELIGIBLE: '资源清单已变化或尚未核实，请重新检测。',
@@ -115,10 +119,65 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   OUTPUT_DIRECTORY_COPY_FAILED: '复制文件失败，已停止迁移，输出目录未切换。',
 };
 
+/**
+ * The unit the product measures these floors in.
+ *
+ * The raw number always stays in the text.  The unit only makes the number
+ * readable: a person reads "约 15.0 GB", support reads "15360".
+ */
+const FLOOR_UNITS: Record<string, string> = {
+  VRAM_INSUFFICIENT: 'MB', FREE_VRAM_BELOW_FLOOR: 'MB',
+  RAM_BELOW_FLOOR: 'MB', RAM_INSUFFICIENT: 'MB', COMMIT_INSUFFICIENT: 'MB',
+  DISK_INSUFFICIENT: 'GB',
+};
+
+/**
+ * One structured diagnostic, written in the words a person can act on.
+ *
+ * A blocker is a fact, not a string: `{code, required, actual}`.  Joining the
+ * array directly printed `[object Object]`, which hid both the reason and the
+ * numbers.  The raw code and the measured numbers stay in the text so the
+ * support line can read them.
+ */
+function describeDiagnostic(row: unknown): string {
+  if (typeof row === 'string') return row;
+  if (!row || typeof row !== 'object') return String(row);
+  const fact = row as { code?: unknown; message?: unknown; required?: unknown; actual?: unknown };
+  const code = typeof fact.code === 'string' ? fact.code : '';
+  const message = typeof fact.message === 'string' ? fact.message : '';
+  const hasNumbers = typeof fact.required === 'number' || typeof fact.actual === 'number';
+  const unit = FLOOR_UNITS[code] ?? '';
+  const numbers = hasNumbers
+    ? `（要求 ${measure(fact.required, unit)}，本机 ${measure(fact.actual, unit)}）`
+    : '';
+  if (message) {
+    // The server already writes a human sentence.  The measured numbers are
+    // appended only when that sentence does not carry them yet.
+    const carried = (typeof fact.required === 'number' && message.includes(String(fact.required)))
+      || (typeof fact.actual === 'number' && message.includes(String(fact.actual)));
+    return `${code ? `${code}：` : ''}${message}${carried ? '' : numbers}`;
+  }
+  if (code) return `${code}${numbers}`;
+  return JSON.stringify(row);
+}
+
+/** A measured value, in its own unit and in the unit a person reads. */
+function measure(value: unknown, unit: string): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return String(value ?? '—');
+  if (unit === 'MB' && Math.abs(value) >= 1024) return `${value} MB（约 ${(value / 1024).toFixed(1)} GB）`;
+  return unit ? `${value} ${unit}` : String(value);
+}
+
+/** A list of structured diagnostics, rendered one by one. */
+function describeDiagnostics(rows: unknown): string {
+  if (!Array.isArray(rows) || !rows.length) return '';
+  return rows.map(describeDiagnostic).filter(Boolean).join('；');
+}
+
 /** Turn a FastAPI/pydantic error payload into one readable line; the raw
  *  technical JSON stays available for support but is no longer the only
  *  thing the user sees. */
-function describeDetail(detail: unknown): string {
+export function describeDetail(detail: unknown): string {
   if (detail && typeof detail === 'object' && !Array.isArray(detail) && 'violations' in detail) {
     const violations = (detail as { violations?: Array<{ rule_id?: string; evidence?: string; remediation?: string }> }).violations;
     if (Array.isArray(violations) && violations.length) {
@@ -179,11 +238,16 @@ function describeDetail(detail: unknown): string {
   }
   if (detail && typeof detail === 'object' && 'code' in detail
       && typeof (detail as { code?: unknown }).code === 'string') {
-    const coded = detail as { code: string; message?: string; blockers?: string[] };
+    const coded = detail as { code: string; message?: string; blockers?: unknown[]; unknowns?: unknown[] };
     const base = coded.message || ERROR_CODE_LABELS[coded.code] || coded.code;
-    const blockers = Array.isArray(coded.blockers) && coded.blockers.length
-      ? `：${coded.blockers.join('；')}` : '';
-    return `${base}${blockers}（${coded.code}）`;
+    // ``blockers`` and ``unknowns`` are lists of structured facts.  They are
+    // rendered one by one; a plain join() printed "[object Object]" and threw
+    // the diagnosis away.
+    const diagnostics = [
+      describeDiagnostics(coded.blockers),
+      describeDiagnostics(coded.unknowns),
+    ].filter(Boolean).join('；');
+    return `${base}${diagnostics ? `：${diagnostics}` : ''}（${coded.code}）`;
   }
   if (detail && typeof detail === 'object' && 'message' in detail) {
     const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';
