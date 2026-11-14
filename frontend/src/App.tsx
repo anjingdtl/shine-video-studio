@@ -167,12 +167,6 @@ function journeyCount(stage: JourneyStage | undefined, key: string): number | nu
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
-/** 启动时恢复显示偏好（主题 / 字号缩放 / 界面层级）。 */
-const savedTheme = window.localStorage.getItem('shine-theme');
-if (savedTheme === 'dark' || savedTheme === 'light') document.documentElement.dataset.theme = savedTheme;
-const savedZoom = window.localStorage.getItem('shine-font-zoom');
-if (savedZoom) document.documentElement.style.zoom = savedZoom;
-
 function App() {
   const studio = useStudio();
   const {

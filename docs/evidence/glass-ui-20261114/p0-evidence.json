@@ -1,0 +1,38 @@
+{
+  "finding": "深色主题下偏好面板标题与说明文字不可辨认",
+  "baseline": "origin/main @ f8dbd70",
+  "measurements": {
+    "element": ".pref-block h3",
+    "before": {
+      "theme": "dark",
+      "textColor": "rgb(86, 88, 75)",
+      "cardBackground": "rgb(35, 36, 32)",
+      "contrast": 2.15
+    },
+    "after": {
+      "theme": "dark",
+      "textColor": "rgb(195, 208, 230)",
+      "cardBackground": "rgba(19, 29, 51, 0.72)",
+      "contrast": 10.78
+    }
+  },
+  "rootCauses": [
+    ":root 只定义了浅色语义变量；html[data-theme='dark'] 仅覆盖了部分组件，没有覆盖 --ink / --ink-mid / --muted / --paper 等基础 token。",
+    "直接消费 --ink-mid 的组件（如 .pref-block h3、.portfolio-work-copy b、.director-page-head h1）在深色卡片上继续使用浅色主题的深色文字。",
+    "素材中心 assets.css 使用未定义的 --asset-* 变量，并硬编码 background:white / color:var(--paper)，深色下前景背景配对失效。",
+    "旧深色覆盖使用橄榄绿硬编码色值，与新深蓝黑主题不一致，且只解决被覆盖到的组件。"
+  ],
+  "fix": [
+    "新增单一 ThemeStore 与六套语义 Token；旧 token 通过兼容层映射到新语义 token。",
+    "删除 304 条 html[data-theme='dark'] 组件级硬编码覆盖，改由 token 统一驱动。",
+    "补齐 --asset-* token，替换素材中心固定白底与 --paper 文字。",
+    "为状态色建立成对的 bg/text/border token，避免只换文字或只换背景。",
+    "保留媒体中性底色，不对图片/视频应用 filter 或 mix-blend-mode。"
+  ],
+  "evidence": {
+    "beforeScreenshot": "p0/before-dark-preferences.webp",
+    "afterScreenshot": "p0/after-dark-preferences.webp",
+    "beforeProjects": "p0/before-dark-projects.webp",
+    "afterProjects": "p0/after-dark-projects.webp"
+  }
+}
