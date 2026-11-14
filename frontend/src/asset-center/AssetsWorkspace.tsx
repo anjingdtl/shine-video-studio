@@ -15,7 +15,7 @@ import {
   saveProjectAssetToLibrary,
   uploadLibraryMedia,
 } from './api';
-import type { CapabilityReport, LibraryAsset, LibraryTask, LibraryVersion } from './api';
+import type { CapabilityReport, ImageGraphReport, LibraryAsset, LibraryTask, LibraryVersion } from './api';
 import './assets.css';
 
 export type AssetCenterPage = 'home' | 'images' | 'voices' | 'library' | 'assignments';
@@ -117,6 +117,46 @@ function capabilityLabel(capability: { state: string; reason: string; can_genera
   if (capability.can_queue === false && capability.state !== 'READY') return '本机声音运行时未就绪';
   if (capability.state === 'PENDING_LOCAL_VALIDATION') return '待本机验证';
   return capability.state;
+}
+
+/** 服务端真实报告的出图阻塞码 → 中文原因与下一步。未登记的码只展示码本身，不编造解释。 */
+const IMAGE_BLOCKER_LABELS: Record<string, { text: string; next: string }> = {
+  IMAGE_RUNTIME_NOT_BOUND: { text: '还没有绑定本机出图运行时（ComfyUI 实例与模型目录）。', next: '打开本机出图配置，完成绑定。' },
+  IMAGE_RENDERER_RECIPE_MISSING: { text: '受管渲染器的运行配方缺失，或与当前绑定的实例不一致。', next: '打开本机出图配置，重新准备运行环境。' },
+  IMAGE_MODEL_ROOT_NOT_CONFIGURED: { text: '出图模型目录还没有配置。', next: '打开本机出图配置，指定模型目录。' },
+  IMAGE_MODEL_FILE_MISSING: { text: '固定清单里的模型权重文件在本机缺失。', next: '在基础配置安装或导入对应权重。' },
+  IMAGE_MODEL_SIZE_MISMATCH: { text: '模型权重文件大小与固定清单不一致。', next: '重新下载或导入该权重；核验通过前不会使用它。' },
+  IMAGE_MODEL_HASH_MISMATCH: { text: '模型权重文件没有通过逐字节哈希核验。', next: '重新下载或导入该权重；核验通过前不会使用它。' },
+  IMAGE_GRAPH_NOT_VERIFIED: { text: '出图工作流还没有在本机渲染器上验证。', next: '打开本机出图配置，运行一次工作流验证。' },
+};
+
+type ImageBlockerRow = { code: string; text: string; next: string };
+
+/** 只把服务端已经报告的阻塞具名化：T2I/RGBA 读 t2i_runtime.blockers；
+ *  编辑类模式另读 graph_report 的真实节点差异。不发明服务端没有的结论。 */
+function imageBlockerRows(capabilities: CapabilityReport | null, mode: string,
+  capability: { graph_report?: ImageGraphReport | null } | undefined): ImageBlockerRow[] {
+  const rows: ImageBlockerRow[] = [];
+  const runtime = capabilities?.t2i_runtime ?? {};
+  const blockers = Array.isArray(runtime.blockers) ? runtime.blockers as Array<{ code?: string }> : [];
+  for (const blocker of blockers) {
+    const code = String(blocker?.code ?? '');
+    if (!code) continue;
+    const known = IMAGE_BLOCKER_LABELS[code];
+    rows.push(known ? { code, ...known } : { code, text: '服务端报告了这一阻塞项。', next: '打开本机出图配置查看详情。' });
+  }
+  if (mode !== 'T2I' && mode !== 'RGBA') {
+    const report = capability?.graph_report;
+    if (report && report.complete === false) {
+      const missing = [...(report.missing_nodes ?? []), ...(report.missing_inputs ?? [])];
+      if (report.error_code) {
+        rows.push({ code: report.error_code, text: '编辑工作流检查没有完成。', next: '打开本机出图配置，确认渲染器可达后重试。' });
+      } else if (missing.length) {
+        rows.push({ code: 'IMAGE_EDIT_GRAPH_INCOMPLETE', text: `本机渲染器缺少编辑工作流需要的节点或输入：${missing.join('、')}。`, next: '安装或更新对应节点包后重新验证。' });
+      }
+    }
+  }
+  return rows;
 }
 
 export function AssetsWorkspace({
@@ -469,6 +509,8 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     && references[0].width === width && references[0].height === height;
   const canGenerate = Boolean(selectedCapability?.can_generate || manualCutoutReady);
   const canValidate = Boolean(selectedCapability?.can_validate);
+  const blockerRows = selectedCapability && !selectedCapability.can_generate && !manualCutoutReady
+    ? imageBlockerRows(capabilities, mode, selectedCapability) : [];
   return <div className="asset-workshop-layout">
     <section className="asset-card asset-workshop-form">
       <div className="asset-card-heading"><div><div className="asset-eyebrow">图片工坊</div><h2>创作一组可审核的图片候选</h2><p>原图和参考图会保留来源，生成任务刷新后仍可查看。</p></div><span className="asset-model-chip">Qwen-Image-2.1</span></div>
@@ -530,6 +572,14 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       {manualCutoutReady ? <div className="asset-capability-notice ready"><span><i />遮罩去背景可用</span><p>白色区域保留主体，黑色区域生成透明像素；这是确定性本机像素处理，不依赖或冒充 Qwen 分割模型。</p></div>
         : selectedCapability && <div className={`asset-capability-notice ${selectedCapability.can_generate ? 'ready' : 'pending'}`}>
           <span><i />{capabilityLabel(selectedCapability)}</span><p>{selectedCapability.reason}</p>
+          {blockerRows.length > 0 && <ul className="asset-blocker-list">
+            {blockerRows.map((row) => (
+              <li key={row.code}><b>{row.code}</b><span>{row.text}</span><em>下一步：{row.next}</em></li>
+            ))}
+          </ul>}
+          {!selectedCapability.can_generate && requiresReferences && references.length === 0 && (
+            <p className="asset-blocker-reference">这一模式还需要至少一张底图或参考图：请先在上方导入图片。这是请求本身的前置条件，与本机能力验证是两件事。</p>
+          )}
         </div>}
       {canValidate && !canGenerate && <div className="asset-validation-note">本机验证会真实提交一张样例到当前 ComfyUI，并生成待审核候选；不会自动晋升或开放正式生成。</div>}
       {error && <div className="asset-inline-error" role="alert">{error}</div>}
