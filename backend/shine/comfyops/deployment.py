@@ -420,6 +420,38 @@ def target_identity(storage_root: str | None, executor: str | None, packages: li
     })
 
 
+def h3_catalog_closure_requested(package_ids: list[str]) -> bool:
+    """True when a package list contains an H3 catalog's video weights.
+
+    Catalog-derived package rows carry the component id as their id, so a
+    request naming an H3 catalog component is a request for that catalog's
+    weights.  Review-only components (VLM/ASR) are deliberately *not* H3:
+    they carry their own capability and no H3 admission.  The answer decides
+    whether the manual /comfyops/install-plans route must defer to
+    /setup/install-plan instead of hosting a second H3 admission.
+    """
+    from shine.comfyops.capability import (
+        CAPABILITY_H3,
+        CATALOG_CAPABILITIES,
+        catalog_capability,
+        plan_capability,
+    )
+
+    for catalog_name, entry in CATALOG_CAPABILITIES.items():
+        if entry[0] != CAPABILITY_H3:
+            continue
+        try:
+            raw = load_deployment_catalog(catalog_name)
+        except (OSError, ValueError, FileNotFoundError):
+            continue
+        matched = sorted({pid for pid in package_ids if pid in {c["component_id"] for c in raw["components"]}})
+        if not matched:
+            continue
+        if plan_capability(catalog_capability(catalog_name, raw), raw, matched) == CAPABILITY_H3:
+            return True
+    return False
+
+
 def create_install_plan(db, settings: Settings, catalog: dict, requested: list[str],
                         project_id: str, disk_free: int, *,
                         variant: dict | None = None,
