@@ -11,10 +11,10 @@
 | A-02 | 前端类型检查 | `tsc -b` | PASS |
 | A-03 | 前端构建 | `vite build` | PASS（1650 modules） |
 | A-04 | 前端全量测试 | `vitest run --no-file-parallelism` | PASS（60 files / 347 tests） |
-| A-05 | 后端全量测试 | 8 分片并行（AGENTS.md 固定规则，`CODEBUDDY_SAFE_DELETE_ENABLED=0`） | 见 §E 执行记录 |
+| A-05 | 后端全量测试 | 8 分片并行（AGENTS.md 固定规则，`CODEBUDDY_SAFE_DELETE_ENABLED=0`） | PASS（8/8 exit=0，见 §E-3） |
 | A-06 | 新增用例 | `pytest tests/test_setup_one_stop_v41.py` | PASS（12 cases） |
-| A-07 | Alembic 隔离库 | `alembic upgrade head` + `alembic check`（临时 DB） | 见 §E |
-| A-08 | Windows 本机启动 | `启动 Shine 工作台.cmd` / API + Worker 同时起来 | 见 §E |
+| A-07 | Alembic 隔离库 | `alembic upgrade head` + `alembic check`（临时 DB） | PASS（No new upgrade operations，见 §E-4） |
+| A-08 | Windows 本机启动 | API 真实进程冒烟（uvicorn + 真实数据目录） | PASS（见 §E-5）；一键启动器覆盖由既有 CI 的 Windows 作业保证 |
 
 ## B. P0 复现与修复（必须有先后对照）
 
@@ -129,6 +129,9 @@ $ SHINE_DATA_DIR=<临时目录> alembic check          → No new upgrade operat
 旧库可原地升级。
 
 ### E-5 Windows 实机冒烟（真实本机，非 TestClient）
+
+> 合入：PR #27 → main `66ca7463e2b01de04bf7fe35f3c24ddcc232a655`。合入后又在 main 上复跑了
+> `test_setup_one_stop_v41` / `test_setup_cold_start` / `test_director_streamline`（含并行合入的 PR #26），全部通过。
 
 ```
 $ uvicorn shine.main:app --host 127.0.0.1 --port 8399   （数据目录为临时目录）
