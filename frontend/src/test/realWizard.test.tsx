@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { RealProductionWizard } from '../components/RealProductionWizard';
-import { StudioStub, baseRoutes, jsonResponse, CATALOG, SYSTEM_STATUS, productionMode } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse, CATALOG, ENV_REPORT, SYSTEM_STATUS, productionMode } from './studioStub';
 
 let stub: StudioStub;
 const callbacks = { onClose: vi.fn(), onFinished: vi.fn(), onOpenExpertSetup: vi.fn(), onRefresh: vi.fn() };
@@ -342,4 +342,132 @@ it('状态接口失联不挡 H3 安装路径', async () => {
   show();
   await screen.findByText(/真实制作已准备好/);
   expect(stub.callsOf('POST', /install-plans\/install\/execute$/)).toHaveLength(1);
+});
+
+const CANDIDATE = {
+  variant_id: 'ref2va-lowend-candidate', title: 'H3 Ref2VA 低显存候选（W6A8）',
+  acceptance_status: 'CANDIDATE', status: 'UNKNOWN', usable_in_production: false,
+  auto_download_allowed: false, catalog_id: 'h3-ref2va-lowend-candidate-windows-x64',
+  total_bytes: 2_000_000_000,
+};
+
+function toolsInstalled() {
+  return {
+    ffmpeg: { present: true, version: '8.1.3', at_floor: true },
+    ffprobe: { present: true, version: '8.1.3', at_floor: true },
+    pwsh: { present: true, version: '7.4.12', at_floor: true },
+    node: { present: true, version: '22.15.0', at_floor: true },
+    npm: { present: true, version: '10.9.2', at_floor: true },
+    uv: { present: true, version: '0.13.7', at_floor: true },
+  };
+}
+
+const REPAIR_PLAN = {
+  plan_id: 'toolrepair-' + 'b'.repeat(32), status: 'COMPLETE',
+  download_bytes: 306_208_785,
+  packages: [
+    { package_id: 'ffmpeg', label: 'FFmpeg + FFprobe', download_bytes: 194_182_300,
+      tools: [{ tool: 'ffmpeg', label: 'FFmpeg', version: '8.1.3' },
+        { tool: 'ffprobe', label: 'FFprobe', version: '8.1.3' }] },
+    { package_id: 'pwsh', label: 'PowerShell 7', download_bytes: 112_026_485,
+      tools: [{ tool: 'pwsh', label: 'PowerShell 7', version: '7.4.12' }] },
+  ],
+  authorization: { status: 'AWAITING_OPERATOR_CONFIRMATION' },
+  execution: { status: 'NOT_STARTED' },
+};
+
+function findings4070() {
+  return [
+    { code: 'TOOL_MISSING_INSTALLABLE', repairability: 'AUTO_REPAIRABLE', scopes: ['BOOTSTRAP'],
+      package_id: 'ffmpeg', tools: ['ffmpeg', 'ffprobe'], message: '缺少 FFmpeg + FFprobe' },
+    { code: 'TOOL_MISSING_INSTALLABLE', repairability: 'AUTO_REPAIRABLE', scopes: ['BOOTSTRAP'],
+      package_id: 'pwsh', tools: ['pwsh'], message: '缺少 PowerShell 7' },
+    { code: 'GPU_VRAM_BELOW_FLOOR', repairability: 'HARDWARE_INCOMPATIBLE',
+      scopes: ['VARIANT_QUALIFICATION', 'PRODUCTION_ACTIVATION'],
+      actual: 12282, required: 15360, message: '显存低于标准档门槛' },
+    { code: 'RAM_MEETS_FLOOR', repairability: 'ALREADY_AVAILABLE', scopes: ['VARIANT_QUALIFICATION'],
+      message: '实装 32768 MB，按实装容量判定达标' },
+  ];
+}
+
+function env4070(tools = toolsInstalled(), findings = findings4070()) {
+  return {
+    ...ENV_REPORT,
+    tools,
+    findings,
+    repair_plan: REPAIR_PLAN,
+    ram: { status: 'OK', ram_mb: 31525, installed_mb: 32768, note: 'HARDWARE_RESERVED_MEMORY' },
+    port: { status: 'OK', port: 8188, selected: 8189, identity: 'FOREIGN_PROCESS' },
+  };
+}
+
+it('RTX 4070 样本：命名补装两个工具包，一次确认后继续，选定变体与端口贯穿全链路', async () => {
+  let envCalls = 0;
+  stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse(
+    envCalls++ === 0 ? env4070() : env4070(toolsInstalled(), findings4070().filter(
+      (row) => row.repairability !== 'AUTO_REPAIRABLE'))),
+  });
+  stub.add({ method: 'POST', pattern: /setup\/tool-repair\/execute$/, respond: () => jsonResponse({
+    status: 'SUCCEEDED', verification: [{ package_id: 'ffmpeg', installed: true }],
+  }) });
+  route('GET', 'setup/variant-recommendations', {
+    tier: 'lowend_12gb', recommended: [], candidates: [CANDIDATE], blocked: [],
+  });
+  show();
+  const repair = await screen.findByTestId('wizard-repair');
+  expect(repair).toHaveTextContent('FFmpeg + FFprobe');
+  expect(repair).toHaveTextContent('PowerShell 7');
+  expect(stub.callsOf('POST', /tool-repair\/execute$/)).toHaveLength(0);
+
+  await userEvent.click(screen.getByRole('button', { name: '确认自动补装' }));
+  const variant = await screen.findByTestId('wizard-variant');
+  expect(variant).toHaveTextContent('低显存候选');
+  expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
+  await userEvent.click(screen.getByRole('button', { name: /低显存候选/ }));
+  await screen.findByText(/真实制作已准备好/);
+
+  expect(stub.callsOf('POST', /tool-repair\/execute$/)).toHaveLength(1);
+  const install = stub.callsOf('POST', /setup\/install-plan$/)[0].body as Record<string, unknown>;
+  expect(install.variant_id).toBe('ref2va-lowend-candidate');
+  expect(install.catalog).toBe('h3-ref2va-lowend-candidate-windows-x64');
+  expect(install.candidate_download_acknowledged).toBe(true);
+  const instance = stub.callsOf('POST', /setup\/next-instance-plan$/)[0].body as Record<string, unknown>;
+  expect(instance.port).toBe(8189);
+  expect(instance.variant_id).toBe('ref2va-lowend-candidate');
+  expect(stub.callsOf('POST', /setup\/profiles$/)[0].body).toMatchObject({
+    variant_id: 'ref2va-lowend-candidate', catalog: 'h3-ref2va-lowend-candidate-windows-x64',
+  });
+  expect(stub.callsOf('POST', /setup\/configuration$/)[0].body).toMatchObject({ port: 8189 });
+  expect(screen.getByTestId('wizard-stages')).toHaveTextContent(/8189/);
+});
+
+it('只做检查时列出可补装的软件名称，不执行任何安装', async () => {
+  stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse(env4070()) });
+  render(<RealProductionWizard mode="diagnose" projectId="proj-1" {...callbacks} />);
+  const result = await screen.findByTestId('wizard-result');
+  expect(result).toHaveTextContent('FFmpeg + FFprobe');
+  expect(result).toHaveTextContent('PowerShell 7');
+  expect(stub.callsOf('POST', /tool-repair\/execute$/)).toHaveLength(0);
+});
+
+it('补装后仍缺工具时停止并保留数据，不形成无限重新检查', async () => {
+  stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse(env4070()) });
+  route('POST', 'setup/tool-repair/execute', { status: 'SUCCEEDED' });
+  show();
+  await screen.findByTestId('wizard-repair');
+  await userEvent.click(screen.getByRole('button', { name: '确认自动补装' }));
+  const result = await screen.findByTestId('wizard-result');
+  expect(result).toHaveTextContent('复查仍显示缺少');
+  expect(stub.callsOf('POST', /tool-repair\/execute$/)).toHaveLength(1);
+});
+
+it('用户取消补装时不产生下载或安装副作用', async () => {
+  stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse(env4070()) });
+  show();
+  await screen.findByTestId('wizard-repair');
+  await userEvent.click(screen.getByRole('button', { name: '暂不补装' }));
+  const result = await screen.findByTestId('wizard-result');
+  expect(result).toHaveTextContent('已取消自动补装');
+  expect(stub.callsOf('POST', /tool-repair\/execute$/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
 });
