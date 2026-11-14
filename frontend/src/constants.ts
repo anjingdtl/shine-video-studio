@@ -223,33 +223,177 @@ export const auditActorLabels: Record<string, string> = {
   user: '用户', admin: '管理员', api: '接口调用',
 };
 
+/** 审计实体：后端 add_audit 的第 4 个参数，这里是它面向人的名字。 */
 export const auditEntityLabels: Record<string, string> = {
-  project: '项目', asset: '素材', candidate_asset: '候选素材', style_version: '风格版本',
-  shot: '分镜', job: '生成任务', job_attempt: '任务尝试', repair: '返工记录',
-  workflow_profile: '工作流模板', provider_profile: '模型配置', series: '连续生产',
-  delivery_order: '成片订单', terminology: '人名对照表', subtitle_track: '字幕',
-  rule_pack: '规则包', rights: '版权记录', installation_plan: '安装计划',
+  project: '项目', asset: '素材', candidate_asset: '候选素材', candidate: '候选素材',
+  style_version: '风格版本', shot: '分镜', job: '生成任务', job_attempt: '任务尝试',
+  repair: '返工记录', workflow_profile: '工作流模板', provider_profile: '模型配置',
+  series: '连续生产', delivery_order: '成片订单', terminology: '人名对照表',
+  project_terminology: '人名对照表', subtitle_track: '字幕', rule_pack: '规则包',
+  rulepack: '规则包', rights: '版权记录', installation_plan: '安装计划',
+  installation_attempt: '安装尝试', library_asset: '素材库素材', library_version: '素材版本',
+  library_render_task: '素材库出图任务', library_voice_profile: '素材库声音档案',
+  library_media: '素材库媒体', library_rights: '素材版权', library_project_link: '素材库项目关联',
+  director_package: '导演包', director_episode_plan: '导演分集计划', production_series: '生产系列',
+  production_run: '生产批次', production_run_episode: '生产批次剧集', preproduction_plan: '前期计划',
+  deployment: '部署', package: '资源包', agent_task: '智能体任务', agent_artifact: '智能体产物',
+  agent_route: '智能体路由', agent_routes: '智能体路由', material_run: '素材生产',
+  material_item: '素材条目', material_text_consent: '素材文字授权', asset_requirement: '素材需求',
+  project_document: '项目文档', resource_lease: '资源占用', comfy_instance: '渲染器实例',
+  relay_upscale_item: '接力放大条目', app_setting: '应用设置', setup_task: '环境准备任务',
+  voice_runtime: '声音运行时', variant: '变体', tool_repair: '基础程序修复', artifact: '产物',
+  system: '系统',
 };
 
+/** 审计事件：精编过的事件名。键必须与后端实际写下的事件码一致。 */
 export const auditEventLabels: Record<string, string> = {
-  PROJECT_CREATED: '创建项目', PROJECT_UPDATED: '修改项目设置',
+  PROJECT_CREATED: '创建项目', PROJECT_SETTINGS_UPDATED: '修改项目设置',
+  PROJECT_TERMINOLOGY_SAVED: '保存人名对照表',
   ASSET_UPLOADED: '上传素材', ASSET_APPROVED: '批准素材', ASSET_LOCKED: '锁定素材',
-  ASSET_METADATA_PATCHED: '修改素材信息',
-  CANDIDATE_PROMOTED: '候选素材转正', CANDIDATE_REJECTED: '候选素材被拒',
-  STYLE_DRAFT_SAVED: '保存风格草稿', STYLE_FROZEN: '冻结风格版本',
-  SHOT_CREATED: '新建分镜', SHOT_UPDATED: '修改分镜', SHOT_BINDINGS_SET: '更新镜头素材绑定',
+  ASSET_METADATA_UPDATED: '修改素材信息', ASSET_UNFROZEN: '解冻素材',
+  CANDIDATE_CREATED: '创建候选素材', CANDIDATE_PROMOTED: '候选素材转正',
+  STYLE_DRAFT_UPDATED: '更新风格草稿', STYLE_FROZEN: '冻结风格版本',
+  STYLE_IMPACT_ANALYZED: '分析风格影响', STYLE_APPLIED_TO_SHOTS: '风格应用到分镜',
+  SHOT_CREATED: '新建分镜', SHOT_BINDINGS_UPDATED: '更新分镜素材绑定',
+  SHOT_CONTINUITY_SET: '设置分镜连续性', SHOT_REVISION_REWRITTEN: '重写分镜修订',
+  SHOT_PROMPT_SAVED: '保存分镜提示词', SHOT_PROMPT_FROZEN: '冻结分镜提示词',
+  SHOT_PROMPT_UNFROZEN: '解冻分镜提示词',
+  SHOT_SUBTITLE_SAVED: '保存分镜字幕', SHOT_SUBTITLE_FROZEN: '冻结分镜字幕',
+  SUBTITLE_REVISION_SAVED: '保存字幕修订', SUBTITLE_REVISION_APPROVED: '批准字幕修订',
+  JOB_PAUSED: '任务暂停', JOB_RESUMED: '任务继续',
+  OPERATOR_REVIEW_RECORDED: '记录人工复核',
+  PRODUCTION_SERIES_CREATED: '创建生产系列', PRODUCTION_SERIES_PAUSED: '暂停生产系列',
+  PRODUCTION_SERIES_RESUMED: '继续生产系列', PRODUCTION_SERIES_CANCELLED: '取消生产系列',
+  PRODUCTION_RUN_CREATED: '创建生产批次', PRODUCTION_RUN_CANCELLED: '取消生产批次',
+  DELIVERY_ASSEMBLED: '成片已装配', EPISODE_DELIVERED: '剧集已交付',
+  EPISODE_PLAN_CREATED: '创建分集计划', EPISODE_PLAN_CONFIRMED: '确认分集计划',
+  EPISODE_SHOTS_CONFIRMED: '确认剧集分镜', EPISODE_SUBTITLE_COMPILED: '编译剧集字幕',
+  DIRECTOR_PACKAGE_CREATED: '创建导演包', DIRECTOR_PACKAGE_CONFIRMED: '确认导演包',
+  DIRECTOR_PRODUCTION_STARTED: '导演生产开始', DIRECTOR_STORYBOARD_QUEUED: '导演分镜已排队',
+  CREATIVE_BRIEF_SAVED: '保存创意简报', CREATIVE_BRIEF_CONFIRMED: '确认创意简报',
+  CREATIVE_SCRIPT_QUEUED: '创意剧本已排队', CREATIVE_SCRIPT_WRITTEN: '创意剧本已写出',
+  STORY_OUTLINE_QUEUED: '故事大纲已排队', STORY_OUTLINE_CONFIRMED: '确认故事大纲',
+  STORY_OUTLINE_EDITED: '编辑故事大纲', STORY_SECTIONS_SELECTED: '选择剧本章节',
+  STORYBOARD_GENERATED: '生成分镜板', STORYBOARD_BOOK_GENERATED: '生成分镜手册',
+  MATERIAL_PLAN_DRAFTED: '起草素材计划', MATERIAL_PLAN_CONFIRMED: '确认素材计划',
+  MATERIAL_BATCH_CREATED: '创建素材批次', MATERIAL_BATCH_RECONCILED: '素材批次已对账',
+  MATERIAL_BRIEF_PRODUCED: '产出素材需求单', MATERIAL_BRIEF_REFUSED: '素材需求单被拒绝',
+  MATERIAL_PROMPT_FROZEN: '冻结素材提示词', MATERIAL_PROMPT_UNFROZEN: '解冻素材提示词',
+  MATERIAL_SCENE_PREPARED: '素材场景已备好', MATERIAL_IMAGE_WORKER_LOST: '素材出图后台服务丢失',
+  MATERIAL_MASTER_SELECTED: '选择素材主条目', MATERIAL_MASTER_ARCHIVED: '归档素材主条目',
+  LIBRARY_ASSET_CREATED: '创建素材库素材', LIBRARY_VERSION_PROMOTED: '素材版本转正',
+  LIBRARY_RIGHTS_APPROVED: '批准素材版权',
+  PROVIDER_PROFILE_CREATED: '新增模型配置', PROVIDER_PROFILE_UPDATED: '更新模型配置',
+  PROVIDER_PROFILE_DELETED: '删除模型配置', PROVIDER_PROFILE_DUPLICATED: '模型配置重复',
+  PROVIDER_KEY_UPDATED: '更新模型密钥', PROVIDER_KEY_CLEARED: '清除模型密钥',
+  PROVIDER_CONNECTION_TESTED: '检测模型连接', PROVIDER_GENERATION_TESTED: '检测模型生成',
+  WORKFLOW_PROFILE_REGISTERED: '注册工作流模板', WORKFLOW_PROFILE_AUTO_REGISTERED: '自动登记工作流模板',
+  WORKFLOW_PROFILE_VALIDATED: '校验工作流模板', WORKFLOW_PROFILE_DELETED: '删除工作流模板',
+  TECHNICAL_QC_RUN: '运行技术质检', REPAIR_ESCALATED: '返工升级',
+  REPAIR_PLAN_SUGGESTED: '建议返工方案', RULEPACK_APPROVED: '批准规则包',
+  OUTPUT_DIRECTORY_CHANGED: '切换输出目录', QUALITY_POLICY_UPDATED: '更新质量策略',
+  WORKER_EXCEPTION: '后台制作服务异常', MODEL_CALL_COMPLETED: '模型调用完成',
+  IMAGE_RUNTIME_BOUND: '绑定出图运行时', IMAGE_RENDERER_STARTED: '出图渲染器启动',
+  IMAGE_RENDERER_STOPPED: '出图渲染器停止', IMAGE_VALIDATION_BATCH_CREATED: '创建出图验证批次',
+  VIDEO_ARTIFACT_DELETED: '删除成片产物', VIDEO_LIBRARY_ORGANIZED: '整理成片库',
+  VOICE_RUNTIME_CONFIGURED: '配置声音运行时', AGENT_PLAN_CREATED: '创建智能体计划',
+  AGENT_ROUTE_UPDATED: '更新智能体路由', AGENT_ROUTE_DELETED: '删除智能体路由',
+  INSTALL_ATTEMPT_NEEDS_REVIEW: '安装尝试转入人工复核', INSTALL_ATTEMPT_RESUMED: '安装尝试已继续',
+  LOCAL_INSTALL_QUEUED: '本机安装已排队', LOCAL_INSTALL_FAILED: '本机安装失败',
+  EXISTING_COMFY_INSTALLATION_ADOPTED: '收编已有 ComfyUI',
+  EXISTING_COMFY_INSTALLATION_VERIFIED: '核验已有 ComfyUI',
+  PACKAGE_REGISTERED_FROM_CATALOG: '按目录登记资源包', PREPRODUCTION_BLOCKED: '前期制作被拦下',
+};
+
+/** 后端已经不再写下的事件码：留着是为了让历史记录仍然读得懂，不再当活码用。 */
+export const auditEventLabelsDeprecated: Record<string, string> = {
+  PROJECT_UPDATED: '修改项目设置', ASSET_METADATA_PATCHED: '修改素材信息',
+  CANDIDATE_REJECTED: '候选素材被拒', STYLE_DRAFT_SAVED: '保存风格草稿',
+  SHOT_UPDATED: '修改分镜', SHOT_BINDINGS_SET: '更新镜头素材绑定',
   JOB_QUEUED: '任务进入队列', JOB_STARTED: '任务开始执行', JOB_COMPLETED: '任务完成',
-  JOB_PASSED: '任务通过', JOB_FAILED: '任务失败', JOB_PAUSED: '任务暂停', JOB_RESUMED: '任务继续',
-  JOB_NEEDS_REVIEW: '任务转入人工复核', JOB_RECONCILED: '任务已核实',
-  REPAIR_APPLIED: '执行返工', REVIEW_RECHECK: '重跑审片',
-  OPERATOR_REVIEW_SUBMITTED: '人工审片提交',
-  SERIES_STARTED: '连续生产开始', SERIES_FINISHED: '连续生产完成',
-  SERIES_CANCELLED: '连续生产取消',
+  JOB_PASSED: '任务通过', JOB_FAILED: '任务失败', JOB_NEEDS_REVIEW: '任务转入人工复核',
+  JOB_RECONCILED: '任务已核实', REPAIR_APPLIED: '执行返工', REVIEW_RECHECK: '重跑审片',
+  OPERATOR_REVIEW_SUBMITTED: '人工审片提交', SERIES_STARTED: '连续生产开始',
+  SERIES_FINISHED: '连续生产完成', SERIES_CANCELLED: '连续生产取消',
   DELIVERY_ORDER_CREATED: '生成成片订单', DELIVERY_RELEASED: '成片已交付',
   TERMINOLOGY_SAVED: '保存人名对照表', SUBTITLE_SAVED: '保存字幕',
-  WORKFLOW_PROFILE_REGISTERED: '注册工作流模板', PROVIDER_PROFILE_CREATED: '新增模型配置',
   RIGHTS_APPROVED: '批准版权记录',
 };
+
+/** 事件码末段的动词：后端写下的事件名几乎都是「主体_动作」，动作在最后一段。 */
+export const auditActionLabels: Record<string, string> = {
+  SAVED: '保存', CREATED: '创建', UPDATED: '更新', DELETED: '删除', QUEUED: '加入队列',
+  ENQUEUED: '已排队', STARTED: '开始', COMPLETED: '完成', FINISHED: '完成', FAILED: '失败',
+  BLOCKED: '被拦下', RECONCILED: '已对账', RECONCILE: '对账', RECONCILIATION: '对账',
+  CONFIRMED: '已确认', FROZEN: '已冻结', UNFROZEN: '已解冻', PINNED: '已钉住',
+  APPROVED: '已批准', REJECTED: '已拒绝', REFUSED: '已拒绝', LOCKED: '已锁定',
+  RESUMED: '已继续', PAUSED: '已暂停', ABANDONED: '已放弃', ADOPTED: '已收编',
+  VERIFIED: '已核验', TESTED: '已检测', CACHED: '已缓存', BOUND: '已绑定',
+  REBOUND: '已重新绑定', SELECTED: '已选择', CHOSEN: '已选择', INTENT: '意图已记录',
+  REQUESTED: '已请求', AUTHORIZED: '已授权', GRANTED: '已授权', RELEASED: '已释放',
+  APPLIED: '已应用', UNCERTAIN: '结果不确定', REQUIRED: '待处理', PENDING: '等待中',
+  PROVEN: '已核实', REGISTERED: '已登记', CANCELLED: '已取消', UNCONFIRMABLE: '无法确认',
+  PASSED: '已通过', RUNNING: '运行中', PROPOSED: '已提议', GENERATED: '已生成',
+  READY: '已就绪', DRAFTED: '已起草', ATTEMPT: '一次尝试', EXHAUSTED: '已用尽',
+  ARCHIVED: '已归档', PREPARED: '已备好', CONFIGURED: '已配置', UNAVAILABLE: '不可用',
+  ISSUED: '已签发', VALIDATED: '已通过校验', EDITED: '已编辑', COMPILED: '已编译',
+  MISSING: '缺失', EXECUTED: '已执行', ASSEMBLED: '已装配', PERSISTED: '已落盘',
+  MATERIALIZED: '已实体化', PROMOTED: '已转正', CORRECTED: '已更正', DEFERRED: '已推迟',
+  SUPERSEDED: '已被取代', ADVANCED: '已推进', STOPPED: '已停止', STORED: '已保存',
+  SUGGESTED: '已建议', RETIRED: '已退役', ORGANIZED: '已整理', RECOVERED: '已恢复',
+  DISCARDED: '已丢弃', ESCALATED: '已升级', UPLOADED: '已上传', REVALIDATED: '已重新核验',
+  UNCONFIRMED: '未确认', TRANSFERRED: '已转移', ADJUSTED: '已调整', REVISED: '已修订',
+  RECORDED: '已记录', REUSE: '已复用', REUSED: '已复用', ADDED: '已添加',
+  REATTACHED: '已重新接管', RETRIED: '已重试', ACTIVATED: '已启用', DELIVERED: '已交付',
+  ANALYZED: '已分析', COMMITTED: '已提交', EXCEPTION: '发生异常', LOST: '已丢失',
+  JUDGED: '已判定', DUPLICATED: '重复', REWRITTEN: '已重写', ACKNOWLEDGED: '已确认',
+  CLEARED: '已清除', SET: '已设置', PRODUCED: '已产出', WRITTEN: '已写入',
+  RESERVED: '已预留', IMPORTED: '已导入', CHANGED: '已变更', TARGET: '目标',
+  SUBMIT: '提交', QC: '质检', LEASE: '占用', ARTIFACT: '产物', CATALOG: '目录',
+  BATCH: '批次', HANDOFF: '交接', STAGE: '阶段', REVIEW: '复核', SHOTS: '分镜',
+  ONLY: '仅', HISTORY: '历史', PARAMETERS: '参数', PROJECT: '项目', RUN: '运行',
+  SUBTITLE: '字幕', DEPENDENCY: '依赖',
+};
+
+/** 事件码首段的主体：动作之外的另一半。 */
+export const auditSubjectLabels: Record<string, string> = {
+  ADVISORY: '审片', AGENT: '智能体', ASSET: '素材', AUTO: '自动', CANDIDATE: '候选素材',
+  CHARACTER: '人物', COMFY: '渲染器', CREATIVE: '创意', DELIVERY: '交付', DEPLOYMENT: '部署',
+  DIRECTOR: '导演', EPISODE: '剧集', EXISTING: '已有安装', EXTERNAL: '外部实例', FILM: '影片',
+  GENERATION: '生成', H3: 'H3 渲染', HANDOFF: '交接', IMAGE: '出图', INSTALL: '安装',
+  INSTANCE: '实例', JOB: '生成任务', LIBRARY: '素材库', LITERARY: '文学', LOCAL: '本机安装',
+  MACHINE: '机器', MATERIAL: '素材', MATERIALS: '素材', MOCK: '模拟', MODEL: '模型',
+  OFFLINE: '离线', OPERATOR: '人工', OUTPUT: '输出', PACKAGE: '资源包', PERSISTED: '已落盘',
+  PIPELINE: '流水线', PREPARATION: '准备', PREPRODUCTION: '前期制作', PRODUCTION: '生产',
+  PROJECT: '项目', PROVIDER: '模型服务', QC: '质检', QUALITY: '质量', RELAY: '接力',
+  REMOTE: '远端', REPAIR: '返工', RESOURCE: '资源', REVIEW: '复核', RULE: '规则',
+  RULEPACK: '规则包', RUN: '运行', SCRIPT: '剧本', SERIES: '连续生产', SETUP: '环境准备',
+  STALE: '过期结果', STORY: '剧本', STORYBOARD: '分镜板', STRATEGY: '策略',
+  SUBMISSION: '提交', SUBMIT: '提交', SUBTITLE: '字幕', TECHNICAL: '技术质检',
+  TOOL: '基础程序', UPLOADED: '上传', VERIFIED: '已核验', VIDEO: '成片', VOICE: '声音',
+  WORKER: '后台制作服务', WORKFLOW: '工作流',
+};
+
+/**
+ * 一个事件码面向人的说法。
+ *
+ * 后端写下的是大写事件码（COMFY_OUTPUT_PERSISTED 这样）。裸码上屏对谁都没有意义，
+ * 所以这里逐层落到能读懂的话：精编名 → 动作 + 主体 → 动作 + 实体 → 兜底。
+ * 任何一步都不把裸码原样交出去。
+ */
+export function auditEventLabel(code: string, entityType?: string | null): string {
+  const precise = auditEventLabels[code];
+  if (precise) return precise;
+  const parts = code.split('_');
+  const action = auditActionLabels[parts[parts.length - 1]];
+  const subject = auditSubjectLabels[parts[0]];
+  const entity = entityType ? auditEntityLabels[entityType] : undefined;
+  if (action && subject) return `${action} · ${subject}`;
+  if (action && entity) return `${action} · ${entity}`;
+  if (action) return action;
+  if (entity) return entity;
+  return `未知操作（${code}）`;
+}
 
 export const subtitleStatusLabels: Record<string, string> = {
   PENDING: '草稿', APPROVED: '已定稿',
