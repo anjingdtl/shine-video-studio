@@ -62,6 +62,8 @@
 (均为硬件/目录 RAM 门槛相关,与本轮改动模块无交集;git diff 确认未触及 comfyops/deployment、recommendation、install qualification。)
 `test_v13_e2e` 首轮失败为本会话 `NO_PROXY` 含 `[::1]` 的 httpx 假失败,`env -u NO_PROXY` 复跑通过(AGENTS.md 已记录)。
 
+**PR #22 CI**(commit `3af7643`):L1 backend quick **success**、Frontend build **success**、L2 backend integration 运行中、L3(main-only)skipped。首轮 L1 失败仅因新测试 import 排序(Ruff I001),已修复。
+
 ### 3.3 前端 / 静态 / 迁移
 - `tsc --noEmit`:0 错误。
 - `vitest run --no-file-parallelism`:**52 文件 / 305 项通过**。
