@@ -1,17 +1,17 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import Field, ValidationError
-from sqlalchemy import literal_column, select, text
+from sqlalchemy import literal_column, select
 from sqlalchemy.orm import Session
 
 from shine.agents import character_binding
-from shine.agents.crew_decompose import child_slot_hash, crew_call_delay
 from shine.agents.editorial_timing import editorial_timing_preview
 from shine.agents.execution import UNKNOWN_CODES
 from shine.agents.film import (
@@ -105,18 +105,6 @@ def _crew_task_dead(task) -> bool:
     return age > float(timeout) + CREW_TASK_DEAD_MARGIN_S
 
 
-def _crew_child(db, parent):
-    child_id = parent.trace.get("blocked_child_task_id") or parent.trace.get("active_child_task_id")
-    child = db.get(AgentTaskRecord, child_id) if child_id else None
-    if (child and child.project_id == parent.project_id
-            and child.trace.get("parent_role") == parent.role_id
-            and (child.input_hash == child_slot_hash(parent, child.trace.get("slot"))
-                 or child.trace.get("parent_task_id") == parent.id)
-            and child.role_id.startswith(parent.role_id + "_")):
-        return child
-    return None
-
-
 @router.post("/projects/{project_id}/film-runs/{task_id}/reconcile")
 def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
                         actor: Operator, db: DBSession):
@@ -130,9 +118,6 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
     task = db.get(AgentTaskRecord, task_id)
     if not task or task.project_id != project_id or task.role_id not in FilmAgentRegistry.roles:
         raise HTTPException(404, "FILM_AGENT_TASK_NOT_FOUND")
-    child = _crew_child(db, task)
-    if child and child.status == "RUNNING" and not _crew_task_dead(child):
-        raise HTTPException(409, "FILM_AGENT_TASK_STILL_RUNNING")
     decided = (task.trace.get("reconciliation") or {}).get("outcome")
     if decided in {"RESULT_ADOPTED", "NOT_SENT_PROVEN", "RESPONSE_RECEIVED_NO_ANSWER",
                    "USER_AUTHORIZED_NEW_REQUEST"}:
@@ -152,13 +137,7 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
         # left this machine is released; a call that may have reached the
         # provider keeps its unknown outcome and waits for the person.
         phase = (task.trace or {}).get("phase")
-        if child and child.status == "RUNNING":
-            child.state_version += 1
-            child_not_sent = child.trace.get("phase") in PRE_REQUEST_PHASES
-            child.status = "SUPERSEDED" if child_not_sent else "NEEDS_REVIEW"
-            child.trace = {**child.trace, "external_outcome": "NOT_SENT" if child_not_sent else "UNKNOWN",
-                           "reconciliation": {"outcome": "NOT_SENT_PROVEN"} if child_not_sent else {}}
-        if phase in PRE_REQUEST_PHASES and (not child or child.status != "NEEDS_REVIEW"):
+        if phase in PRE_REQUEST_PHASES:
             task.status = "SUPERSEDED"
             task.error_code = None
             task.state_version += 1
@@ -182,7 +161,6 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
                    "dead_worker": True, "external_outcome": "UNKNOWN"}, project_id=project_id)
         db.commit()
         return {"outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "task_id": task.id,
-                **({"child_task_id": child.id} if child else {}),
                 "state_version": task.state_version, "resubmittable": False,
                 "note": "持有这次调用的进程已经结束，但请求可能已经发出、结果无法取回；"
                         "需要你明确重发这一场，系统才会以一次新的模型请求重问。"}
@@ -272,11 +250,9 @@ def reconcile_film_task(project_id: str, task_id: str, body: ReconcileFilmTask,
         task.state_version += 1
         add_audit(db, actor, "FILM_AGENT_UNKNOWN_REQUIRES_NEW_ATTEMPT", "agent_task", task.id,
                   {"status": task.status, "external_outcome": external_outcome,
-                   "resubmittable": False, "external_calls": 0,
-                   **({"child_task_id": child.id} if child else {})}, project_id=project_id)
+                   "resubmittable": False, "external_calls": 0}, project_id=project_id)
         db.commit()
         return {"outcome": "UNKNOWN_REQUIRES_NEW_ATTEMPT", "task_id": task.id,
-                **({"child_task_id": child.id} if child else {}),
                 "state_version": task.state_version, "resubmittable": False,
                 "external_outcome": "UNKNOWN",
                 "note": "上一次调用可能已经发出、结果无法取回；需要你明确重发这一场，"
@@ -302,25 +278,12 @@ def resend_unknown_film_run(project_id: str, task_id: str, body: ReconcileFilmTa
     from shine.services import add_audit
 
     require_project(db, project_id)
-    db.commit()
-    db.execute(text("BEGIN IMMEDIATE"))
     task = db.get(AgentTaskRecord, task_id)
     if not task or task.project_id != project_id or task.role_id not in FilmAgentRegistry.roles:
         raise HTTPException(404, "FILM_AGENT_TASK_NOT_FOUND")
     if task.state_version != body.expected_state_version:
         raise HTTPException(409, "FILM_AGENT_TASK_STATE_CHANGED")
     decided = (task.trace.get("reconciliation") or {}).get("outcome")
-    child = _crew_child(db, task)
-    if child and any(
-        (row.trace.get("reconciliation") or {}).get("outcome") == "USER_AUTHORIZED_NEW_REQUEST"
-        for row in db.scalars(select(AgentTaskRecord).where(
-            AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == child.role_id,
-            AgentTaskRecord.input_hash == child.input_hash,
-        ))
-    ):
-        raise HTTPException(409, "FILM_AGENT_UNKNOWN_RESEND_ALREADY_USED")
-    if child and child.status != "NEEDS_REVIEW":
-        raise HTTPException(409, "FILM_AGENT_UNKNOWN_RESEND_NOT_ALLOWED")
     if decided != "UNKNOWN_REQUIRES_NEW_ATTEMPT":
         raise HTTPException(409, "FILM_AGENT_UNKNOWN_RESEND_NOT_ALLOWED")
     task.status = "SUPERSEDED"
@@ -330,18 +293,12 @@ def resend_unknown_film_run(project_id: str, task_id: str, body: ReconcileFilmTa
         "outcome": "USER_AUTHORIZED_NEW_REQUEST", "resubmittable": True,
         "previous_external_outcome": task.trace.get("external_outcome"),
         "checked_at": utcnow().isoformat()}}
-    if child is not None:
-        child.status = "SUPERSEDED"
-        child.state_version += 1
-        child.trace = {**child.trace, "reconciliation": task.trace["reconciliation"]}
     add_audit(db, actor, "FILM_AGENT_UNKNOWN_RESEND_AUTHORIZED", "agent_task", task.id,
               {"role": task.role_id, "resubmitted": True, "external_calls": 1,
-               **({"child_task_id": child.id} if child else {}),
                "previous_external_outcome": task.trace.get("external_outcome")},
               project_id=project_id)
     db.commit()
     return {"outcome": "USER_AUTHORIZED_NEW_REQUEST", "task_id": task.id,
-            **({"child_task_id": child.id} if child else {}),
             "state_version": task.state_version, "resubmittable": True,
             "note": "已登记你的确认：这一场会以一次新的模型请求重问；旧请求的结果仍然未知，不会被自动采用。"}
 
@@ -511,7 +468,7 @@ def runs(project_id: str, db: DBSession):
             "status": r.status,
             "error_code": r.error_code,
             "state_version": r.state_version,
-            "trace": {key: val for key, val in r.trace.items() if key != "checkpoint"},
+            "trace": {key: value for key, value in r.trace.items() if key != "checkpoint"},
             "created_at": r.created_at,
         }
         for r in db.scalars(
@@ -1041,7 +998,17 @@ a retry that repeats the same prompt repeats the same mistake.
 
 
 def _agent_step_delay_seconds() -> float:
-    return crew_call_delay()
+    """The pause between two crew calls.
+
+    Two real model calls back to back share the same provider connection and
+    the same rate limit; the gap keeps the second call from starting while the
+    first one is still settling, and gives the workbench a visible boundary
+    between two steps.
+    """
+    try:
+        return max(0.0, int(os.getenv("SHINE_AGENT_STEP_DELAY_MS", "1200")) / 1000)
+    except ValueError:
+        return 1.2
 
 
 def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
@@ -1512,7 +1479,7 @@ def generate_storyboard(
             # record itself.  A JSON pointer and a validator name are not
             # provider text, so a retry may be told exactly what to repair.
             for key in ("provider_schema_path", "provider_schema_validator", "visual_field",
-                        "offending_line", "provider_finish_reason", "blocked_child_task_id"):
+                        "offending_line", "provider_finish_reason"):
                 value = task.trace.get(key)
                 if isinstance(value, str) and value:
                     rejection[key] = value
