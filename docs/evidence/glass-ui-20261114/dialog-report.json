@@ -1,0 +1,12 @@
+{
+  "scope": "帮助弹窗在六主题下的可见文本对比度",
+  "themes": [
+    { "theme": "light", "background": "rgba(255,255,255,0.97)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 7.52, "radius": "22px" },
+    { "theme": "dark", "background": "rgba(19,29,51,0.97)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 10.84, "radius": "22px" },
+    { "theme": "xianxia", "background": "rgba(18,50,54,0.97)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 10.54, "radius": "22px" },
+    { "theme": "cyberpunk", "background": "rgba(16,19,49,0.98)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 11.49, "radius": "22px" },
+    { "theme": "cinema", "background": "rgba(51,44,40,0.98)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 9.02, "radius": "22px" },
+    { "theme": "comic", "background": "rgb(255,255,255)", "backdrop": "blur(22px) saturate(1.1)", "checked": 31, "failures": 0, "minContrast": 8.07, "radius": "22px" }
+  ],
+  "conclusion": "六主题弹窗 0 条 AA 失败，最低对比度 7.52:1"
+}

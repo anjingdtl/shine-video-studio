@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, MonitorCog, Moon, Sun, Type } from 'lucide-react';
+import { ArrowRight, Check, Film, MonitorCog, Mountain, Moon, ShieldCheck, Sparkles, Sun, Type, Zap } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
+import { useTheme } from '../theme/useTheme';
+import { setTheme } from '../theme/themeStore';
+import { THEMES, type ThemeId } from '../theme/themes';
 
 type Props = { onNavigate: (id: string) => void };
 
@@ -9,30 +13,42 @@ const FONT_STEPS = [
   { key: 'large', text: '大', zoom: '1.12' },
 ];
 
+const THEME_ICONS: Record<ThemeId, LucideIcon> = {
+  light: Sun,
+  dark: Moon,
+  xianxia: Mountain,
+  cyberpunk: Zap,
+  cinema: Film,
+  comic: Sparkles,
+};
+
 const CONFIG_GUIDES: Array<{ id: string; title: string; desc: string }> = [
   { id: 'settings', title: 'AI 模型（LLM）配置', desc: '添加/更换写作、审片用的模型，填密钥，测试连接' },
   { id: 'settings', title: 'ComfyUI 生成引擎连接', desc: '填本机 ComfyUI 地址并测试连通' },
   { id: 'settings', title: '生成工作流模板', desc: '「模型与系统」底部「工作流 Profile 注册」' },
-    { id: 'setup', title: '模型与节点安装', desc: '点击检测，再确认下载缺项并自动配置' },
+  { id: 'setup', title: '模型与节点安装', desc: '点击检测，再确认下载缺项并自动配置' },
   { id: 'setup', title: '新机环境自检', desc: '显卡、磁盘、上游可达性、就绪分层检查' },
 ];
 
 export default function PreferencesPanel({ onNavigate }: Props) {
-  const [theme, setTheme] = useState<'light' | 'dark'>(() =>
-    window.localStorage.getItem('shine-theme') === 'dark' ? 'dark' : 'light');
-  const [fontKey, setFontKey] = useState(() =>
-    window.localStorage.getItem('shine-font') ?? 'standard');
-
-  useEffect(() => {
-    document.documentElement.dataset.theme = theme;
-    window.localStorage.setItem('shine-theme', theme);
-  }, [theme]);
+  const theme = useTheme();
+  const [fontKey, setFontKey] = useState(() => {
+    try {
+      return window.localStorage.getItem('shine-font') ?? 'standard';
+    } catch {
+      return 'standard';
+    }
+  });
 
   useEffect(() => {
     const step = FONT_STEPS.find((item) => item.key === fontKey) ?? FONT_STEPS[1];
     document.documentElement.style.zoom = step.zoom;
-    window.localStorage.setItem('shine-font', fontKey);
-    window.localStorage.setItem('shine-font-zoom', step.zoom);
+    try {
+      window.localStorage.setItem('shine-font', fontKey);
+      window.localStorage.setItem('shine-font-zoom', step.zoom);
+    } catch {
+      // Blocked storage keeps the in-memory text size for this session.
+    }
   }, [fontKey]);
 
   return (
@@ -45,19 +61,46 @@ export default function PreferencesPanel({ onNavigate }: Props) {
         </div>
         <div className="section-icon"><MonitorCog size={17} /></div>
       </div>
-      <div className="pref-grid">
-        <div className="pref-block">
-          <h3><Sun size={13} /> 主题</h3>
-          <p>浅色适合明亮房间，深色适合暗光环境长时间盯片。</p>
-          <div className="pref-options">
-            <button className={`pref-option ${theme === 'light' ? 'active' : ''}`} onClick={() => setTheme('light')}>
-              <Sun size={15} /> 浅色
-            </button>
-            <button className={`pref-option ${theme === 'dark' ? 'active' : ''}`} onClick={() => setTheme('dark')}>
-              <Moon size={15} /> 深色
-            </button>
-          </div>
+      <div className="pref-block">
+        <h3><Sparkles size={13} /> 界面主题</h3>
+        <p>六套工作台外观，点击卡片立即切换，不需要保存或重启。</p>
+        <div className="theme-grid" role="group" aria-label="界面主题">
+          {THEMES.map((item) => {
+            const Icon = THEME_ICONS[item.id];
+            const active = theme === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={`theme-card ${active ? 'active' : ''}`}
+                aria-pressed={active}
+                aria-label={`${item.name}主题：${item.description}`}
+                onClick={() => setTheme(item.id)}
+              >
+                <span className="theme-preview" style={{ background: item.preview.background }} aria-hidden="true">
+                  <span className="theme-preview-bar" style={{ background: item.preview.text }} />
+                  <span className="theme-preview-card" style={{ background: item.preview.surface, borderColor: item.preview.accent }}>
+                    <span className="theme-preview-line" style={{ background: item.preview.text }} />
+                    <span className="theme-preview-line short" style={{ background: item.preview.text }} />
+                    <span className="theme-preview-button" style={{ background: item.preview.accent, color: item.preview.onAccent }}>Aa</span>
+                  </span>
+                </span>
+                <span className="theme-card-title">
+                  <Icon size={13} aria-hidden="true" />
+                  {item.name}
+                  {active && <span className="theme-card-current"><Check size={10} aria-hidden="true" />当前</span>}
+                </span>
+                <span className="theme-card-desc">{item.description}</span>
+              </button>
+            );
+          })}
         </div>
+        <p className="theme-note">
+          <ShieldCheck size={12} aria-hidden="true" />
+          界面主题仅调整工作台外观，不影响作品导演风格、成片颜色与生成结果。
+        </p>
+      </div>
+      <div className="pref-grid">
         <div className="pref-block">
           <h3><Type size={13} /> 文字大小</h3>
           <p>整体缩放界面文字与控件，不改变任何内容排版。</p>

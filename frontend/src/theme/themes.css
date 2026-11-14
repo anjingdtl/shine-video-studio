@@ -1,0 +1,900 @@
+/* ==========================================================================
+   Shine Glass UI — six themes, one Design Token system (V1.0)
+   Only the presentation layer changes here. Business state, director-style
+   data, generated media and production tasks are untouched.
+   ========================================================================== */
+
+:root {
+  /* shape / motion */
+  --radius-card: 18px;
+  --radius-dialog: 22px;
+  --radius-control: 11px;
+  --motion-fast: 140ms;
+  --motion-normal: 220ms;
+  --glass-blur: 16px;
+  --glass-blur-strong: 22px;
+  --ui-card-border-width: 1px;
+  --ui-card-shadow: var(--ui-shadow-1);
+}
+
+/* ---------- 01 星云银白 · light (default) ---------- */
+:root {
+  color-scheme: light;
+
+  --ui-bg: #f1f5fb;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-raised: #f7fafd;
+  --ui-bg-sunken: #e9eff8;
+  --ui-field: #ffffff;
+
+  --ui-text: #1b273c;
+  --ui-text-strong: #142034;
+  --ui-text-secondary: #3f4e66;
+  --ui-text-muted: #526176;
+  --ui-text-faint: #586880;
+  --ui-text-inverse: #f2f6ff;
+
+  --ui-border: #dce4f0;
+  --ui-border-soft: #e8eef7;
+  --ui-border-strong: #c3d0e2;
+
+  --ui-accent: #315cdf;
+  --ui-accent-hover: #2449b8;
+  --ui-accent-strong: #2449b8;
+  --ui-accent-muted: #6b87e8;
+  --ui-accent-line: #b9c8f2;
+  --ui-accent-soft: #e8eefd;
+  --ui-accent-soft-2: #f2f6fe;
+  --ui-on-accent: #ffffff;
+
+  --ui-link: #315cdf;
+  --ui-focus: #315cdf;
+  --ui-focus-halo: rgba(49, 92, 223, .22);
+  --ui-selection: #cfe0ff;
+  --ui-placeholder: #8494aa;
+
+  --ui-contrast: #1b2b4d;
+  --ui-on-contrast: #f2f6ff;
+  --ui-on-contrast-muted: #c6d4ea;
+
+  --ui-deco: #315cdf;
+  --ui-deco-2: #7a66a8;
+  --ui-deco-soft: #e8eefd;
+
+  --ui-shadow-1: 0 10px 30px rgba(31, 45, 75, .08);
+  --ui-shadow-2: 0 24px 70px rgba(31, 45, 75, .16);
+
+  --ambient-a: rgba(49, 92, 223, .18);
+  --ambient-b: rgba(84, 196, 255, .16);
+  --ambient-c: rgba(255, 255, 255, .78);
+  --theme-glow: rgba(49, 92, 223, .16);
+
+  --status-ok: #2f7d4e;
+  --status-ok-text: #24633d;
+  --status-ok-bg: #e6f5ec;
+  --status-ok-border: #bfe4cc;
+  --status-warning: #b45309;
+  --status-warning-text: #8a4308;
+  --status-warning-text-strong: #6f3606;
+  --status-warning-bg: #fff4e2;
+  --status-warning-border: #f0d7ae;
+  --status-danger: #b3261e;
+  --status-danger-text: #96201a;
+  --status-danger-bg: #fdecea;
+  --status-danger-border: #f2c6c2;
+  --status-info: #2e5fa3;
+  --status-info-text: #274f87;
+  --status-info-bg: #eaf1fb;
+  --status-info-border: #c6d9f2;
+
+  --glass-panel: rgba(255, 255, 255, .72);
+  --glass-panel-raised: rgba(255, 255, 255, .86);
+  --glass-sidebar: rgba(255, 255, 255, .74);
+  --glass-topbar: rgba(255, 255, 255, .66);
+  --glass-menu: rgba(255, 255, 255, .95);
+  --glass-dialog: rgba(255, 255, 255, .97);
+  --glass-border: rgba(27, 39, 60, .10);
+  --glass-inner-highlight: rgba(255, 255, 255, .85);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #fbfcfe;
+  --glass-scrim: rgba(17, 25, 40, .42);
+
+  --control-bg: #ffffff;
+  --control-text: var(--ui-text);
+  --control-border: var(--ui-border);
+  --control-hover: #f7fafd;
+  --control-active: #eef3fc;
+  --control-disabled-bg: #f0f3f8;
+  --control-disabled-text: #5e6e85;
+  --table-header: #f2f6fc;
+  --table-row-hover: #f5f8fd;
+  --table-selected: #e8eefd;
+  --code-bg: #f4f7fc;
+  --media-stage: #0e1116;
+  --tooltip-bg: #1b273c;
+  --tooltip-text: #f2f6ff;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(49, 92, 223, .08);
+  --sidebar-bg-3: rgba(49, 92, 223, .14);
+  --sidebar-line: rgba(27, 39, 60, .12);
+  --sidebar-ink: #1b273c;
+  --sidebar-ink-2: #3f4e66;
+  --sidebar-muted: #526176;
+  --sidebar-accent: #315cdf;
+  --sidebar-accent-2: #2449b8;
+  --sidebar-card: #e0e9fa;
+  --sidebar-card-ink: #1b273c;
+}
+
+/* ---------- 02 星际墨夜 · dark ---------- */
+html[data-theme='dark'] {
+  color-scheme: dark;
+
+  --ui-bg: #0d1424;
+  --ui-bg-elevated: #131d33;
+  --ui-bg-raised: #17223a;
+  --ui-bg-sunken: #0a101d;
+  --ui-field: #182440;
+
+  --ui-text: #eef4ff;
+  --ui-text-strong: #ffffff;
+  --ui-text-secondary: #c3d0e6;
+  --ui-text-muted: #9fb0cb;
+  --ui-text-faint: #8a9bb8;
+  --ui-text-inverse: #0b1530;
+
+  --ui-border: #26344f;
+  --ui-border-soft: #1c2942;
+  --ui-border-strong: #3a4b6c;
+
+  --ui-accent: #8fafff;
+  --ui-accent-hover: #afc7ff;
+  --ui-accent-strong: #c8d8ff;
+  --ui-accent-muted: #6f8bd9;
+  --ui-accent-line: #3c5380;
+  --ui-accent-soft: #1a2a4a;
+  --ui-accent-soft-2: #16233c;
+  --ui-on-accent: #0b1530;
+
+  --ui-link: #9dbcff;
+  --ui-focus: #8fafff;
+  --ui-focus-halo: rgba(143, 175, 255, .28);
+  --ui-selection: #24406e;
+  --ui-placeholder: #7c8daa;
+
+  --ui-contrast: #22375f;
+  --ui-on-contrast: #eef4ff;
+  --ui-on-contrast-muted: #c3d0e6;
+
+  --ui-deco: #8fafff;
+  --ui-deco-2: #9b8cff;
+  --ui-deco-soft: #1a2a4a;
+
+  --ui-shadow-1: 0 14px 38px rgba(0, 0, 0, .38);
+  --ui-shadow-2: 0 28px 80px rgba(0, 0, 0, .55);
+
+  --ambient-a: rgba(63, 107, 255, .22);
+  --ambient-b: rgba(84, 196, 255, .14);
+  --ambient-c: rgba(143, 175, 255, .08);
+  --theme-glow: rgba(143, 175, 255, .18);
+
+  --status-ok: #7fe0a5;
+  --status-ok-text: #7fe0a5;
+  --status-ok-bg: #12291f;
+  --status-ok-border: #2a5540;
+  --status-warning: #f0c17b;
+  --status-warning-text: #f0c17b;
+  --status-warning-text-strong: #ffd79b;
+  --status-warning-bg: #2c2214;
+  --status-warning-border: #5a4526;
+  --status-danger: #ff9e9e;
+  --status-danger-text: #ff9e9e;
+  --status-danger-bg: #2e171a;
+  --status-danger-border: #5c3038;
+  --status-info: #9dc4ff;
+  --status-info-text: #9dc4ff;
+  --status-info-bg: #15233a;
+  --status-info-border: #2d4770;
+
+  --glass-panel: rgba(19, 29, 51, .72);
+  --glass-panel-raised: rgba(23, 34, 58, .84);
+  --glass-sidebar: rgba(9, 15, 30, .78);
+  --glass-topbar: rgba(13, 20, 36, .78);
+  --glass-menu: rgba(19, 29, 51, .95);
+  --glass-dialog: rgba(19, 29, 51, .97);
+  --glass-border: rgba(143, 175, 255, .18);
+  --glass-inner-highlight: rgba(255, 255, 255, .08);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #111a2e;
+  --glass-scrim: rgba(2, 6, 16, .62);
+
+  --control-bg: #182440;
+  --control-text: var(--ui-text);
+  --control-border: #2a3a59;
+  --control-hover: #1d2c4a;
+  --control-active: #223352;
+  --control-disabled-bg: #141d30;
+  --control-disabled-text: #93a4c0;
+  --table-header: #16223a;
+  --table-row-hover: #182640;
+  --table-selected: #1a2a4a;
+  --code-bg: #101a2d;
+  --media-stage: #0e1116;
+  --tooltip-bg: #22375f;
+  --tooltip-text: #eef4ff;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(143, 175, 255, .08);
+  --sidebar-bg-3: rgba(143, 175, 255, .16);
+  --sidebar-line: rgba(143, 175, 255, .18);
+  --sidebar-ink: #eef4ff;
+  --sidebar-ink-2: #c3d0e6;
+  --sidebar-muted: #9fb0cb;
+  --sidebar-accent: #8fafff;
+  --sidebar-accent-2: #afc7ff;
+  --sidebar-card: #22375f;
+  --sidebar-card-ink: #eef4ff;
+}
+
+/* ---------- 03 云阙灵境 · xianxia ---------- */
+html[data-theme='xianxia'] {
+  color-scheme: dark;
+
+  --ui-bg: #0d262a;
+  --ui-bg-elevated: #123236;
+  --ui-bg-raised: #163b3e;
+  --ui-bg-sunken: #0a2023;
+  --ui-field: #14383c;
+
+  --ui-text: #effdf9;
+  --ui-text-strong: #ffffff;
+  --ui-text-secondary: #c6e8df;
+  --ui-text-muted: #a3cbc0;
+  --ui-text-faint: #99c2b7;
+  --ui-text-inverse: #092925;
+
+  --ui-border: #27514f;
+  --ui-border-soft: #1d423f;
+  --ui-border-strong: #3a6a63;
+
+  --ui-accent: #7bdcc3;
+  --ui-accent-hover: #98e8d3;
+  --ui-accent-strong: #a9f0df;
+  --ui-accent-muted: #5fb8a5;
+  --ui-accent-line: #3c7a6e;
+  --ui-accent-soft: #17423e;
+  --ui-accent-soft-2: #143a36;
+  --ui-on-accent: #092925;
+
+  --ui-link: #9fe8d6;
+  --ui-focus: #7bdcc3;
+  --ui-focus-halo: rgba(123, 220, 195, .28);
+  --ui-selection: #1f554e;
+  --ui-placeholder: #7fa69c;
+
+  --ui-contrast: #1b4a47;
+  --ui-on-contrast: #effdf9;
+  --ui-on-contrast-muted: #c6e8df;
+
+  --ui-deco: #d9bc81;
+  --ui-deco-2: #7bdcc3;
+  --ui-deco-soft: #2a3b30;
+
+  --ui-shadow-1: 0 14px 38px rgba(0, 0, 0, .36);
+  --ui-shadow-2: 0 28px 80px rgba(0, 0, 0, .52);
+
+  --ambient-a: rgba(123, 220, 195, .18);
+  --ambient-b: rgba(217, 188, 129, .12);
+  --ambient-c: rgba(79, 160, 150, .12);
+  --theme-glow: rgba(123, 220, 195, .18);
+
+  --status-ok: #93e6a8;
+  --status-ok-text: #93e6a8;
+  --status-ok-bg: #143026;
+  --status-ok-border: #2e5b3f;
+  --status-warning: #e8c57f;
+  --status-warning-text: #e8c57f;
+  --status-warning-text-strong: #f5d99a;
+  --status-warning-bg: #2e2718;
+  --status-warning-border: #5c4a28;
+  --status-danger: #f2a093;
+  --status-danger-text: #f2a093;
+  --status-danger-bg: #321d1b;
+  --status-danger-border: #61332e;
+  --status-info: #9fd8e8;
+  --status-info-text: #9fd8e8;
+  --status-info-bg: #123039;
+  --status-info-border: #2c5560;
+
+  --glass-panel: rgba(18, 50, 54, .72);
+  --glass-panel-raised: rgba(22, 59, 62, .84);
+  --glass-sidebar: rgba(8, 28, 30, .80);
+  --glass-topbar: rgba(13, 38, 42, .78);
+  --glass-menu: rgba(18, 50, 54, .95);
+  --glass-dialog: rgba(18, 50, 54, .97);
+  --glass-border: rgba(123, 220, 195, .20);
+  --glass-inner-highlight: rgba(255, 255, 255, .08);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #102e32;
+  --glass-scrim: rgba(3, 14, 15, .60);
+
+  --control-bg: #14383c;
+  --control-text: var(--ui-text);
+  --control-border: #2c5754;
+  --control-hover: #1a4144;
+  --control-active: #1f4c4e;
+  --control-disabled-bg: #112e31;
+  --control-disabled-text: #9cc4ba;
+  --table-header: #143336;
+  --table-row-hover: #173b3e;
+  --table-selected: #17423e;
+  --code-bg: #0f2b2e;
+  --media-stage: #0e1116;
+  --tooltip-bg: #1b4a47;
+  --tooltip-text: #effdf9;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(123, 220, 195, .08);
+  --sidebar-bg-3: rgba(123, 220, 195, .16);
+  --sidebar-line: rgba(123, 220, 195, .20);
+  --sidebar-ink: #effdf9;
+  --sidebar-ink-2: #c6e8df;
+  --sidebar-muted: #a3cbc0;
+  --sidebar-accent: #7bdcc3;
+  --sidebar-accent-2: #d9bc81;
+  --sidebar-card: #1b4a47;
+  --sidebar-card-ink: #effdf9;
+}
+
+/* ---------- 04 霓虹之城 · cyberpunk ---------- */
+html[data-theme='cyberpunk'] {
+  color-scheme: dark;
+
+  --ui-bg: #090b22;
+  --ui-bg-elevated: #101331;
+  --ui-bg-raised: #151a3d;
+  --ui-bg-sunken: #070919;
+  --ui-field: #141836;
+
+  --ui-text: #f6f3ff;
+  --ui-text-strong: #ffffff;
+  --ui-text-secondary: #cfc9f2;
+  --ui-text-muted: #a9a3d3;
+  --ui-text-faint: #918cc0;
+  --ui-text-inverse: #081522;
+
+  --ui-border: #2a2a55;
+  --ui-border-soft: #1e1f45;
+  --ui-border-strong: #41437a;
+
+  --ui-accent: #55e8ff;
+  --ui-accent-hover: #8bf0ff;
+  --ui-accent-strong: #a6f6ff;
+  --ui-accent-muted: #3fb6cc;
+  --ui-accent-line: #2f6b8a;
+  --ui-accent-soft: #102b42;
+  --ui-accent-soft-2: #0e2438;
+  --ui-on-accent: #081522;
+
+  --ui-link: #6ff0ff;
+  --ui-focus: #55e8ff;
+  --ui-focus-halo: rgba(85, 232, 255, .30);
+  --ui-selection: #1b3f66;
+  --ui-placeholder: #8480ac;
+
+  --ui-contrast: #17324f;
+  --ui-on-contrast: #f6f3ff;
+  --ui-on-contrast-muted: #cfc9f2;
+
+  --ui-deco: #ff4fbf;
+  --ui-deco-2: #8073ff;
+  --ui-deco-soft: #2a1236;
+
+  --ui-shadow-1: 0 14px 40px rgba(0, 0, 0, .42);
+  --ui-shadow-2: 0 28px 86px rgba(0, 0, 0, .58);
+
+  --ambient-a: rgba(85, 232, 255, .18);
+  --ambient-b: rgba(255, 79, 191, .16);
+  --ambient-c: rgba(128, 115, 255, .18);
+  --theme-glow: rgba(255, 79, 191, .20);
+
+  --status-ok: #63f0a8;
+  --status-ok-text: #63f0a8;
+  --status-ok-bg: #0f2a22;
+  --status-ok-border: #2a5a44;
+  --status-warning: #ffd166;
+  --status-warning-text: #ffd166;
+  --status-warning-text-strong: #ffe39b;
+  --status-warning-bg: #2e2414;
+  --status-warning-border: #5e4a22;
+  --status-danger: #ff7a9c;
+  --status-danger-text: #ff7a9c;
+  --status-danger-bg: #301521;
+  --status-danger-border: #5e2a3c;
+  --status-info: #7bd3ff;
+  --status-info-text: #7bd3ff;
+  --status-info-bg: #0e2536;
+  --status-info-border: #28506a;
+
+  --glass-panel: rgba(16, 19, 49, .74);
+  --glass-panel-raised: rgba(21, 26, 61, .86);
+  --glass-sidebar: rgba(7, 8, 28, .82);
+  --glass-topbar: rgba(9, 11, 34, .80);
+  --glass-menu: rgba(16, 19, 49, .96);
+  --glass-dialog: rgba(16, 19, 49, .98);
+  --glass-border: rgba(85, 232, 255, .18);
+  --glass-inner-highlight: rgba(255, 255, 255, .08);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #0f1230;
+  --glass-scrim: rgba(2, 3, 14, .66);
+
+  --control-bg: #141836;
+  --control-text: var(--ui-text);
+  --control-border: #303064;
+  --control-hover: #1a1f48;
+  --control-active: #1f2554;
+  --control-disabled-bg: #101329;
+  --control-disabled-text: #a9a3d3;
+  --table-header: #121536;
+  --table-row-hover: #161b41;
+  --table-selected: #102b42;
+  --code-bg: #0c0f26;
+  --media-stage: #0e1116;
+  --tooltip-bg: #17324f;
+  --tooltip-text: #f6f3ff;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(85, 232, 255, .08);
+  --sidebar-bg-3: rgba(255, 79, 191, .14);
+  --sidebar-line: rgba(85, 232, 255, .18);
+  --sidebar-ink: #f6f3ff;
+  --sidebar-ink-2: #cfc9f2;
+  --sidebar-muted: #a9a3d3;
+  --sidebar-accent: #55e8ff;
+  --sidebar-accent-2: #ff4fbf;
+  --sidebar-card: #17324f;
+  --sidebar-card-ink: #f6f3ff;
+}
+
+/* ---------- 05 胶片时光 · cinema ---------- */
+html[data-theme='cinema'] {
+  color-scheme: dark;
+
+  --ui-bg: #282320;
+  --ui-bg-elevated: #332c28;
+  --ui-bg-raised: #3a322d;
+  --ui-bg-sunken: #221e1b;
+  --ui-field: #352d28;
+
+  --ui-text: #fff0e3;
+  --ui-text-strong: #fff8f0;
+  --ui-text-secondary: #e3cdbb;
+  --ui-text-muted: #c6ad9b;
+  --ui-text-faint: #b79e8c;
+  --ui-text-inverse: #2d211a;
+
+  --ui-border: #4a3e36;
+  --ui-border-soft: #3c332d;
+  --ui-border-strong: #66554a;
+
+  --ui-accent: #d7a577;
+  --ui-accent-hover: #e6bb90;
+  --ui-accent-strong: #f0cda6;
+  --ui-accent-muted: #a87b55;
+  --ui-accent-line: #6b513c;
+  --ui-accent-soft: #3e2f26;
+  --ui-accent-soft-2: #3a2c24;
+  --ui-on-accent: #2d211a;
+
+  --ui-link: #e6bb90;
+  --ui-focus: #d7a577;
+  --ui-focus-halo: rgba(215, 165, 119, .28);
+  --ui-selection: #59412f;
+  --ui-placeholder: #a58c7b;
+
+  --ui-contrast: #46352b;
+  --ui-on-contrast: #fff0e3;
+  --ui-on-contrast-muted: #e3cdbb;
+
+  --ui-deco: #b78e95;
+  --ui-deco-2: #d7a577;
+  --ui-deco-soft: #3a2c2a;
+
+  --ui-shadow-1: 0 14px 38px rgba(0, 0, 0, .34);
+  --ui-shadow-2: 0 28px 80px rgba(0, 0, 0, .50);
+
+  --ambient-a: rgba(215, 165, 119, .16);
+  --ambient-b: rgba(183, 142, 149, .12);
+  --ambient-c: rgba(120, 90, 66, .14);
+  --theme-glow: rgba(215, 165, 119, .16);
+
+  --status-ok: #a9c99a;
+  --status-ok-text: #b7d6a8;
+  --status-ok-bg: #2a3325;
+  --status-ok-border: #46543c;
+  --status-warning: #e5c07b;
+  --status-warning-text: #e5c07b;
+  --status-warning-text-strong: #f2d69a;
+  --status-warning-bg: #332a1b;
+  --status-warning-border: #5c4b2c;
+  --status-danger: #e08a7d;
+  --status-danger-text: #eAA091;
+  --status-danger-bg: #36211e;
+  --status-danger-border: #5e3732;
+  --status-info: #a9bcc9;
+  --status-info-text: #bcd0dc;
+  --status-info-bg: #26323a;
+  --status-info-border: #40525e;
+
+  --glass-panel: rgba(51, 44, 40, .74);
+  --glass-panel-raised: rgba(58, 50, 45, .86);
+  --glass-sidebar: rgba(32, 27, 24, .84);
+  --glass-topbar: rgba(40, 35, 32, .80);
+  --glass-menu: rgba(51, 44, 40, .96);
+  --glass-dialog: rgba(51, 44, 40, .98);
+  --glass-border: rgba(255, 240, 227, .14);
+  --glass-inner-highlight: rgba(255, 255, 255, .07);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #312a26;
+  --glass-scrim: rgba(15, 11, 9, .62);
+
+  --control-bg: #352d28;
+  --control-text: var(--ui-text);
+  --control-border: #54463c;
+  --control-hover: #3d332d;
+  --control-active: #433831;
+  --control-disabled-bg: #2c2622;
+  --control-disabled-text: #c6ad9b;
+  --table-header: #322b26;
+  --table-row-hover: #382f2a;
+  --table-selected: #3e2f26;
+  --code-bg: #261f1b;
+  --media-stage: #0e1116;
+  --tooltip-bg: #46352b;
+  --tooltip-text: #fff0e3;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(215, 165, 119, .08);
+  --sidebar-bg-3: rgba(215, 165, 119, .16);
+  --sidebar-line: rgba(255, 240, 227, .14);
+  --sidebar-ink: #fff0e3;
+  --sidebar-ink-2: #e3cdbb;
+  --sidebar-muted: #c6ad9b;
+  --sidebar-accent: #d7a577;
+  --sidebar-accent-2: #e6bb90;
+  --sidebar-card: #46352b;
+  --sidebar-card-ink: #fff0e3;
+}
+
+/* ---------- 06 次元物语 · comic ---------- */
+html[data-theme='comic'] {
+  color-scheme: light;
+
+  --ui-bg: #fff4df;
+  --ui-bg-elevated: #ffffff;
+  --ui-bg-raised: #fff9ec;
+  --ui-bg-sunken: #ffefd2;
+  --ui-field: #ffffff;
+
+  --ui-text: #243044;
+  --ui-text-strong: #1a2436;
+  --ui-text-secondary: #44506a;
+  --ui-text-muted: #566079;
+  --ui-text-faint: #5c677d;
+  --ui-text-inverse: #fff4df;
+
+  --ui-border: #e3d5bc;
+  --ui-border-soft: #f0e5d2;
+  --ui-border-strong: #c9b58f;
+
+  --ui-accent: #b62e2b;
+  --ui-accent-hover: #97211f;
+  --ui-accent-strong: #8e1f1d;
+  --ui-accent-muted: #d4554f;
+  --ui-accent-line: #e9a9a2;
+  --ui-accent-soft: #ffe3da;
+  --ui-accent-soft-2: #fff0ea;
+  --ui-on-accent: #ffffff;
+
+  --ui-link: #b62e2b;
+  --ui-focus: #b62e2b;
+  --ui-focus-halo: rgba(182, 46, 43, .24);
+  --ui-selection: #ffd9c9;
+  --ui-placeholder: #8a8f9f;
+
+  --ui-contrast: #243044;
+  --ui-on-contrast: #fff4df;
+  --ui-on-contrast-muted: #e8dcc4;
+
+  --ui-deco: #ff6659;
+  --ui-deco-2: #4b9ef5;
+  --ui-deco-soft: #fff0ea;
+
+  --ui-shadow-1: 4px 5px 0 rgba(36, 48, 68, .14);
+  --ui-shadow-2: 8px 10px 0 rgba(36, 48, 68, .18);
+  --ui-card-border-width: 2px;
+  --ui-card-shadow: 5px 6px 0 rgba(36, 48, 68, .14);
+
+  --ambient-a: rgba(255, 102, 89, .18);
+  --ambient-b: rgba(75, 158, 245, .16);
+  --ambient-c: rgba(255, 204, 80, .22);
+  --theme-glow: rgba(255, 102, 89, .18);
+
+  --status-ok: #2f7d4e;
+  --status-ok-text: #24663f;
+  --status-ok-bg: #e7f6eb;
+  --status-ok-border: #b9e2c4;
+  --status-warning: #9a5b12;
+  --status-warning-text: #8a4f0c;
+  --status-warning-text-strong: #703f08;
+  --status-warning-bg: #fff2d6;
+  --status-warning-border: #efd39d;
+  --status-danger: #b3261e;
+  --status-danger-text: #96201a;
+  --status-danger-bg: #fde7e4;
+  --status-danger-border: #f3bdb7;
+  --status-info: #2f5fa8;
+  --status-info-text: #274f8c;
+  --status-info-bg: #e8f1fe;
+  --status-info-border: #bcd5f5;
+
+  --glass-panel: rgba(255, 255, 255, .88);
+  --glass-panel-raised: rgba(255, 255, 255, .96);
+  --glass-sidebar: rgba(255, 249, 236, .90);
+  --glass-topbar: rgba(255, 249, 236, .84);
+  --glass-menu: #ffffff;
+  --glass-dialog: #ffffff;
+  --glass-border: rgba(36, 48, 68, .18);
+  --glass-inner-highlight: rgba(255, 255, 255, .95);
+  --glass-shadow: var(--ui-shadow-1);
+  --glass-fallback: #ffffff;
+  --glass-scrim: rgba(36, 48, 68, .38);
+
+  --control-bg: #ffffff;
+  --control-text: var(--ui-text);
+  --control-border: #d9c8ab;
+  --control-hover: #fff9ec;
+  --control-active: #fff0ea;
+  --control-disabled-bg: #f4ecdd;
+  --control-disabled-text: #5f6b80;
+  --table-header: #fff2d6;
+  --table-row-hover: #fff8e8;
+  --table-selected: #ffe3da;
+  --code-bg: #fff8e8;
+  --media-stage: #0e1116;
+  --tooltip-bg: #243044;
+  --tooltip-text: #fff4df;
+
+  --sidebar-bg: var(--glass-sidebar);
+  --sidebar-bg-2: rgba(182, 46, 43, .07);
+  --sidebar-bg-3: rgba(182, 46, 43, .12);
+  --sidebar-line: rgba(36, 48, 68, .16);
+  --sidebar-ink: #243044;
+  --sidebar-ink-2: #44506a;
+  --sidebar-muted: #566079;
+  --sidebar-accent: #b62e2b;
+  --sidebar-accent-2: #8e1f1d;
+  --sidebar-card: #ffe3da;
+  --sidebar-card-ink: #243044;
+}
+
+/* --------------------------------------------------------------------------
+   Legacy token compatibility layer.
+   Every old token used by the existing pages maps to one semantic token, so
+   six themes work without duplicating page CSS.
+   -------------------------------------------------------------------------- */
+:root {
+  --ink: var(--ui-text);
+  --ink-soft: var(--ui-text-strong);
+  --ink-mid: var(--ui-text-secondary);
+  --ink-2: var(--ui-text-secondary);
+  --muted: var(--ui-text-muted);
+  --muted-2: var(--ui-text-muted);
+  --faint: var(--ui-text-faint);
+  --faint-2: var(--ui-text-faint);
+  --line: var(--ui-border);
+  --line-soft: var(--ui-border-soft);
+  --line-2: var(--ui-border);
+  --line-strong: var(--ui-border-strong);
+  --paper: var(--ui-bg-elevated);
+  --bg: var(--ui-bg);
+  --surface: var(--ui-bg-sunken);
+  --surface-2: var(--ui-bg-raised);
+  --surface-3: var(--ui-bg-raised);
+  --field: var(--ui-field);
+  --surface-warm: var(--ui-bg-raised);
+  --border: var(--ui-border);
+  --panel: var(--ui-bg-elevated);
+  --paper-2: var(--ui-bg-elevated);
+  --surface-raised: var(--ui-bg-elevated);
+
+  --olive: var(--ui-accent);
+  --olive-dark: var(--ui-accent);
+  --olive-ink: var(--ui-accent-strong);
+  --olive-mid: var(--ui-accent);
+  --olive-soft: var(--ui-accent-muted);
+  --olive-faint: var(--ui-accent-line);
+  --olive-line: var(--ui-accent-line);
+  --olive-bg: var(--ui-accent-soft);
+  --olive-bg-2: var(--ui-accent-soft-2);
+  --accent: var(--ui-accent);
+
+  --mint: var(--status-ok-bg);
+  --mint-2: var(--status-ok-bg);
+  --ok: var(--status-ok);
+  --ok-ink: var(--status-ok-text);
+  --ok-ink-2: var(--status-ok-text);
+  --ok-strong: var(--status-ok-text);
+  --ok-bg: var(--status-ok-bg);
+  --ok-bg-2: var(--status-ok-bg);
+  --ok-line: var(--status-ok-border);
+  --ok-bright: var(--status-ok);
+  --ok-led: var(--status-ok);
+  --ok-led-2: var(--status-ok);
+  --ok-led-bg: var(--status-ok-bg);
+  --ok-led-bg-2: var(--status-ok-bg);
+
+  --warn-ink: var(--status-warning-text);
+  --warn-deep: var(--status-warning-text-strong);
+  --warn-2: var(--status-warning-text);
+  --warn-3: var(--status-warning-text);
+  --warn-strong: var(--status-warning);
+  --warn-soft: var(--status-warning);
+  --warn-bg: var(--status-warning-bg);
+  --warn-bg-2: var(--status-warning-bg);
+  --warn-bg-3: var(--status-warning-bg);
+  --warn-line: var(--status-warning-border);
+  --warn-title: var(--status-warning-text-strong);
+  --busy-ink: var(--status-warning-text);
+  --busy-2: var(--status-warning);
+  --busy-bg: var(--status-warning-bg);
+  --sand: var(--ui-bg-raised);
+  --sand-2: var(--ui-bg-raised);
+  --sand-ink: var(--status-warning-text);
+  --sand-bg: var(--status-warning-bg);
+
+  --danger: var(--status-danger);
+  --danger-ink: var(--status-danger-text);
+  --danger-ink-2: var(--status-danger-text);
+  --danger-deep: var(--status-danger-text);
+  --danger-bg: var(--status-danger-bg);
+  --danger-bg-2: var(--status-danger-bg);
+  --danger-line: var(--status-danger-border);
+  --danger-soft: var(--status-danger);
+  --danger-bright: var(--status-danger);
+  --danger-led: var(--status-danger);
+
+  --info-ink: var(--status-info-text);
+  --info-2: var(--status-info-text);
+  --info-bg: var(--status-info-bg);
+  --checking: var(--status-warning);
+  --checking-bg: var(--status-warning-bg);
+  --warn-led: var(--status-warning);
+  --real-ink: var(--status-warning-text);
+
+  --plum: var(--ui-deco-2);
+  --plum-bg: var(--ui-deco-soft);
+  --video-bg: var(--media-stage);
+
+  --lib-ink: var(--ui-text);
+  --lib-ink-2: var(--ui-text-secondary);
+  --lib-muted: var(--ui-text-muted);
+  --lib-line: var(--ui-border);
+  --lib-bg: var(--ui-bg-raised);
+  --lib-ok: var(--status-ok-text);
+  --lib-ok-bg: var(--status-ok-bg);
+  --lib-warn: var(--status-warning-text);
+  --lib-warn-bg: var(--status-warning-bg);
+  --lib-danger-bg: var(--status-danger-bg);
+  --lib-info: var(--status-info-text);
+  --lib-info-bg: var(--status-info-bg);
+  --lib-video: var(--media-stage);
+  --lib-paper: var(--ui-bg-elevated);
+
+  --card-shadow: var(--ui-shadow-1);
+  --card-shadow-2: var(--ui-shadow-1);
+  --toast-shadow: var(--ui-shadow-2);
+  --modal-shadow: var(--ui-shadow-2);
+  --menu-shadow: var(--ui-shadow-1);
+  --prod-shadow: var(--ui-shadow-2);
+  --lift-shadow: var(--ui-shadow-2);
+  --focus-ring: var(--ui-focus-halo);
+  --input-ring: var(--ui-focus-halo);
+  --ok-ring: var(--ui-focus-halo);
+  --warn-glow: var(--ui-focus-halo);
+  --danger-glow: var(--ui-focus-halo);
+  --warn-dot-glow: var(--ui-focus-halo);
+  --warn-select-ring: var(--ui-focus-halo);
+  --scrim: var(--glass-scrim);
+  --scrim-soft: rgba(0, 0, 0, .55);
+  --poster-scrim: rgba(0, 0, 0, .66);
+  --poster-shadow: rgba(0, 0, 0, .60);
+  --dialog-scrim: var(--glass-scrim);
+  --check-overlay: rgba(255, 255, 255, .86);
+  --fx-rgba12812812818: var(--ui-border-soft);
+  --fx-rgba25325325094: var(--glass-topbar);
+  --fx-rgba18519114325: var(--ui-focus-halo);
+  --fx-rgba60502014: var(--ui-shadow-1);
+  --fx-rgb24624824594: var(--glass-topbar);
+
+  --tip-ink: var(--status-info-text);
+  --tip-bg: var(--status-info-bg);
+  --tip-line: var(--status-info-border);
+  --tip-ink-dark: var(--status-info-text);
+  --tip-bg-dark: var(--status-info-bg);
+  --tip-line-dark: var(--status-info-border);
+
+  --btn-primary-bg: var(--ui-accent);
+  --btn-primary-bg-hover: var(--ui-accent-hover);
+  --btn-primary-line: var(--ui-accent);
+  --btn-primary-ink: var(--ui-on-accent);
+  --btn-sec-bg: var(--ui-bg-elevated);
+  --btn-sec-bg-hover: var(--ui-bg-raised);
+  --btn-sec-ink: var(--ui-text);
+  --btn-sec-line: var(--ui-border);
+  --btn-text-ink: var(--ui-accent-strong);
+  --btn-text-ink-hover: var(--ui-accent-hover);
+  --btn-danger-ink: var(--status-danger-text);
+  --btn-danger-line: var(--status-danger-border);
+  --btn-danger-bg: var(--ui-bg-elevated);
+  --btn-danger-solid: var(--status-danger);
+  --btn-danger-solid-ink: var(--ui-text-inverse);
+
+  /* asset-centre compatibility (its CSS was previously using undefined vars) */
+  --asset-paper: var(--ui-bg);
+  --asset-surface: var(--ui-bg-sunken);
+  --asset-surface-2: var(--ui-bg-raised);
+  --asset-card: var(--ui-bg-elevated);
+  --asset-line: var(--ui-border);
+  --asset-line-2: var(--ui-border-soft);
+  --asset-line-3: var(--ui-border-strong);
+  --asset-ink: var(--ui-text);
+  --asset-ink-2: var(--ui-text-secondary);
+  --asset-ink-3: var(--ui-text-secondary);
+  --asset-muted: var(--ui-text-muted);
+  --asset-muted-2: var(--ui-text-muted);
+  --asset-muted-3: var(--ui-text-faint);
+  --asset-faint: var(--ui-text-faint);
+  --asset-green: var(--ui-accent);
+  --asset-green-deep: var(--ui-accent-strong);
+  --asset-green-soft: var(--ui-accent-muted);
+  --asset-green-bg: var(--ui-accent-soft);
+  --asset-green-bg-2: var(--ui-accent-soft-2);
+  --asset-green-bg-3: var(--ui-accent-soft-2);
+  --asset-green-line: var(--ui-accent-line);
+  --asset-ok: var(--status-ok-text);
+  --asset-ok-2: var(--status-ok-text);
+  --asset-ok-bg: var(--status-ok-bg);
+  --asset-ok-line: var(--status-ok-border);
+  --asset-warn: var(--status-warning);
+  --asset-warn-ink: var(--status-warning-text);
+  --asset-warn-bg: var(--status-warning-bg);
+  --asset-warn-line: var(--status-warning-border);
+  --asset-danger: var(--status-danger-text);
+  --asset-danger-bg: var(--status-danger-bg);
+  --asset-danger-line: var(--status-danger-border);
+  --asset-plum: var(--ui-deco-2);
+  --asset-plum-bg: var(--ui-deco-soft);
+  --asset-art-warm: var(--status-warning-text);
+  --asset-art-warm-bg: var(--status-warning-bg);
+  --asset-ring: var(--ui-focus-halo);
+  --asset-select-ring: var(--ui-focus-halo);
+  --asset-shadow: var(--ui-shadow-1);
+  --asset-shadow-2: var(--ui-shadow-2);
+}
+
+/* Reduced transparency: swap glass for readable solid surfaces. */
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  html[data-theme] {
+    --glass-panel: var(--ui-bg-elevated);
+    --glass-panel-raised: var(--ui-bg-elevated);
+    --glass-sidebar: var(--ui-bg-elevated);
+    --glass-topbar: var(--ui-bg-elevated);
+    --glass-menu: var(--ui-bg-elevated);
+    --glass-dialog: var(--ui-bg-elevated);
+    --glass-blur: 0px;
+    --glass-blur-strong: 0px;
+  }
+}
