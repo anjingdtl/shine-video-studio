@@ -588,10 +588,22 @@ export function RealProductionWizard({
           ...(chosen ? { variant_id: chosen.variant_id, catalog: chosen.catalog_id } : {}),
         }));
         if (!alive()) return;
-        await api('/setup/configuration', json('POST', {
-          project_id: projectId,
-          ...(servicePort.current ? { port: servicePort.current } : {}),
-        }));
+        const configuration = await api<{ node_pack_notes?: Array<{ missing?: string[] }> }>(
+          '/setup/configuration', json('POST', {
+            project_id: projectId,
+            ...(servicePort.current ? { port: servicePort.current } : {}),
+          }));
+        if (!alive()) return;
+        const missingPacks = (configuration.node_pack_notes ?? []).flatMap((note) => note.missing ?? []);
+        if (missingPacks.length) {
+          // The gate was lowered for this environment: say so instead of letting
+          // the run look complete while those nodes stay disabled.
+          setStage('workflows', {
+            status: 'warn',
+            note: `运行配置已生成，但 ${missingPacks.length} 个节点包没有装（${missingPacks.join('、')}）；`
+              + '本次运行会把它们禁用，请到「安装与下载」补装后再重新生成运行配置。',
+          });
+        }
       } catch (error) {
         stopWith('workflows', `生成方案登记失败：${(error as Error).message}。已完成的步骤不会丢失，重新打开向导可继续。`);
         return;

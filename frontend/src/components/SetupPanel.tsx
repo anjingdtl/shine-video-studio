@@ -549,7 +549,14 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
         withJson('POST', { project_id: projectRef.current }));
       await loadRuntime();
       await onRefresh();
-      return `受管配置已生成：${String((result as { recipe?: string }).recipe ?? '')}`;
+      const recipe = String((result as { recipe?: string }).recipe ?? '');
+      const missingPacks = ((result as { node_pack_notes?: Array<{ missing?: string[] }> }).node_pack_notes ?? [])
+        .flatMap((note) => note.missing ?? []);
+      if (missingPacks.length) {
+        return `受管配置已生成：${recipe}。注意：${missingPacks.length} 个节点包没有装（${missingPacks.join('、')}）；`
+          + '本次运行会把它们禁用，请到「安装与下载」补装后再重新生成运行配置。';
+      }
+      return `受管配置已生成：${recipe}`;
     });
   }
 
