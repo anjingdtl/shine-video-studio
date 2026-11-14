@@ -76,7 +76,10 @@ describe('本机环境简化流程', () => {
     await user.click(screen.getByRole('button', { name: '检测本机' }));
     await screen.findByText('发现 1 个已有安装。');
     expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
-    expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
+    // 检测只读：允许只读盘点（inspect），不得发起安装、导入或接管。
+    expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /import-models$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /existing-installations\/adopt$/)).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: '检查已有目录' }));
     await screen.findByText('h3 / model.safetensors：待哈希校验');
     expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();

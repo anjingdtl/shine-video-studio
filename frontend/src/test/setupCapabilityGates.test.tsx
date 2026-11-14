@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SetupCenter } from '../components/SetupCenter';
 import { describeDetail } from '../api';
-import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse, setupSummary } from './studioStub';
 
 /**
  * The reported failure, on the reported machine.
@@ -98,9 +98,9 @@ beforeEach(() => {
 });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
-async function detect(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '检测本机' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled(), { timeout: 20000 });
+async function detect() {
+  // 打开就检测：等「上次检测」出现，说明服务端事实已经回来。
+  await screen.findByText(/上次检测/, undefined, { timeout: 20000 });
 }
 
 function planBodies(): Array<Record<string, unknown>> {
@@ -134,7 +134,7 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
 
     // 只勾素材出图：先取消默认勾选的 H3 视频生成。
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
@@ -176,16 +176,18 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
     const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
     expect(outcomes).toHaveTextContent('素材出图');
-    // 文件核验完成是文件层面的结论，不再写成「资源已就绪」。
-    expect(outcomes).toHaveTextContent('文件已核验 · 运行待验证');
+    // 下载交给后台后，界面只报「已排队」：它拿不到终态就不替安装器下结论，
+    // 更不能把「文件已下载」写成「资源已就绪」。
+    expect(outcomes).toHaveTextContent('已排队，后台继续');
+    expect(outcomes).not.toHaveTextContent('资源已就绪');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
@@ -224,7 +226,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
 
     // H3 与素材出图同时勾选。
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).toBeChecked();
@@ -232,21 +234,39 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
     const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
     expect(outcomes).toHaveTextContent('H3 视频生成');
     expect(outcomes).toHaveTextContent('未完成');
     expect(outcomes).toHaveTextContent('VRAM_INSUFFICIENT');
+    expect(outcomes).toHaveTextContent('已排队，后台继续');
     // 两份计划都提交了：合法的能力没有被连带拒绝。
     expect(planBodies()).toHaveLength(2);
   });
 
   it('本机已有的权重不会因为核验没做完就被重新下载', async () => {
     stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
+    // 本机已经有一套 ComfyUI（所以有可以核验的目录）。
+    stub.add({
+      method: 'GET', pattern: /setup\/summary/,
+      respond: () => jsonResponse(setupSummary({
+        installation: {
+          selected: { root: 'F:////AI////ComfyUI', instance_id: 'inst-1', port: 8188,
+            managed: true, adopted: false, source: 'managed', reason: '本工作台自己的受管环境', exists: true },
+          candidates: [], choice_required: false,
+        },
+      })),
+    });
     // 核验正在进行中：几十 GB 的权重不该被重新下载一遍。
     stub.add({
-      method: 'POST', pattern: /setup\/existing-installations\/verify$/,
-      respond: () => jsonResponse({ status: 'VERIFYING', verified: [], rejected: [] }),
+      method: 'POST', pattern: /setup\/reconcile$/,
+      respond: (_url, init) => {
+        const body = JSON.parse(String(init?.body ?? '{}')) as { capability?: string };
+        // H3 的核验正在进行；图片文件本来就不在本机。
+        return jsonResponse(body.capability === 'h3'
+          ? { status: 'IN_PROGRESS', verified: 0, rejected: 0, registered: [], complete: false }
+          : { status: 'RECONCILED', verified: 0, rejected: 0, registered: [], complete: false });
+      },
     });
     stub.add({
       method: 'POST', pattern: /setup\/install-plan$/,
@@ -259,11 +279,11 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
     // 只提交了图片计划：H3 权重没有重新下载。
     const plans = planBodies();
     expect(plans).toHaveLength(1);
@@ -278,7 +298,7 @@ describe('按钮按实际选择命名', () => {
     stub = new StudioStub(routes4070());
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('button', { name: /确认下载素材出图权重/ })).toBeEnabled();
     const breakdown = screen.getByRole('list', { name: '分项下载量' });
@@ -289,9 +309,8 @@ describe('按钮按实际选择命名', () => {
   it('多个能力同时选择时，显示分项下载量', async () => {
     // H3 权重不在本机时，H3 与素材出图是两项待准备的能力。
     stub = new StudioStub(routes4070({ h3FilesPresent: false }));
-    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     expect(screen.getByRole('button', { name: '确认整备所选能力' })).toBeEnabled();
     const breakdown = screen.getByRole('list', { name: '分项下载量' });
     expect(breakdown).toHaveTextContent('H3 视频权重');
@@ -333,9 +352,8 @@ describe('CASE-06：结构化错误不再渲染成 [object Object]', () => {
 describe('本机已有 H3 文件时的诚实表述', () => {
   it('文件已找到不等于生产就绪', async () => {
     stub = new StudioStub(routes4070());
-    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     expect(screen.getByText(/本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件/)).toBeTruthy();
   });
 });

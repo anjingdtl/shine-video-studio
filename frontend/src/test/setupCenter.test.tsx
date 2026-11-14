@@ -34,38 +34,34 @@ beforeEach(() => {
 });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
-async function detect(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '检测本机' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled());
+async function detect() {
+  // 打开就检测：等「上次检测」出现，说明服务端事实已经回来。
+  await screen.findByText(/上次检测/, undefined, { timeout: 20000 });
 }
 
 describe('制作环境：检测快照与候选下载', () => {
-  it('挂载不自动检测，只有用户点击才检测', async () => {
-    const user = userEvent.setup();
+  it('打开就自动检测，不需要先找检测入口', async () => {
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    expect(screen.getByRole('button', { name: '检测本机' })).toBeEnabled();
-    expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(0);
-    await detect(user);
+    await detect();
     expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(1);
+    expect(stub.callsOf('GET', /setup\/summary/).length).toBeGreaterThan(0);
   });
 
-  it('检测完保存快照，切页回来读快照不重复检测', async () => {
-    const user = userEvent.setup();
+  it('切页回来重新读取，不把浏览器快照当资格判定', async () => {
     const first = render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     first.unmount();
     expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(1);
 
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled();
+    await waitFor(() => expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(2));
     expect(screen.getByText(/上次检测/)).toBeTruthy();
-    expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(1);
   });
 
   it('已有一套权重不锁死候选：候选可选、BLOCKED 仍禁用', async () => {
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     const candidate = screen.getByRole('radio', { name: /低显存候选/ });
     expect(candidate).toBeEnabled();
     await user.click(candidate);
@@ -80,7 +76,7 @@ describe('制作环境：检测快照与候选下载', () => {
     }) });
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     const found = screen.getByText('本机已找到权重');
     expect(found.className).toContain('cap-found-warn');
 
@@ -110,9 +106,8 @@ describe('制作环境：检测快照与候选下载', () => {
       },
       port: { status: 'OK', port: 8188, selected: 8189, identity: 'FOREIGN_PROCESS' },
     }) });
-    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     expect(screen.getByRole('group', { name: '基础工具补装' })).toHaveTextContent('FFmpeg + FFprobe');
     expect(screen.getByText(/服务端口 8189/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeEnabled();
@@ -127,9 +122,8 @@ describe('制作环境：检测快照与候选下载', () => {
       repair_plan: { plan_id: 'toolrepair-' + 'd'.repeat(32), status: 'NOTHING_TO_REPAIR',
         download_bytes: 0, packages: [] },
     }) });
-    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
   });
@@ -165,9 +159,8 @@ describe('制作环境：检测快照与候选下载', () => {
         },
       }],
     }) });
-    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
 
     expect(screen.getByText('本机已核验 · 已绑定')).toBeTruthy();
     expect(screen.getByTestId('setup-next-step')).toHaveTextContent('把这个变体的生成方案登记到当前作品');

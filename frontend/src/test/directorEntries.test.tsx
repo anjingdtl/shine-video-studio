@@ -241,22 +241,18 @@ describe('基础配置：一次检测、一处确认', () => {
     window.history.replaceState(null, '', '#d/setup');
     render(<App />);
 
-    // 检测只由用户点击触发；点一次后给出一行结论与能力勾选。
-    await user.click(await screen.findByRole('button', { name: '检测本机' }));
-    expect(await screen.findByText(/可以运行 H3 Ref2VA INT8 ConvRot/)).toBeInTheDocument();
-    expect(screen.getByText('H3 Ref2VA INT8 ConvRot（当前生产基线）')).toBeInTheDocument();
-    expect(screen.getByText(/候选 · 未真机验收；确认后可下载权重/)).toBeInTheDocument();
-    // 下载确认就在检测卡里，不需要再往下找另一个按钮。
-    const confirm = screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
-    expect(confirm).toBeInTheDocument();
+    // V4.1：导演页只显示同一份服务端事实的只读摘要，不再自己开第二条安装链。
+    expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
+    expect((await screen.findAllByText(/完整整备在「设置 → 制作环境」/)).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('checkbox', { name: /素材出图/ })).toBeNull();
+
+    // 「打开设置」把完整整备带到唯一那一处：变体、能力勾选与一次确认都在那里。
+    await user.click(screen.getByRole('button', { name: '打开设置' }));
+    expect(await screen.findByText('要准备哪些能力')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /画面审片/ })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /语音核对/ })).toBeInTheDocument();
-    // 点一次就在原地展开确认条：写清目录与下载量，再点「开始准备」才真的执行。
-    await user.click(confirm);
-    expect(await screen.findByRole('group', { name: '确认准备制作环境' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '开始准备' })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: '取消' }));
+    expect(await screen.findByText(/选一套 H3 生成方案/)).toBeInTheDocument();
     expect(screen.queryByRole('group', { name: '确认准备制作环境' })).toBeNull();
   });
 });
