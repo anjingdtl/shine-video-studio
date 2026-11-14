@@ -3,7 +3,7 @@ import { AlertTriangle } from 'lucide-react';
 import {
   ERROR_CODE_LABELS, api, applyCameraPlan, confirmEpisodePlan, generateStoryboardDraft,
   generateStoryboardDraftFor, getPipelineOverview, listEpisodePlans, materializeEpisodePlan,
-  reconcileFilmTask, resendUnknownFilmTask,
+  reconcileFilmTask, resendUnknownFilmTask, timeoutSignal,
   type EpisodePlan, type PipelineOverview, type PipelineVolume, type StoryboardUnit,
 } from '../api';
 import { AgentProgress, type AgentRunProgress } from './AgentProgress';
@@ -40,7 +40,7 @@ export function StoryboardDraftSection({ projectId, volume, onMessage, onRefresh
     && ['QUEUED', 'RUNNING'].includes(run.status));
 
   const loadCrew = useCallback(() => {
-    api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) })
+    api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: timeoutSignal(5000) })
       .then(setCrewRuns).catch(() => undefined);
   }, [projectId]);
   useEffect(() => { void loadCrew(); }, [loadCrew]);

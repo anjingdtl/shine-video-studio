@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Cpu, Download, Image as ImageIcon, Loader2, Mic,
   MonitorCheck, RefreshCw, Video,
 } from 'lucide-react';
-import { api, json } from '../api';
+import { api, json, timeoutSignal } from '../api';
 import { GuideTip } from './GuideTip';
 import {
   approveAndExecuteSetupPlan, isQueuedInstallation, waitForInstallationAttempt,
@@ -284,7 +284,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           try {
             const verify = await api<{ status: string; rejected?: unknown[]; verified?: unknown[] }>(
               '/setup/existing-installations/verify',
-              { ...json('POST', { path: scan.root, snapshot: scan.snapshot }), signal: AbortSignal.timeout(3_600_000) },
+              { ...json('POST', { path: scan.root, snapshot: scan.snapshot }), signal: timeoutSignal(3_600_000) },
             );
             ensure();
             if (verify.status === 'VERIFYING') {
@@ -388,7 +388,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       setRunning({ label: '启动服务核对工作流，完成后自动停止…', note: '第一次会慢一些' });
       const validated = await api<{ status: string }>('/setup/services/validate', {
         ...json('POST', { project_id: projectId, recipe_sha256: state.candidate.recipe_sha256 }),
-        signal: AbortSignal.timeout(3_600_000),
+        signal: timeoutSignal(3_600_000),
       });
       if (validated.status !== 'READY') throw new Error(`服务检测没有通过（${validated.status}）。`);
       await api('/setup/runtime/activate', json('POST', {

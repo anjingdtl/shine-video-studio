@@ -1,7 +1,7 @@
-import { api as request, ApiError, json } from './api';
+import { api as request, ApiError, json, timeoutSignal } from './api';
 
 function api<T>(path: string, init?: RequestInit): Promise<T> {
-  return request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(60_000) });
+  return request<T>(path, { ...init, signal: init?.signal ?? timeoutSignal(60_000) });
 }
 
 export type SetupPlan = { plan_id: string; sha256: string; kind?: string; status: string };
@@ -289,7 +289,7 @@ export async function approveAndExecuteSetupPlan(
     // local ComfyUI instance and answers with its own result.
     const result = await api<CompletedExecution>(path, {
       ...json('POST', body),
-      signal: AbortSignal.timeout(600_000),
+      signal: timeoutSignal(600_000),
     });
     check();
     return result;
@@ -298,7 +298,7 @@ export async function approveAndExecuteSetupPlan(
   try {
     const answer = await api<QueuedInstallation>(path, {
       ...json('POST', body),
-      signal: AbortSignal.timeout(120_000),
+      signal: timeoutSignal(120_000),
     });
     check();
     if (!answer || !answer.attempt_id) {

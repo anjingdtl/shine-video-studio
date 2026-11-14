@@ -156,7 +156,15 @@ def validate_resource_plan(db, settings, payload: dict) -> None:
     binding = load_binding(strategy.model_variant_id, fresh=True)
     from shine.comfyops.deployment import _catalog_package_spec, _component_map, _resolve_closure
 
-    identity = managed_installation_pin(db, str(context.get("instance_id") or ""))
+    # Phase A plans carry no instance pin; phase B plans must still match the
+    # exact managed installation they were frozen against.
+    instance_id = context.get("instance_id")
+    if instance_id:
+        identity = managed_installation_pin(db, str(instance_id))
+    else:
+        identity = None
+        if context.get("instance_pin") is not None:
+            raise ValueError("RESOURCE_PLAN_IDENTITY_CHANGED")
     if (context.get("strategy_sha256") != strategy.strategy_sha256()
             or context.get("catalog_sha256") != graph_hash(binding.catalog)
             or context.get("manifest_sha256") != graph_hash(binding.manifest)

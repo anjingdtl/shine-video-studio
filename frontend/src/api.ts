@@ -204,6 +204,18 @@ export class ApiError extends Error {
               public readonly detail?: unknown) { super(message); }
 }
 
+/** 请求超时信号。``AbortSignal.timeout`` 在旧版 Edge WebView2 / Safari 16 之前
+ *  不存在：直接调用会抛 TypeError，使每个带超时的请求都失败、界面误报「断线」。
+ *  这里在缺失时回退到 AbortController + 定时器，超时行为完全一致。 */
+export function timeoutSignal(ms: number): AbortSignal {
+  if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
+    return AbortSignal.timeout(ms);
+  }
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(), ms);
+  return controller.signal;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('X-Shine-Local-Action', '1');
@@ -1694,7 +1706,9 @@ export type StrategyOptions = {
 export const getStrategyOptions = (projectId: string) =>
   api<StrategyOptions>(`/projects/${projectId}/director/strategy-options`);
 
-/** 本机实际准备好的模型方案：导演包的版本按钮只读这一份。 */
+/** 本机实际准备好的模型方案：导演包的版本按钮只读这一份。
+ *  七个事实彼此解耦：可选择准备 / 已安装 / 已核验 / 已绑定受管实例 /
+ *  方案登记 / 节点核验 / 试镜就绪 / 正式生产资格。``available`` 仍是开拍闸门。 */
 export type VariantAvailability = {
   variant_id: string;
   label: string;
@@ -1703,8 +1717,12 @@ export type VariantAvailability = {
   downloadable: boolean;
   installed: boolean;
   verified: boolean;
+  bound: boolean;
   profiles_registered: boolean;
   runtime_validated: boolean;
+  selectable_for_preparation: boolean;
+  trial_ready: boolean;
+  production_ready: boolean;
   available: boolean;
   reason: string;
 };

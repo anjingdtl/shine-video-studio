@@ -1,6 +1,6 @@
 import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { api as request, json, type SystemStatus } from '../api';
+import { api as request, json, timeoutSignal, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import {
   approveAndExecuteSetupPlan,
@@ -108,7 +108,7 @@ export function RealProductionWizard({
   }
   async function api<T>(path: string, init?: RequestInit): Promise<T> {
     check();
-    const result = await request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(60_000) });
+    const result = await request<T>(path, { ...init, signal: init?.signal ?? timeoutSignal(60_000) });
     check();
     return result;
   }
@@ -141,7 +141,7 @@ export function RealProductionWizard({
       const result = await api<{ reused_bytes: number; rejected: Array<{ component_id: string; relative_path: string }> }>(
         '/setup/existing-installations/import-models', {
           ...json('POST', { path: scan.root, snapshot: scan.snapshot }),
-          signal: AbortSignal.timeout(3_600_000),
+          signal: timeoutSignal(3_600_000),
         });
       total += result.reused_bytes;
     }
@@ -444,7 +444,7 @@ export function RealProductionWizard({
     try {
       setStage('workflows', { status: 'running', note: '正在检查本机 H3 服务与工作流；建议审片资源会单独报告，不会阻止制作…' });
       const validation = await api<{ status: string; advisory_reviews?: Record<string, { status: string }> }>('/setup/services/validate', {
-        ...json('POST', body), signal: AbortSignal.timeout(3_600_000),
+        ...json('POST', body), signal: timeoutSignal(3_600_000),
       });
       if (!alive()) return;
       if (validation.status !== 'READY') {
@@ -496,7 +496,7 @@ export function RealProductionWizard({
           do {
             result = await api<ExistingVerification>('/setup/existing-installations/verify', {
               ...json('POST', { path: scan.root, snapshot: scan.snapshot }),
-              signal: AbortSignal.timeout(3_600_000),
+              signal: timeoutSignal(3_600_000),
             });
             if (result.status === 'VERIFYING') {
               setStage('existing', { status: 'running', note: '另一个核验仍在读取本地文件；正在查询结果，不会重复扫描权重…' });

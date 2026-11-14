@@ -323,6 +323,79 @@ def test_local_inventory_api_rejects_invalid_strategy(studio):
     assert response.status_code == 422
 
 
+def test_phase_a_plan_needs_no_managed_instance(studio, tmp_path, monkeypatch):
+    """A fresh machine can freeze a download plan before any ComfyUI exists.
+
+    This is the circular-dependency fix: preparing bytes (phase A) must not
+    require a managed renderer that itself needs the bytes to be installed.
+    """
+    from shine.comfyops.models import InstallationPlan
+    from shine.comfyops.resource_resolver import validate_resource_plan
+
+    client, factory, settings = studio
+    monkeypatch.setattr("shine.comfyops.storage.require_storage", lambda settings: tmp_path)
+    monkeypatch.setattr("shine.comfyops.storage.disk_info", lambda path: {"free_bytes": 10**12})
+    project = create_project(client, title="新装机离线整备")
+    strategy = {"model_variant_id": "ref2va-lowend-candidate", "accelerator_id": "native20"}
+    preview = client.post("/api/v1/setup/resources/resolve",
+                          json={"project_id": project, "strategy": strategy}).json()
+    # No instance_id at all: phase A.
+    response = client.post("/api/v1/setup/resources/install-plan", json={
+        "project_id": project, "strategy": strategy, "snapshot_sha256": preview["snapshot_sha256"],
+        "source_preference": "AUTO", "disk_free": 10**12,
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "AWAITING_APPROVAL"
+    with factory() as db:
+        plan = db.get(InstallationPlan, response.json()["plan_id"])
+        context = plan.payload["resource_context"]
+        assert context["instance_id"] is None and context["instance_pin"] is None
+        # The offline plan still revalidates cleanly.
+        validate_resource_plan(db, settings, plan.payload)
+        # A phase-A plan may not smuggle in an instance pin.
+        forged = {**plan.payload, "resource_context": {**context, "instance_pin": {"id": "x", "sha256": "a" * 64}}}
+        with pytest.raises(ValueError, match="RESOURCE_PLAN_IDENTITY_CHANGED"):
+            validate_resource_plan(db, settings, forged)
+
+
+def test_variant_availability_decouples_preparation_from_production(studio, monkeypatch):
+    """W6A8 is selectable for preparation even when nothing is installed.
+
+    The candidate manifest declares ``required_component_ids=[]``; that must
+    not make ``installed`` permanently false once the graph's weights really
+    are present, and it must never unlock production for a candidate.
+    """
+    client, _factory, _settings = studio
+    project = create_project(client, title="解耦可用性")
+    rows = client.get(f"/api/v1/setup/variant-availability?project_id={project}").json()["variants"]
+    candidate = next(row for row in rows if row["variant_id"] == "ref2va-lowend-candidate")
+    # Nothing installed yet: still selectable for preparation, never shootable.
+    assert candidate["selectable_for_preparation"] is True
+    assert candidate["available"] is False
+    assert candidate["production_ready"] is False
+    assert candidate["installed"] is False
+    assert candidate["acceptance_status"] == "CANDIDATE"
+
+    # Now the graph's four weights are hash-verified on disk.  The empty
+    # required_component_ids must not hide that fact.
+    import shine.comfyops.variant_readiness as vr
+
+    real_weights = vr.weight_evidence
+
+    def prepared_weights(db, settings, binding):
+        rows = real_weights(db, settings, binding)
+        return [{**row, "prepared": True, "verified": True, "consumable": True} for row in rows]
+
+    monkeypatch.setattr(vr, "weight_evidence", prepared_weights)
+    rows = client.get(f"/api/v1/setup/variant-availability?project_id={project}").json()["variants"]
+    candidate = next(row for row in rows if row["variant_id"] == "ref2va-lowend-candidate")
+    assert candidate["installed"] is True, "graph-derived weights count even with required_component_ids=[]"
+    assert candidate["verified"] is True and candidate["bound"] is True
+    # A candidate stays a candidate: bytes alone never grant production.
+    assert candidate["available"] is False
+    assert candidate["production_ready"] is False
+
+
 def test_live_node_check_never_queries_unowned_service(studio, monkeypatch):
     from shine.comfyops.resource_diagnostics import check_owned_node_inputs
     from shine.strategy import GenerationStrategy
