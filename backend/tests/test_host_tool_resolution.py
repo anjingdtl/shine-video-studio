@@ -17,6 +17,26 @@ import pytest
 
 from shine.comfyops import host_env
 
+#: These contract tests exercise the POSIX resolution rules (an extensionless
+#: sh shim in the managed directory).  ``CreateProcess`` cannot execute such a
+#: script on Windows, so on a Windows host the *resolution* still runs for
+#: real while the execution is injected; on a POSIX host the resolved
+#: absolute path is really executed, exactly as production does.
+POSIX_HOST = os.name != "nt"
+
+
+def _probe_sh_tool(name, managed, output):
+    if POSIX_HOST:
+        return host_env.probe_command(name, search_paths=[str(managed)], windows=False)
+
+    def runner(probe):  # noqa: ANN001 - the injected execution seam
+        shim = managed / name
+        if not shim.is_file():
+            return False, ""
+        return True, output
+
+    return host_env.probe_command(name, search_paths=[str(managed)], windows=False, runner=runner)
+
 
 def _write_tool(directory, name, body, *, executable=True):
     directory.mkdir(parents=True, exist_ok=True)
@@ -39,7 +59,7 @@ def test_tool_only_in_managed_directory_is_resolved_to_an_absolute_path(tmp_path
     managed = tmp_path / "shine-data" / "tools" / "bin"
     shim = _write_tool(managed, "ffmpeg", "#!/bin/sh\necho 'ffmpeg version 8.0.1'\n")
 
-    report = host_env.probe_command("ffmpeg", search_paths=[str(managed)])
+    report = _probe_sh_tool("ffmpeg", managed, "ffmpeg version 8.0.1\n")
 
     assert report["present"] is True
     assert report["at_floor"] is True
@@ -51,12 +71,12 @@ def test_tool_only_in_managed_directory_is_resolved_to_an_absolute_path(tmp_path
 def test_the_same_tool_is_missing_before_the_managed_directory_exists(tmp_path, clean_path):
     managed = tmp_path / "shine-data" / "tools" / "bin"
 
-    before = host_env.probe_command("ffmpeg", search_paths=[str(managed)])
+    before = _probe_sh_tool("ffmpeg", managed, "ffmpeg version 7.1\n")
     assert before["present"] is False
 
     _write_tool(managed, "ffmpeg", "#!/bin/sh\necho 'ffmpeg version 7.1'\n")
     # No restart, no PATH mutation: the next probe sees the installed tool.
-    after = host_env.probe_command("ffmpeg", search_paths=[str(managed)])
+    after = _probe_sh_tool("ffmpeg", managed, "ffmpeg version 7.1\n")
     assert after["present"] is True
     assert after["at_floor"] is True
 
@@ -65,7 +85,7 @@ def test_powershell_seven_in_the_managed_directory_meets_its_floor(tmp_path, cle
     managed = tmp_path / "Tools with spaces" / "bin"
     _write_tool(managed, "pwsh", "#!/bin/sh\necho '7.4.6'\n")
 
-    report = host_env.probe_command("pwsh", search_paths=[str(managed)])
+    report = _probe_sh_tool("pwsh", managed, "7.4.6\n")
 
     assert report["present"] is True
     assert report["version"] == "7.4.6"
@@ -78,8 +98,8 @@ def test_node_and_npm_are_resolved_independently(tmp_path, clean_path):
     _write_tool(managed, "node", "#!/bin/sh\necho 'v22.11.0'\n")
     _write_tool(managed, "npm", "#!/bin/sh\necho '10.9.0'\n")
 
-    node = host_env.probe_command("node", search_paths=[str(managed)])
-    npm = host_env.probe_command("npm", search_paths=[str(managed)])
+    node = _probe_sh_tool("node", managed, "v22.11.0\n")
+    npm = _probe_sh_tool("npm", managed, "10.9.0\n")
 
     assert node["at_floor"] is True and npm["at_floor"] is True
     assert node["resolved_path"] != npm["resolved_path"]
@@ -90,8 +110,8 @@ def test_uv_and_ffprobe_are_whitelisted_and_detected(tmp_path, clean_path):
     _write_tool(managed, "uv", "#!/bin/sh\necho 'uv 0.9.5'\n")
     _write_tool(managed, "ffprobe", "#!/bin/sh\necho 'ffprobe version 8.0'\n")
 
-    uv = host_env.probe_command("uv", search_paths=[str(managed)])
-    ffprobe = host_env.probe_command("ffprobe", search_paths=[str(managed)])
+    uv = _probe_sh_tool("uv", managed, "uv 0.9.5\n")
+    ffprobe = _probe_sh_tool("ffprobe", managed, "ffprobe version 8.0\n")
 
     assert uv["at_floor"] is True
     assert ffprobe["at_floor"] is True
