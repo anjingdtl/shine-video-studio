@@ -26,6 +26,15 @@ describe('接口错误文案', () => {
     expect((error as ApiError).message).not.toContain('[object Object]');
   });
 
+  it('服务端内部错误给出中文说明，而不是裸英文 500', async () => {
+    respond(500, { detail: 'Internal Server Error' });
+    const error = await api('/asset-center/assignments').catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).message).not.toContain('Internal Server Error');
+    expect((error as ApiError).message).toContain('服务端内部错误');
+    expect((error as ApiError).message).toContain('没有完成');
+  });
+
   it('安装目录排队状态有面向用户的说明', async () => {
     respond(409, { detail: 'INSTALL_TARGET_CONFLICT' });
     const error = await api('/comfyops/install-plans/x/execute').catch((caught: unknown) => caught);
