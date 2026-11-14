@@ -87,6 +87,9 @@ class ConfigurationRequest(BaseModel):
     project_id: str
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
     port: int = Field(default=8188, ge=1024, le=65535)
+    #: The variant whose startup contract supplies the recipe's memory floors.
+    #: Omitted = the default production variant, exactly the previous behavior.
+    variant_id: str | None = Field(default=None, max_length=80)
 
 
 class RuntimeActivationRequest(BaseModel):
@@ -820,11 +823,24 @@ def configuration(body: ConfigurationRequest, actor: Operator, settings: Setting
     port, port_state = _resolve_service_port(db, body.port)
     runtime = prepare_review_runtime(settings, deployment.load_default_catalog())
     result = deployment.generate_configuration(db, settings, body.project_id,
-                                               instance_name=body.instance_name, port=port)
+                                               instance_name=body.instance_name, port=port,
+                                               variant_id=body.variant_id)
     return {**result, "review_runtime_preparation": runtime,
             "requested_port": body.port, "port": port,
             "port_identity": port_state.get("identity"),
             "port_selected_by_server": port != body.port}
+
+
+@router.get("/variant-startup-contract")
+def variant_startup_contract(variant_id: str, settings: SettingsDep, db: DBSession):
+    """Read-only startup contract of one variant: declared facts, not authority.
+
+    An undetermined contract (unknown render-time floors) is returned as-is so
+    the workbench can show exactly which upstream evidence is still missing.
+    """
+    from shine.comfyops.variant_recipe import build_startup_contract
+
+    return build_startup_contract(variant_id)
 
 
 @router.get("/readiness")

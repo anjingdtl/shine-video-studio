@@ -216,6 +216,31 @@ export function timeoutSignal(ms: number): AbortSignal {
   return controller.signal;
 }
 
+/** 常驻监督进程（独立环回端口）：后台死掉时页面无法经 API 重启它自己，
+ *  由监督进程执行「空闲门禁 → 身份核验停止 → 幂等启动」。端口可经
+ *  localStorage 覆盖，默认与启动器一致。 */
+export function supervisorPort(): number {
+  const stored = Number(window.localStorage.getItem('shine-supervisor-port'));
+  return Number.isFinite(stored) && stored > 0 ? stored : 8790;
+}
+export const supervisorBase = (): string => `http://127.0.0.1:${supervisorPort()}`;
+
+export type RestartStatus = { phase: string; detail: string };
+
+export async function restartStack(): Promise<{ status?: string; code?: string; detail?: string }> {
+  const response = await fetch(`${supervisorBase()}/restart-stack`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Shine-Local-Action': '1' },
+    signal: timeoutSignal(15000),
+  });
+  return response.json();
+}
+
+export async function restartStatus(): Promise<RestartStatus> {
+  const response = await fetch(`${supervisorBase()}/restart-status`, { signal: timeoutSignal(5000) });
+  return response.json();
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   headers.set('X-Shine-Local-Action', '1');

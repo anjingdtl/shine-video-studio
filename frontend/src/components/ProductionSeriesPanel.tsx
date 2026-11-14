@@ -575,7 +575,9 @@ export default function ProductionSeriesPanel({
     },
     running: activeSeries ? { label: `拍摄进行中 · ${statusLabels[activeSeries.status] ?? activeSeries.status}`,
       done: activeSeries.completed_count, total: activeSeries.shot_count } : null,
-  }, [busy, working, registering, demoSelected, activeSeries, profileId, shots.length]);
+  }, [busy, working, registering, demoSelected, activeSeries, profileId, shots.length,
+    quality, profileChosenByUser, gates, shots, busyShotIds, framePreset, customWidth,
+    customHeight, clipSeconds, ref2vaProfiles, mode, system]);
 
   return <div className="card section-card series-card" id="production-series">
     <div className="section-heading compact">

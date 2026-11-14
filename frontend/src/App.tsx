@@ -41,7 +41,7 @@ import { GuideTip } from './components/GuideTip';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
-import { getDirectorOverview, getJourney, type DirectorOverview, type Journey, type JourneyStage } from './api';
+import { getDirectorOverview, getJourney, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
 import type { Asset, Project } from './api';
@@ -231,7 +231,7 @@ function App() {
     setReconnectPhase('checking');
     try {
       if (!await checkConnection()) {
-        setReconnectError('后端未响应。请双击项目根目录的「一键启动 Shine 视频工作台」，启动后再点重新连接。');
+        setReconnectError('后端未响应。可点「重启后台」由本机监督进程安全重启，或双击项目根目录的「一键启动 Shine 视频工作台」。');
         return;
       }
       setReconnectPhase('loading');
@@ -240,6 +240,43 @@ function App() {
       setReconnectError('后端连接检查已通过，但作品数据读取失败。请重新连接。');
     } finally {
       setReconnectPhase(null);
+    }
+  }
+
+  const [restartPhase, setRestartPhase] = useState<'starting' | null>(null);
+  const [restartError, setRestartError] = useState('');
+  /** 重连无效时由常驻监督进程重启后台：空闲门禁拒绝活工作，页内显示进度与具名拒绝。 */
+  async function restartBackend() {
+    if (restartPhase) return;
+    setRestartError('');
+    setRestartPhase('starting');
+    try {
+      const begun = await restartStack();
+      if (begun.code === 'STACK_BUSY') {
+        setRestartError(`后台仍有进行中的制作或租约，已拒绝重启：${begun.detail ?? ''}`);
+        return;
+      }
+      if (begun.code) {
+        setRestartError(`监督进程拒绝重启（${begun.code}）。`);
+        return;
+      }
+      for (let i = 0; i < 150; i++) {
+        await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        const status = await restartStatus();
+        if (status.phase === 'ready') {
+          await reconnectWorkbench();
+          return;
+        }
+        if (status.phase === 'failed' || status.phase === 'refused') {
+          setRestartError(status.detail || '重启失败，请查看 run/logs/supervisor.err.log。');
+          return;
+        }
+      }
+      setRestartError('重启超时，请查看 run/logs/supervisor.err.log。');
+    } catch {
+      setRestartError(`无法连接监督进程（127.0.0.1:${supervisorPort()}）。请先用启动器启动一次以拉起监督进程。`);
+    } finally {
+      setRestartPhase(null);
     }
   }
   /** Nav density contract: the current view's group is expanded by default; other groups expand only via their explicit toggle button. */
@@ -613,12 +650,16 @@ function App() {
     />;
   }
 
-  const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting}>
-    <button type="button" className="btn-secondary" disabled={reconnecting} onClick={reconnectWorkbench}>
+  const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting || restartPhase !== null}>
+    <button type="button" className="btn-secondary" disabled={reconnecting || restartPhase !== null} onClick={reconnectWorkbench}>
       {reconnecting ? reconnectLabel : '重新连接'}
     </button>
-    {reconnecting && <div role="status"><Meter label={reconnectLabel} value={0} tone="busy" /></div>}
+    <button type="button" className="btn-secondary" disabled={reconnecting || restartPhase !== null} onClick={restartBackend}>
+      {restartPhase ? '正在重启后台…' : '重启后台'}
+    </button>
+    {(reconnecting || restartPhase) && <div role="status"><Meter label={restartPhase ? '正在重启后台…' : reconnectLabel} value={0} tone="busy" /></div>}
     {reconnectError && <p role="alert">{reconnectError}</p>}
+    {restartError && <p role="alert">{restartError}</p>}
   </div>;
 
   return (

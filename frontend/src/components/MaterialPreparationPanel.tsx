@@ -817,7 +817,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       disabledReason: '先完成③镜头拆解：分镜定稿后才按清单备料' };
   }
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
-    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts, storyboardReady]);
+    [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts, storyboardReady,
+      state, selected, bindings, strategy]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the

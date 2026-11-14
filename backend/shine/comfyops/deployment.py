@@ -716,13 +716,35 @@ def advisory_review_readiness(settings: Settings) -> dict:
 
 
 def generate_configuration(db, settings: Settings, project_id: str, *,
-                           instance_name: str = 'shine-h3', port: int = 8188) -> dict:
+                           instance_name: str = 'shine-h3', port: int = 8188,
+                           variant_id: str | None = None) -> dict:
     """Generate the instance-bound managed recipe, review manifests and .env entries.
 
     Everything is derived from the deployed isolated instance and the repo, so a
     new machine needs no personal paths, GPU UUID hardcoding or hand-edited JSON.
+    ``variant_id`` selects the startup contract whose memory floors the recipe
+    carries; without it the default production variant is used, unchanged.
     """
     from shine.comfyops.instances import instance_identity, instance_root
+
+    # The variant contract is resolved before any transaction: an undetermined
+    # startup (unknown render-time floors) is refused by name here and never
+    # written into the recipe with the baseline's numbers.
+    if variant_id is None:
+        requirements = default_variant_requirements()
+    else:
+        from shine.comfyops.variant_recipe import build_startup_contract
+        contract = build_startup_contract(variant_id)
+        admission = contract["admission"]
+        if not admission["startup_determined"]:
+            raise HTTPException(409, {
+                "code": "VARIANT_STARTUP_CONTRACT_NOT_DETERMINED",
+                "variant_id": variant_id,
+                "contract_sha256": contract["contract_sha256"],
+                "blockers": admission["blockers"],
+                "missing_upstream_evidence": contract["missing_upstream_evidence"],
+            })
+        requirements = contract["memory_facts"]
 
     # Serialize with resource admission and instance lifecycle intent. A lease
     # timeout does not prove that a renderer has stopped.
@@ -813,7 +835,6 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "--fast", "fp16_accumulation",
         "--disable-all-custom-nodes", "--whitelist-custom-nodes", *whitelist,
     ])
-    requirements = default_variant_requirements()
     renderer = {
         "instance_id": instance.id,
         "installation": {"id": instance.id, "sha256": instance.sha256},

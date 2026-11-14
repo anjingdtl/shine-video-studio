@@ -1,6 +1,7 @@
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
+import { StageRailProvider } from '../components/StageRail';
 import { StoryboardBookPanel } from '../components/StreamlinePanels';
 import { StudioStub, jsonResponse } from './studioStub';
 
@@ -48,5 +49,35 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
     dialogue_ratio_percent: 70,
     narration_level: 'high',
   });
+  stub.restore();
+});
+
+it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注册时的旧值', async () => {
+  const bodies: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
+      { id: 'noir', name_zh: '黑色电影', summary_zh: '低照度、硬光', version: '1.0' },
+    ]) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/director\/storyboard-book$/, respond: (_url, init) => {
+      bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse(BOOK);
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(
+    <StageRailProvider stageId="plan" stageLabel="第②步 · 剧本统筹">
+      <StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />
+    </StageRailProvider>,
+  );
+  await screen.findByRole('option', { name: /黑色电影/ });
+  fireEvent.change(screen.getByLabelText('集数'), { target: { value: '3' } });
+  fireEvent.change(screen.getByLabelText('每集目标秒数'), { target: { value: '45' } });
+  // On the director page the rail is the primary surface: its action must read
+  // the current inputs, not the closure captured when the rail first registered.
+  const rail = screen.getByLabelText('本阶段操作');
+  await user.click(within(rail).getByRole('button', { name: '生成分镜书' }));
+  await waitFor(() => expect(bodies).toHaveLength(1));
+  expect(bodies[0]).toMatchObject({ episode_count: 3, target_seconds: 45 });
   stub.restore();
 });

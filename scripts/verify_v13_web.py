@@ -279,26 +279,37 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(outline_panel).to_contain_text("先把这版故事定下来", timeout=15000)
         # The convergence round moved each page's single primary action into the
         # page-level stage rail (one action per page), so the extract button is
-        # rendered in the rail, not inside the panel body.  Assert the real
-        # product surface rather than the old inline button.
-        expect(page.locator(".action-rail")).to_contain_text("后台提取并归并总体大纲", timeout=15000)
+        # rendered in the rail, not inside the panel body.  All seven stage pages
+        # stay mounted (hidden switching), each with its own rail, so the locator
+        # must be scoped to the active stage's container: the global class alone
+        # resolves to seven elements and violates strict mode.
+        creative_rail = page.locator("#creative").get_by_label("本阶段操作")
+        expect(creative_rail).to_be_visible(timeout=15000)
+        expect(creative_rail).to_contain_text("后台提取并归并总体大纲", timeout=15000)
+        extract_action = creative_rail.get_by_role(
+            "button", name="后台提取并归并总体大纲", exact=True
+        )
+        expect(extract_action).to_have_count(1)
+        # The isolated fixture has no scriptwriter consent, so the action may be
+        # legitimately disabled; the product contract requires a named reason
+        # whenever it is, never a silently dead button.
+        if extract_action.is_disabled():
+            expect(creative_rail.locator(".rail-disabled-reason")).to_be_visible()
         expect(page.locator(".script-doc.active")).to_contain_text("当前依据")
-        # The director journey gives the style and master panels their own page
-        # and keeps the pre-production panel in the expert layer. The script
-        # navigates the way a user does instead of assuming one flat page.
-        page.goto(f"{ui_base}#d/assets", wait_until="networkidle")
+        # After the director-journey convergence the style panel lives in the
+        # expert production board; the director plan page freezes style through
+        # the storyboard-book confirmation instead.  The personal-desktop build
+        # approves with the same-origin CSRF marker and no operator password, so
+        # the style panel has no credential field.
+        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
         page.reload(wait_until="networkidle")
-        # The personal-desktop build approves with the same-origin CSRF marker
-        # and no operator password, so the style panel has no credential field.
         page.locator("#style").get_by_role(
             "button", name="批准并冻结", exact=True
         ).click()
         expect(page.locator("#style")).to_contain_text("已冻结 V1", timeout=15000)
-        # Confirming a master still lives on the production board's asset panel;
+        # Confirming a master lives on the same production board's asset panel;
         # the director pages use their own material workflow.  ``#assets`` must
         # therefore stay unique (the plan page was renamed to ``#plan-stage``).
-        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
-        page.reload(wait_until="networkidle")
         masters = page.locator("#assets")
         master = masters.locator(".asset-row").filter(
             has_text="isolated-browser-upload.png"
@@ -313,7 +324,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         prep = page.locator("#preproduction")
         # The evidence field lives in a collapsed advanced section.
         prep.get_by_text("展开高级准备").click()
-        prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
+        prep.get_by_label("核验证据").fill(
             "Explicit isolated browser lifecycle approval"
         )
         prep.get_by_role("button", name="读取执行器与授权扫描范围", exact=True).click()
@@ -427,13 +438,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         )
         assert result_json()["is_mock"] is True
         prep.get_by_role("button", name="全资产工厂", exact=True).click()
-        prep.get_by_label("人工核验 / 试听 / 权利证据").fill(
-            "Explicit isolated browser QA fixture review"
-        )
+        # The convergence round removed the per-view evidence field and risk
+        # checkbox from the factory/voice views: the shared evidence entered in
+        # the environment view still travels with every approval decision, and
+        # promotion is gated by the candidate's review state, not a checkbox.
         card = prep.locator("article").filter(has_text="BrowserCharacter")
         expect(card).to_contain_text("待人工复核")
         prep.get_by_label("操作模式").select_option("local")
-        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
         expect(card).to_contain_text("待人工复核")
         # Merely selecting local mode cannot relabel the existing Fake candidate.
         assert asset["payload"]["provenance"]["is_mock"]
@@ -458,7 +469,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # Fake request mode cannot authorize real filesystem reconciliation.
         expect(failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True)).to_be_disabled()
         prep.get_by_label("操作模式").select_option("local")
-        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
+        prep.get_by_label("我已核对本机维护的路径范围和操作内容").check()
         failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True).click()
         expect(failed_card).to_contain_text("已对账收尾", timeout=15000)
         expect(failed_card).to_contain_text("继续安装须新建并批准计划")
@@ -522,23 +533,28 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # The basic self-review scope checks the expected output size, so the
         # workbench only offers the real-generation confirmation once the
         # operator declares the width and height. Fill them exactly as an
-        # operator would before expecting the confirmation dialog.
+        # operator would before expecting the armed confirmation.
         production.get_by_label("审片建议（可选）").select_option("basic")
         production.get_by_label("预期画面宽度").fill("768")
         production.get_by_label("预期画面高度").fill("1344")
-        queue = production.get_by_role("button", name="加入队列", exact=True).first
         for mode in ("T2VA", "Ref2VA"):
             production.get_by_label("生成模板").select_option(f"ui-only-{mode}")
-            dialog_policy["mode"] = "dismiss"
-            queue.click()
-            dialog_policy["mode"] = "accept"
-            assert "确认用真实模式生成" in dialog_messages[-1]
-            assert len(submissions) == (0 if mode == "T2VA" else 1), submissions
-            # The switchable policy handler above is already back in accept
-            # mode; registering a second accept here would race it for the
-            # same dialog ("already handled").
+            before = len(submissions)
+            # Real generation uses a two-click armed button instead of a native
+            # dialog: the first click only reveals the confirmation, cancelling
+            # must submit nothing, and confirming submits exactly one job.
+            production.get_by_role("button", name="加入队列", exact=True).first.click()
+            armed = production.locator(".queue-confirm")
+            expect(armed).to_have_count(1)
+            armed.get_by_role("button", name="取消", exact=True).click()
+            expect(armed).to_have_count(0)
+            assert len(submissions) == before, submissions
+            production.get_by_role("button", name="加入队列", exact=True).first.click()
             with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/projects/{p}/jobs")):
-                queue.click()
+                production.locator(".queue-confirm").get_by_role(
+                    "button", name="确认真实生成", exact=True
+                ).click()
+            assert len(submissions) == before + 1, submissions
             assert submissions[-1]["generation_mode"] == mode
             assert submissions[-1]["workflow_profile_id"] == f"ui-only-{mode}"
         assert c.get(base + f"/projects/{p}/jobs").json() == [], "UI routing probe must create no backend jobs"
@@ -580,8 +596,8 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         prep.get_by_text("展开高级准备").click()
         prep.get_by_role("button", name="工作流能力", exact=True).click()
         prep.get_by_label("操作模式").select_option("local")
-        prep.get_by_label("人工核验 / 试听 / 权利证据").fill("Mock UI protocol check only; no real acceptance")
-        prep.get_by_label("我已核对服务器配置的范围、来源、许可和具体操作风险").check()
+        prep.get_by_label("核验证据").fill("Mock UI protocol check only; no real acceptance")
+        prep.get_by_label("我已核对本机维护的路径范围和操作内容").check()
         # The card shows only the id prefix, and both native fixtures share the
         # same first eight characters; the displayed payload.name is the unique
         # selector the current UI offers.
@@ -638,15 +654,17 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         crew.get_by_label("执行工种").select_option("qc_reviewer")
         expect(crew.get_by_role("button", name="运行工种", exact=True)).to_be_disabled()
         crew.get_by_label("检查镜头输入").select_option(routing_shot["id"])
-        consent = crew.get_by_label("允许本次工种向所选远端模型发送", exact=False)
-        consent.check()
+        # The convergence round replaced the per-call consent checkbox with a
+        # project-level one-time consent.  The panel must still disclose that
+        # script/style/metadata (never media bytes) may travel to the remote
+        # model, and the request carries the explicit allow_remote_text flag.
+        expect(crew.get_by_text("向远端模型发送剧本/风格/元数据遵循项目级一次同意")).to_be_visible()
         with page.expect_response(lambda response: response.url.endswith("/film-agents/qc_reviewer/run")):
             crew.get_by_role("button", name="运行工种", exact=True).click()
         page.wait_for_load_state("networkidle")
         assert len(critic_calls) == 1
         assert critic_calls[0]["shot_spec"] == routing_shot["spec"]
         assert critic_calls[0]["input_revision_ids"] == [] and critic_calls[0]["allow_remote_text"] is True
-        expect(consent).not_to_be_checked()
         runs_url = f"**/api/v1/projects/{p}/film-runs"
         abandon_url = f"**/api/v1/projects/{p}/film-runs/ui-unknown-text-task/abandon-remote-response"
         page.route(runs_url, lambda route: route.fulfill(json=[{
@@ -695,10 +713,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             page.unroute(path)
         for path in [roles_url, lock_url, critic_url]:
             page.unroute(path)
-        # The text-provider settings live on the setup view, not beside the
-        # crew panel.
+        # The text-provider settings live on the setup view.  The convergence
+        # round moved the AI model manager into the setup panel's production
+        # environment section; #settings deliberately carries no second copy.
         page.goto(f"{ui_base}#v/setup", wait_until="networkidle")
-        settings = page.locator("#settings")
+        settings = page.locator("#setup")
         add_model = settings.locator(".llm-add-model")
         add_model.get_by_label("模型配置名称", exact=True).fill("UI bounded text fixture")
         add_model.get_by_label("服务平台", exact=True).select_option("openai_compatible")
@@ -713,6 +732,9 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         assert bounded_response.value.json()["generation_options"] == {"max_completion_tokens": 8192, "reasoning_effort": "low"}
         bounded_card = settings.locator(".llm-model-card").filter(has_text="UI bounded text fixture")
         expect(bounded_card).to_contain_text("UI bounded text fixture")
+        # The compact card hides the editor behind a "设置" fold; the operator
+        # opens it before reaching the connection parameters.
+        bounded_card.get_by_text("设置", exact=True).click()
         bounded_card.get_by_text("编辑连接与模型参数", exact=True).click()
         bounded_card.locator("details.llm-advanced-settings.llm-advanced-nested > summary").click()
         expect(bounded_card.get_by_label("回复上限 UI bounded text fixture", exact=True)).to_have_value("8192")
@@ -748,9 +770,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # Director run scope: a project with no run shows "not started" and no
         # controls borrowed from another package.  A disconnected journey
         # request must recover on reload instead of leaving a dead page (J11).
+        # The seven-stage split moved the run-scope/post panel to the deliver
+        # page (成片中心); the run page now carries the shoot controls.
         page.goto(f"{ui_base}#v/production", wait_until="networkidle")
         page.get_by_label("切换项目").select_option(other)
-        page.goto(f"{ui_base}#d/run", wait_until="networkidle")
+        page.goto(f"{ui_base}#d/deliver", wait_until="networkidle")
         expect(page.get_by_text("还没有整部作品的运行记录", exact=False)).to_be_visible(timeout=15000)
         expect(page.get_by_role("button", name="暂停", exact=True)).to_have_count(0)
         page.route("**/api/v1/projects/*/journey*", lambda route: route.abort())
@@ -799,7 +823,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
                     "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
                     "late old-project responses cannot overwrite selected-project assets/shots",
-                    "independent text critic requires selected shot, routes exact spec and resets per-call consent (intercepted)",
+                    "independent text critic requires selected shot, routes exact spec under project-level text consent (intercepted)",
                     "remote text response abandonment cancel/confirm, exact authenticated grant and credential clearing (intercepted; no model call)",
                     "explicit text output budget and reasoning depth persist from UI without a model call",
                     "director run scope shows a not-started project without borrowed controls and recovers after a dropped journey request",
