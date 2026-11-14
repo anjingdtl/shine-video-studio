@@ -237,6 +237,66 @@
 
 **诚实边界**：以上仅为界面与接口层的复核。本机 `h3_connected=false`、`production_mode=BLOCKED`，**D1–D8 的真实生产验收仍未开始**，不得据本节宣称真实 H3 渲染或成片验收通过。
 
+## 4C. R3 质检结论与退回项（2026-11-15 02:39，质检员）
+
+**结论来源**：质检员产出 `.local-acceptance/r3-20261115-qa/`（`HANDOFF-R3-RETURN.md`、`verify_director_r3.json`、6 张截图、8 个后端分片日志、前端全量 vitest 日志）。已同步至总控（`message_bot` → `bot_a48efeacd5bc`，`task_43f4629ef896`）。
+
+### 4C.1 绿：导演主线 D1–D8 全部通过
+
+| 检查项 | 结果 | 证据 |
+| --- | --- | --- |
+| 定向回归 | `directorBlockerNavigation` + `directorModuleGuide` → **2 files / 6 tests passed，退出码 0**（提交后复跑） | 后端分片日志、前端 vitest 日志 |
+| 前端全量 | `npm.cmd run build` 退出码 0；`npm.cmd test`（--no-file-parallelism）→ **69 files / 373 tests passed** | `frontend-full-vitest.log` |
+| 浏览器实景复验 | **19 / 19 全 pass**，`pageerrors` 为空 | `verify_director_r3.json`、`shots/01–06` |
+| 裁定第 3 条 live | `#d/assets` rail 显示「去第 1 阶段确认大纲」且**已无**「去剧本统筹」；点击落到 `#d/creative` | `01-d-assets-rail-upstream.png`、`02-after-click-creative.png` |
+| D1 | 禁用理由为真实阻塞「编剧角色还没有配置模型」+「去配置文本模型」出口；错误理由「先在上方授权剧本文字发送」不再出现 | `03-d-creative-outline-gate.png` |
+| D2 / D4 | 异页跳对 `plan-stage → #d/assets`、同页不自环、同页改指上游前置，三条裁定全部成立 | 同上 |
+| D5 | 末阶段显示「已经是最后一个阶段」，不再出现「全部阶段已完成」 | `06-d-deliver-last-stage.png` |
+| D6 | 七页 `.module-guide` 齐备，均含「这一步要做什么 / 为什么必须做」 | `03`–`06` |
+| D7 | 导演包指引为「三步：勾选要拍的集 → 确认模型版本 → 点右侧操作栏的『先选择要拍的集』（当前不可点：本机没有这套权重）」 | `04-d-package-guide.png` |
+| D8 | `#d/run` 右卡补「去导演包选择要拍的集」 | `05-d-run-action-rail.png` |
+
+**基线未被污染**：`main = 63f50be`（PR #31 已把 `chore/director-journey-r1-closeout-20261115` 合入 main）；02:29:55 的 fast-forward 发生在质检员跑分片期间，但 `476c962 → 63f50be` diff 为空、内容一致。
+
+### 4C.2 红：后端 8 分片中 4 片失败（**与本轮导演修复无关**）
+
+`chunk-1 / chunk-3 / chunk-6 / chunk-7` 失败，共 34 个 FAILED/ERROR，证据 `backend-shards/chunk-{0..7}.log`。
+
+**根因**：「工作栈整备」新增的 **409 `NODE_PACK_DIRECTORY_MISSING`** 门禁在夹具/离线环境硬拦，8 个分片日志里出现 **33 次**，绝大多数失败是它在 setup 阶段抛出、用例根本没跑起来：
+
+```
+missing: ComfyUI-KJNodes, comfyui-videohelpersuite, ComfyUI-MiniMax-H3-PDD-Acc,
+         ComfyUI-SolAttn_triton, Comfyui_Minimax_h3_latent_Upscaler
+message: 这些节点包在安装的 custom_nodes 里找不到对应目录；请先在「安装与下载」补装节点，再重新生成运行配置。
+```
+
+**归属判定**：本轮导演修复触及的文件为 `backend/shine/director/journey.py`、`backend/tests/test_director_journey_script_blockers.py`、`backend/tests/test_start_shine_launcher.py` 与前端 16 个文件；上述失败文件**无一落在其中**。修复师另行以 worktree 对照验证：同提交且不含本轮改动的干净树**同样红**，引入该节点包校验之前的提交**全绿** ⇒ 与本轮修复无关。
+
+**修法要求（质检员）**：不得删门禁，生产语义（真实安装必须具备这些节点包）必须保留；问题在于夹具/离线/测试环境没有这些 `custom_nodes` 目录时被硬拦。应让门禁在离线/夹具场景可声明节点包状态，或离线模式降级为可诊断提示，**不得为变绿而放宽生产路径**。改完须带定向回归：上述失败文件集合 + `test_offline_e2e.py`、`test_comfy_completion_window.py`、`test_production_series.py`、`test_advisory_queue.py`、`test_comfy_handoff_journal.py`、`test_v13_preparation.py`、`test_h3_compiler.py`。
+
+另有两处环境项：`test_v13_preparation.py:54` `ValueError: invalid literal for int() with base 10: ''`、一处 `UnicodeDecodeError('gbk')`。
+
+### 4C.3 同时移交：素材线缺陷 A1–A5
+
+报告已产出但**未提交**：`docs/TEST_REPORT_20261115_ASSET_IMAGE_JOURNEY_r1-20261115-assets.md`（02:23，18KB）。
+
+| 编号 | 级别 | 症状 |
+| --- | --- | --- |
+| A1 | P1 | 直接进入「项目分配」页时分配必然失败（界面显示已选、内部状态为空） |
+| A2 | P2 | 分配失败文案把三个条件混写，且与实际不满足的条件不符 |
+| A3 | P2 | 「检查并人工晋升」单击直达，界面未把技术检查与人工晋升分开呈现 |
+| A4 | P2 | 出图按钮永久禁用，且 `CATALOG_VARIANT_UNDECLARED` 未进入用户可见文本 |
+| A5 | P1 | 角色绑定链路在素材相关页面没有入口，且被「无文本模型」卡在第一跳 |
+
+按「一次只修一个缺陷」，先修 **A1** 并带定向回归。提交该报告须用显式路径 `git add docs/TEST_REPORT_20261115_ASSET_IMAGE_JOURNEY_r1-20261115-assets.md`，**禁止** `git add -A` / `git commit -a`（`AssetsWorkspace.tsx` 与 `assetsWorkspace.test.tsx` 正被并行会话改动，不可顺手提交他人在途改动）。
+
+### 4C.4 残余事实与诚实边界
+
+1. 本机 `h3_connected=false`、`production_mode=BLOCKED`，以上全部为界面层与 mock/离线验证，**未发生真实 H3 渲染，不构成成片验收**。
+2. 六项「未运行」清单不变：大纲提取与确认；分集确认；分镜草案与应用；`EPISODE_PLAN_NOT_MATERIALIZED` 双台账复现；一键开拍空槽位口径；幂等键冲突。原因：本机无任何可用文本模型（产品以 `REAL_LLM_PROVIDER_REQUIRED` 拒绝 mock 文本 profile、生产应用不装配 `mock_llm_responder`、无 Ollama 或本地 OpenAI 兼容端点）。
+3. **D1–D8 的真实生产验收（真实 H3 渲染、成片）尚未开始**，需真机同时具备可用文本模型与 ComfyUI 权重/节点包后补做。
+4. 端口占用不抢：8010/5180 导演线、8020/5190 素材线均在跑；需另起实例用 8030/5200，且只用 `scripts/start_eval_instance.ps1`。
+
 ## 5. 证据清单（截图）
 
 目录：`.local-acceptance/eval-20261115/shots/`
@@ -265,6 +325,17 @@
 | `20-run-after-fix.png` | R2 修复后视频生产页：右侧空卡补上「去导演包选择要拍的集」 | 4B：D8 |
 | `21-assets-selfloop-fixed.png` | 裁定第 3 条落地：剧本统筹页出现「去第 1 阶段确认大纲」 | 4B：D2 |
 | `22-assets-to-creative-landed.png` | 点击该动作后落到 `#d/creative`，该页给出「去配置文本模型」出口 | 4B：D2 |
+
+**R3 质检复验截图**（目录：`.local-acceptance/r3-20261115-qa/shots/`，由质检员产出）
+
+| 文件 | 内容 | 对应检查 |
+| --- | --- | --- |
+| `01-d-assets-rail-upstream.png` | `#d/assets` 右侧 rail 显示「去第 1 阶段确认大纲」，已无「去剧本统筹」 | 4C：R3-01/02/03 |
+| `02-after-click-creative.png` | 点击该动作后落到 `#d/creative` | 4C：R3-04 |
+| `03-d-creative-outline-gate.png` | 创意页 `.module-guide` + 真实禁用理由 + 「去配置文本模型」出口 | 4C：D1 / D6 |
+| `04-d-package-guide.png` | 导演包「三步：…」指引指向真实按钮 | 4C：D7 |
+| `05-d-run-action-rail.png` | `#d/run` 右侧任务卡「去导演包选择要拍的集」 | 4C：D8 |
+| `06-d-deliver-last-stage.png` | 末阶段「已经是最后一个阶段」 | 4C：D5 |
 
 ## 6. 收工声明
 

@@ -2,6 +2,7 @@ import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from
 import { useEffect, useRef, useState } from 'react';
 import { api as request, json, timeoutSignal, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { nodePackWarning } from './nodePackNotes';
 import { ApiError } from '../api';
 import { WorkerValidationGate } from './WorkerValidationGate';
 import {
@@ -588,10 +589,18 @@ export function RealProductionWizard({
           ...(chosen ? { variant_id: chosen.variant_id, catalog: chosen.catalog_id } : {}),
         }));
         if (!alive()) return;
-        await api('/setup/configuration', json('POST', {
-          project_id: projectId,
-          ...(servicePort.current ? { port: servicePort.current } : {}),
-        }));
+        const configuration = await api<{ node_pack_notes?: Array<{ missing?: string[] }> }>(
+          '/setup/configuration', json('POST', {
+            project_id: projectId,
+            ...(servicePort.current ? { port: servicePort.current } : {}),
+          }));
+        if (!alive()) return;
+        const warning = nodePackWarning(configuration.node_pack_notes);
+        if (warning) {
+          // The gate was lowered for this environment: say so instead of letting
+          // the run look complete while those nodes stay disabled.
+          setStage('workflows', { status: 'warn', note: `运行配置已生成，但${warning}` });
+        }
       } catch (error) {
         stopWith('workflows', `生成方案登记失败：${(error as Error).message}。已完成的步骤不会丢失，重新打开向导可继续。`);
         return;

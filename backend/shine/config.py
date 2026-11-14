@@ -50,6 +50,11 @@ class Settings:
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
     offline_simulation: bool = False
+    #: 节点包目录门禁模式。enforce=真实安装缺节点包必须 409 拦下（生产默认）；
+    #: diagnose=降级为可诊断提示，缺失必须被记录，不是静默通过。
+    #: 它不从环境变量读取：只有进程内显式设置（离线测试夹具）才能降级，
+    #: 机器级环境变量不得悄悄关掉生产门禁。
+    node_pack_gate: str = "enforce"
     local_voice_url: str = ""
     local_image_url: str = ""
     comfy_probe_roots: tuple[str, ...] = ()
@@ -103,6 +108,9 @@ class Settings:
             local_image_url=os.getenv("SHINE_LOCAL_IMAGE_URL", ""),
             local_voice_url=os.getenv("SHINE_LOCAL_VOICE_URL", ""),
             offline_simulation=os.getenv("SHINE_OFFLINE_SIMULATION", "") == "1",
+            # node_pack_gate is deliberately NOT read from the environment: a
+            # machine-wide variable could silently turn the production gate off.
+            # Only an in-process caller (the offline test fixture) may lower it.
             operator_id=os.getenv("SHINE_OPERATOR_ID", ""),
             operator_token_sha256=os.getenv("SHINE_OPERATOR_TOKEN_SHA256", ""),
             # The ordinary project API has no per-request authentication yet, so

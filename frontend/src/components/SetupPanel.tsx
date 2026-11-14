@@ -2,6 +2,7 @@ import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, timeoutSignal } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
 import { ApiError } from '../api';
 import { WorkerValidationGate } from './WorkerValidationGate';
@@ -549,7 +550,9 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
         withJson('POST', { project_id: projectRef.current }));
       await loadRuntime();
       await onRefresh();
-      return `受管配置已生成：${String((result as { recipe?: string }).recipe ?? '')}`;
+      const recipe = String((result as { recipe?: string }).recipe ?? '');
+      const warning = nodePackWarning((result as { node_pack_notes?: NodePackNote[] }).node_pack_notes);
+      return warning ? `受管配置已生成：${recipe}。${warning}` : `受管配置已生成：${recipe}`;
     });
   }
 
