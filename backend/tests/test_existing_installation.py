@@ -313,3 +313,41 @@ def test_install_plan_excludes_only_hash_verified_cache_from_download(prep):
         target.write_bytes(b'correct model')
         assert post(client, '/setup/install-plan', body)['download_bytes'] == 0
     assert spec['size'] > 13
+
+
+def test_a_non_git_install_reports_an_observed_version_with_its_source(tmp_path):
+    """ComfyUI 0.39.0 without a Git checkout is not "version unknown"."""
+    root = installation(tmp_path)
+    (root / 'comfyui_version.py').write_text('__version__ = "0.39.0"\n', encoding='utf-8')
+    report = existing.inspect(str(root), catalog())
+    software = report['software']
+    assert software['version_status'] == 'INSTALLED_VERSION_OBSERVED'
+    assert software['actual_version'] == '0.39.0'
+    assert software['version_source'] == 'comfyui_version.py'
+    assert software['version_confidence'] == 'MEDIUM'
+    assert software['actual_revision'] is None
+    # A release number is evidence of the software, never of the pinned commit.
+    assert software['version_evidence']['version_is_not_a_commit'] is True
+    assert software['version_evidence']['pinned_revision_compared'] is False
+
+
+def test_custom_node_inventory_reports_only_evidence_it_really_has(tmp_path):
+    root = installation(tmp_path)
+    declared = root / 'custom_nodes' / 'ComfyUI-KJNodes'
+    declared.mkdir(parents=True)
+    (declared / 'pyproject.toml').write_text('[project]\nversion = "1.4.2"\n', encoding='utf-8')
+    unknown = root / 'custom_nodes' / 'SomeUnversionedNode'
+    unknown.mkdir(parents=True)
+    (unknown / '__init__.py').write_text('# test only\n', encoding='utf-8')
+    (root / 'custom_nodes' / 'shine_h3_sampling_mode.py').write_text('# test only\n', encoding='utf-8')
+
+    report = existing.inspect(str(root), catalog())
+    packages = {row['name']: row for row in report['node_packages']['packages']}
+
+    assert packages['ComfyUI-KJNodes']['version_status'] == 'VERSION_DECLARED'
+    assert packages['ComfyUI-KJNodes']['version'] == '1.4.2'
+    assert packages['SomeUnversionedNode']['version_status'] == 'VERSION_UNKNOWN'
+    assert packages['SomeUnversionedNode']['version'] is None
+    assert packages['ComfyUI-KJNodes']['node_class_mapping'] == 'REQUIRES_RUNNING_SERVICE'
+    assert report['node_packages']['node_class_mapping_verified'] is False
+    assert 'shine_h3_sampling_mode.py' in packages

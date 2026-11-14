@@ -38,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 # --- the honest stage vocabulary -------------------------------------------
 QUEUED = "QUEUED"
+#: The plan still owns its identity, but another plan is writing the same
+#: physical target.  This is a durable waiting state, not an error: the Worker
+#: promotes it as soon as the target is free.
+WAITING_FOR_TARGET = "WAITING_FOR_TARGET"
 DOWNLOADING = "DOWNLOADING"
 RETRY_WAIT = "RETRY_WAIT"
 VERIFYING = "VERIFYING"
@@ -54,6 +58,7 @@ MOCK_VERIFIED = "MOCK_VERIFIED"
 
 STAGES = (
     QUEUED,
+    WAITING_FOR_TARGET,
     DOWNLOADING,
     RETRY_WAIT,
     VERIFYING,
@@ -87,6 +92,7 @@ TERMINAL_STAGES = frozenset(
 ACTIVE_STAGES = frozenset(
     {
         QUEUED,
+        WAITING_FOR_TARGET,
         DOWNLOADING,
         RETRY_WAIT,
         VERIFYING,
@@ -94,6 +100,21 @@ ACTIVE_STAGES = frozenset(
         VALIDATING_RUNTIME_CONTRACT,
         PAUSED,
         FAILED_RETRYABLE,
+    }
+)
+
+#: Stages that may hold the physical write right for their target.  A paused or
+#: retryable attempt is deliberately absent: it keeps its plan identity but no
+#: longer owns the directory, so unrelated plans can proceed.  ``WAITING_FOR_TARGET``
+#: is absent too - waiting is exactly the absence of the write right.
+TARGET_HOLDING_STAGES = frozenset(
+    {
+        QUEUED,
+        DOWNLOADING,
+        RETRY_WAIT,
+        VERIFYING,
+        INSTALLING,
+        VALIDATING_RUNTIME_CONTRACT,
     }
 )
 
@@ -155,6 +176,37 @@ def _iso(value):
     return value.isoformat() if value else None
 
 
+def _lease_is_live(attempt, now) -> bool:
+    """A claim is a *time-bounded* right; an expired claim is not a write lock."""
+    if attempt.lease_owner is None:
+        return False
+    expiry = attempt.lease_expires_at
+    return expiry is None or expiry > now
+
+
+def target_holder(db, storage_root: str | None, *, exclude_attempt_id: str | None = None,
+                  now=None):
+    """The attempt that currently owns this physical directory, if any.
+
+    The question is narrow on purpose: which *other* live attempt may be
+    writing these files right now?  A paused attempt keeps its plan identity
+    but has released the directory; a waiting attempt has never acquired it.
+    """
+    if not storage_root:
+        return None
+    now = now or utcnow()
+    for attempt, plan in active_attempts(db):
+        if attempt.id == exclude_attempt_id:
+            continue
+        if (attempt.stage or attempt.status) not in TARGET_HOLDING_STAGES:
+            continue
+        if not _lease_is_live(attempt, now):
+            continue
+        if normalized_storage_root((plan.payload or {}).get("storage_root")) == storage_root:
+            return attempt
+    return None
+
+
 def local_execution_enabled() -> bool:
     """The local executor stays opt-in on the authorized Windows host."""
     return os.name == "nt" and os.getenv("SHINE_ENABLE_LOCAL_EXECUTION") == "1"
@@ -186,6 +238,8 @@ def attempt_view(attempt: InstallationAttempt) -> dict:
         "pause_requested": bool(attempt.pause_requested),
         "terminal": stage in TERMINAL_STAGES,
         "resumable": stage in RESUMABLE_STAGES,
+        "waiting_for_target": stage == WAITING_FOR_TARGET,
+        "waiting_behind_attempt_id": payload.get("waiting_behind_attempt_id"),
         "created_at": _iso(attempt.created_at),
     }
 
@@ -211,8 +265,10 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str,
     The exclusive right belongs to the *physical target*, not to one plan row:
     a second tab, a second project or a fresh browser session that asks for the
     same bytes in the same directory either re-attaches to the one live attempt
-    (same plan hash) or is refused with a conflicting identity.  Two attempts
-    can never write the same files at the same time.
+    (same plan hash) or waits its turn.  A different component set in the same
+    directory is never refused with an unrecoverable conflict: it is queued as
+    ``WAITING_FOR_TARGET`` and the Worker starts it when the directory is free.
+    Two attempts can still never write the same files at the same time.
     """
     existing_id = db.scalar(active_attempt_query(plan.id).limit(1))
     if existing_id:
@@ -235,12 +291,7 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str,
                 project_id=plan.project_id,
             )
             return existing, True
-        # The same physical directory cannot receive two different component
-        # sets at once: two writers would interleave into the same files.
-        if target_root and normalized_storage_root(
-            (existing_plan.payload or {}).get("storage_root")
-        ) == target_root:
-            raise ValueError("INSTALL_TARGET_CONFLICT")
+    holder = target_holder(db, target_root)
     payload = {
         "plan_hash": plan_hash,
         "target_key": target_key,
@@ -248,14 +299,21 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str,
         "actor": actor,
         "executor": plan.payload.get("executor"),
     }
+    if holder is not None:
+        payload.update({
+            "waiting_behind_attempt_id": holder.id,
+            "waiting_behind_plan_id": holder.plan_id,
+            "waiting_since": str(utcnow()),
+        })
     if extra:
         payload.update(extra)
+    stage = WAITING_FOR_TARGET if holder is not None else QUEUED
     attempt = InstallationAttempt(
         plan_id=plan.id,
         payload=payload,
         sha256=plan_hash,
-        status=QUEUED,
-        stage=QUEUED,
+        status=stage,
+        stage=stage,
         total_bytes=int(plan.payload.get("download_bytes") or 0),
     )
     db.add(attempt)
@@ -263,10 +321,12 @@ def queue_attempt(db, plan: InstallationPlan, plan_hash: str, actor: str,
     add_audit(
         db,
         actor,
-        "LOCAL_INSTALL_QUEUED",
+        ("LOCAL_INSTALL_WAITING_FOR_TARGET" if holder is not None
+         else "LOCAL_INSTALL_QUEUED"),
         "installation_attempt",
         attempt.id,
-        {"plan_id": plan.id, "plan_hash": plan_hash},
+        {"plan_id": plan.id, "plan_hash": plan_hash,
+         "waiting_behind_attempt_id": holder.id if holder else None},
         project_id=plan.project_id,
     )
     return attempt, False
@@ -329,7 +389,7 @@ def request_cancel(db, attempt: InstallationAttempt) -> InstallationAttempt:
         raise ValueError("INSTALL_ATTEMPT_FINISHED")
     attempt.cancel_requested = True
     attempt.pause_requested = False
-    if attempt.lease_owner is None and stage in {QUEUED, PAUSED, FAILED_RETRYABLE}:
+    if attempt.lease_owner is None and stage in {QUEUED, WAITING_FOR_TARGET, PAUSED, FAILED_RETRYABLE}:
         # Nothing is running: the cancellation is already effective.  The
         # reusable .part files and the verified models are kept.
         attempt.stage = CANCELLED
@@ -348,29 +408,67 @@ def _plan_hash_matches(db, attempt: InstallationAttempt) -> bool:
 
 
 def claim_next_attempt(factory, worker_id: str, *, lease_seconds: int = LEASE_SECONDS) -> str | None:
-    """Claim one queued attempt.  The claim is a lease, not a permanent lock."""
+    """Claim one runnable attempt.  The claim is a lease, not a permanent lock.
+
+    An attempt whose physical target is still held by another live attempt is
+    moved to ``WAITING_FOR_TARGET`` and skipped; the next runnable attempt is
+    considered instead.  Fairness follows creation order, so a waiting plan
+    starts as soon as the directory is free - no user action, no error.
+    """
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         now = utcnow()
-        attempt = db.scalar(
+        candidates = db.scalars(
             select(InstallationAttempt)
             .where(
-                InstallationAttempt.stage == QUEUED,
+                InstallationAttempt.stage.in_([QUEUED, WAITING_FOR_TARGET]),
                 or_(
                     InstallationAttempt.lease_owner.is_(None),
                     InstallationAttempt.lease_expires_at <= now,
                 ),
             )
             .order_by(InstallationAttempt.created_at, InstallationAttempt.id)
-            .limit(1)
-        )
-        if attempt is None:
-            return None
-        attempt.lease_owner = worker_id
-        attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
-        attempt.heartbeat_at = now
-        attempt_id = attempt.id
-    return attempt_id
+        ).all()
+        for attempt in candidates:
+            plan = db.get(InstallationPlan, attempt.plan_id)
+            root = normalized_storage_root((plan.payload or {}).get("storage_root")) if plan else ""
+            holder = target_holder(db, root, exclude_attempt_id=attempt.id, now=now)
+            if holder is not None:
+                if attempt.stage != WAITING_FOR_TARGET:
+                    attempt.stage = WAITING_FOR_TARGET
+                    attempt.status = WAITING_FOR_TARGET
+                    attempt.payload = {
+                        **(attempt.payload or {}),
+                        "waiting_behind_attempt_id": holder.id,
+                        "waiting_behind_plan_id": holder.plan_id,
+                        "waiting_since": str(now),
+                    }
+                    attempt.sha256 = graph_hash(attempt.payload)
+                    add_audit(
+                        db, worker_id, "INSTALL_ATTEMPT_WAITING_FOR_TARGET",
+                        "installation_attempt", attempt.id,
+                        {"waiting_behind_attempt_id": holder.id,
+                         "target_key": (attempt.payload or {}).get("target_key")},
+                    )
+                continue
+            attempt.lease_owner = worker_id
+            attempt.lease_expires_at = now + timedelta(seconds=lease_seconds)
+            attempt.heartbeat_at = now
+            # The claimed attempt now holds the directory.  Recording QUEUED
+            # here (before the slow stage starts) is what makes a second
+            # Worker see the write right as taken.
+            attempt.stage = QUEUED
+            attempt.status = QUEUED
+            payload = dict(attempt.payload or {})
+            if payload.pop("waiting_behind_attempt_id", None) is not None:
+                payload["waiting_completed"] = True
+            payload.pop("waiting_behind_plan_id", None)
+            payload.pop("waiting_since", None)
+            payload["claimed_at"] = str(now)
+            attempt.payload = payload
+            attempt_id = attempt.id
+            return attempt_id
+    return None
 
 
 def renew_lease(factory, attempt_id: str, worker_id: str, *, lease_seconds: int = LEASE_SECONDS) -> bool:

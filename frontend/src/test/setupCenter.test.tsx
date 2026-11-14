@@ -133,4 +133,46 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
   });
+
+  it('后端已核验并绑定的权重不被界面当成缺失而重新下载', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse({
+      configured: true, layer: 'GRAPH_VERIFIED', families: {}, renderer: { state: 'RUNNING' },
+      blockers: [], upstream: { required_bytes: 0 },
+    }) });
+    stub.add({ method: 'GET', pattern: /setup\/variant-availability/, respond: () => jsonResponse({
+      adopted_root: 'D:\\Trae\\ComfyUI',
+      variants: [{
+        variant_id: 'h3-ref2va-int8-convrot', label: '标准', title: '标准',
+        acceptance_status: 'SUPPORTED', downloadable: true,
+        installed: true, verified: true, bound: true,
+        profiles_registered: false, runtime_validated: false,
+        selectable_for_preparation: true, trial_ready: false, production_ready: false,
+        available: false, reason: '生成方案还没登记',
+        facts: {
+          FILES_FOUND: true, FILES_VERIFIED: true, RESOURCE_REGISTERED: true,
+          INSTANCE_BOUND: true, WORKFLOW_VALIDATED: false, TRIAL_READY: false,
+          PRODUCTION_READY: false,
+        },
+        binding: {
+          instance_id: 'local-8188', mode: 'ADOPTED_EXTERNAL_INSTALLATION',
+          source: 'ADOPTED_REGISTRATION', root: 'D:\\Trae\\ComfyUI',
+          evidence: ['ADOPTED_INSTALLATION_FAMILY_DIRECTORY'],
+        },
+        blocking_reasons: [{ code: 'PROFILES_NOT_REGISTERED', message: '生成方案还没登记到当前作品' }],
+        next_step: {
+          code: 'PROFILE_NOT_REGISTERED', label: '把这个变体的生成方案登记到当前作品',
+          reason: '当前作品还没有登记这套生成方案。', action: 'REGISTER_PROFILES', blocked: false,
+        },
+      }],
+    }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    await detect(user);
+
+    expect(screen.getByText('本机已核验 · 已绑定')).toBeTruthy();
+    expect(screen.getByTestId('setup-next-step')).toHaveTextContent('把这个变体的生成方案登记到当前作品');
+    // H3 is verified by the backend, and the image capability is already
+    // present, so nothing needs downloading: the same 44GB is never planned twice.
+    expect(screen.getByRole('button', { name: /确认并完成配置（不下载）/ })).toBeEnabled();
+  });
 });
