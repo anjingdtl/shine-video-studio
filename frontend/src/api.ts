@@ -57,7 +57,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   INSTALL_BACKUP_MISSING: '安装换入前缺少可恢复的原目录备份，系统没有改动文件。请到专业设置查看详情。',
   INSTALL_DESTINATION_CHANGED: '已安装目录的内容与固定清单不一致，系统没有改动它。请到专业设置查看差异。',
   APPROVAL_REQUIRED_OR_REPLAYED: '这次确认已过期或已经用过。请重新加载安装列表后再确认一次。',
-  STOP_WORKER_BEFORE_SERVICE_VALIDATION: '本机后台制作服务正在运行，重新验证需要先停止它（一键启动器窗口里可以停止后台服务）。首次安装验证不受影响。',
+  STOP_WORKER_BEFORE_SERVICE_VALIDATION: '本机后台制作服务正在运行，重新验证需要先停止它：在左侧「工作栈」监控里点「停止 Worker」，验证完成后再点「启动 Worker」恢复。首次安装验证不受影响。',
   LLM_NOT_CONFIGURED: '还没有给这个角色配置模型服务。请先到基础配置里配置文本模型。',
   TEXT_ROLE_NOT_READY: '这一步需要的文本工种还没有配置好。只需配置它自己，其它工种不影响。',
   REMOTE_AGENT_CONSENT_REQUIRED: '当前模型在远端，需要你明确同意才会把剧本文字发出去。',
@@ -315,6 +315,66 @@ export async function restartStack(): Promise<{ status?: string; code?: string; 
 export async function restartStatus(): Promise<RestartStatus> {
   const response = await fetch(`${supervisorBase()}/restart-status`, { signal: timeoutSignal(5000) });
   return response.json();
+}
+
+export type LifecycleStatus = {
+  idle_shutdown_minutes: number;
+  ever_seen: boolean;
+  last_seen_age_s: number | null;
+  stack_running: boolean;
+  worker: 'running' | 'stopped' | 'unknown' | 'absent';
+  last_stop: { at: number; kind: string; ok: boolean; detail: string } | null;
+};
+
+const supervisorHeaders = { 'Content-Type': 'application/json', 'X-Shine-Local-Action': '1' };
+
+/** 页面在线心跳：关页即停报，监督进程据此在空闲宽限后自动退出整栈。 */
+export async function presencePing(): Promise<void> {
+  try {
+    await fetch(`${supervisorBase()}/presence`, {
+      method: 'POST', headers: supervisorHeaders, signal: timeoutSignal(5000),
+    });
+  } catch {
+    /* 监督进程不在（未用启动器）时退化为现状，不刷错误 */
+  }
+}
+
+export async function lifecycleStatus(): Promise<LifecycleStatus> {
+  const response = await fetch(`${supervisorBase()}/lifecycle`, { signal: timeoutSignal(5000) });
+  return response.json();
+}
+
+export async function stopStack(): Promise<{ status?: string; code?: string; blockers?: string[] }> {
+  const response = await fetch(`${supervisorBase()}/stop-stack`, {
+    method: 'POST', headers: supervisorHeaders, signal: timeoutSignal(15000),
+  });
+  return response.json();
+}
+
+export async function stopWorker(): Promise<{ status?: string; code?: string; detail?: string }> {
+  const response = await fetch(`${supervisorBase()}/stop-worker`, {
+    method: 'POST', headers: supervisorHeaders, signal: timeoutSignal(30000),
+  });
+  return response.json();
+}
+
+export async function startWorker(): Promise<{ status?: string; code?: string; detail?: string }> {
+  const response = await fetch(`${supervisorBase()}/start-worker`, {
+    method: 'POST', headers: supervisorHeaders, signal: timeoutSignal(30000),
+  });
+  return response.json();
+}
+
+/** 服务复核验前置：停 Worker 并等心跳过期（约 30s），不伪造心跳。 */
+export async function stopWorkerAndWaitOffline(): Promise<void> {
+  const result = await stopWorker();
+  if (result.code) throw new Error(result.detail || result.code);
+  for (let tick = 0; tick < 20; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+    const state = await lifecycleStatus();
+    if (state.worker !== 'running') return;
+  }
+  throw new Error('Worker 心跳尚未过期，请稍后重试。');
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

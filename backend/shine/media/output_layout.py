@@ -404,6 +404,36 @@ def active_work_blockers(db) -> list[str]:
     return blockers
 
 
+def active_work_details(db) -> dict:
+    """The same live work as :func:`active_work_blockers`, but as objects.
+
+    Read-only; the migration gate itself is unchanged. The panel uses this to
+    name the blocking tasks and point at the place they can be handled.
+    """
+    from shine.asset_center.models import LibraryRenderTask
+    from shine.comfyops.ownership import LIVE_SERIES_STATUSES
+    from shine.models import Job, ProductionSeries, Project
+    from shine.production.models import ACTIVE_RUN_STATUSES, ProductionRun
+
+    def title(project_id):
+        project = db.get(Project, project_id) if project_id else None
+        return project.title if project is not None else None
+
+    jobs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+            for row in db.scalars(select(Job).where(
+                Job.status.in_(_ACTIVE_JOB_STATUSES)).limit(20))]
+    series = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+              for row in db.scalars(select(ProductionSeries).where(
+                  ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(20))]
+    runs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+            for row in db.scalars(select(ProductionRun).where(
+                ProductionRun.status.in_(ACTIVE_RUN_STATUSES)).limit(20))]
+    library = [{"id": row.id, "status": row.status}
+               for row in db.scalars(select(LibraryRenderTask).where(
+                   LibraryRenderTask.status.in_(_ACTIVE_LIBRARY_TASKS)).limit(20))]
+    return {"jobs": jobs, "series": series, "runs": runs, "library_tasks": library}
+
+
 def validate_output_root(path: str | None, settings) -> Path | None:
     """Normalise and prove the directory can receive outputs.  ``None`` = default."""
     raw = str(path or "").strip()

@@ -73,9 +73,11 @@ describe('空数据库与两层界面入口', () => {
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
     // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
     expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    // 导演页只显示同一份服务端事实的只读摘要：完整整备在「设置 → 制作环境」。
+    // 完整整备收进导演页：没有作品时确认按钮禁用，并明确要求先建作品。
     expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeNull();
+    const confirms = screen.getAllByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
+    expect(confirms.length).toBeGreaterThan(0);
+    for (const button of confirms) expect(button).toBeDisabled();
   });
 
   it('无项目时依赖项目的操作有明确说明', async () => {

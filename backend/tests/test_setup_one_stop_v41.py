@@ -200,6 +200,11 @@ def test_configuration_uses_the_resolved_port_not_a_default(prep, monkeypatch):
     project = create_project(client)
     root, identity = _managed_instance(prep, port=8189)
     (root / "custom_nodes").mkdir(parents=True, exist_ok=True)
+    # A real H3 installation carries the pinned node packs; the configuration
+    # contract now refuses by name when their directories are absent.
+    for cid, comp in deployment._component_map(deployment.load_default_catalog()).items():
+        if comp["kind"] == "node":
+            (root / "custom_nodes" / cid).mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(deployment, "ENV_PATH", settings.data_dir / "isolated-env")
     monkeypatch.setattr("shine.comfyops.host_env.probe_gpu",
                         lambda: {"status": "OK", "uuid": "GPU-TEST"})

@@ -409,7 +409,35 @@ def _advisory_review_status(blockers: list[dict]) -> dict:
     }
 
 
-def _validate_workflows_against_object_info(contracts: dict, object_info: dict) -> None:
+def renderer_log_evidence(log_file) -> dict:
+    """Read-only tail of the managed renderer log with import failures named.
+
+    The owned process group discards inherited std handles, so the bootstrap
+    writes its own log; a workflow contract failure must point at the reason
+    (a node pack that failed to import) instead of leaving it to guesswork.
+    """
+    if not log_file:
+        return {}
+    path = Path(str(log_file))
+    evidence: dict = {"renderer_log": str(path), "import_errors": []}
+    if not path.is_file():
+        return evidence
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
+    except OSError:
+        return evidence
+    markers = ("Cannot import", "Failed to load", "ImportError",
+               "ModuleNotFoundError", "Traceback")
+    excerpt: list[str] = []
+    for index, line in enumerate(lines):
+        if any(marker in line for marker in markers):
+            excerpt.extend(lines[index:index + 6])
+    evidence["import_errors"] = excerpt[-60:]
+    return evidence
+
+
+def _validate_workflows_against_object_info(contracts: dict, object_info: dict,
+                                            log_evidence: dict | None = None) -> None:
     for name, profile in contracts.items():
         validation = validate_against_object_info(profile.graph, profile.parameter_map, object_info)
         if validation["missing_nodes"] or validation["missing_inputs"]:
@@ -418,6 +446,7 @@ def _validate_workflows_against_object_info(contracts: dict, object_info: dict) 
                 "profile": name,
                 "missing_nodes": validation["missing_nodes"],
                 "missing_inputs": validation["missing_inputs"],
+                **(log_evidence or {}),
             })
 
 
@@ -533,7 +562,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
     object_info = renderer["object_info"]
-    _validate_workflows_against_object_info(contracts, object_info)
+    _validate_workflows_against_object_info(
+        contracts, object_info, log_evidence=renderer_log_evidence(recipe.get("log_file")))
     _validate_core_mode_nodes(object_info)
     if renderer["port"] != recipe["renderer"].get("port"):
         raise HTTPException(409, "SERVICE_VALIDATION_RENDERER_PORT_CHANGED")

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, CircleStop, Loader2, RefreshCw } from 'lucide-react';
-import { api, json } from '../api';
+import { api, json, lifecycleStatus, startWorker, stopStack, stopWorker, type LifecycleStatus } from '../api';
 
 type WorkStack = {
   id: string;
@@ -44,6 +44,9 @@ const STATE_TONE: Record<string, string> = {
  */
 export function WorkStackMonitor() {
   const [snapshot, setSnapshot] = useState<WorkStackSnapshot | null>(null);
+  const [lifecycle, setLifecycle] = useState<LifecycleStatus | null>(null);
+  const [confirmExit, setConfirmExit] = useState(false);
+  const [workerBusy, setWorkerBusy] = useState(false);
   const [busyId, setBusyId] = useState('');
   const [confirmId, setConfirmId] = useState('');
   const [message, setMessage] = useState('');
@@ -57,6 +60,12 @@ export function WorkStackMonitor() {
       if (alive.current) setSnapshot(value);
     } catch {
       /* 后端未就绪时保持上一次快照，不刷错误 */
+    }
+    try {
+      const value = await lifecycleStatus();
+      if (alive.current) setLifecycle(value);
+    } catch {
+      /* 监督进程不在时保持上一次状态 */
     }
   }, []);
 
@@ -116,9 +125,56 @@ export function WorkStackMonitor() {
       <div className="stack-monitor-meta">
         <span>Worker {counts?.workers_online ?? 0} 在线</span>
         <span>出片中 {counts?.running_jobs ?? 0}</span>
+        <span>{lifecycle
+          ? (lifecycle.idle_shutdown_minutes > 0
+            ? `关页空闲 ${lifecycle.idle_shutdown_minutes} 分钟后自动退出`
+            : '自动退出已关闭')
+          : '生命周期未知'}</span>
         <button type="button" className="stack-monitor-refresh" title="刷新工作栈" onClick={() => void load()}>
           <RefreshCw size={11} />
         </button>
+      </div>
+      <div className="stack-monitor-meta">
+        <button type="button" className="ghost-mini" disabled={workerBusy}
+          title="服务复核验需要「API 活着 + Worker 停止」；验证完成后记得启动恢复"
+          onClick={() => void (async () => {
+            setWorkerBusy(true);
+            setMessage('');
+            try {
+              const result = lifecycle?.worker === 'running' ? await stopWorker() : await startWorker();
+              setMessage(result.code
+                ? `Worker 操作被拒绝：${result.detail || result.code}`
+                : (lifecycle?.worker === 'running' ? 'Worker 已停止；心跳约 30 秒后过期，可继续服务核验。' : 'Worker 已启动。'));
+              await load();
+            } catch (error) {
+              setMessage(error instanceof Error ? error.message : String(error));
+            } finally {
+              setWorkerBusy(false);
+            }
+          })()}>
+          {workerBusy ? '…' : lifecycle?.worker === 'running' ? '停止 Worker' : '启动 Worker'}
+        </button>
+        <button type="button" className="ghost-mini"
+          onClick={() => void (async () => {
+            if (!confirmExit) {
+              setConfirmExit(true);
+              setMessage('停止整个后台（API/Worker/Web）并释放显存？有活任务时会被拒绝，不会打断在途渲染。');
+              return;
+            }
+            setConfirmExit(false);
+            setMessage('');
+            try {
+              const result = await stopStack();
+              setMessage(result.code === 'STACK_BUSY'
+                ? `现在还不能停止：${(result.blockers ?? []).join('；')}`
+                : '后台正在停止…停止后本页将不可用，再次使用请双击桌面快捷方式。');
+            } catch (error) {
+              setMessage(error instanceof Error ? error.message : String(error));
+            }
+          })()}>
+          {confirmExit ? '确认退出' : '停止后台并退出'}
+        </button>
+        {confirmExit && <button type="button" className="ghost-mini" onClick={() => { setConfirmExit(false); setMessage(''); }}>取消</button>}
       </div>
       <div className="stack-monitor-list" role="log" aria-live="polite">
         {visible.length === 0 && <p className="stack-monitor-empty">当前没有后台进程在跑。</p>}

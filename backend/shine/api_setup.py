@@ -778,6 +778,22 @@ def catalog_summary():
     }
 
 
+@router.get("/renderer-log")
+def renderer_log(instance_id: str, settings: SettingsDep):
+    """Read-only import-log evidence for one managed renderer.
+
+    The bootstrap writes the renderer's own stdout/stderr here; a contract
+    failure or a node pack that would not import is diagnosed from this tail
+    instead of guesswork. No process is started and nothing is mutated.
+    """
+    from shine.comfyops.service_validation import renderer_log_evidence
+    if not instance_id or len(instance_id) > 64 or not all(
+            ch.isalnum() or ch == "-" for ch in instance_id):
+        raise HTTPException(422, "INSTANCE_ID_INVALID")
+    path = settings.comfyops_dir / "logs" / f"renderer-{instance_id}.log"
+    return renderer_log_evidence(str(path))
+
+
 @router.post("/install-plan")
 def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession):
     """Create an install plan - after the server re-checked the hardware.
@@ -1712,27 +1728,38 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     fetched.  The actual download plan is still created by ``POST
     /install-plan`` - one approval entry, not two.
     """
-    from shine.comfyops.setup_summary import capability_report, resolve_installation
+    from shine.comfyops.setup_summary import capability_report, resolve_installation, runtime_closure_gap
     from shine.services import require_project
 
     require_project(db, body.project_id)
     resolved = resolve_installation(db, settings, path=body.installation_path,
                                     discovered=_discovered_roots(settings, db))
     selected = resolved.get("selected") or {}
+    gap = runtime_closure_gap(db, settings, selected)
     reports = {capability: capability_report(db, settings, capability, installation=selected,
                                              project_id=body.project_id)
                for capability in body.capabilities}
     plans = []
     for capability, report in reports.items():
         missing = report.get("missing_files") or []
+        components = sorted({row["component_id"] for row in missing})
+        if capability == "h3":
+            # One plan covers the bare-machine closure: weights plus the runtime
+            # (source / wheels / node packs) the instance ladder will install.
+            components = sorted(set(components) | set(gap["missing_components"]))
+        from shine.comfyops.setup_summary import IMAGE_CATALOG
+        catalog = (deployment.load_deployment_catalog(IMAGE_CATALOG)
+                   if capability == "image" else deployment.load_default_catalog())
+        cmap = deployment._component_map(catalog)
         plans.append({
             "capability": capability,
             "label": report["label"],
             "catalog": report.get("catalog"),
-            "download_bytes": sum(int(row.get("size") or 0) for row in missing),
-            "components": sorted({row["component_id"] for row in missing}),
-            "files": len(missing),
-            "needs_download": bool(missing),
+            "download_bytes": sum(int(f.get("size") or 0)
+                                  for cid in components for f in cmap.get(cid, {}).get("files", [])),
+            "components": components,
+            "files": sum(len(cmap.get(cid, {}).get("files", [])) for cid in components),
+            "needs_download": bool(components),
             "needs_recipe": capability in {"h3", "image"},
             "starts_services": bool(body.verify_runtime) and capability == "h3",
             "changes_external_installation": False,
@@ -1740,6 +1767,7 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     return {
         "project_id": body.project_id,
         "installation": resolved,
+        "runtime_gap": gap,
         "capabilities": reports,
         "plans": plans,
         "download_bytes": sum(row["download_bytes"] for row in plans),
@@ -1766,7 +1794,8 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     require_project(db, body.project_id)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
                     installation_path=body.installation_path, port=body.port,
-                    variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor)
+                    variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,
+                    settings=settings)
     db.commit()
     return {"status": value.get("status"), "task_id": value.get("task_id"),
             "steps": [row["id"] for row in value.get("steps") or []],

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, FolderTree, HardDrive, RefreshCw } from 'lucide-react';
-import { api, json } from '../api';
+import { api, json, startWorker } from '../api';
 
 type Layout = { material: string; video: string; voice: string; material_center: string };
 
@@ -15,6 +15,13 @@ export type OutputDirectoryState = {
   free_gb: number;
   migration: { root?: string; started_at?: string; actor?: string } | null;
   blockers: string[];
+  blocker_details?: {
+    jobs: Array<{ id: string; status: string; project_title: string | null }>;
+    series: Array<{ id: string; status: string; project_title: string | null }>;
+    runs: Array<{ id: string; status: string; project_title: string | null }>;
+    library_tasks: Array<{ id: string; status: string }>;
+  };
+  worker_online?: boolean;
 };
 
 type MigrationResult = {
@@ -137,7 +144,34 @@ export default function OutputDirectoryPanel() {
     </div>}
     {blockers.length > 0 && <div className="blocked-callout">
       <RefreshCw size={13} />
-      <span>现在还不能迁移：{blockers.join('；')}。等这些任务结束后再切换目录。</span>
+      <span>现在还不能迁移：{blockers.join('；')}。</span>
+      {state.worker_online === false && (
+        <button type="button" className="btn-secondary" onClick={() => void (async () => {
+          setMessage('');
+          try {
+            const result = await startWorker();
+            setMessage(result.code ? `Worker 没能启动：${result.detail || result.code}` : 'Worker 已启动，等任务完成后即可迁移。');
+            await load();
+          } catch (error) {
+            setMessage(error instanceof Error ? error.message : String(error));
+          }
+        })()}>启动 Worker，让任务继续完成</button>
+      )}
+      <ul className="blocker-details">
+        {(state.blocker_details?.jobs ?? []).map((row) => (
+          <li key={row.id}>镜头任务 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+        ))}
+        {(state.blocker_details?.series ?? []).map((row) => (
+          <li key={row.id}>生产序列 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+        ))}
+        {(state.blocker_details?.runs ?? []).map((row) => (
+          <li key={row.id}>整片运行 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+        ))}
+        {(state.blocker_details?.library_tasks ?? []).map((row) => (
+          <li key={row.id}>素材生成 {row.id.slice(0, 8)} · {row.status}</li>
+        ))}
+      </ul>
+      <span>到「视频生产」页可暂停/核对/结案这些任务；Worker 停止时先启动它。等它们结束后再切换目录。</span>
     </div>}
     <div className="inline-actions">
       <button className="btn-primary" disabled={busy || picking || blockers.length > 0} onClick={() => void choose()}>

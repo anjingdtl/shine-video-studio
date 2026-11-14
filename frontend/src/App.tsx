@@ -41,7 +41,7 @@ import { GuideTip } from './components/GuideTip';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
-import { getDirectorOverview, getJourney, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
+import { getDirectorOverview, getJourney, presencePing, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import StorageSettings from './components/StorageSettings';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
 import type { Asset, Project } from './api';
@@ -466,6 +466,12 @@ function App() {
 
   /** 进入导演层基础配置，可直达指定分区；普通入口回到①安装与下载。
    *  导演模式内所有“去配置模型/生成方案”的引导都走这里，不再甩去专业模式。 */
+  useEffect(() => {
+    void presencePing();
+    const timer = window.setInterval(() => { void presencePing(); }, 20000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   function goToDirectorSetup(tab: 'env' | 'models' | 'extra' = 'env') {
     setSetupFocusTab(tab);
     setUi('director');

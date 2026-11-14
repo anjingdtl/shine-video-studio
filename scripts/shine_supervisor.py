@@ -1,18 +1,29 @@
-"""Resident loopback supervisor that can restart the Shine stack from the page.
+"""Resident loopback supervisor: the work stack's lifecycle owner.
 
 The web page is served by the API it would restart, so a dead backend cannot be
 revived through any API call. This small resident process, started by the
 launcher and recorded OUTSIDE ``run/processes.json`` (so ``stop_shine.py`` never
-kills it mid-restart), owns that one action.
+kills it mid-restart), owns the stack's lifecycle actions:
+
+* ``POST /restart-stack`` — identity-verified stop + idempotent start (unchanged);
+* ``POST /presence`` — the page reports it is open; a closed tab stops pinging;
+* ``GET /lifecycle`` — presence, policy and last stop, for the page to display;
+* ``POST /stop-stack`` — explicit exit: stop the stack and release the backends;
+* ``POST /stop-worker`` / ``POST /start-worker`` — worker-level control so service
+  re-validation can reach its "API alive, Worker stopped" precondition;
+* a watchdog that auto-stops the stack once the page has been closed and the
+  machine is idle past a grace period. Live production is never interrupted:
+  while work exists the watchdog waits, and a stack that never saw a page
+  (headless / script usage) is never auto-stopped.
 
 Safety contract:
   * binds 127.0.0.1 only; a cross-site ``Origin`` is refused, so a remote page
-    cannot trigger a restart (the local-action marker alone is not enough);
-  * the mutating endpoint requires the same-origin ``x-shine-local-action``
+    cannot trigger any action (the local-action marker alone is not enough);
+  * every mutating endpoint requires the same-origin ``x-shine-local-action``
     marker used by the rest of the personal-desktop workbench;
-  * a restart is refused while live work exists (active jobs / series / GPU
-    leases / installing attempts) via the product idle gate — never a silent
-    kill of an in-flight render;
+  * stop/restart/worker-stop are refused while live work exists (active jobs /
+    series / runs / GPU leases / installing attempts / deliveries) via the
+    product idle gates — never a silent kill of an in-flight render;
   * stop and start reuse the identity-verified ``stop_shine.py`` and the
     idempotent ``start_shine.ps1``; no PID-only kill is introduced here.
 """
@@ -23,6 +34,7 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +43,8 @@ from urllib.parse import urlparse
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8790
+DEFAULT_IDLE_SHUTDOWN_MINUTES = 5
+WATCHDOG_TICK_SECONDS = 20
 
 _STATE = {
     "phase": "idle",  # idle | stopping | starting | ready | failed | refused
@@ -39,6 +53,8 @@ _STATE = {
     "finished_at": None,
 }
 _LOCK = threading.Lock()
+_PRESENCE = {"last_seen": None, "ever_seen": False}
+_LAST_STOP: dict | None = None
 
 
 def _loopback_origin(origin: str | None) -> bool:
@@ -48,19 +64,22 @@ def _loopback_origin(origin: str | None) -> bool:
     return parsed.hostname in ("127.0.0.1", "localhost", "::1")
 
 
-def _idle_blocker(data_dir: Path) -> str | None:
-    """The product idle gate; returns a named code when live work exists."""
+def _settings(data_dir: Path):
     from shine.config import Settings
-    from shine.comfyops.runtime_configuration import require_idle_configuration
-    from shine.db import make_engine, make_session_factory
-    from fastapi import HTTPException
-
-    settings = Settings(
+    return Settings(
         data_dir=data_dir,
         database_url=os.getenv("SHINE_DATABASE_URL")
         or f"sqlite:///{(data_dir / 'shine.db').as_posix()}",
     )
-    engine = make_engine(settings.database_url)
+
+
+def _idle_blocker(data_dir: Path) -> str | None:
+    """The product idle gate; returns a named code when live work exists."""
+    from shine.comfyops.runtime_configuration import require_idle_configuration
+    from shine.db import make_engine, make_session_factory
+    from fastapi import HTTPException
+
+    engine = make_engine(_settings(data_dir).database_url)
     factory = make_session_factory(engine)
     try:
         with factory() as db:
@@ -72,10 +91,129 @@ def _idle_blocker(data_dir: Path) -> str | None:
         engine.dispose()
 
 
-def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
+def _stack_blockers(data_dir: Path) -> list[str]:
+    """Everything that means the stack still has work to do.
+
+    The union of the configuration idle gate (leases / active jobs / live
+    series / installing attempts), the media work blockers (jobs / series /
+    runs / library tasks), creative script tasks and pending deliveries.
+    """
+    from sqlalchemy import func, select
+    from shine.comfyops.runtime_configuration import require_idle_configuration
+    from shine.db import make_engine, make_session_factory
+    from shine.media.output_layout import active_work_blockers
+    from shine.models import AgentTaskRecord
+    from shine.media.delivery_models import DeliveryOrder
+    from fastapi import HTTPException
+
+    blockers: list[str] = []
+    engine = make_engine(_settings(data_dir).database_url)
+    factory = make_session_factory(engine)
+    try:
+        with factory() as db:
+            try:
+                require_idle_configuration(db)
+            except HTTPException as exc:
+                blockers.append(str(exc.detail))
+            blockers.extend(active_work_blockers(db))
+            from shine.director.creative import SCRIPT_TASK_ROLE_ID
+            creative = db.scalar(
+                select(func.count(AgentTaskRecord.id)).where(
+                    AgentTaskRecord.status.in_(["QUEUED", "RUNNING"]),
+                    AgentTaskRecord.role_id.in_([SCRIPT_TASK_ROLE_ID, "creative_brief_authoring"]),
+                )) or 0
+            if creative:
+                blockers.append(f"{creative} 个创意剧本任务待执行或正在生成")
+            deliveries = db.scalar(
+                select(func.count(DeliveryOrder.id)).where(
+                    DeliveryOrder.status.in_(["PENDING", "ASSEMBLING"]))) or 0
+            if deliveries:
+                blockers.append(f"{deliveries} 个成片交付待装配")
+    finally:
+        engine.dispose()
+    return blockers
+
+
+def auto_stop_decision(*, now: float, last_seen: float | None, ever_seen: bool,
+                       minutes: float, stack_running: bool,
+                       blockers: list[str]) -> tuple[bool, str]:
+    """Pure watchdog decision; kept separate so it is unit-testable."""
+    if minutes <= 0:
+        return False, "自动退出已关闭"
+    if not ever_seen or last_seen is None:
+        return False, "页面从未打开（无头/脚本用法不自动退出）"
+    if not stack_running:
+        return False, "工作栈不在运行"
+    if blockers:
+        return False, "有活工作：" + "；".join(blockers)
+    if now - last_seen < minutes * 60:
+        return False, "关页宽限期内"
+    return True, "页面已关闭且空闲超过宽限期"
+
+
+def _venv_python() -> Path:
     python = REPO_ROOT / "backend" / ".venv" / "Scripts" / "python.exe"
     if not python.is_file():  # posix dev checkout
         python = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
+    return python
+
+
+def _run_stop(data_dir: Path, kind: str) -> None:
+    global _LAST_STOP
+    try:
+        stop = subprocess.run(
+            [str(_venv_python()), str(REPO_ROOT / "scripts" / "stop_shine.py"),
+             "--data-dir", str(data_dir)],
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
+        )
+        if stop.returncode not in (0, 1):
+            with _LOCK:
+                _LAST_STOP = {"at": time.time(), "kind": kind,
+                              "detail": f"停止未完全收尾（exit {stop.returncode}）",
+                              "ok": False}
+            return
+        release = subprocess.run(
+            [str(_venv_python()), str(REPO_ROOT / "scripts" / "release_residual_backends.py"),
+             "--data-dir", str(data_dir)],
+            capture_output=True, text=True, timeout=300,
+        )
+        with _LOCK:
+            _LAST_STOP = {
+                "at": time.time(), "kind": kind, "ok": True,
+                "detail": "后台已停止，显存已释放。"
+                if release.returncode == 0 else
+                f"后台已停止；显存释放未完全确认（exit {release.returncode}）。",
+            }
+    except Exception as exc:  # noqa: BLE001 - surfaced, never silent
+        with _LOCK:
+            _LAST_STOP = {"at": time.time(), "kind": kind, "ok": False,
+                          "detail": f"停止异常：{exc}"}
+
+
+def _watchdog(data_dir: Path, minutes: float) -> None:
+    while True:
+        time.sleep(WATCHDOG_TICK_SECONDS)
+        try:
+            with _LOCK:
+                busy_restart = _STATE["phase"] in ("stopping", "starting")
+                presence = dict(_PRESENCE)
+            if busy_restart:
+                continue
+            stack_running = (data_dir / "run" / "processes.json").is_file()
+            blockers = _stack_blockers(data_dir) if stack_running else []
+            stop, reason = auto_stop_decision(
+                now=time.time(), last_seen=presence["last_seen"],
+                ever_seen=presence["ever_seen"], minutes=minutes,
+                stack_running=stack_running, blockers=blockers)
+            if stop:
+                _run_stop(data_dir, "auto")
+        except Exception:  # noqa: BLE001 - the watchdog must never die
+            continue
+
+
+def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
+    python = _venv_python()
     try:
         with _LOCK:
             _STATE.update(phase="stopping", detail="身份核验停止旧栈…",
@@ -115,11 +253,127 @@ def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
             _STATE.update(phase="failed", detail=f"重启异常：{exc}", finished_at=time.time())
 
 
+def _read_manifest(data_dir: Path) -> dict | None:
+    path = data_dir / "run" / "processes.json"
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+
+
+def _worker_state(manifest: dict | None) -> str:
+    from shine.comfyops.installer import process_identity
+    if not manifest:
+        return "absent"
+    entry = next((row for row in manifest.get("processes", [])
+                  if row.get("name") == "worker"), None)
+    if not entry:
+        return "absent"
+    state = "stopped"
+    for owner in entry.get("owners", []):
+        try:
+            current = process_identity(owner.get("pid"))
+        except (OSError, ValueError):
+            return "unknown"
+        if current is not None and current == owner.get("birth"):
+            return "running"
+        if current is not None:
+            state = "unknown"
+    return state
+
+
+def _stop_worker(data_dir: Path) -> tuple[int, dict]:
+    import stop_shine
+    manifest = _read_manifest(data_dir)
+    if not manifest:
+        return 409, {"code": "STACK_NOT_RUNNING"}
+    entry = next((row for row in manifest.get("processes", [])
+                  if row.get("name") == "worker"), None)
+    if not entry:
+        return 409, {"code": "WORKER_NOT_RECORDED"}
+    # A temporary single-entry manifest: the real record stays untouched, so a
+    # later whole-stack stop skips the gone worker and the next launcher start
+    # reconciles the half stack through its existing safe path.
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                     encoding="utf-8") as handle:
+        json.dump({"processes": [entry]}, handle)
+        temp_path = Path(handle.name)
+    try:
+        result = stop_shine.stop_manifest(temp_path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+    if result != 0:
+        return 409, {"code": "WORKER_STOP_UNRESOLVED",
+                     "detail": "Worker 进程身份无法核验，未强行终止；请走对账。"}
+    return 200, {"status": "STOPPED",
+                 "detail": "Worker 已停止；心跳约 30 秒后过期，即可继续服务核验。"}
+
+
+def _start_worker(data_dir: Path) -> tuple[int, dict]:
+    import stop_shine
+    import shine_processes
+    from shine.comfyops.installer import process_identity
+    manifest = _read_manifest(data_dir)
+    if not manifest:
+        return 409, {"code": "STACK_NOT_RUNNING"}
+    if _worker_state(manifest) == "running":
+        return 409, {"code": "WORKER_ALREADY_RUNNING"}
+    if _worker_state(manifest) == "unknown":
+        return 409, {"code": "WORKER_STATE_UNVERIFIED"}
+    python = _venv_python()
+    log_dir = data_dir / "run" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    env = {**os.environ, "SHINE_DATA_DIR": str(data_dir), "PYTHONUNBUFFERED": "1"}
+    if manifest.get("database_url"):
+        env["SHINE_DATABASE_URL"] = manifest["database_url"]
+    if manifest.get("render_provider"):
+        env["SHINE_RENDER_PROVIDER"] = manifest["render_provider"]
+    out = open(log_dir / "worker.out.log", "ab")
+    err = open(log_dir / "worker.err.log", "ab")
+    try:
+        process = subprocess.Popen(
+            [str(python), "-m", "shine.worker"], cwd=str(REPO_ROOT), env=env,
+            stdout=out, stderr=err,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    finally:
+        out.close()
+        err.close()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and process.poll() is None:
+        time.sleep(0.1)
+    if process.poll() is not None:
+        return 409, {"code": "WORKER_START_FAILED",
+                     "detail": "Worker 启动后立即退出，见 run/logs/worker.err.log。"}
+    birth = process_identity(process.pid)
+    owners = shine_processes.snapshot(process.pid, birth)
+    guard = stop_shine._acquire_startup_guard(data_dir)
+    try:
+        manifest = _read_manifest(data_dir) or manifest
+        entry = next((row for row in manifest.get("processes", [])
+                      if row.get("name") == "worker"), None)
+        if entry is None:
+            entry = {"name": "worker"}
+            manifest.setdefault("processes", []).append(entry)
+        entry.update(pid=process.pid, birth=birth, owners=owners,
+                     command=f"{python} -m shine.worker")
+        path = data_dir / "run" / "processes.json"
+        tmp = path.with_suffix(f".new-{os.getpid()}")
+        tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+    finally:
+        stop_shine._release_startup_guard(guard)
+    return 200, {"status": "RUNNING", "pid": process.pid}
+
+
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ShineSupervisor/1.0"
+    server_version = "ShineSupervisor/1.1"
     data_dir: Path
     api_port: int
     web_port: int
+    idle_minutes: float
 
     def log_message(self, *args):  # quiet by default
         pass
@@ -135,10 +389,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_OPTIONS(self):
-        origin = self.headers.get("Origin")
+    def _origin(self) -> str | None:
+        return self.headers.get("Origin")
+
+    def _refused_origin(self, origin: str | None) -> bool:
         if not _loopback_origin(origin):
             self._send(403, {"code": "SUPERVISOR_CROSS_ORIGIN_REFUSED"})
+            return True
+        return False
+
+    def _refused_marker(self, origin: str | None) -> bool:
+        if self.headers.get("x-shine-local-action") != "1":
+            self._send(403, {"code": "SUPERVISOR_LOCAL_ACTION_REQUIRED"}, origin)
+            return True
+        return False
+
+    def do_OPTIONS(self):
+        origin = self._origin()
+        if self._refused_origin(origin):
             return
         self.send_response(204)
         if origin:
@@ -149,9 +417,8 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        origin = self.headers.get("Origin")
-        if not _loopback_origin(origin):
-            self._send(403, {"code": "SUPERVISOR_CROSS_ORIGIN_REFUSED"})
+        origin = self._origin()
+        if self._refused_origin(origin):
             return
         path = urlparse(self.path).path
         if path == "/health":
@@ -161,19 +428,66 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/restart-status":
             with _LOCK:
                 self._send(200, dict(_STATE), origin)
+        elif path == "/lifecycle":
+            with _LOCK:
+                presence = dict(_PRESENCE)
+                last_stop = dict(_LAST_STOP) if _LAST_STOP else None
+            manifest = _read_manifest(self.data_dir)
+            self._send(200, {
+                "idle_shutdown_minutes": self.idle_minutes,
+                "ever_seen": presence["ever_seen"],
+                "last_seen_age_s": (time.time() - presence["last_seen"])
+                if presence["last_seen"] else None,
+                "stack_running": manifest is not None,
+                "worker": _worker_state(manifest),
+                "last_stop": last_stop,
+            }, origin)
         else:
             self._send(404, {"code": "SUPERVISOR_UNKNOWN_PATH"}, origin)
 
     def do_POST(self):
-        origin = self.headers.get("Origin")
-        if not _loopback_origin(origin):
-            self._send(403, {"code": "SUPERVISOR_CROSS_ORIGIN_REFUSED"})
+        origin = self._origin()
+        if self._refused_origin(origin):
             return
-        if urlparse(self.path).path != "/restart-stack":
+        path = urlparse(self.path).path
+        if path == "/presence":
+            if self._refused_marker(origin):
+                return
+            with _LOCK:
+                _PRESENCE.update(last_seen=time.time(), ever_seen=True)
+            self._send(200, {"status": "ok"}, origin)
+            return
+        if path == "/stop-stack":
+            if self._refused_marker(origin):
+                return
+            blockers = _stack_blockers(self.data_dir)
+            if blockers:
+                self._send(409, {"code": "STACK_BUSY", "blockers": blockers}, origin)
+                return
+            threading.Thread(target=_run_stop, args=(self.data_dir, "manual"),
+                             daemon=True).start()
+            self._send(202, {"status": "STOPPING"}, origin)
+            return
+        if path == "/stop-worker":
+            if self._refused_marker(origin):
+                return
+            blockers = _stack_blockers(self.data_dir)
+            if blockers:
+                self._send(409, {"code": "STACK_BUSY", "blockers": blockers}, origin)
+                return
+            code, payload = _stop_worker(self.data_dir)
+            self._send(code, payload, origin)
+            return
+        if path == "/start-worker":
+            if self._refused_marker(origin):
+                return
+            code, payload = _start_worker(self.data_dir)
+            self._send(code, payload, origin)
+            return
+        if path != "/restart-stack":
             self._send(404, {"code": "SUPERVISOR_UNKNOWN_PATH"}, origin)
             return
-        if self.headers.get("x-shine-local-action") != "1":
-            self._send(403, {"code": "SUPERVISOR_LOCAL_ACTION_REQUIRED"}, origin)
+        if self._refused_marker(origin):
             return
         with _LOCK:
             if _STATE["phase"] in ("stopping", "starting"):
@@ -198,6 +512,9 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=int(os.environ.get("SHINE_SUPERVISOR_PORT", DEFAULT_PORT)))
     parser.add_argument("--api-port", type=int, default=8000)
     parser.add_argument("--web-port", type=int, default=5173)
+    parser.add_argument("--idle-shutdown-minutes", type=float,
+                        default=float(os.environ.get("SHINE_IDLE_SHUTDOWN_MINUTES",
+                                                     DEFAULT_IDLE_SHUTDOWN_MINUTES)))
     args = parser.parse_args()
     data_dir = Path(args.data_dir)
     (data_dir / "run").mkdir(parents=True, exist_ok=True)
@@ -205,12 +522,15 @@ def main() -> int:
     Handler.data_dir = data_dir
     Handler.api_port = args.api_port
     Handler.web_port = args.web_port
+    Handler.idle_minutes = args.idle_shutdown_minutes
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     # Recorded outside processes.json so stop_shine.py never kills the supervisor.
     (data_dir / "run" / "supervisor.json").write_text(
         json.dumps({"pid": os.getpid(), "port": args.port, "data_dir": str(data_dir)}, indent=2),
         encoding="utf-8",
     )
+    threading.Thread(target=_watchdog, args=(data_dir, args.idle_shutdown_minutes),
+                     daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

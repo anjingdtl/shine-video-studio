@@ -3,6 +3,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, timeoutSignal } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { SetupCenter } from './SetupCenter';
+import { ApiError } from '../api';
+import { WorkerValidationGate } from './WorkerValidationGate';
 import { VariantRecommendationCard } from './VariantRecommendation';
 import {
   approveAndExecuteSetupPlan,
@@ -325,9 +327,16 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
     window.setTimeout(() => setNotice(null), 6000);
   }, []);
 
+  const [workerGate, setWorkerGate] = useState<null | (() => Promise<string>)>(null);
+
   async function run(action: () => Promise<string>) {
     setBusy(true);
-    try { say(await action()); } catch (error) { say((error as Error).message, 'bad'); }
+    try { say(await action()); setWorkerGate(null); } catch (error) {
+      if (error instanceof ApiError && error.code === 'STOP_WORKER_BEFORE_SERVICE_VALIDATION') {
+        setWorkerGate(() => action);
+      }
+      say((error as Error).message, 'bad');
+    }
     finally { setBusy(false); }
   }
 
@@ -870,6 +879,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
 
       <LLMSetupPanel onChanged={onRefresh} />
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
+      {workerGate && <WorkerValidationGate onRetry={() => void run(workerGate)} />}
 
       {/*
         制作环境的唯一完整入口。检测、核验、登记、下载、绑定、运行合同与真实

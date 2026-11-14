@@ -2,6 +2,8 @@ import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from
 import { useEffect, useRef, useState } from 'react';
 import { api as request, json, timeoutSignal, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { ApiError } from '../api';
+import { WorkerValidationGate } from './WorkerValidationGate';
 import {
   approveAndExecuteSetupPlan,
   latestInstallationAttempt,
@@ -251,6 +253,8 @@ export function RealProductionWizard({
       };
     }
   }
+
+  const [workerGate, setWorkerGate] = useState(false);
 
   async function run() {
     cancelled.current = false;
@@ -634,6 +638,9 @@ export function RealProductionWizard({
       const reviewerTotal = Object.keys(validation.advisory_reviews ?? {}).length;
       setStage('workflows', { status: 'ok', note: `H3 服务与工作流已验证。建议审片资源就绪 ${reviewerReady}/${reviewerTotal} 项；未就绪时仍可制作，相关检查会留待人工复核。` });
     } catch (error) {
+      if (error instanceof ApiError && error.code === 'STOP_WORKER_BEFORE_SERVICE_VALIDATION') {
+        setWorkerGate(true);
+      }
       stopWith('workflows', `服务验证失败：${(error as Error).message}`);
       return;
     }
@@ -805,6 +812,7 @@ export function RealProductionWizard({
             ? '按顺序完成下面的检查。已有环境会自动识别和复用；需要下载或启动服务的操作会先征求你的确认。'
             : '只做检查，不改动任何文件。发现的问题会在这里说明原因和处理办法。'}
         </p>
+        {workerGate && <WorkerValidationGate onRetry={() => { setWorkerGate(false); void run(); }} />}
         <ol className="wizard-stages" data-testid="wizard-stages">
           {stages.map((stage) => (
             <li key={stage.id} className={`wizard-stage ${stage.status}`} data-stage={stage.id}>

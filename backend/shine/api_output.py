@@ -34,9 +34,15 @@ def _default_root(request: Request):
 
 @router.get("/settings/output-directory")
 def get_output_directory(request: Request, db: DBSession) -> dict:
-    return directory_summary(
+    from shine.comfyops.service_validation import _worker_online
+    from shine.media.output_layout import active_work_details
+
+    summary = directory_summary(
         db, request.app.state.settings, default_root=_default_root(request)
     )
+    summary["blocker_details"] = active_work_details(db)
+    summary["worker_online"] = _worker_online(db, request.app.state.settings)
+    return summary
 
 
 @router.post("/settings/output-directory/select")

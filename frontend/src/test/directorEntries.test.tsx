@@ -237,17 +237,11 @@ describe('基础配置：一次检测、一处确认', () => {
       }],
       blocked: [], options: [], notes: [],
     }) });
-    const user = userEvent.setup();
     window.history.replaceState(null, '', '#d/setup');
     render(<App />);
 
-    // V4.1：导演页只显示同一份服务端事实的只读摘要，不再自己开第二条安装链。
+    // 用户裁定：完整整备收进导演页，与专家层共用同一个 SetupCenter。
     expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
-    expect((await screen.findAllByText(/完整整备在「设置 → 制作环境」/)).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('checkbox', { name: /素材出图/ })).toBeNull();
-
-    // 「打开设置」把完整整备带到唯一那一处：变体、能力勾选与一次确认都在那里。
-    await user.click(screen.getByRole('button', { name: '打开设置' }));
     expect(await screen.findByText('要准备哪些能力')).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /画面审片/ })).toBeInTheDocument();

@@ -627,6 +627,47 @@ def preparation_state(db) -> dict[str, Any]:
 # --- missing files ----------------------------------------------------------
 
 
+def runtime_closure_gap(db, settings, installation: dict | None) -> dict[str, Any]:
+    """Read-only bare-machine gap: runtime components and the instance ladder.
+
+    Weights are reported by ``capability_report``; this adds the runtime closure
+    (ComfyUI source, wheels, node packs) and a read-only preview of the instance
+    ladder, mirroring ``next_instance_plan``'s predicates without creating plans.
+    """
+    from shine.comfyops import deployment
+    from shine.comfyops.existing_installation import resolve_node_pack_dirs
+    from shine.comfyops.models import ComfyInstance
+
+    catalog = deployment.load_default_catalog()
+    components = deployment._component_map(catalog)
+    instance_present = bool(installation and installation.get("instance_id"))
+    gap: list[str] = []
+    ladder: list[str] = []
+    if not instance_present:
+        gap.extend(cid for cid, c in components.items()
+                   if c["kind"] in {"source", "wheel", "node"})
+        ladder = ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
+    else:
+        root = Path(str(installation.get("root") or ""))
+        _dirs, missing = resolve_node_pack_dirs(root, catalog)
+        gap.extend(missing)
+        instance = db.get(ComfyInstance, installation["instance_id"])
+        payload = instance.payload if instance is not None else {}
+        expected_nodes = {cid for cid, c in components.items() if c["kind"] == "node"}
+        installed = payload.get("node_versions", {})
+        if any(cid not in installed for cid in expected_nodes):
+            ladder.append("INSTALL_NODE")
+        expected_bindings = {c["destination_family"]: cid for cid, c in components.items()
+                             if c["kind"] == "model" and c.get("destination_family")}
+        if payload.get("model_bindings", {}) != expected_bindings:
+            ladder.append("BIND_MODELS")
+    return {
+        "instance_present": instance_present,
+        "missing_components": sorted(set(gap)),
+        "instance_ladder": ladder,
+    }
+
+
 def missing_files(db, settings, *, capabilities: list[str] | None = None) -> dict[str, Any]:
     """Exactly the files that are absent, with the fixed source for each."""
     manual_root = Path(settings.comfyops_dir) / "manual-downloads"
