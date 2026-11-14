@@ -135,3 +135,13 @@
 - `tests/test_crew_decompose.py`:schema 感知 mock + 真实 DB 两项回归绿；Ruff 干净。
 
 **主路集成留待下一专项(用户裁定)**:接入实测为 breaking change——scriptwriter 1→N 调用需迁移 ~30+ 耦合测试合同(test_film_crew 13 处 + test_crew_prompt_contract/test_director_streamline/test_novel_multiepisode_autopilot 等多文件);段落预切分把 beat 数量从模型创作决定改为 server 段落决定,需 two-pass(先定 beat 边界再逐 beat 填)保创作分段。为守全量回归绿,主路接入已回退,保留已验证 helper 为基础。剩余:测试合同迁移 + two-pass + director 逐镜 + 真实 A/B 实测。**时延降低尚未真正交付,不声称已优化。**
+## 11. WP7 主链集成与复验进度（2026-11-14）
+
+- 功能分支以 merge commit `70414de` 并入 `origin/main@4e96cf6`，无冲突。WP7 实现提交 `7116a84`，已推送 PR #22 功能分支。合并状态仍为 OPEN。
+- 小说 production context、无固定剪辑表的提案使用小合同。编剧先定原文范围，再逐 beat 填写。导演先定分组、时长和 cut，再逐镜写视觉与参考。摄影指导逐镜填写 CameraShot。服务端保留原产物合同、验证和 H3 Prompt Compiler，固定剪辑表及导演连续性定向返修沿用既有合同。
+- 子调用记录发送前 intent、ledger、结果 SHA 及可校验 checkpoint。UNKNOWN 级联到父任务，核对回执含子任务 ID。原子记录一次性重发授权后，同输入、同 prompt、同 provider 的已完成子任务仍可复用。单测验证第二次请求只询问未决子任务。
+- 环境为隔离 8010/5183。现有项目的最高版本为已确认的两集方案 v6，前 5 版均 SUPERSEDED。已对原摄影指导 UNKNOWN 核对并授权重发，旧记录仍为 UNKNOWN。第 3 单元新摄影指导任务 `b5146ec0-d30f-4b4b-8651-9b7e60a920fa` 完成 7 个真实调用，合计 160.936 秒 / 14,178 reasoning tokens，整单 CameraPlan 通过并落 7 镜。原来整单因截断失败，该结果说明本次能够完成，不证明速度提升。
+- 编剧同输入 A/B 的整单臂已完成，6 个 beat，438.42 秒 / 10,512 reasoning tokens。这次存在远端间歇性延迟；单次耗时不可代表典型性能。另有历史同单元整单样本约 106 秒 / 12,882 reasoning tokens。
+- 根据本轮用户授权，真实人物素材生成已入队。复用「老周」主素材，生成「女人」候选。验证小样 `042e2d2e-8ef4-471d-bed8-dade119f04a5`，正式候选批次 `9819ce44-f6ae-4e30-8818-a08d6cf3e97a`。此记录写入时常驻 Worker 仍在处理第 4 单元，出图及 H3 双集验收尚未签署。
+- `npx.cmd vitest run --no-file-parallelism` 57 文件 / 337 项通过。`npm.cmd run build`、`ruff check backend`、隔离新库 `alembic upgrade head` + `alembic check` 通过（head `f180d0010001`，无 drift）。后端 8 分片基线日志位于 `.local-data/wp7-baseline/`，退出码依次为 0 / 0 / 0 / 1 / 0 / 0 / 0 / 0，剩两例已知的 `test_deployment_recommendation.py` RAM 基线失败，原第三例已由 main 上 PR #23 修复。首轮 WP7 全量定位出三处 `test_story_continuity.py` mock 合同迁移遗漏，迁移后该模块与 film crew、prompt contract、decomposition、offline E2E 的定向 60 项通过。完整复跑日志位于 `.local-data/wp7-final/`。
+- RTX 4070 为 EXEMPT_HARDWARE_UNAVAILABLE，VLM 正负校准未做，本轮没有更改 `worker.py` / `preproduction.py`。
