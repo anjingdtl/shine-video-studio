@@ -61,7 +61,7 @@ function catalogComponent(component_id: string, kind: string, role: string | nul
 
 describe('本机环境简化流程', () => {
   it('发现已有安装时先检查复用，不能直接要求重新下载', async () => {
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
       installations: ['F:\\AI\\ComfyUI'],
     }) });
     stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
@@ -92,7 +92,7 @@ describe('本机环境简化流程', () => {
   });
 
   it('已有 ComfyUI 被明确确认已安装，模型只读哈希核验且不复制或创建重复计划', async () => {
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
       installations: ['F:\\AI\\ComfyUI'],
     }) });
     stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
@@ -132,7 +132,7 @@ describe('本机环境简化流程', () => {
     stub.add({ method: 'GET', pattern: /setup\/catalog$/, respond: () => jsonResponse({
       catalog_id: 'c', catalog_version: '1', generated: '', platform: {}, total_bytes: 800, components,
     }) });
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
       installations: ['F:\\AI\\ComfyUI'],
     }) });
     const verified = [
@@ -176,7 +176,7 @@ describe('本机环境简化流程', () => {
   });
 
   it('自动检索失败时不开放下载，允许重新检测', async () => {
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await user.click(screen.getByRole('button', { name: '检测本机' }));

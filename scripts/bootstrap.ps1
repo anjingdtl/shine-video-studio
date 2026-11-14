@@ -8,6 +8,7 @@ param(
     [switch]$CheckOnly,
     [string]$ToolsManifest = "",
     [string]$InstallRoot = "",
+    [string]$ToolsRoot = "",
     [switch]$NoPathUpdate,
     [switch]$NoLaunch,
     [string]$DataDir = "",
@@ -140,7 +141,10 @@ function Install-Tool([string]$name, $entry) {
     $url = $entry.url
     $sha256 = $entry.sha256
     $expectedSize = [long]$entry.size
-    $toolBase = if ($StorageRoot) { Join-Path $StorageRoot 'tools' } else { Join-Path $env:LOCALAPPDATA 'Shine\tools' }
+    # A caller may name the managed tools root explicitly (the Web repair plan
+    # does).  Without it the historic per-user location is used, so every
+    # existing installer path behaves exactly as before.
+    $toolBase = if ($ToolsRoot) { $ToolsRoot } elseif ($StorageRoot) { Join-Path $StorageRoot 'tools' } else { Join-Path $env:LOCALAPPDATA 'Shine\tools' }
     $toolsRoot = [IO.Path]::GetFullPath($toolBase)
     $toolDir = [IO.Path]::GetFullPath((Join-Path $toolsRoot ($name + '-' + $entry.version)))
     if (-not $toolDir.StartsWith($toolsRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) {

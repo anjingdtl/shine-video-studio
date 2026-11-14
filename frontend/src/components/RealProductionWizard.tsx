@@ -31,9 +31,55 @@ const STAGE_TITLES: Array<{ id: StageId; title: string }> = [
 
 const INITIAL_STAGES: Stage[] = STAGE_TITLES.map(({ id, title }) => ({ id, title, status: 'pending', note: '' }));
 
+type EnvFinding = {
+  code: string;
+  repairability: 'AUTO_REPAIRABLE' | 'USER_ACTION_REQUIRED' | 'HARDWARE_INCOMPATIBLE'
+    | 'DETECTION_UNKNOWN' | 'ALREADY_AVAILABLE';
+  scopes?: string[];
+  scope?: string[];
+  message?: string;
+  next_action?: string;
+  package_id?: string;
+  tools?: string[];
+  selected_port?: number;
+};
+
+type RepairPackage = {
+  package_id: string; label: string; download_bytes: number;
+  tools: Array<{ tool: string; label: string; version: string; min_version?: string }>;
+};
+
+type RepairPlan = {
+  plan_id: string; status: 'COMPLETE' | 'NOTHING_TO_REPAIR' | string;
+  packages: RepairPackage[]; download_bytes: number;
+  authorization: { status: string }; execution: { status: string };
+};
+
+type VariantOption = {
+  variant_id: string; title: string; acceptance_status: string; status: string;
+  usable_in_production: boolean; auto_download_allowed: boolean;
+  catalog_id?: string; total_bytes?: number; summary?: string;
+};
+
+type VariantRecommendation = {
+  tier: string;
+  recommended: VariantOption[];
+  candidates: VariantOption[];
+  blocked: VariantOption[];
+};
+
 type EnvReport = {
-  blockers: Array<{ code: string; tool?: string; detail?: string }>;
-  ram: { status: string }; disk: { status: string; free_gb: number }; gpu: Record<string, unknown>;
+  blockers: Array<{ code: string; tool?: string; detail?: string; message?: string }>;
+  findings?: EnvFinding[];
+  repair_plan?: RepairPlan;
+  tools?: Record<string, { present: boolean; version: string; at_floor: boolean }>;
+  port?: {
+    status: string; port: number; selected?: number; identity?: string;
+    reusable?: boolean; reason?: string | null;
+  };
+  tool_packages?: RepairPackage[];
+  ram: { status: string; ram_mb?: number; installed_mb?: number | null; note?: string };
+  disk: { status: string; free_gb: number }; gpu: Record<string, unknown>;
   advisory_reviews?: Record<string, { status: string; model_id?: string; model_files_present?: number;
     model_files_expected?: number; runtime_ready?: boolean }>;
 };
@@ -59,12 +105,41 @@ type Catalog = { total_bytes: number; components: Array<{ component_id: string; 
 
 const HARDWARE_BLOCKER_ZH: Record<string, string> = {
   TOOL_MISSING_INSTALLABLE: '缺少必需的基础程序', TOOL_STALE: '基础程序版本过旧',
-  GPU_VRAM_BELOW_FLOOR: '显卡可用显存不足', RAM_BELOW_FLOOR: '本机内存不足或无法读取',
+  TOOL_PACKAGE_UNREPAIRABLE: '基础程序缺少固定下载源',
+  GPU_VRAM_BELOW_FLOOR: '显卡可用显存不足', RAM_BELOW_FLOOR: '本机内存不足',
+  RAM_BELOW_FLOOR_UNCONFIRMED: '内存容量需要复核（读不到实装容量）',
+  RAM_UNREADABLE: '读不到本机物理内存',
   DISK_BELOW_FLOOR: '安装目录空间不足', PORT_OCCUPIED: '服务端口被占用',
+  PORT_OCCUPIED_SELECTED_ALTERNATIVE: '服务端口被占用，已改用其他端口',
   DATA_DIR_NOT_WRITABLE: '项目数据目录无法写入', DEPLOYMENT_DIR_NOT_WRITABLE: '安装目录无法写入',
   NVIDIA_SMI_UNAVAILABLE: '无法检测 NVIDIA 显卡，请检查显卡驱动',
   NVIDIA_DRIVER_UNAVAILABLE: '无法检测 NVIDIA 显卡，请检查显卡驱动',
   NVIDIA_SMI_OUTPUT_UNPARSEABLE: '显卡检测结果无法读取，请检查显卡驱动',
+  COMMIT_BELOW_FLOOR: '提交内存上限不足（页面文件过小）',
+  COMMIT_UNREADABLE: '读不到提交内存上限',
+};
+
+const TOOL_NAME_ZH: Record<string, string> = {
+  ffmpeg: 'FFmpeg', ffprobe: 'FFprobe', pwsh: 'PowerShell 7', node: 'Node.js', npm: 'npm', uv: 'uv',
+};
+
+function findingText(finding: EnvFinding): string {
+  if (finding.message) return finding.message;
+  const names = (finding.tools ?? []).map((tool) => TOOL_NAME_ZH[tool] ?? tool).join('、');
+  const base = HARDWARE_BLOCKER_ZH[finding.code] ?? `环境检测未通过（${finding.code}）`;
+  return names ? `${base}：${names}` : base;
+}
+
+function blockingScope(finding: EnvFinding, scope: string): boolean {
+  return (finding.scopes ?? finding.scope ?? []).includes(scope);
+}
+
+const REPAIR_IN_PROGRESS_TEXT: Record<string, string> = {
+  SUCCEEDED: '补装完成，正在复查工具版本…',
+  PARTIAL: '部分工具补装完成，正在复查…',
+  FAILED: '补装没有完成',
+  ALREADY_AVAILABLE: '工具已经达标，无需补装',
+  PLATFORM_UNSUPPORTED: '当前环境不是 Windows，未执行本机补装',
 };
 
 function fmtBytes(value: number): string {
@@ -93,6 +168,8 @@ export function RealProductionWizard({
   const [stages, setStages] = useState<Stage[]>(INITIAL_STAGES);
   const [finished, setFinished] = useState<null | { ok: boolean; summary: string }>(null);
   const [reuseOffer, setReuseOffer] = useState<null | { scans: ExistingScan[]; totalBytes: number }>(null);
+  const [repairOffer, setRepairOffer] = useState<null | RepairPlan>(null);
+  const [variantOffer, setVariantOffer] = useState<null | VariantOption[]>(null);
   const [reusedBytes, setReusedBytes] = useState(0);
   const [llmRequired, setLlmRequired] = useState(false);
   const [needProject, setNeedProject] = useState(false);
@@ -103,6 +180,12 @@ export function RealProductionWizard({
   const selectedProject = useRef(projectId);
   selectedProject.current = projectId;
   const originalProject = useRef(projectId);
+  /** The one H3 variant the person chose; it survives every re-run. */
+  const variantChoice = useRef<VariantOption | null>(null);
+  /** The port the server selected; never re-hardcoded to 8188. */
+  const servicePort = useRef<number | null>(null);
+  /** One automatic repair per wizard run: a still-missing tool stops instead of looping. */
+  const repairAttempts = useRef(0);
   function check() {
     if (!mounted.current || cancelled.current || selectedProject.current !== originalProject.current) throw new Error('WIZARD_CANCELLED');
   }
@@ -172,7 +255,8 @@ export function RealProductionWizard({
   async function run() {
     cancelled.current = false;
     setStages(INITIAL_STAGES.map((stage) => ({ ...stage, status: 'pending', note: '' })));
-    setFinished(null); setLlmRequired(false); setReuseOffer(null); setReusedBytes(0); setNeedProject(false);
+    setFinished(null); setLlmRequired(false); setReuseOffer(null); setRepairOffer(null); setVariantOffer(null);
+    setReusedBytes(0); setNeedProject(false);
     const alive = () => !cancelled.current && mounted.current;
     const onlyDiagnose = mode === 'diagnose';
 
@@ -260,25 +344,93 @@ export function RealProductionWizard({
       return;
     }
 
-    // 2. 硬件与基础程序
+    // 2. 硬件与基础程序：只读检测 → 分类 → 可自动修复的进入补装计划
     setStage('hardware', { status: 'running', note: RUNNING_TEXT.hardware });
+    let env: EnvReport;
     try {
-      const env = await api<EnvReport>('/setup/environment');
+      env = await api<EnvReport>('/setup/environment');
       if (!alive()) return;
-      if (env.blockers.length) {
-        stopWith('hardware', `本机还缺少必要条件：${env.blockers.map(b => HARDWARE_BLOCKER_ZH[b.code] ?? `环境检测未通过（${b.code}）`).join('；')}。处理后在专业设置的「制作环境」里可查看细节。`);
+      const findings = env.findings;
+      if (findings) {
+        const bootstrapFindings = findings.filter((finding) => blockingScope(finding, 'BOOTSTRAP'));
+        const hardBlockers = bootstrapFindings.filter(
+          (finding) => !['AUTO_REPAIRABLE', 'ALREADY_AVAILABLE'].includes(finding.repairability));
+        const repairable = bootstrapFindings.filter((finding) => finding.repairability === 'AUTO_REPAIRABLE');
+        if (hardBlockers.length) {
+          stopWith('hardware', `本机还有需要你处理的问题：${hardBlockers.map(findingText).join('；')}。处理后再重新检查。`);
+          return;
+        }
+        if (repairable.length) {
+          const labels = repairable.map((finding) => (finding.tools ?? [])
+            .map((tool) => TOOL_NAME_ZH[tool] ?? tool).join(' + ')).filter(Boolean).join('、');
+          if (onlyDiagnose) {
+            setStage('hardware', { status: 'warn', note: `检测到可自动补装：${labels}。这里只做检查，没有下载或安装；启用真实制作时确认一次即可自动补装。` });
+            setFinished({ ok: false, summary: `检查完成：本机缺少 ${labels}，可以在「启用真实制作」里一次确认后自动补装并继续。` });
+            return;
+          }
+          if (repairAttempts.current > 0) {
+            stopWith('hardware', `已尝试自动补装，但复查仍显示缺少 ${labels}。已下载的内容会保留，不会重复循环；请到专业设置的「制作环境」查看补装记录并手动处理。`);
+            return;
+          }
+          const plan = env.repair_plan ?? await api<RepairPlan>('/setup/tool-repair-plan');
+          if (!alive()) return;
+          if (plan.status !== 'COMPLETE' || !plan.packages.length) {
+            stopWith('hardware', `缺少 ${labels}，但没有可用的固定下载计划。请手动安装后重新检查。`);
+            return;
+          }
+          setStage('hardware', { status: 'warn', note: `发现可自动补装：${labels}，预计下载 ${fmtBytes(plan.download_bytes)}。确认后使用 Windows 自带 PowerShell 5.1 补装，并自动复查版本。` });
+          setRepairOffer(plan);
+          return; // 用户确认后由 repairTools() 继续
+        }
+      } else if (env.blockers.length) {
+        // Older servers do not classify findings: name the tools instead of
+        // repeating "missing prerequisite" three times.
+        const names = env.blockers.map((blocker) => {
+          if (blocker.code.startsWith('TOOL_') && blocker.tool) return TOOL_NAME_ZH[blocker.tool] ?? blocker.tool;
+          return HARDWARE_BLOCKER_ZH[blocker.code] ?? `环境检测未通过（${blocker.code}）`;
+        });
+        stopWith('hardware', `本机还缺少必要条件：${names.join('；')}。处理后再重新检查。`);
         return;
       }
+      const port = env.port?.selected ?? env.port?.port;
+      if (!port) {
+        stopWith('hardware', '服务端口状态读取不到，不能安全地准备 ComfyUI。请重新检查。');
+        return;
+      }
+      servicePort.current = port;
+      const portNote = env.port?.identity && env.port.identity !== 'FREE'
+        ? `端口 ${env.port.port} 当前为 ${env.port.identity}，本次使用 ${port}（不会结束占用端口的程序）。`
+        : `服务端口 ${port} 可用。`;
+      const ramNote = env.ram?.note === 'HARDWARE_RESERVED_MEMORY'
+        ? `系统报告可用 ${env.ram.ram_mb} MB，实装 ${env.ram.installed_mb} MB（差额为硬件保留），按实装容量判定达标。`
+        : '';
       const reviewStatus = Object.entries(env.advisory_reviews ?? {}).map(([role, item]) =>
         `${role === 'VLM' ? '画面建议审阅' : role === 'ASR' ? '对白识别建议' : role}：${item.status === 'READY' ? '资源已就绪' : '暂未就绪'}`,
       );
       const advisoryNote = reviewStatus.length
         ? `建议审片检查：${reviewStatus.join('；')}。它们只提供参考，缺失不影响真实制作，未覆盖内容会留待人工复核。`
         : '建议审片与对白识别为可选参考，不会阻止真实制作。';
-      setStage('hardware', { status: 'ok', note: `显卡、内存、磁盘与基础程序均满足要求。${advisoryNote}` });
+      setStage('hardware', { status: 'ok', note: `显卡、内存、磁盘与基础程序已通过检查。${ramNote}${portNote}${advisoryNote}` });
     } catch (error) {
       stopWith('hardware', `环境检查失败：${(error as Error).message}`);
       return;
+    }
+
+    // 2b. 模型方案：用户选定的变体贯穿安装、实例、方案登记与激活。
+    if (!variantChoice.current) {
+      const recommendation = await api<VariantRecommendation>('/setup/variant-recommendations').catch(() => null);
+      if (!alive()) return;
+      const preferred = recommendation?.recommended?.[0];
+      if (preferred) {
+        variantChoice.current = preferred;
+      } else if (recommendation?.candidates?.length) {
+        setVariantOffer(recommendation.candidates);
+        setStage('models', {
+          status: 'warn',
+          note: '这台电脑没有可直接投产的标准方案；请先选一套候选方案，再继续准备资源（下载不等于验收）。',
+        });
+        return; // 用户选择后由 chooseVariant() 继续
+      }
     }
 
     // 3. 已有 ComfyUI 与模型：优先复用，禁止默认重下
@@ -289,7 +441,11 @@ export function RealProductionWizard({
       stopWith('existing', '还没有选择安装目录。请到专业设置的「制作环境」选择一个空间足够的非系统盘目录后重试。');
       return;
     }
-    const found = await api<{ installations: string[] }>('/setup/existing-installations');
+    // Search the person's chosen storage root as well as the declared probe
+    // roots: a ComfyUI download nested inside it must not be invisible.
+    const found = await api<{
+      installations: string[]; scan?: { truncated?: boolean; directories_visited?: number };
+    }>(`/setup/existing-installations?root=${encodeURIComponent(storage.root)}`);
     if (!alive()) return;
     const scans: ExistingScan[] = [];
     for (const root of found.installations.slice(0, 3)) {
@@ -320,7 +476,9 @@ export function RealProductionWizard({
         status: 'ok',
         note: found.installations.length
           ? '检测到已有 ComfyUI，但固定清单中的模型不在其中；缺少的组件将在确认后按需下载。'
-          : '未检测到已有 ComfyUI；将在确认后按固定清单下载缺少的组件。',
+          : found.scan?.truncated
+            ? '在已达到搜索上限的范围内没有找到已有 ComfyUI；这不代表整盘没有。可到专业设置直接指定下载目录。'
+            : '未检测到已有 ComfyUI；将在确认后按固定清单下载缺少的组件。',
       });
     }
 
@@ -352,6 +510,7 @@ export function RealProductionWizard({
         return;
       }
       const catalog = await api<Catalog>('/setup/catalog');
+      const variant = variantChoice.current;
       const previous = await api<Array<{ id: string; sha256: string; status: string; payload: { deployment?: unknown } }>>(`/comfyops/install-plans?project_id=${projectId}`);
       const pending = previous.filter(p => p.payload.deployment && ['AWAITING_APPROVAL', 'APPROVED'].includes(p.status));
       if (pending.length > 1) throw new Error('MULTIPLE_PENDING_PLANS：请到专业设置选择并核对计划。');
@@ -359,13 +518,19 @@ export function RealProductionWizard({
         : await api<SetupPlan & { download_bytes: number }>('/setup/install-plan', json('POST', {
           components: catalog.components.filter(c => !['VLM', 'ASR'].includes(c.role ?? '')).map(c => c.component_id),
           project_id: projectId, disk_free: storage.free_bytes,
+          ...(variant ? {
+            variant_id: variant.variant_id,
+            catalog: variant.catalog_id,
+            candidate_download_acknowledged: !variant.auto_download_allowed,
+          } : {}),
         }));
       if (!alive()) return;
       const expectedDownload = 'download_bytes' in plan ? plan.download_bytes : undefined;
       const downloadText = expectedDownload === undefined
         ? '沿用之前已审核的待处理计划'
         : `本计划预计新下载 ${fmtBytes(expectedDownload)}；ASR/VLM 建议审片资源不包含在内`;
-      if (!window.confirm(`批准缺少的核心制作组件下载与校验？\n作品：${projectId}\n目录：${storage.root}\n计划：${plan.plan_id}\n哈希：${plan.sha256}\n${downloadText}。已复用 ${fmtBytes(reused)}，原安装保持不变。`)) {
+      const variantText = variant ? `\n生成方案：${variant.title}` : '';
+      if (!window.confirm(`批准缺少的核心制作组件下载与校验？\n作品：${projectId}${variantText}\n目录：${storage.root}\n计划：${plan.plan_id}\n哈希：${plan.sha256}\n${downloadText}。已复用 ${fmtBytes(reused)}，原安装保持不变。`)) {
         stopWith('models', '已取消下载，没有执行安装计划。需要时可重新检查并审核原计划。');
         return;
       }
@@ -392,12 +557,19 @@ export function RealProductionWizard({
             stopWith('workflows', '已取消实例准备，没有执行实例计划。'); return;
           }
           let complete = false;
+          const port = servicePort.current;
+          if (!port) throw new Error('SERVICE_PORT_UNKNOWN：端口状态读取不到，不能准备实例。');
+          const variant = variantChoice.current;
           for (let step = 0; step < 8; step += 1) {
             if (!alive()) return;
             setStage('workflows', { status: 'running', note: `正在准备运行环境（第 ${step + 1} 步）…` });
-            const next = await api<SetupPlan & { complete: boolean }>(
-              '/setup/next-instance-plan', json('POST', { project_id: projectId, instance_name: 'shine-h3', port: 8188, mode: 'local' }));
+            const next = await api<SetupPlan & { complete: boolean; port?: number }>(
+              '/setup/next-instance-plan', json('POST', {
+                project_id: projectId, instance_name: 'shine-h3', port, mode: 'local',
+                ...(variant ? { catalog: variant.catalog_id, variant_id: variant.variant_id } : {}),
+              }));
             if (!alive()) return;
+            if (typeof next.port === 'number') servicePort.current = next.port;
             if (next.complete) { complete = true; break; }
             await approveAndExecuteSetupPlan({ ...next, kind: 'INSTANCE_LIFECYCLE' }, check);
             if (!alive()) return;
@@ -406,9 +578,16 @@ export function RealProductionWizard({
         } else {
           setStage('workflows', { status: 'running', note: '保留现有 ComfyUI 与模型，只登记固定工作流并生成 Shine 隔离运行配置…' });
         }
-        await api('/setup/profiles', json('POST', { project_id: projectId }));
+        const chosen = variantChoice.current;
+        await api('/setup/profiles', json('POST', {
+          project_id: projectId,
+          ...(chosen ? { variant_id: chosen.variant_id, catalog: chosen.catalog_id } : {}),
+        }));
         if (!alive()) return;
-        await api('/setup/configuration', json('POST', { project_id: projectId }));
+        await api('/setup/configuration', json('POST', {
+          project_id: projectId,
+          ...(servicePort.current ? { port: servicePort.current } : {}),
+        }));
       } catch (error) {
         stopWith('workflows', `生成方案登记失败：${(error as Error).message}。已完成的步骤不会丢失，重新打开向导可继续。`);
         return;
@@ -531,7 +710,7 @@ export function RealProductionWizard({
         const adoption = await api<{ status: string; installed_h3_bytes: number; copied_bytes: number; downloaded_bytes: number }>(
           '/setup/existing-installations/adopt', json('POST', {
             project_id: projectId, path: scan.root, snapshot: scan.snapshot,
-            instance_name: 'shine-h3', port: 8188,
+            instance_name: 'shine-h3', ...(servicePort.current ? { port: servicePort.current } : {}),
           }));
         if (!alive()) return;
         setReusedBytes(adoption.installed_h3_bytes);
@@ -557,6 +736,40 @@ export function RealProductionWizard({
     }
     const storage = await api<StorageState>('/setup/storage');
     await runTail(() => !cancelled.current && mounted.current, false, imported, storage);
+  }
+
+  /** 一次确认完成基础工具补装：固定计划 ID、固定参数、无任意命令。 */
+  async function repairTools() {
+    if (!repairOffer) return;
+    const plan = repairOffer;
+    setRepairOffer(null);
+    repairAttempts.current += 1;
+    setStage('hardware', { status: 'running', note: '正在用 Windows 自带 PowerShell 5.1 补装固定工具包；已下载的部分会保留，不会重复下载同一包。' });
+    try {
+      const result = await api<{
+        status: string; message?: string; unsatisfied_packages?: string[];
+        verification?: Array<{ package_id: string; installed: boolean }>;
+      }>('/setup/tool-repair/execute', {
+        ...json('POST', { plan_id: plan.plan_id }),
+        signal: timeoutSignal(3_600_000),
+      });
+      const note = REPAIR_IN_PROGRESS_TEXT[result.status] ?? result.status;
+      if (result.status !== 'SUCCEEDED') {
+        const packages = (result.unsatisfied_packages ?? []).join('、');
+        stopWith('hardware', `${note}${result.message ? `：${result.message}` : ''}${packages ? `（${packages}）` : ''}。已下载的数据会保留，可以稍后重试；本次不会自动循环。`);
+        return;
+      }
+      setStage('hardware', { status: 'running', note: `${note} 正在继续后面的准备…` });
+      await run();
+    } catch (error) {
+      stopWith('hardware', `补装执行失败：${(error as Error).message}。已下载的数据会保留；可以稍后重试。`);
+    }
+  }
+
+  function chooseVariant(option: VariantOption) {
+    variantChoice.current = option;
+    setVariantOffer(null);
+    void safely(run);
   }
 
   function declineReuse() {
@@ -617,6 +830,39 @@ export function RealProductionWizard({
             <div className="wizard-actions">
           <button type="button" className="btn-secondary" onClick={() => void safely(continueAfterReuse)}>{reuseHasInstalledSoftware ? '核验并确认复用' : '校验并复用模型'}</button>
               {!reuseHasInstalledSoftware && <button type="button" className="btn-secondary" onClick={declineReuse}>不复用，直接继续</button>}
+            </div>
+          </div>
+        )}
+        {repairOffer && (
+          <div className="wizard-reuse" data-testid="wizard-repair">
+            <p>
+              本机缺少这些基础程序：
+              <b>{repairOffer.packages.map(pkg => pkg.label).join('、')}</b>
+              。将使用 Windows 自带的 PowerShell 5.1 按固定清单补装（约 {fmtBytes(repairOffer.download_bytes)}），
+              每个安装包都会校验 SHA-256；已安装且达标的 Node/npm/uv 不会被重复下载，也不会改动其他软件或驱动。
+            </p>
+            <div className="wizard-actions">
+              <button type="button" className="btn-secondary" onClick={() => void safely(repairTools)}>确认自动补装</button>
+              <button type="button" className="btn-secondary" onClick={() => {
+                setRepairOffer(null);
+                stopWith('hardware', `已取消自动补装，没有执行任何下载或安装。缺少：${repairOffer.packages.map(pkg => pkg.label).join('、')}。可以到专业设置手动处理。`);
+              }}>暂不补装</button>
+            </div>
+          </div>
+        )}
+        {variantOffer && (
+          <div className="wizard-reuse" data-testid="wizard-variant">
+            <p>
+              这台电脑没有可直接投产的标准方案。先选一套 H3 组合，系统才按你的选择准备资源；
+              候选方案下载完成只代表资源已整备，不代表通过真机验收。没有暗选默认 INT8。
+            </p>
+            <div className="wizard-actions wizard-variant-list">
+              {variantOffer.map(option => (
+                <button type="button" key={option.variant_id} className="btn-secondary"
+                  onClick={() => chooseVariant(option)}>
+                  {option.title}（{option.acceptance_status}，约 {fmtBytes(option.total_bytes ?? 0)}）
+                </button>
+              ))}
             </div>
           </div>
         )}

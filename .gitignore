@@ -96,6 +96,8 @@ Desktop.ini
 
 # Personal material dropped by external agent tools; never enter the repo
 .codex-attachments/
+# Files the person attaches to a conversation are inputs, not project sources.
+/.uploads/
 
 # Rust build outputs for the native launcher
 /launcher/target/

@@ -17,11 +17,26 @@ import re
 import socket
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
 BOOTSTRAP_INSTALLABLE = {"uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe"}
+
+#: The ports a service may be moved to when the preferred one is not usable.
+#: The range starts right after the historical 8188 and is only ever probed.
+PORT_FALLBACK_WINDOW = 64
+
+#: Port identities.  "Can this port be bound" is not the same question as
+#: "which program holds it": a Shine-owned renderer is reusable, a foreign
+#: process must never be killed and only needs a different port.
+PORT_FREE = "FREE"
+PORT_OWNED_COMFYUI = "OWNED_COMFYUI"
+PORT_ADOPTABLE_COMFYUI = "ADOPTABLE_COMFYUI"
+PORT_FOREIGN_PROCESS = "FOREIGN_PROCESS"
+PORT_UNKNOWN_IDENTITY = "UNKNOWN_IDENTITY"
 
 FLOOR_VERSIONS = {
     "uv": "0.9",
@@ -62,6 +77,32 @@ def _run(probe: CommandProbe) -> tuple[bool, str]:
     return True, (result.stdout or "") + (result.stderr or "")
 
 
+def _run_with_path(probe: CommandProbe, search_paths: list[str] | None) -> tuple[bool, str]:
+    """Run a probe with the managed tool directory in front of PATH.
+
+    A freshly installed tool is written to a directory the running API process
+    does not have on its inherited PATH (Windows only re-reads PATH for new
+    processes).  Prepending the *managed* directory makes the just-installed
+    executable findable without restarting the workbench and without trusting
+    whatever a user shell happens to export.
+    """
+    if not search_paths:
+        return _run(probe)
+    environment = dict(os.environ)
+    existing = environment.get("PATH") or environment.get("Path") or ""
+    environment["PATH"] = os.pathsep.join([*search_paths, existing])
+    try:
+        result = subprocess.run(
+            probe.args, shell=False, capture_output=True, text=True, timeout=30,
+            errors="replace", env=environment,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False, ""
+    if result.returncode != 0:
+        return False, ""
+    return True, (result.stdout or "") + (result.stderr or "")
+
+
 def _version_of(text: str, pattern: str) -> str:
     match = re.search(pattern, text)
     return match.group(0) if match else ""
@@ -74,9 +115,15 @@ def _at_floor(version: str, floor: str) -> bool:
     return key(version) >= key(floor)
 
 
-def probe_command(name: str, *, runner=None) -> dict:
-    """One CLI tool: present / version / at_floor."""
-    runner = runner or _run
+def probe_command(name: str, *, runner=None, search_paths: list[str] | None = None) -> dict:
+    """One CLI tool: present / version / at_floor / how it was found.
+
+    ``search_paths`` are the managed tool directories checked in front of the
+    inherited PATH, so a tool installed a minute ago is detected without a
+    workbench restart.  The returned ``command`` is the resolved executable
+    identity when the OS can name it; nothing here installs or starts a tool.
+    """
+    runner = runner or (lambda probe: _run_with_path(probe, search_paths))
     npm = "npm.cmd" if os.name == "nt" else "npm"
     if name == "pwsh":
         probe = CommandProbe(["pwsh", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"])
@@ -94,7 +141,17 @@ def probe_command(name: str, *, runner=None) -> dict:
     present, output = runner(probe)
     version = _version_of(output, probe.version_pattern)
     floor = FLOOR_VERSIONS[name]
-    return {"present": present, "version": version, "at_floor": _at_floor(version or "0", floor)}
+    return {
+        "present": present,
+        "version": version,
+        "at_floor": _at_floor(version or "0", floor),
+        "min_version": floor,
+        "tool": name,
+        # The probe cannot tell which PATH entry answered; it only claims that
+        # the managed directory was searched in front of the process PATH.
+        "search_scope": "MANAGED_THEN_PROCESS_PATH" if search_paths else "PROCESS_PATH",
+        "requires_environment_refresh": bool(search_paths and present),
+    }
 
 
 def default_requirements() -> dict:
@@ -224,20 +281,90 @@ def _memory_status() -> dict:
         return {"status": "BLOCKED", "reason": "RAM_UNAVAILABLE"}
 
 
-def probe_ram() -> dict:
-    """Physical memory: the total and what is available right now."""
-    status = _memory_status()
+def probe_installed_memory(runner=None) -> dict:
+    """The physical memory the machine was built with, when Windows can say it.
+
+    ``GlobalMemoryStatusEx`` reports the memory Windows may use; firmware and
+    the iGPU reserve part of a retail 32 GB kit, so a healthy 32 GB machine can
+    report ~31.0 GiB.  Summing ``Win32_PhysicalMemory.Capacity`` is a different
+    fact from the same machine: what is physically installed.  Both facts are
+    reported side by side and neither one is invented.  On a non-Windows host
+    the installation size is explicitly unknown.
+    """
+    if os.name != "nt":
+        return {"status": "UNKNOWN", "reason": "HARDWARE_INVENTORY_UNAVAILABLE",
+                "installed_mb": None, "source": "not_windows"}
+    runner = runner or _run
+    ok, output = runner(CommandProbe([
+        "powershell.exe", "-NoProfile", "-NonInteractive", "-Command",
+        "(Get-CimInstance Win32_PhysicalMemory | Measure-Object -Property Capacity -Sum).Sum",
+    ]))
+    digits = re.findall(r"\d{6,}", output or "")
+    if not ok or not digits:
+        return {"status": "UNKNOWN", "reason": "HARDWARE_INVENTORY_UNAVAILABLE",
+                "installed_mb": None, "source": "Win32_PhysicalMemory"}
+    installed_mb = int(digits[-1]) // (1024 ** 2)
+    if installed_mb <= 0:
+        return {"status": "UNKNOWN", "reason": "HARDWARE_INVENTORY_UNPARSEABLE",
+                "installed_mb": None, "source": "Win32_PhysicalMemory"}
+    return {"status": "OK", "reason": None, "installed_mb": installed_mb,
+            "source": "Win32_PhysicalMemory"}
+
+
+def probe_ram(installed_reader=None, memory_reader=None) -> dict:
+    """Physical memory as four separate facts.
+
+    ``ram_mb``                  what the OS reports it can use (GlobalMemoryStatusEx)
+    ``installed_mb``            what the firmware says is installed (may be unknown)
+    ``floor_mb``                the admission floor expressed in reported units
+    ``at_floor``                measured against the floor, with its basis named
+
+    A host that reports less than the floor *and* has no readable hardware
+    inventory is ``review_required`` - it is never rounded up to "meets the
+    floor".  A host whose installed capacity really reaches the declared floor
+    is reported with ``HARDWARE_RESERVED_MEMORY`` as the basis, which is a
+    measured explanation, not a widened tolerance.
+    """
+    status = (memory_reader or _memory_status)()
     if status.get("status") != "OK":
-        return status
+        return {**status, "at_floor": False, "review_required": True,
+                "declared_floor_mb": None, "floor_mb": None,
+                "installed_mb": None, "at_floor_basis": "UNMEASURED",
+                "detail": "无法读取本机物理内存"}
     from shine.comfyops.variants import effective_floor_mb
 
     requirements = default_requirements()
-    floor = effective_floor_mb(int(requirements.get("min_ram_mb") or RAM_MB_MIN)) or RAM_MB_MIN
+    declared = int(requirements.get("min_ram_mb") or RAM_MB_MIN)
+    floor = effective_floor_mb(declared) or RAM_MB_MIN
+    inventory = (installed_reader or probe_installed_memory)()
+    installed = inventory.get("installed_mb")
+    total = status["ram_mb"]
+    at_floor = total >= floor
+    basis = "OS_REPORTED_TOTAL" if at_floor else None
+    note = None
+    if not at_floor and isinstance(installed, int) and installed >= declared:
+        at_floor = True
+        basis = "HARDWARE_INSTALLED_MEMORY"
+        note = "HARDWARE_RESERVED_MEMORY"
+    elif not at_floor:
+        basis = "OS_REPORTED_TOTAL"
+        note = ("BELOW_FLOOR" if isinstance(installed, int)
+                else "INSTALLED_CAPACITY_UNKNOWN")
+    review_required = (not at_floor) and not isinstance(installed, int)
     return {
         "status": "OK",
-        "ram_mb": status["ram_mb"],
+        "ram_mb": total,
         "ram_available_mb": status["ram_available_mb"],
-        "at_floor": status["ram_mb"] >= floor,
+        "installed_mb": installed,
+        "installed_source": inventory.get("source"),
+        "installed_inventory_status": inventory.get("status"),
+        "declared_floor_mb": declared,
+        "floor_mb": floor,
+        "deficit_mb": max(0, floor - total),
+        "at_floor": at_floor,
+        "at_floor_basis": basis,
+        "review_required": review_required,
+        "note": note,
     }
 
 
@@ -373,14 +500,114 @@ def probe_disk(path: Path) -> dict:
             "runtime_floor_gb": DISK_GB_MIN}
 
 
-def probe_port(port: int) -> dict:
+def _port_bindable(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(2)
+        sock.settimeout(1)
         try:
             sock.bind(("127.0.0.1", port))
         except OSError:
-            return {"status": "BLOCKED", "reason": "PORT_OCCUPIED", "port": port}
-    return {"status": "OK", "port": port}
+            return False
+    return True
+
+
+def _probe_comfy_http(port: int) -> dict:
+    """Ask the listener whether it is ComfyUI; a 200 alone proves nothing.
+
+    The contract checked here is ComfyUI's own ``/system_stats`` shape: a JSON
+    object carrying both ``system`` and ``devices``.  Any other responder is a
+    foreign process whose identity stays foreign, never "ComfyUI".
+    """
+    url = f"http://127.0.0.1:{port}/system_stats"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as response:  # noqa: S310 - loopback only
+            raw = response.read(262_144)
+    except (urllib.error.URLError, OSError, ValueError):
+        return {"reachable": False, "comfyui": False, "probe": "/system_stats"}
+    try:
+        payload = json.loads(raw.decode("utf-8", "replace"))
+    except ValueError:
+        return {"reachable": True, "comfyui": False, "probe": "/system_stats",
+                "detail": "NON_JSON_RESPONSE"}
+    is_comfy = isinstance(payload, dict) and "system" in payload and "devices" in payload
+    return {
+        "reachable": True,
+        "comfyui": is_comfy,
+        "probe": "/system_stats",
+        "comfyui_version": ((payload.get("system") or {}).get("comfyui_version")
+                            if isinstance(payload, dict) else None),
+        "device_count": len(payload.get("devices") or []) if isinstance(payload, dict) else None,
+    }
+
+
+def _first_free_port(preferred: int, *, owned_ports: set[int]) -> int | None:
+    for candidate in range(preferred + 1, min(preferred + 1 + PORT_FALLBACK_WINDOW, 65536)):
+        if candidate in owned_ports:
+            return candidate
+        if _port_bindable(candidate):
+            return candidate
+    return None
+
+
+def probe_port(port: int, *, http=None, owned_ports: set[int] | None = None) -> dict:
+    """Which program holds this port, and which port the service may use.
+
+    Binding is only the first question.  A Shine-owned renderer or an existing
+    ComfyUI is reusable; a foreign process is never killed and never
+    mislabelled, it only moves the service to another verified-free port.
+    When nothing can be established the identity is ``UNKNOWN_IDENTITY`` - the
+    absence of evidence is not evidence of a free port.
+    """
+    owned = set(owned_ports or set())
+    http_probe = http or _probe_comfy_http
+    if _port_bindable(port):
+        return {
+            "status": "OK",
+            "port": port,
+            "selected": port,
+            "identity": PORT_FREE,
+            "preferred_available": True,
+            "reusable": False,
+            "evidence": {"bind": "FREE"},
+        }
+    if port in owned:
+        return {
+            "status": "OK",
+            "port": port,
+            "selected": port,
+            "identity": PORT_OWNED_COMFYUI,
+            "preferred_available": True,
+            "reusable": True,
+            "evidence": {"bind": "OCCUPIED", "source": "managed_instance_record",
+                         "identity_rule": "owned_record"},
+        }
+    probe = http_probe(port) or {}
+    if probe.get("comfyui"):
+        identity = PORT_ADOPTABLE_COMFYUI
+        reusable = True
+    elif probe.get("reachable"):
+        identity = PORT_FOREIGN_PROCESS
+        reusable = False
+    else:
+        identity = PORT_UNKNOWN_IDENTITY
+        reusable = False
+    alternative = _first_free_port(port, owned_ports=owned)
+    selected = port if reusable else alternative
+    return {
+        "status": "OK" if selected is not None else "BLOCKED",
+        "port": port,
+        "selected": selected,
+        "identity": identity,
+        "preferred_available": False,
+        "reusable": reusable,
+        "reason": None if selected is not None else "PORT_OCCUPIED",
+        "next_action": None if selected is not None else "USER_ACTION_REQUIRED",
+        "evidence": {"bind": "OCCUPIED", **probe,
+                     "alternative_port": alternative,
+                     "identity_rule": "owned_record" if identity == PORT_OWNED_COMFYUI
+                     else ("comfy_system_stats" if identity == PORT_ADOPTABLE_COMFYUI
+                           else ("http_responder" if identity == PORT_FOREIGN_PROCESS
+                                 else "no_evidence"))},
+    }
 
 
 def probe_writable(path: Path) -> dict:
@@ -394,23 +621,33 @@ def probe_writable(path: Path) -> dict:
     return {"status": "OK", "writable": True}
 
 
-def probe_host_environment(data_dir: Path, *, port: int = DEFAULT_PORT, deployment_dir: Path | None = None) -> dict:
-    """Probe the selected deployment disk independently of the project database disk."""
+def probe_host_environment(data_dir: Path, *, port: int = DEFAULT_PORT, deployment_dir: Path | None = None,
+                           tool_paths: list[str] | None = None,
+                           owned_ports: set[int] | None = None) -> dict:
+    """Probe the selected deployment disk independently of the project database disk.
+
+    ``tool_paths`` are managed tool directories searched before PATH, so a tool
+    installed by the repair plan is visible without restarting the workbench.
+    ``owned_ports`` are ports already recorded for Shine-managed instances;
+    they make the port probe answer "owned" instead of guessing.
+    """
     target = deployment_dir or data_dir
     tools = {}
     for name in sorted(BOOTSTRAP_INSTALLABLE):
-        tools[name] = probe_command(name)
+        tools[name] = probe_command(name, search_paths=tool_paths)
     facts = probe_host_facts(data_dir, deployment_dir=target)
+    port_state = probe_port(port, owned_ports=owned_ports)
     return {
         "platform": facts["platform"],
         "tools": tools,
+        "tool_paths": list(tool_paths or []),
         "gpu": facts["gpu"],
         "gpus": facts["gpus"],
         "cuda": facts["cuda"],
         "ram": facts["ram"],
         "commit": facts["commit"],
         "disk": facts["disk"],
-        "port": probe_port(port),
+        "port": port_state,
         "data_dir": facts["paths"]["data_dir"],
         "deployment_dir": facts["paths"]["deployment_dir"],
         "path_issues": facts["paths"]["issues"],
@@ -520,47 +757,261 @@ def _path_issues(data_dir: Path) -> list:
     return issues
 
 
-def setup_blockers(report: dict) -> list:
-    """Honest blocker list: what stands between this host and the supported config.
+REPAIRABILITY_AUTO = "AUTO_REPAIRABLE"
+REPAIRABILITY_USER = "USER_ACTION_REQUIRED"
+REPAIRABILITY_HARDWARE = "HARDWARE_INCOMPATIBLE"
+REPAIRABILITY_UNKNOWN = "DETECTION_UNKNOWN"
+REPAIRABILITY_AVAILABLE = "ALREADY_AVAILABLE"
+REPAIRABILITIES = (
+    REPAIRABILITY_AUTO,
+    REPAIRABILITY_USER,
+    REPAIRABILITY_HARDWARE,
+    REPAIRABILITY_UNKNOWN,
+    REPAIRABILITY_AVAILABLE,
+)
 
-    The floors come from the default variant manifest, so this list, the
-    recommender, the install plan and the production start cannot disagree
-    about what a machine needs.
+SCOPE_BOOTSTRAP = "BOOTSTRAP"
+SCOPE_RESOURCE = "RESOURCE_PREPARATION"
+SCOPE_VARIANT = "VARIANT_QUALIFICATION"
+SCOPE_SERVICE = "SERVICE_CONFIGURATION"
+SCOPE_ACTIVATION = "PRODUCTION_ACTIVATION"
+SCOPES = (SCOPE_BOOTSTRAP, SCOPE_RESOURCE, SCOPE_VARIANT, SCOPE_SERVICE, SCOPE_ACTIVATION)
+
+
+def _finding(code: str, *, repairability: str, scopes: tuple[str, ...], message: str,
+             next_action: str, actual=None, required=None, **extra) -> dict:
+    return {
+        "code": code,
+        "repairability": repairability,
+        "scopes": list(scopes),
+        "scope": list(scopes),  # Kept for readers that expect one flat key.
+        "message": message,
+        "next_action": next_action,
+        "actual": actual,
+        "required": required,
+        **extra,
+    }
+
+
+def environment_findings(report: dict, *, manifest: dict | None = None) -> list[dict]:
+    """Every detected condition, classified by *what can fix it* and *what it blocks*.
+
+    The old blocker list mixed three different questions and let any answer stop
+    the whole chain.  Here each finding states:
+
+    ``repairability``  AUTO_REPAIRABLE / USER_ACTION_REQUIRED /
+                       HARDWARE_INCOMPATIBLE / DETECTION_UNKNOWN / ALREADY_AVAILABLE
+    ``scopes``         which stages the condition really blocks
+
+    A missing FFmpeg blocks the bootstrap scope only; it never blocks model
+    candidate lookup or the creation of a repair plan.  Insufficient VRAM for
+    the default INT8 variant blocks that variant's qualification, not resource
+    preparation for a low-end candidate.
     """
-    blockers = []
-    for name, info in (report.get("tools") or {}).items():
-        if not info["present"]:
-            blockers.append({"code": "TOOL_MISSING_INSTALLABLE", "tool": name})
-        elif not info["at_floor"]:
-            blockers.append({"code": "TOOL_STALE", "tool": name, "version": info["version"]})
+    from shine.comfyops.tool_inventory import PACKAGE_ALREADY_AVAILABLE, inspect_packages, load_tools_manifest
+
+    try:
+        tools_manifest = manifest if manifest is not None else load_tools_manifest()
+    except ValueError:
+        tools_manifest = {"tools": {}}
+
+    findings: list[dict] = []
+    for package in inspect_packages(report.get("tools") or {}, tools_manifest):
+        if package["status"] == PACKAGE_ALREADY_AVAILABLE:
+            findings.append(_finding(
+                "TOOL_PACKAGE_AVAILABLE", repairability=REPAIRABILITY_AVAILABLE,
+                scopes=(SCOPE_BOOTSTRAP,), next_action="NONE",
+                message=f"{package['label']} 已安装且版本达标，不会重复安装。",
+                package_id=package["package_id"], tools=[row["tool"] for row in package["tools"]],
+            ))
+            continue
+        missing = package["missing_tools"]
+        stale = package["stale_tools"]
+        state = "缺少" if missing else "版本过旧"
+        detail = "、".join(missing or stale)
+        if package["auto_repairable"]:
+            findings.append(_finding(
+                "TOOL_MISSING_INSTALLABLE" if missing else "TOOL_STALE",
+                repairability=REPAIRABILITY_AUTO, scopes=(SCOPE_BOOTSTRAP,),
+                next_action="INSTALL_PINNED_TOOL_PACKAGE",
+                message=f"{state} {package['label']}（{detail}）：已固定下载源与 SHA-256，"
+                        f"可自动补装 {package['download_bytes']} 字节。",
+                actual={"tools": detail, "missing": missing, "stale": stale},
+                required={"version": (package["download"] or {}).get("version")},
+                package_id=package["package_id"], tool=detail,
+                tools=[row["tool"] for row in package["tools"]],
+                download=package["download"],
+                requires_environment_refresh=True,
+            ))
+        else:
+            findings.append(_finding(
+                "TOOL_PACKAGE_UNREPAIRABLE", repairability=REPAIRABILITY_USER,
+                scopes=(SCOPE_BOOTSTRAP,), next_action="INSTALL_TOOL_MANUALLY",
+                message=f"{state} {package['label']}（{detail}），但没有可用的固定下载清单，需要手动安装。",
+                actual={"tools": detail}, required=None,
+                package_id=package["package_id"], tool=detail,
+            ))
+
     facts = report.get("facts") or report
     requirements = default_requirements()
     gpu = facts.get("gpu") or {}
     if gpu.get("status") != "OK":
-        blockers.append({"code": gpu.get("reason", "NVIDIA_DRIVER_UNAVAILABLE"), "tool": "gpu"})
+        findings.append(_finding(
+            gpu.get("reason", "NVIDIA_DRIVER_UNAVAILABLE"), repairability=REPAIRABILITY_USER,
+            scopes=(SCOPE_VARIANT, SCOPE_ACTIVATION), next_action="CHECK_NVIDIA_DRIVER",
+            message="无法读取 NVIDIA 显卡与驱动信息；不会自动安装或升级显卡驱动。",
+            actual=None, required="nvidia-smi 可读",
+        ))
     else:
         floor = int(requirements.get("min_vram_mb") or VRAM_MB_MIN)
         total = int(gpu.get("vram_total_mb") or gpu.get("vram_mb") or 0)
         if total < floor:
-            blockers.append({"code": "GPU_VRAM_BELOW_FLOOR", "vram_mb": total})
+            findings.append(_finding(
+                "GPU_VRAM_BELOW_FLOOR", repairability=REPAIRABILITY_HARDWARE,
+                scopes=(SCOPE_VARIANT, SCOPE_ACTIVATION), next_action="SELECT_LOWER_TIER_VARIANT",
+                message=f"这张卡有 {total} MB 显存，低于标准档 {floor} MB 门槛；"
+                        "默认 INT8 方案不能标记为生产就绪，但仍可查看并准备合法的低显存候选方案。",
+                actual=total, required=floor,
+            ))
+        else:
+            findings.append(_finding(
+                "GPU_VRAM_MEETS_FLOOR", repairability=REPAIRABILITY_AVAILABLE,
+                scopes=(SCOPE_VARIANT,), next_action="NONE",
+                message=f"显存 {total} MB 达到标准档门槛 {floor} MB。",
+                actual=total, required=floor,
+            ))
+
     ram = facts.get("ram") or {}
-    if ram.get("status") != "OK" or not ram.get("at_floor"):
-        blockers.append({"code": "RAM_BELOW_FLOOR", "ram_mb": ram.get("ram_mb", 0)})
+    if ram.get("status") != "OK":
+        findings.append(_finding(
+            "RAM_UNREADABLE", repairability=REPAIRABILITY_UNKNOWN,
+            scopes=(SCOPE_VARIANT,), next_action="REVIEW_MEMORY_INVENTORY",
+            message="读不到本机物理内存总量；结论是未知，不会冒充满足。",
+            actual=None, required=requirements.get("min_ram_mb"),
+        ))
+    elif ram.get("at_floor"):
+        note = ram.get("note")
+        if note == "HARDWARE_RESERVED_MEMORY":
+            message = (f"系统报告可用 {ram.get('ram_mb')} MB，但硬件清单显示实装 "
+                       f"{ram.get('installed_mb')} MB；差额是固件/核显保留内存，按实装容量判定达标。")
+        else:
+            message = f"物理内存 {ram.get('ram_mb')} MB 达到门槛 {ram.get('floor_mb')} MB。"
+        findings.append(_finding(
+            "RAM_MEETS_FLOOR", repairability=REPAIRABILITY_AVAILABLE,
+            scopes=(SCOPE_VARIANT,), next_action="NONE", message=message,
+            actual=ram.get("ram_mb"), required=ram.get("floor_mb"),
+            evidence_basis=ram.get("at_floor_basis"),
+        ))
+    elif ram.get("review_required"):
+        findings.append(_finding(
+            "RAM_BELOW_FLOOR_UNCONFIRMED", repairability=REPAIRABILITY_UNKNOWN,
+            scopes=(SCOPE_VARIANT,), next_action="REVIEW_MEMORY_INVENTORY",
+            message=(f"系统报告 {ram.get('ram_mb')} MB，低于门槛 {ram.get('floor_mb')} MB；"
+                     "硬件实装容量读不出来，因此不能确认这台机器属于 32GB 档，也不能伪造为达标。"),
+            actual=ram.get("ram_mb"), required=ram.get("floor_mb"),
+            deficit_mb=ram.get("deficit_mb"),
+        ))
+    else:
+        findings.append(_finding(
+            "RAM_BELOW_FLOOR", repairability=REPAIRABILITY_HARDWARE,
+            scopes=(SCOPE_RESOURCE, SCOPE_VARIANT, SCOPE_ACTIVATION),
+            next_action="ADD_PHYSICAL_MEMORY",
+            message=f"实装内存 {ram.get('installed_mb') or ram.get('ram_mb')} MB，低于门槛 {ram.get('floor_mb')} MB。",
+            actual=ram.get("installed_mb") or ram.get("ram_mb"), required=ram.get("floor_mb"),
+            deficit_mb=ram.get("deficit_mb"),
+        ))
+
     commit = facts.get("commit") or {}
     min_commit = requirements.get("min_commit_mb")
     if isinstance(min_commit, int | float) and not isinstance(min_commit, bool):
         if commit.get("status") != "OK":
-            blockers.append({"code": "COMMIT_UNAVAILABLE"})
+            findings.append(_finding(
+                "COMMIT_UNREADABLE", repairability=REPAIRABILITY_UNKNOWN,
+                scopes=(SCOPE_VARIANT,), next_action="REVIEW_PAGE_FILE",
+                message="读不到提交内存上限，结论未知。", actual=None, required=min_commit,
+            ))
         elif int(commit.get("commit_total_mb") or 0) < int(min_commit):
-            blockers.append({"code": "COMMIT_BELOW_FLOOR", "commit_mb": commit.get("commit_total_mb")})
+            findings.append(_finding(
+                "COMMIT_BELOW_FLOOR", repairability=REPAIRABILITY_USER,
+                scopes=(SCOPE_VARIANT, SCOPE_ACTIVATION), next_action="ENLARGE_PAGE_FILE",
+                message=f"提交内存上限 {commit.get('commit_total_mb')} MB 低于 {min_commit} MB；"
+                        "页面文件过小或被关闭时会出现这种情况。",
+                actual=commit.get("commit_total_mb"), required=min_commit,
+            ))
+
     disk = report.get("disk") or facts.get("disk") or {}
     if not disk.get("at_floor", True):
-        blockers.append({"code": "DISK_BELOW_FLOOR", "free_gb": disk.get("free_gb")})
+        findings.append(_finding(
+            "DISK_BELOW_FLOOR", repairability=REPAIRABILITY_USER,
+            scopes=(SCOPE_RESOURCE, SCOPE_ACTIVATION), next_action="FREE_DISK_SPACE",
+            message=f"安装盘只剩 {disk.get('free_gb')} GB，低于运行余量门槛。",
+            actual=disk.get("free_gb"), required=disk.get("runtime_floor_gb"),
+        ))
+
     port = report.get("port") or {}
-    if port.get("status") != "OK":
-        blockers.append({"code": "PORT_OCCUPIED", "port": port.get("port")})
+    identity = port.get("identity")
+    if identity == PORT_FREE:
+        findings.append(_finding(
+            "PORT_FREE", repairability=REPAIRABILITY_AVAILABLE, scopes=(SCOPE_SERVICE,),
+            next_action="NONE", message=f"服务端口 {port.get('port')} 空闲。",
+            actual=port.get("port"), required=port.get("port"),
+        ))
+    elif identity in {PORT_OWNED_COMFYUI, PORT_ADOPTABLE_COMFYUI}:
+        findings.append(_finding(
+            "PORT_HELD_BY_COMFYUI", repairability=REPAIRABILITY_AVAILABLE, scopes=(SCOPE_SERVICE,),
+            next_action="REUSE_EXISTING_COMFYUI",
+            message=(f"端口 {port.get('port')} 由"
+                     + ("本机受管 ComfyUI" if identity == PORT_OWNED_COMFYUI else "可核验的已有 ComfyUI")
+                     + "持有，按现有发现/核验流程复用，不杀进程、不重新绑定。"),
+            actual=identity, required=PORT_FREE,
+        ))
+    elif port.get("selected"):
+        findings.append(_finding(
+            "PORT_OCCUPIED_SELECTED_ALTERNATIVE", repairability=REPAIRABILITY_AUTO,
+            scopes=(SCOPE_SERVICE,), next_action="USE_SELECTED_PORT",
+            message=(f"端口 {port.get('port')} 被"
+                     f"{('其他进程' if identity == PORT_FOREIGN_PROCESS else '未知进程')}占用；"
+                     f"已选择合法空闲端口 {port.get('selected')}，不会结束占用者。"),
+            actual={"port": port.get("port"), "identity": identity},
+            required={"port": PORT_FREE, "selected": port.get("selected")},
+            selected_port=port.get("selected"),
+        ))
+    else:
+        findings.append(_finding(
+            "PORT_OCCUPIED", repairability=REPAIRABILITY_USER, scopes=(SCOPE_SERVICE,),
+            next_action="FREE_PORT_MANUALLY",
+            message=f"端口 {port.get('port')} 被占用，且在候选范围内没有可用端口。",
+            actual=identity, required=PORT_FREE,
+        ))
+
     if not (report.get("data_dir") or {}).get("writable", True):
-        blockers.append({"code": (report.get("data_dir") or {}).get("reason", "DATA_DIR_NOT_WRITABLE")})
+        findings.append(_finding(
+            (report.get("data_dir") or {}).get("reason", "DATA_DIR_NOT_WRITABLE"),
+            repairability=REPAIRABILITY_USER, scopes=(SCOPE_BOOTSTRAP, SCOPE_RESOURCE),
+            next_action="CHOOSE_WRITABLE_DIRECTORY",
+            message="项目数据目录无法写入。", actual=None, required="可写目录",
+        ))
     if not (report.get("deployment_dir") or {}).get("writable", True):
-        blockers.append({"code": "DEPLOYMENT_DIR_NOT_WRITABLE"})
+        findings.append(_finding(
+            "DEPLOYMENT_DIR_NOT_WRITABLE", repairability=REPAIRABILITY_USER,
+            scopes=(SCOPE_RESOURCE,), next_action="CHOOSE_WRITABLE_DIRECTORY",
+            message="安装目录无法写入。", actual=None, required="可写目录",
+        ))
+    return findings
+
+
+def setup_blockers(report: dict) -> list:
+    """The legacy flat blocker list, derived from the classified findings.
+
+    Each entry keeps its historic ``code`` (so existing consumers keep working)
+    and carries the classification and the exact next action.  A condition that
+    is already satisfied is not a blocker and is never counted as one.
+    """
+    blockers = []
+    for finding in environment_findings(report):
+        if finding["repairability"] == REPAIRABILITY_AVAILABLE:
+            continue
+        entry = {key: value for key, value in finding.items() if key not in {"scopes", "scope"}}
+        entry["scope"] = finding["scopes"]
+        blockers.append(entry)
     return blockers
