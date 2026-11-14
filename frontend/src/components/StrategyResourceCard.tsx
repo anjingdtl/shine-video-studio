@@ -82,19 +82,22 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
       check();
       const candidates = result.managed_installations ?? [];
       const installationId = runtime.installation_id || (candidates.length === 1 ? candidates[0].id : '');
-      if (!installationId) throw new Error('请先在基础配置中登记或选定本机受管安装实例。');
+      // 阶段 A（离线整备）不要求已有受管 ComfyUI 实例：新装机可以先下载并校验
+      // 权重，实例绑定（阶段 B）等 ComfyUI 装好后再走既有激活流程。
       setInstanceId(installationId);
-      try {
-        const local = await post<LocalInventory>('/setup/resources/inspect-local', {
-          project_id: projectId, strategy, instance_id: installationId,
-        });
-        check(); setInventory(local);
-      } catch {
-        check(); setMessage('暂时无法扫描受管模型目录，仍可查看下载计划。');
+      if (installationId) {
+        try {
+          const local = await post<LocalInventory>('/setup/resources/inspect-local', {
+            project_id: projectId, strategy, instance_id: installationId,
+          });
+          check(); setInventory(local);
+        } catch {
+          check(); setMessage('暂时无法扫描受管模型目录，仍可查看下载计划。');
+        }
       }
       const created = await post<Plan>('/setup/resources/install-plan', {
         project_id: projectId, strategy, snapshot_sha256: result.snapshot_sha256,
-        instance_id: installationId, disk_free: storage.free_bytes, source_preference: source,
+        instance_id: installationId || undefined, disk_free: storage.free_bytes, source_preference: source,
       });
       check(); setPlan(created);
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
@@ -182,6 +185,8 @@ export function StrategyResourceCard({ projectId, strategy }: { projectId: strin
     {plan && <div className="required-action">
       <p>本次计划下载 {gib(plan.download_bytes)}，需预留 {gib(plan.disk_required)} 磁盘空间。
         来源为上方选择的固定源或已审镜像，文件将按 SHA-256 校验。</p>
+      {!instanceId && <p>当前还没有受管 ComfyUI 实例：这一步只做离线下载与校验（阶段 A）；
+        装好 ComfyUI 后再把已校验的资源绑定到受管实例并核对节点（阶段 B），不会凭空启动渲染器。</p>}
       <button type="button" className="must-button" disabled={working} onClick={() => void confirm()}>
         确认并下载上述资源
       </button>

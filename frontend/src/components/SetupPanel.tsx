@@ -1,6 +1,6 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api';
+import { api, timeoutSignal } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { VariantRecommendationCard } from './VariantRecommendation';
 import {
@@ -699,7 +699,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       try {
         const result = await api<ExistingVerification>('/setup/existing-installations/verify', {
           ...withJson('POST', { path: existingScan.root, snapshot: existingScan.snapshot }),
-          signal: AbortSignal.timeout(3_600_000),
+          signal: timeoutSignal(3_600_000),
         });
         const verifiedSet = new Set(result.verified.map(row => `${row.component_id}:${row.relative_path}`));
         const resultRows = [...result.verified, ...result.rejected];
@@ -729,7 +729,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       const result = await api<ExistingModelImport>(
         '/setup/existing-installations/import-models', { ...withJson('POST', {
           path: existingScan.root, snapshot: existingScan.snapshot,
-        }), signal: AbortSignal.timeout(3_600_000) });
+        }), signal: timeoutSignal(3_600_000) });
       const importedSet = new Set(result.imported.map(row => `${row.component_id}:${row.relative_path}`));
       setExistingScan(previous => previous ? ({ ...previous,
         matches: previous.matches.map(row => ({ ...row, status: importedSet.has(`${row.component_id}:${row.relative_path}`)
@@ -839,7 +839,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         ensureCurrent();
         setProgress('启动服务并检测工作流，完成后自动停止…');
         const validation = await api<{ status: string }>('/setup/services/validate', {
-          ...withJson('POST', body), signal: AbortSignal.timeout(3_600_000),
+          ...withJson('POST', body), signal: timeoutSignal(3_600_000),
         });
         if (validation.status !== 'READY') throw new Error(`服务检测未通过：${validation.status}。配置尚未激活。`);
         ensureCurrent();

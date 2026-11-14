@@ -46,6 +46,15 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The quick tier can select media-dependent integration contracts (e.g.
+      # candidate QC's full decode).  Without FFmpeg those tests honestly report
+      # "unavailable" and fail; L1 needs the same media tools as L2/L3.
+      - name: Install FFmpeg and FFprobe
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          ffmpeg -version | head -1
+          ffprobe -version | head -1
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true

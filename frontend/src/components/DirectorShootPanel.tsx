@@ -21,6 +21,7 @@ import {
   type ProductionRun,
   type ProductionStrategy,
   type StrategyOptions,
+  type VariantAvailability,
 } from '../api';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
@@ -157,8 +158,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   const [problem, setProblem] = useState('');
   const [run, setRun] = useState<ProductionRun | null>(null);
   const [touched, setTouched] = useState(false);
-  /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。 */
-  const [availability, setAvailability] = useState<Record<string, { available: boolean; reason: string }>>({});
+  /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。但「未就绪」不等于
+   *  「不可选择」——候选模型可以被选中进入资源准备，只是不能开拍。 */
+  const [availability, setAvailability] = useState<Record<string, VariantAvailability>>({});
   const submitting = useRef(false);
 
   // 稳定的空数组：每次渲染新建 [] 会让下面的选择 effect 无限触发。
@@ -207,16 +209,23 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     getVariantAvailability(projectId)
       .then((rows) => {
         if (cancelled) return;
-        setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, { available: row.available, reason: row.reason }])));
-        const ready = rows.find((row) => row.available);
-        if (ready) setVariantId((current) => (rows.find((row) => row.variant_id === current)?.available ? current : ready.variant_id));
+        setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, row])));
+        // 默认选第一个已就绪的方案；但用户已经选定的方案（哪怕未就绪、需要
+        // 准备资源）保持不变，不被强行切回 INT8。
+        setVariantId((current) => {
+          if (rows.some((row) => row.variant_id === current)) return current;
+          const ready = rows.find((row) => row.available);
+          return (ready ?? rows[0])?.variant_id ?? current;
+        });
       })
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [projectId]);
 
-  const chosenVariantAvailable = availability[variantId]?.available ?? false;
-  const chosenVariantReason = availability[variantId]?.reason ?? '本机没有这套权重';
+  const chosen = availability[variantId];
+  const chosenVariantAvailable = chosen?.available ?? false;
+  const chosenVariantReason = chosen?.reason ?? '本机没有这套权重';
+  const chosenSelectable = chosen?.selectable_for_preparation ?? true;
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 
   const toggle = (episodeId: string) => {
@@ -349,10 +358,13 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
             {options.model_variants.map((row) => {
               const state = availability[row.variant_id];
               const ready = state?.available ?? false;
+              // 可选择用于资源准备 ≠ 已就绪可开拍。未安装/候选模型仍可选中，
+              // 选中后下方出现资源整备卡；开拍闸门另由 chosenVariantAvailable 把守。
+              const selectable = state?.selectable_for_preparation ?? true;
               return <button key={row.variant_id} type="button" role="radio"
                 aria-checked={variantId === row.variant_id}
                 className={`strategy-option${variantId === row.variant_id ? ' active' : ''}${ready ? '' : ' not-ready'}`}
-                disabled={!ready || running || busy !== ''}
+                disabled={!selectable || running || busy !== ''}
                 title={ready ? row.label : state?.reason ?? '本机没有这套权重'}
                 onClick={() => setVariantId(row.variant_id)}>
                 {describeVariantName(row.variant_id)}
@@ -361,9 +373,11 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
             })}
           </div>
           {!chosenVariantAvailable && <p className="strategy-note">
-            {describeVariantName(variantId)}：{chosenVariantReason}。到「基础配置 · 安装与下载」准备后再回来开拍。
+            {describeVariantName(variantId)}：{chosenVariantReason}。
+            {chosenSelectable ? '可在下方「模型资源检测」里扫描本机、授权下载并校验；准备完成前不能开拍。'
+              : '到「基础配置 · 安装与下载」准备后再回来开拍。'}
           </p>}
-          {variantId === 'ref2va-lowend-candidate' && <StrategyResourceCard
+          {chosenSelectable && (!chosenVariantAvailable || chosen?.acceptance_status === 'CANDIDATE') && <StrategyResourceCard
             key={`${projectId}-${variantId}-${acceleratorId}-${secondPass}-${upscale}`}
             projectId={projectId} strategy={{ schema_version: '1', generation_mode: 'Ref2VA',
               model_variant_id: variantId, accelerator_id: acceleratorId,

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  api, json, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
+  api, json, timeoutSignal, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
   type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion,
   type Shot, type Style, type StyleVersion, type SystemHealth, type SystemStatus, type WorkflowProfile,
 } from './api';
@@ -128,7 +128,7 @@ export function useStudio() {
     const probe = ++healthProbe.current;
     let online = false;
     try {
-      const projects = await api<Project[]>('/projects', { signal: AbortSignal.timeout(2500), cache: 'no-store' });
+      const projects = await api<Project[]>('/projects', { signal: timeoutSignal(2500), cache: 'no-store' });
       online = Array.isArray(projects);
     } catch { /* A failed health probe means the API cannot be reached. */ }
     if (probe === healthProbe.current) {
@@ -139,7 +139,7 @@ export function useStudio() {
   }, []);
 
   const loadSystem = useCallback(async () => {
-    try { setSystem(await api<SystemStatus>('/system/status', { signal: AbortSignal.timeout(8000), cache: 'no-store' })); }
+    try { setSystem(await api<SystemStatus>('/system/status', { signal: timeoutSignal(8000), cache: 'no-store' })); }
     catch { setSystem(null); }
   }, []);
 
@@ -162,7 +162,7 @@ export function useStudio() {
   }, []);
 
   const loadProject = useCallback(async (id: string) => {
-    const signal = AbortSignal.timeout(8000);
+    const signal = timeoutSignal(8000);
     if (loadedProject.current !== id) {
       // Switching productions: the previous list belongs to another film. A
       // material step that keeps showing it - even for the moment the new one
@@ -203,7 +203,7 @@ export function useStudio() {
     // for an empty workspace. A later manual refresh supersedes this request.
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const rows = await api<Project[]>('/projects', { signal: AbortSignal.timeout(3000), cache: 'no-store' });
+        const rows = await api<Project[]>('/projects', { signal: timeoutSignal(3000), cache: 'no-store' });
         if (requestId !== projectsRequest.current) return null;
         setProjects(rows);
         setProjectsLoaded(true);

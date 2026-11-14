@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  api as request, json, type AgentRoute, type AgentRoutePreview, type LlmOverview,
+  api as request, json, timeoutSignal, type AgentRoute, type AgentRoutePreview, type LlmOverview,
   type LlmReadiness, type LlmRole, type ProviderProfile, type ProviderTestResult,
 } from '../api';
 import { routeRoleLabels } from '../constants';
@@ -73,7 +73,7 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
   const autoRan = useRef(false);
 
   async function api<T>(path: string, init?: RequestInit, timeoutMs = 60_000): Promise<T> {
-    return request<T>(path, { ...init, signal: init?.signal ?? AbortSignal.timeout(timeoutMs) });
+    return request<T>(path, { ...init, signal: init?.signal ?? timeoutSignal(timeoutMs) });
   }
 
   async function load() {

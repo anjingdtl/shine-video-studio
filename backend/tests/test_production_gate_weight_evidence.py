@@ -171,8 +171,16 @@ def test_verified_bytes_the_current_instance_binds_are_consumable(api, monkeypat
     assert gate["selectable"] is True, gate["blockers"]
 
 
-def test_the_package_entry_refuses_what_the_gate_refuses(api, monkeypatch):
-    """The same verdict on the way into a director package."""
+def test_the_package_entry_refuses_what_the_gate_refuses(api, monkeypatch, fake_deployment_host):
+    """The same verdict on the way into a director package.
+
+    ``fake_deployment_host`` keeps the deployment-storage drive policy out of
+    the way: on a CI runner whose pytest temp dir lives on the system drive,
+    ``require_storage`` would otherwise refuse to read the cache at all, and
+    the wrong-bytes file this test planted would never be seen - turning the
+    byte-verification verdict (NOT_VERIFIED) into a storage-policy verdict
+    (NOT_AVAILABLE).  The sibling wrong-bytes test already isolates this.
+    """
     client, factory, settings = api
     studio = _studio(client)
     project = studio["project"]

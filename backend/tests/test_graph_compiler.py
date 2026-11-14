@@ -252,7 +252,14 @@ def test_execution_identity_snapshot_is_complete_and_hashable():
 def test_candidate_stack_uses_pinned_recipe_and_refuses_unverified_combinations():
     compiled = compile_ref2va_workflow(image_count=2, variant_id="ref2va-lowend-candidate", accelerator_id="native20")
     assert compiled.execution_identity()["compiler"] == "shine.graph_compiler.v2"
+    # The full model stack comes from the candidate's pinned recipe, never the
+    # INT8 baseline: W6A8 DiT, NVFP4 text encoder, INT8 ConvRot video VAE and
+    # FP32 audio VAE.  A regression to the baseline FP16 video VAE or the
+    # realism LoRA / SolAttn chain would silently change the executed model.
+    assert compiled.graph["10"]["inputs"]["unet_name"].endswith("minimax_h3_ref2va_pruned_w6a8.safetensors")
+    assert compiled.graph["20"]["inputs"]["clip_name"] == "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
     assert compiled.graph["21"]["inputs"]["vae_name"].endswith("minimax_h3_video_vae_int8_convrot.safetensors")
+    assert compiled.graph["22"]["inputs"]["vae_name"].endswith("minimax_h3_audio_vae_fp32.safetensors")
     assert not any(node["class_type"] in {"LoraLoaderModelOnly", "SolAttnPatch"} for node in compiled.graph.values())
     assert "MiniMaxH3MemoryEfficientSageAttentionPatch" in compiled.required_nodes
     for accelerator, second in (("pdd8", None), ("native20", SecondPassSpec())):

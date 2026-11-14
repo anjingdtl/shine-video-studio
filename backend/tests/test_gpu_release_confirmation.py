@@ -24,12 +24,23 @@ def fake_comfy():
         server.stop()
 
 
+# A real loopback HTTP round-trip through a freshly built httpx client can take
+# tens of milliseconds on a loaded CI runner (Windows especially).  The release
+# window must cover that latency or a *confirmed* release is reported as
+# unconfirmed purely because the first poll outran the budget.  The product
+# default is 120 s; these positive cases only need a window that is robust to
+# scheduler jitter, not a tight one.  Refusal cases keep a short window because
+# they expect the wait to expire.
+RELEASE_WINDOW_S = 5.0
+REFUSAL_WINDOW_S = 0.05
+
+
 def test_release_is_confirmed_when_the_model_is_gone(fake_comfy):
     """ComfyUI 0.39 shape: reserved 64 MiB, unallocated 46.75 MiB."""
     fake_comfy.comfyui_version = "0.39.0"
     fake_comfy.torch_vram_total = 67108864
     fake_comfy.torch_vram_free = 49017344
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=RELEASE_WINDOW_S)
     client.free_models()
 
 
@@ -57,11 +68,13 @@ def test_release_is_refused_for_an_older_server_that_still_reserves_torch_memory
     fake_comfy.comfyui_version = "0.38.0"
     fake_comfy.torch_vram_total = 1024
     fake_comfy.torch_vram_free = 0
-    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=0.05)
+    client = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=REFUSAL_WINDOW_S)
     with pytest.raises(ComfyUIError):
         client.free_models()
     fake_comfy.torch_vram_total = 0
-    client.free_models()
+    # The confirmation phase needs a window that survives CI HTTP latency.
+    confirmed = ComfyUIClient(fake_comfy.base_url, timeout_s=2, model_release_timeout_s=RELEASE_WINDOW_S)
+    confirmed.free_models()
 
 
 def test_release_is_refused_when_the_reading_is_unknown(fake_comfy):

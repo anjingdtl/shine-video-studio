@@ -51,7 +51,11 @@ class ResourceResolveRequest(BaseModel):
 
 class ResourcePlanRequest(ResourceResolveRequest):
     snapshot_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    instance_id: str = Field(min_length=1, max_length=96)
+    # Phase A (offline resource preparation) does not require a managed ComfyUI
+    # instance: a fresh machine can download and hash-verify weights before any
+    # renderer exists.  When an instance is named, the plan additionally pins it
+    # (phase B binding); when it is absent the plan stays instance-independent.
+    instance_id: str | None = Field(default=None, max_length=96)
     source_preference: Literal["AUTO", "MIRROR_FIRST", "OFFICIAL_FIRST"] = "AUTO"
     disk_free: int = Field(ge=0)
 
@@ -418,8 +422,12 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             "downloadable": bool(manifest.get("auto_download_allowed")),
             "installed": False,
             "verified": False,
+            "bound": False,
             "profiles_registered": bool(registered),
             "runtime_validated": bool(validated),
+            "selectable_for_preparation": False,
+            "trial_ready": False,
+            "production_ready": False,
             "available": False,
             "reason": "本机没有这套权重",
         }
@@ -441,25 +449,48 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
                 present = {row["component_id"] for row in report.get("matches") or []}
             except Exception:  # noqa: BLE001 - an unreadable directory is a fact
                 present = set()
-        entry["installed"] = bool(required) and required <= present
         try:
             readiness_report = variant_readiness(db, settings, binding, project_id)
         except Exception:  # noqa: BLE001 - the ledger may be unreadable
             readiness_report = None
-        if readiness_report is not None:
-            weights = readiness_report.get("weights") or []
-            entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
+        weights = (readiness_report or {}).get("weights") or []
+        # The graph-derived requirement is authoritative.  A candidate manifest
+        # may declare ``required_component_ids=[]`` (W6A8 does); that must never
+        # be read as "nothing is required" - the weights its profile really
+        # loads are the requirement.  ``bool([]) and ...`` used to make
+        # ``installed`` permanently false for such variants.
+        weight_ids = {str(row.get("component_id")) for row in weights}
+        required_ids = required or weight_ids
+        installed_by_scan = bool(required_ids) and required_ids <= present
+        installed_by_evidence = bool(weights) and all(row.get("prepared") for row in weights)
+        entry["installed"] = installed_by_scan or installed_by_evidence
+        entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
+        # "Bound" is a separate fact from "verified": the bytes were checked,
+        # and the current managed renderer reads them from that very place.
+        entry["bound"] = bool(weights) and all(row.get("consumable") for row in weights)
+        entry["production_ready"] = bool((readiness_report or {}).get("production_ready"))
         accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
+        # Seven decoupled facts.  ``available`` keeps its historic meaning -
+        # the production-start gate - while preparation, trial and production
+        # are told apart so an uninstalled candidate can still be selected and
+        # its resources prepared without unlocking production.
+        entry["selectable_for_preparation"] = True
+        entry["trial_ready"] = bool(entry["installed"] and entry["verified"] and entry["bound"]
+                                    and entry["profiles_registered"] and entry["runtime_validated"])
         entry["available"] = (accepted and entry["installed"]
                               and entry["profiles_registered"] and entry["runtime_validated"])
         if not entry["installed"]:
-            entry["reason"] = "本机没有这套权重"
+            entry["reason"] = "本机没有这套权重：可选择后下载准备"
+        elif not entry["verified"]:
+            entry["reason"] = "权重已就位，待逐字节核验"
         elif not entry["profiles_registered"]:
             entry["reason"] = "生成方案还没登记"
         elif not entry["runtime_validated"]:
             entry["reason"] = "还没在本机核对节点"
+        elif not entry["bound"]:
+            entry["reason"] = "权重已核验，但当前受管实例还没绑定"
         elif not accepted:
-            entry["reason"] = "候选方案，暂不能开拍"
+            entry["reason"] = "候选方案：可准备资源与试镜，暂不能正式开拍"
         else:
             entry["reason"] = "本机已就绪"
         rows.append(entry)
@@ -659,7 +690,7 @@ def work_stacks(request: Request, db: DBSession):
 
 @router.post('/managed-processes/release')
 def release_managed_processes(request: Request, actor: Operator, db: DBSession,
-                              body: "ManagedReleaseRequest | None" = None):
+                              body: ManagedReleaseRequest | None = None):
     """Stop the owned renderer and reviewers and give the GPU memory back.
 
     This is the workbench's own "close the backend" action: ComfyUI and the
@@ -906,16 +937,22 @@ def create_resource_install_plan(body: ResourcePlanRequest, settings: SettingsDe
     preview = resolve_resources(db, settings, strategy)
     if not preview.get("download_eligible") or preview.get("snapshot_sha256") != body.snapshot_sha256:
         raise HTTPException(409, "RESOURCE_SNAPSHOT_CHANGED_OR_INELIGIBLE")
-    try:
-        identity = managed_installation_pin(db, body.instance_id)
-    except ValueError as exc:
-        raise HTTPException(409, str(exc)) from exc
+    # Phase A: no managed instance is required to prepare bytes.  When one is
+    # named, pin it so phase B binding cannot drift; when absent, the plan is
+    # instance-independent and activation happens later through the existing
+    # lifecycle, never by downloading against a renderer that does not exist.
+    identity = None
+    if body.instance_id:
+        try:
+            identity = managed_installation_pin(db, body.instance_id)
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
     binding = load_binding(strategy.model_variant_id, fresh=True)
     context = {"schema": "shine.resource-plan.v2", "strategy": strategy.model_dump(mode="json"),
                "strategy_sha256": strategy.strategy_sha256(), "catalog_sha256": preview["catalog_sha256"],
                "manifest_sha256": preview["manifest_sha256"],
                "recipe_sha256": preview["compiled_recipe_sha256"], "snapshot_sha256": body.snapshot_sha256,
-               "instance_id": body.instance_id, "instance_pin": identity,
+               "instance_id": body.instance_id or None, "instance_pin": identity,
                "source_preference": body.source_preference}
     plan = deployment.create_install_plan(
         db, settings, binding.catalog, [item["component_id"] for item in preview["components"]],

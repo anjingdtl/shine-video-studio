@@ -344,3 +344,43 @@ describe('⑦ 逐集成片', () => {
     expect(player).not.toBeNull();
   });
 });
+
+describe('⑤ 模型版本选择与资源准备解耦', () => {
+  it('未安装的 W6A8 仍可选中并进入资源整备，但开拍闸门保持关闭', async () => {
+    stubOverview(overviewBody([episode({})]));
+    stubRef2vaProfile();
+    stubStrategyOptions();
+    // 覆盖可用性台账：七个事实解耦。W6A8 是候选、未安装，但可选择用于准备。
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-availability/,
+      respond: () => jsonResponse({ project_id: 'proj-1', variants: [
+        { variant_id: 'h3-ref2va-int8-convrot', label: '标准', title: '标准', acceptance_status: 'SUPPORTED',
+          downloadable: true, installed: true, verified: true, bound: true, profiles_registered: true,
+          runtime_validated: true, selectable_for_preparation: true, trial_ready: true,
+          production_ready: true, available: true, reason: '本机已就绪' },
+        { variant_id: 'ref2va-lowend-candidate', label: '低显存候选', title: '低显存候选', acceptance_status: 'CANDIDATE',
+          downloadable: false, installed: false, verified: false, bound: false, profiles_registered: false,
+          runtime_validated: false, selectable_for_preparation: true, trial_ready: false,
+          production_ready: false, available: false, reason: '本机没有这套权重：可选择后下载准备' },
+      ] }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
+      ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/setup\/resources\/resolve$/,
+      respond: () => jsonResponse({ components: [], missing_download_bytes: 0, snapshot_sha256: 'a'.repeat(64),
+        download_eligible: true, blockers: [], managed_installations: [] }) });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
+    expect(await screen.findByText('这次要拍哪几集')).toBeInTheDocument();
+
+    // W6A8 单选按钮可点（不再因为未就绪而被禁用）。
+    const w6a8 = await screen.findByRole('radio', { name: /低显存候选 · W6A8/ });
+    expect(w6a8).toBeEnabled();
+    await user.click(w6a8);
+    // 选中后出现资源整备卡，引导扫描/下载/校验。
+    expect(await screen.findByText('模型资源检测')).toBeInTheDocument();
+    // 开拍闸门仍然关闭：候选未通过真实生产验收。
+    const [start] = await screen.findAllByRole('button', { name: /确认拍摄方案并开始真实制作/ });
+    await waitFor(() => expect(start).toBeDisabled());
+  });
+});

@@ -277,7 +277,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         page.goto(f"{ui_base}#d/creative", wait_until="networkidle")
         outline_panel = page.locator("#outline-confirm")
         expect(outline_panel).to_contain_text("先把这版故事定下来", timeout=15000)
-        expect(outline_panel).to_contain_text("后台提取并归并总体大纲")
+        # The convergence round moved each page's single primary action into the
+        # page-level stage rail (one action per page), so the extract button is
+        # rendered in the rail, not inside the panel body.  Assert the real
+        # product surface rather than the old inline button.
+        expect(page.locator(".action-rail")).to_contain_text("后台提取并归并总体大纲", timeout=15000)
         expect(page.locator(".script-doc.active")).to_contain_text("当前依据")
         # The director journey gives the style and master panels their own page
         # and keeps the pre-production panel in the expert layer. The script

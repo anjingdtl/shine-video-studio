@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, FileText, HelpCircle, Loader2, RefreshCw, ShieldCheck, Sparkles } from 'lucide-react';
-import { API, ApiError, api, json, type DialogueCoverage } from '../api';
+import { API, ApiError, api, json, timeoutSignal, type DialogueCoverage } from '../api';
 import { DIALOGUE_LANGUAGES, failureLabels, label } from '../constants';
 import { AgentProgress, agentPhaseLabels, reusedRolesFromInputs, type AgentRunProgress } from './AgentProgress';
 import { useStageRail, useRailPresent } from './StageRail';
@@ -247,7 +247,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     setMessage(options?.start_role
       ? `已复用 ${inheritedRoles.length} 个已完成步骤，正在从「${stepLabels[options.start_role] ?? options.start_role}」继续。`
       : '正在启动编剧 Agent。编剧完成后先核对人物对照，确认后才会继续导演。');
-    const priorRuns = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) }).catch(() => []);
+    const priorRuns = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: timeoutSignal(5000) }).catch(() => []);
     const priorRunIds = new Set(priorRuns.map(run => run.id));
     let polling = true;
     let pollInFlight = false;
@@ -255,7 +255,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
       if (!polling || pollInFlight) return;
       pollInFlight = true;
       try {
-        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
+        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: timeoutSignal(5000) });
         if (!polling) return;
         setPollError('');
         setLastCheckedAt(Date.now());
@@ -264,7 +264,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
         let reusedRoles: string[] = [];
         if (currentRuns.some(run => run.trace?.input_revision_ids?.length)) {
           const artifacts = await api<Array<{ id: string; kind: string; producer_role: string; stale: boolean }>>(
-            `/projects/${projectId}/film-artifacts`, { signal: AbortSignal.timeout(5000) }).catch(() => []);
+            `/projects/${projectId}/film-artifacts`, { signal: timeoutSignal(5000) }).catch(() => []);
           if (!polling) return;
           reusedRoles = reusedRolesFromInputs(currentRuns, artifacts);
         }
@@ -360,7 +360,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     finally {
       polling = false; window.clearInterval(progressTimer);
       try {
-        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
+        const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: timeoutSignal(5000) });
         setProgressRuns(runs.filter(run => !priorRunIds.has(run.id)));
         setLastCheckedAt(Date.now());
       } catch { /* Keep the last observed progress. */ }
@@ -379,7 +379,7 @@ export default function StoryboardPanel({ projectId, onRefresh, onNavigate, back
     }
     setCheckingPreviousRun(true);
     try {
-      const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: AbortSignal.timeout(5000) });
+      const runs = await api<AgentRunProgress[]>(`/projects/${projectId}/film-runs`, { signal: timeoutSignal(5000) });
       const previous = runs.find(run => run.id === taskId && run.role_id === 'director');
       setLastCheckedAt(Date.now());
       const scriptwriter = previous?.trace?.input_revision_ids?.[0];

@@ -1411,3 +1411,42 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   需求 payload 与计划；绑定键 entity_id 仍用镜头用名（零绑定风险）。新增
   `GET …/material-preparation/entity-catalog` 只读接口；素材中心展示规范全名+
   全貌+按场变体；晋升时定义随主素材 provenance 入库。回归 test_material_derive（+断言）。
+
+## 2026-11-14 H3 资源自整备 V2.0 最终收尾轮
+
+- **W6A8 可选择 ≠ 可开拍**：`GET /setup/variant-availability` 解耦七态
+  （selectable_for_preparation/installed/verified/bound/profiles_registered/
+  runtime_validated/trial_ready/production_ready），`available` 仍是开拍闸门。
+  `installed` 以**图推导权重**为准：候选 manifest `required_component_ids=[]`
+  不再使 `installed` 恒假。导演拍摄页未就绪/候选模型按钮不再禁用，选中即显示
+  资源整备卡；开拍仍由 `strategy_blockers`（MODEL_VARIANT_NOT_ACCEPTED）把守。
+- **离线整备无循环依赖**：`/setup/resources/install-plan` 的 `instance_id` 改可选。
+  阶段 A（扫描/哈希/授权下载/断点/缓存）不要求受管 ComfyUI 实例；阶段 B 绑定仍钉
+  实例身份。`validate_resource_plan` 接受无实例计划并拒绝伪造 `instance_pin`。
+  复用既有 ControlledDownloader/InstallationPlan/Attempt，不新建安装器。
+- **动态装配闭包已正确**：W6A8 native20 图采用候选配方的完整模型链
+  （W6A8 DiT/NVFP4 文本/INT8 ConvRot 视频 VAE/FP32 音频 VAE，无 realism LoRA/SolAttn），
+  不是只换 DiT。`test_graph_compiler` 锁定四权重闭包防回退。**受管启动配置仍按
+  INT8 默认门槛生成**（`generate_configuration`），W6A8 requirements 全 unknown，
+  不得猜测门槛 → W6A8 受管激活/试镜保持 BLOCKED，待真机验收。
+- **旧 WebView 兼容**：新增 `api.ts::timeoutSignal(ms)`，`AbortSignal.timeout`
+  缺失（旧 Edge WebView2/Safari16）时回退 AbortController，避免每个超时请求抛错
+  误报断线；全站替换（含 useStudio 的 /system/status 轮询）。
+- **CI 修复（run 43491015993）**：Ruff UP037 去引号；GPU 释放确认阳性阶段放宽抗
+  CI 抖动窗口（产品默认 120s 不变）；权重证据包入口用例补 `fake_deployment_host`
+  隔离系统盘存储策略（CI Windows 临时目录在系统盘使 require_storage 抛错，把
+  NOT_VERIFIED 误成 NOT_AVAILABLE）；浏览器 E2E 大纲主操作已收进页面级操作栏，
+  断言改读 `.action-rail`。均未删测试/放宽安全拒绝。另修预存 CI 配置缺口：
+  L1 quick job 未装 FFmpeg（L2/L3 才装），候选 QC 全解码返回 unavailable 致
+  `CANDIDATE_NOT_APPROVED`（main 上被 Ruff 失败掩盖）；给 L1 补 FFmpeg 安装步骤。
+- **回归口径**：后端 8 分片全 exit 0、零 FAILED/ERROR（2106 用例）；两处首轮失败
+  （test_renderer_supervisor、test_v13_e2e）均为本会话 `NO_PROXY` 含 `[::1]` 的
+  httpx 假失败，`env -u NO_PROXY -u no_proxy` 复跑通过。前端 49 文件/287 项、
+  tsc/build、Ruff、Alembic（head f180d0010001，无 drift）通过。
+- **真机边界**：本机 RTX 5080 16GB（非 4070），W6A8 权重未下载、RelayVSR 权重未钉
+  SHA → W6A8/4070 试镜与 Relay X2 为 NOT_RUN/BLOCKED；VLM 正负校准未做。本轮未改
+  worker.py/preproduction.py，不触发重校准义务。证据
+  `docs/H3_V2_FINAL_CLOSEOUT_REPORT_20261114.md`、
+  `docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md`；回归
+  `test_resource_resolver_v2`（+2）、`test_graph_compiler`、`directorRun.test.tsx`（+1）、
+  `timeoutSignal.test.ts`（新增）。
