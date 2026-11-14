@@ -292,7 +292,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
           : !selected.length ? '至少选择一集' : undefined,
         icon: <Clapperboard size={14} /> }
     : null;
-  useStageRail(`director-shoot-${mode}`, { priority: 1, primary }, [mode, selected, busy, demo, running, chosenVariantAvailable]);
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary },
+    [mode, selected, busy, demo, running, chosenVariantAvailable,
+      variantId, acceleratorId, secondPass, upscale]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 

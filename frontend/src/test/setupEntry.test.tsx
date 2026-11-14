@@ -46,7 +46,8 @@ describe('空数据库与两层界面入口', () => {
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
     expect(screen.getByRole('progressbar', { name: '正在检查后端…' })).toBeInTheDocument();
     finishProbe(jsonResponse({}, 503));
-    expect(await screen.findByText(/后端未响应。请双击/)).toBeInTheDocument();
+    expect(await screen.findByText(/后端未响应/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '重启后台' })).toBeInTheDocument();
     online = true;
     probeNext = true;
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));

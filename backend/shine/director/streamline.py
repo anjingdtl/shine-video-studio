@@ -672,28 +672,58 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         authorize = None
         if retrying and state.get("failed_task_id"):
             failed = db.get(AgentTaskRecord, state["failed_task_id"])
+            failed_trace = (failed.trace or {}) if failed is not None else {}
             # A real provider's decided refusal needs the one-call replay
             # authorisation; a mock record never replays through that gate
             # (the API boundary refuses mock targets by design).
-            if failed is not None and (failed.trace or {}).get("is_mock") is not True:
-                authorize = state["failed_task_id"]
-        result = generate_storyboard(project_id, StoryboardRequest(
-            text=document.text[unit["start_offset"]:unit["end_offset"]],
-            locked_story_facts=state["locked_facts"], allow_remote_text=True,
-            start_role=state.get("failed_role") if retrying else None,
-            resume_steps=state.get("resume_steps", {}) if retrying else {},
-            authorize_replay_task_id=authorize,
-            production_context={
-                "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
-                "production_section_id": unit["production_section_id"], "source_offsets": unit,
-                "story_line": outline.payload_json.get("story_line", []),
-                "timeline": outline.payload_json.get("timeline", []),
-                "characters": outline.payload_json.get("characters", []),
-                "continuity_facts": facts,
-                "continuity": {"basis": "user_supplied_unverified"},
-                "previous_render_status": "PENDING_SERVER_VERIFICATION"},
-            consent_document_id=document.id, consent_document_sha256=document.sha256,
-        ), request_like, db, gateway)
+            if failed is not None and failed_trace.get("is_mock") is not True:
+                reconciliation = (failed_trace.get("reconciliation") or {}).get("outcome")
+                if (failed_trace.get("external_outcome") == "RESPONSE_RECEIVED"
+                        and failed.status in {"REJECTED", "FAILED"}):
+                    authorize = state["failed_task_id"]
+                elif reconciliation in {"USER_AUTHORIZED_NEW_REQUEST", "NOT_SENT_PROVEN"}:
+                    # The UNKNOWN call was reconciled and the person authorized
+                    # exactly one replacement (or it was proven never sent):
+                    # the retry makes that ONE new call for the failed role.
+                    # The old row is history and is never replayed.
+                    authorize = None
+                else:
+                    # An unreconciled UNKNOWN has no replacement path here:
+                    # reconcile first, then decide. Never a silent new call.
+                    raise HTTPException(
+                        409, "STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION")
+        try:
+            result = generate_storyboard(project_id, StoryboardRequest(
+                text=document.text[unit["start_offset"]:unit["end_offset"]],
+                locked_story_facts=state["locked_facts"], allow_remote_text=True,
+                start_role=state.get("failed_role") if retrying else None,
+                resume_steps=state.get("resume_steps", {}) if retrying else {},
+                authorize_replay_task_id=authorize,
+                production_context={
+                    "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+                    "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                    "story_line": outline.payload_json.get("story_line", []),
+                    "timeline": outline.payload_json.get("timeline", []),
+                    "characters": outline.payload_json.get("characters", []),
+                    "continuity_facts": facts,
+                    "continuity": {"basis": "user_supplied_unverified"},
+                    "previous_render_status": "PENDING_SERVER_VERIFICATION"},
+                consent_document_id=document.id, consent_document_sha256=document.sha256,
+            ), request_like, db, gateway)
+        except HTTPException as exc:
+            # A gate refusal (consent, frozen contract, unreconciled UNKNOWN)
+            # must keep the episode's blocked marker: losing it would strand
+            # the run in NEEDS_REVIEW with no retry entry left.
+            blocked = {**state.get("blocked_episodes", {}),
+                       unit["episode_id"]: {"unit_index": cursor, "status": "NEEDS_REVIEW",
+                                            "failed_role": state.get("failed_role"),
+                                            "failed_task_id": state.get("failed_task_id"),
+                                            "rejections": []}}
+            state = {**state, "blocked_episodes": blocked, "cursor": cursor,
+                     "failed_unit_index": cursor}
+            _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW",
+                         str(exc.detail))
+            return
     if result["status"] != "PROPOSED":
         # Pause this episode; keep every other episode's landed shots.  The
         # failed role and resume steps travel with the task so a retry continues

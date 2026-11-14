@@ -193,7 +193,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     priority: 1,
     primary: outlinePrimary,
     running: running ? { label: '大纲提取中', done: outlineTask?.summary?.done, total: outlineTask?.summary?.total } : null,
-  }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions]);
+  }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing]);
 
   return <section className="card section-card outline-confirm" id="outline-confirm">
     <div className="section-heading compact">

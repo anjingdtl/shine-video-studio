@@ -95,9 +95,14 @@ def test_outline_pacing_is_part_of_identity_and_characters_carry_introductions(a
     gateway = LLMGateway(SecretStore(api[2].secret_store_dir), mock_responder=responder)
 
     def queue(pacing):
-        r = client.post(f"/api/v1/projects/{project}/story-preparation/outlines", json={
-            "document_id": doc["id"], "expected_document_hash": doc["sha256"],
-            "locked_facts": [], "pacing": pacing}, headers=LOCAL)
+        body = {"document_id": doc["id"], "expected_document_hash": doc["sha256"],
+                "locked_facts": []}
+        # Omitting the field is the declared default; an explicit null is not a
+        # valid literal and the API refuses it with 422.
+        if pacing is not None:
+            body["pacing"] = pacing
+        r = client.post(f"/api/v1/projects/{project}/story-preparation/outlines", json=body,
+                        headers=LOCAL)
         assert r.status_code == 202, r.text
         return r.json()["task_id"]
 
@@ -107,6 +112,10 @@ def test_outline_pacing_is_part_of_identity_and_characters_carry_introductions(a
     assert compact != relaxed
     # Same pacing reuses the queued task.
     assert queue("compact") == compact
+    # Omitting the choice is the declared default, not a fourth identity shared
+    # with another rhythm.
+    default = queue(None)
+    assert default not in (compact, relaxed)
 
     for _ in range(70):
         if not story.run_pending_story_task(factory, api[2], "worker", gateway=gateway):
@@ -125,6 +134,27 @@ def test_outline_pacing_is_part_of_identity_and_characters_carry_introductions(a
         assert "## 登场人物" in md
         back = streamline.markdown_to_outline(md, payload)
         assert back["characters"][0]["introduction"] == payload["characters"][0]["introduction"]
+
+        relaxed_task = db.get(AgentTaskRecord, relaxed)
+        assert relaxed_task.status == "SUCCEEDED", relaxed_task.trace
+        relaxed_payload = db.get(
+            AgentArtifact, relaxed_task.trace["outline_artifact_id"]).payload_json
+        assert relaxed_payload["pacing"] == "relaxed"
+        assert relaxed_payload["pacing_label"] == "舒缓剧情"
+        default_task = db.get(AgentTaskRecord, default)
+        assert default_task.status == "SUCCEEDED", default_task.trace
+        default_payload = db.get(
+            AgentArtifact, default_task.trace["outline_artifact_id"]).payload_json
+        assert default_payload["pacing"] == "balanced"
+        assert default_payload["pacing_label"] == "均衡剧情"
+        # Pacing shapes the narrative projection only: source segmentation,
+        # locked facts and character identity numbering are server-owned and
+        # must be identical across all three rhythms.
+        for other in (relaxed_payload, default_payload):
+            assert other["production_sections"] == payload["production_sections"]
+            assert other["locked_facts"] == payload["locked_facts"]
+            assert [c["entity_id"] for c in other["characters"]] == \
+                [c["entity_id"] for c in payload["characters"]]
 
 
 def test_outline_rejects_unknown_pacing(api, monkeypatch):

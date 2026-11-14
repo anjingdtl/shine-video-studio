@@ -166,7 +166,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         : { label: '生成分镜书', onClick: () => void generate(), loading: busy, icon: <Sparkles size={14} /> })
     : null;
   useStageRail('storyboard-book', { priority: 1, primary },
-    [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel]);
+    [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
+      episodeCount, targetSeconds]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">

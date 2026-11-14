@@ -13,7 +13,8 @@
     [string]$AdditionalReviewManifest = '',
     [ValidateRange(1,65535)][int]$AdditionalReviewPort = 8117,
     [switch]$OpenBrowser,
-    [switch]$AutoPorts
+    [switch]$AutoPorts,
+    [ValidateRange(1,65535)][int]$SupervisorPort = 8790
 )
 
 $ErrorActionPreference = 'Stop'
@@ -559,6 +560,29 @@ try {
             web_port = $WebPort
             worker = (-not $NoWorker)
             command = 'start_shine'
+        }
+
+        # The resident supervisor lets the page restart a dead backend (the API
+        # cannot restart itself). It is recorded in run/supervisor.json, NOT in
+        # processes.json, so stop_shine.py never kills it mid-restart.
+        $supervisorAlive = $false
+        try {
+            $sup = Invoke-RestMethod "http://127.0.0.1:$SupervisorPort/health" -TimeoutSec 2
+            $supervisorAlive = ($sup.role -eq 'supervisor')
+        } catch { }
+        if (-not $supervisorAlive) {
+            $supLog = Join-Path $logDir 'supervisor.out.log'
+            $supErr = Join-Path $logDir 'supervisor.err.log'
+            Start-Process -WindowStyle Hidden -FilePath $venvPython `
+                -ArgumentList @(
+                    (Join-Path $PSScriptRoot 'shine_supervisor.py'),
+                    '--data-dir', $env:SHINE_DATA_DIR,
+                    '--port', "$SupervisorPort",
+                    '--api-port', "$ApiPort",
+                    '--web-port', "$WebPort"
+                ) -WorkingDirectory $repoRoot `
+                -RedirectStandardOutput $supLog -RedirectStandardError $supErr | Out-Null
+            Write-Host "Started supervisor on port $SupervisorPort (page can restart the stack)"
         }
     }
 } catch {

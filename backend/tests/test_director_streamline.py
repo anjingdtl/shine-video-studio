@@ -239,6 +239,30 @@ def test_outline_markdown_round_trip_is_lossless():
     assert parsed["other"] == {"keep": 1}  # untouched non-anchored content
 
 
+def test_outline_character_edit_keeps_identity_and_updates_introduction():
+    payload = {
+        "summary": "雨夜。",
+        "characters": [
+            {"name": "老周", "entity_id": "entity-001", "stable_identity": "钟表匠",
+             "introduction": "五十岁的钟表匠，沉默寡言。"},
+            {"name": "客人", "entity_id": "entity-002",
+             "introduction": "雨夜来访的陌生人。"},
+        ],
+        "story_line": [], "timeline": [], "relationships": [], "questions": [],
+    }
+    markdown = streamline.outline_to_markdown(payload)
+    assert "## 登场人物" in markdown
+    edited = markdown.replace("五十岁的钟表匠，沉默寡言。", "五十岁的钟表匠，雨夜修好一只怀表。")
+    parsed = streamline.markdown_to_outline(edited, payload)
+    zhou = next(c for c in parsed["characters"] if c["name"] == "老周")
+    assert zhou["introduction"] == "五十岁的钟表匠，雨夜修好一只怀表。"
+    assert zhou["entity_id"] == "entity-001"
+    assert zhou["stable_identity"] == "钟表匠"
+    guest = next(c for c in parsed["characters"] if c["name"] == "客人")
+    assert guest["entity_id"] == "entity-002"
+    assert guest["introduction"] == "雨夜来访的陌生人。"
+
+
 def test_outline_edit_revision_and_one_click_confirm(api):
     client, factory, settings = api
     prepared = _prepare_project(client, sections=2, questions=["客人到底是谁？"])
@@ -324,6 +348,27 @@ def test_outline_version_chain_tracks_draft_and_confirmed(api):
         f"/api/v1/projects/{project}/director/outline"
         "?artifact_id=00000000-0000-0000-0000-000000000000")
     assert missing.status_code == 404
+
+    # Confirming the draft switches the single basis to v2; v1 stays history.
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/outline/confirm",
+        json={"artifact_id": body["artifact_id"], "expected_sha256": body["sha256"]},
+        headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    after = client.get(f"/api/v1/projects/{project}/director/outline").json()
+    assert after["artifact_id"] == body["artifact_id"]
+    assert after["approved"] is True and after["confirmed"] is True
+    assert after["confirmed_artifact_id"] == body["artifact_id"]
+    chain = {v["artifact_id"]: v for v in after["versions"]}
+    assert chain[body["artifact_id"]]["confirmed"] is True
+    assert chain[outline["id"]]["confirmed"] is False
+    assert chain[outline["id"]]["approved"] is True  # history is never rewritten
+    from shine.director import basis
+    from shine.models import ProjectDocument
+    with factory() as db:
+        document = db.get(ProjectDocument, prepared["document"]["id"])
+        resolved = basis.outline_for_document(db, project, document)
+        assert resolved is not None and resolved.id == body["artifact_id"]
 
 
 # ---------------------------------------------------------------------------
