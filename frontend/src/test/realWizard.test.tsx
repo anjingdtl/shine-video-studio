@@ -9,7 +9,7 @@ let stub: StudioStub;
 const callbacks = { onClose: vi.fn(), onFinished: vi.fn(), onOpenExpertSetup: vi.fn(), onRefresh: vi.fn() };
 function show() { return render(<RealProductionWizard mode="enable" projectId="proj-1" {...callbacks} />); }
 function route(method: string, suffix: string, body: unknown, status = 200) {
-  stub.add({ method, pattern: new RegExp(suffix + '$'), respond: () => jsonResponse(body, status) });
+  stub.add({ method, pattern: new RegExp(suffix + '(?:\\?.*)?$'), respond: () => jsonResponse(body, status) });
 }
 function fullPath() {
   route('GET', 'system/status', { ...SYSTEM_STATUS, production_mode: productionMode({ mode: 'READY' }) });
@@ -142,7 +142,7 @@ it('核心 LLM 未配置时仍安装 H3，并把文本步骤单独标为待配�
 it('识别并确认复用已安装 ComfyUI 与 H3，完成准备时不重复下载', async () => {
   route('GET', 'setup/catalog', { ...CATALOG, components: [{ component_id: 'minimax-h3-diffusion', files: 1 }] });
   route('GET', 'setup/readiness', { layers: [{ layer: 'L2_files_verified', status: 'READY' }] });
-  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
     installations: ['F:\\AI\\ComfyUI'],
   }) });
   stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
@@ -174,7 +174,7 @@ it('长时间核验使用宽限时限，并对账进行中的请求而不重复�
   const timeout = vi.spyOn(AbortSignal, 'timeout');
   const software = { installed: true, version_status: 'INSTALLED_VERSION_MATCH',
     runtime: { status: 'PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED' }, node_revisions_verified: false };
-  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
     installations: ['F:\\AI\\ComfyUI'],
   }) });
   stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
@@ -202,7 +202,7 @@ it('确认复用后若其他固定文件缺失，只提示，不自动下载或�
   route('GET', 'setup/readiness', { layers: [{
     layer: 'L2_files_verified', status: 'PENDING', missing_components: ['qwen3-asr-0.6b'],
   }] });
-  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
     installations: ['F:\\AI\\ComfyUI'],
   }) });
   stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({
@@ -229,7 +229,7 @@ it('确认复用后若其他固定文件缺失，只提示，不自动下载或�
 });
 it('已有安装登记失败时给出中文原因与错误码，不把原始 JSON 留给用户', async () => {
   route('GET', 'setup/catalog', { ...CATALOG, components: [{ component_id: 'minimax-h3-diffusion', files: 1 }] });
-  stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({
+  stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
     installations: ['F:\\AI\\ComfyUI'],
   }) });
   stub.add({ method: 'POST', pattern: /existing-installations\/inspect$/, respond: () => jsonResponse({

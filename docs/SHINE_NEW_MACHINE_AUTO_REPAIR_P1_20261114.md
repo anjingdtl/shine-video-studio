@@ -225,3 +225,43 @@ RUNTIME_CONTRACT_VERIFIED → TRIAL_READY → PRODUCTION_READY`；
   argv 合同验证，标注 `PENDING_WINDOWS_VALIDATION`。
 - RTX 4070 真机推理：不在本 PR 门槛内；所有 4070 结论均来自环境事实模拟。
 - 断点续传的字节级行为由既有 `bootstrap.ps1` 单测覆盖，本轮未改动其算法。
+
+## 11. 补充修复：已有 ComfyUI 与模型检索（2026-11-14）
+
+现场反馈：用户已经下载 ComfyUI 和模型，但「检测已有 ComfyUI」找不到。
+
+根因不是文件不存在，而是检索范围被写死：
+
+- `discover()` 只在固定盘根目录下看名字含 `comfy` 的目录，或 `ai/tools/apps/comfy`
+  的一层子目录。`D:\Downloads\AIGC\ComfyUI_windows_portable\ComfyUI` 这类
+  常见下载层级完全不在覆盖范围内。
+- 配置的 `SHINE_COMFY_PROBE_ROOTS` 只检查根目录本身和 `root/ComfyUI`，不会
+  向下搜索。
+- `inspect()` 只扫描 `<ComfyUI>/models`。权重放在外部目录、由
+  `extra_model_paths.yaml` 声明时，模型同样会被漏掉。
+
+修复后的合同：
+
+- 配置根目录按有界深度 6 搜索，固定盘按深度 4 搜索；优先访问名字含
+  `comfy`、`download`、`ai` 等目录。
+- 每个种子目录有 12,000 个目录的访问预算；跳过 `Windows`、`Program Files`、
+  `AppData`、`$Recycle.Bin`、`node_modules`、`.git`、虚拟环境等系统/缓存目录；
+  不跟随符号链接、junction 和 UNC 网络路径。
+- 返回值新增 `coverage: BOUNDED_RECURSIVE_SCAN` 与 `scan`（深度、访问数、
+  预算、是否截断、种子列表），不再把“浅层没找到”表述成“整盘没有”。
+- `GET /setup/existing-installations` 支持可选 `root` 参数；桌面向导会把
+  用户选定的安装目录一并传入，下载到该目录内部时不会被漏检。
+- `inspect()` 在标准 `<ComfyUI>/models` 之外，只读跟随 `extra_model_paths.yaml`
+  声明的本机目录；UNC、链接、junction 与不存在的目录一律忽略。
+  返回 `model_roots` 说明实际读取了哪些目录。
+- 扫描仍然是只读的：不复制、不修改、不执行 ComfyUI 的 Python 代码，
+  仍以文件大小为候选、哈希为最终证据。
+
+测试：
+
+- `test_discovery_finds_deep_download_layout`
+- `test_discovery_skips_system_and_cache_trees`
+- `test_discovery_endpoint_searches_the_chosen_root`
+- `test_inspection_scans_model_roots_declared_by_the_installation`
+- `test_inspection_ignores_declared_network_roots`
+- `test_discovery_finds_portable_at_common_depth_with_bounded_scan`

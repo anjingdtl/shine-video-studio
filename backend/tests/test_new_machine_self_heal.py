@@ -489,14 +489,17 @@ def test_executor_refuses_a_root_outside_the_data_directory(tmp_path):
         environment_repair._validate_roots(plan, settings)
 
 
-def test_web_repair_uses_the_stock_powershell_entry_and_a_managed_tools_root():
-    """PowerShell 7 cannot be its own prerequisite, and the Web repair may
-    name a managed tools root without changing the historical default."""
+def test_web_repair_uses_the_stock_powershell_entry_and_a_managed_tools_root(tmp_path):
+    """PowerShell 7 cannot be its own prerequisite: the Web repair is launched
+    by the stock Windows PowerShell, and the script accepts a managed tools
+    root without changing the historical default."""
     repo = environment_repair.REPO_ROOT
     bootstrap = (repo / "scripts" / "bootstrap.ps1").read_text(encoding="utf-8-sig")
     assert "[string]$ToolsRoot = \"\"" in bootstrap
     assert "$toolBase = if ($ToolsRoot) { $ToolsRoot }" in bootstrap
-    assert "powershell.exe" in bootstrap
+    plan = environment_repair.build_repair_plan(settings_for(tmp_path), report_4070())
+    assert plan["bootstrap"]["executable"] == "powershell.exe"
+    assert plan["bootstrap"]["parameters"][0] == "-NoProfile"
 
 
 # ---------------------------------------------------------------------------

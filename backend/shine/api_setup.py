@@ -171,10 +171,22 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
 
 
 @router.get('/existing-installations')
-def existing_installations(settings: SettingsDep):
+def existing_installations(settings: SettingsDep, root: str | None = None):
+    """Bounded discovery inside declared roots, fixed drives and an optional root.
+
+    ``root`` is the directory the person already chose (for example the
+    deployment storage root).  It is searched several levels deep so a nested
+    download is not invisible just because it is not at a fixed depth.
+    """
+    from pathlib import Path
+
     from shine.comfyops.existing_installation import discover
 
-    return discover(list(settings.comfy_probe_roots))
+    roots = [*settings.comfy_probe_roots]
+    # A stale/network path chosen earlier must not make the whole scan fail.
+    if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
+        roots.append(root)
+    return discover(roots)
 
 
 @router.post('/existing-installations/inspect')

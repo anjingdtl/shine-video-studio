@@ -441,7 +441,11 @@ export function RealProductionWizard({
       stopWith('existing', '还没有选择安装目录。请到专业设置的「制作环境」选择一个空间足够的非系统盘目录后重试。');
       return;
     }
-    const found = await api<{ installations: string[] }>('/setup/existing-installations');
+    // Search the person's chosen storage root as well as the declared probe
+    // roots: a ComfyUI download nested inside it must not be invisible.
+    const found = await api<{
+      installations: string[]; scan?: { truncated?: boolean; directories_visited?: number };
+    }>(`/setup/existing-installations?root=${encodeURIComponent(storage.root)}`);
     if (!alive()) return;
     const scans: ExistingScan[] = [];
     for (const root of found.installations.slice(0, 3)) {
@@ -472,7 +476,9 @@ export function RealProductionWizard({
         status: 'ok',
         note: found.installations.length
           ? '检测到已有 ComfyUI，但固定清单中的模型不在其中；缺少的组件将在确认后按需下载。'
-          : '未检测到已有 ComfyUI；将在确认后按固定清单下载缺少的组件。',
+          : found.scan?.truncated
+            ? '在已达到搜索上限的范围内没有找到已有 ComfyUI；这不代表整盘没有。可到专业设置直接指定下载目录。'
+            : '未检测到已有 ComfyUI；将在确认后按固定清单下载缺少的组件。',
       });
     }
 

@@ -6,6 +6,7 @@ import hashlib
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
 from fastapi import HTTPException
@@ -115,32 +116,201 @@ def fixed_drives() -> list[Path]:
             if ctypes.windll.kernel32.GetDriveTypeW(f'{chr(code)}:\\') == 3]
 
 
+#: A person-declared root is walked to a bounded depth because downloads are
+#: commonly nested (``Downloads/<bundle>/ComfyUI``).  Fixed drives get a
+#: slightly shallower walk.  Both stop at a per-seed directory budget and skip
+#: system/cache trees, so a read-only probe can never become an unbounded
+#: whole-disk crawl.
+CONFIGURED_ROOT_DEPTH = 6
+DRIVE_SCAN_DEPTH = 4
+SCAN_DIRECTORY_BUDGET = 12_000
+SCAN_TIME_BUDGET_S = 6.0
+_SCAN_SKIP_DIRECTORIES = frozenset({
+    '$recycle.bin', 'system volume information', 'windows', 'winsxs',
+    'program files', 'program files (x86)', 'programdata', 'appdata',
+    'recovery', 'perflogs', 'msocache', 'node_modules', '.git',
+    '__pycache__', '.venv', 'venv', 'site-packages',
+})
+
+
+def _is_local(path: Path) -> bool:
+    return not str(path).startswith(('\\\\', '//'))
+
+
+def _is_comfy_directory(path: Path) -> bool:
+    try:
+        return (path / 'main.py').is_file() and (path / 'comfy').is_dir()
+    except OSError:
+        return False
+
+
+def _discovery_priority(entry) -> tuple[int, str]:
+    name = entry.name.lower()
+    if 'comfy' in name:
+        return (0, name)
+    if name.startswith(('ai', 'sd', 'stable', 'download', 'tools', 'apps', 'models')):
+        return (1, name)
+    return (2, name)
+
+
+def _scan_for_comfy(seed: Path, depth: int, unreadable: list[str],
+                    deadline: float) -> tuple[list[Path], int, bool]:
+    """Depth-first bounded search for a directory that looks like ComfyUI.
+
+    Likely names (``*comfy*``, downloads, AI folders) are visited first so the
+    budget is spent where a real installation usually lives.
+    """
+    found: list[Path] = []
+    visited = 0
+    truncated = False
+    stack: list[tuple[Path, int]] = [(seed, 0)]
+    while stack:
+        if visited >= SCAN_DIRECTORY_BUDGET or time.monotonic() >= deadline:
+            truncated = True
+            break
+        directory, level = stack.pop()
+        visited += 1
+        if _is_comfy_directory(directory):
+            found.append(directory.resolve())
+            continue
+        if level >= depth:
+            continue
+        try:
+            children = list(os.scandir(directory))
+        except OSError:
+            unreadable.append(str(directory))
+            continue
+        children.sort(key=_discovery_priority)
+        # Push in reverse so the most likely child is the next directory popped.
+        for entry in reversed(children):
+            name = entry.name.lower()
+            if name.startswith('.') or name in _SCAN_SKIP_DIRECTORIES:
+                continue
+            try:
+                if entry.is_symlink() or getattr(entry, 'is_junction', lambda: False)():
+                    continue
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            stack.append((Path(entry.path), level + 1))
+    return found, visited, truncated
+
+
 def discover(roots: list[str], drives: list[Path] | None = None) -> dict:
-    """Bounded common-location discovery, never a recursive whole-disk scan."""
-    candidates = [local_path(r) for r in roots]
-    unreadable = []
-    for drive in fixed_drives() if drives is None else drives:
+    """Find ComfyUI inside declared roots and fixed drives with bounded depth.
+
+    Declared roots (``SHINE_COMFY_PROBE_ROOTS``) are the person's explicit
+    statement of where to look, so they are searched several levels deep; fixed
+    drives are only a convenience fallback.  Links/junctions, network paths and
+    system/cache directories are never followed, and the walk has a directory
+    budget, so the result reports its own coverage instead of implying a full
+    disk audit.
+    """
+    seeds: list[tuple[Path, int]] = [
+        (local_path(r), CONFIGURED_ROOT_DEPTH) for r in roots
+    ]
+    seeds.extend((Path(drive), DRIVE_SCAN_DEPTH)
+                 for drive in (fixed_drives() if drives is None else drives))
+    found: set[str] = set()
+    unreadable: list[str] = []
+    scanned: list[str] = []
+    visited = 0
+    truncated = False
+    deadline = time.monotonic() + SCAN_TIME_BUDGET_S
+    for seed, depth in seeds:
+        if time.monotonic() >= deadline:
+            truncated = True
+            break
+        if not _is_local(seed):
+            continue
         try:
-            children = list(drive.iterdir())[:200]
-            candidates.extend(p for p in children if 'comfy' in p.name.lower())
-            for parent in children:
-                if parent.is_dir() and parent.name.lower().startswith(('ai', 'tools', 'apps', 'comfy')):
-                    try:
-                        candidates.extend(p for p in list(parent.iterdir())[:200] if 'comfy' in p.name.lower())
-                    except OSError:
-                        unreadable.append(str(parent))
+            if not seed.is_dir():
+                continue
         except OSError:
-            unreadable.append(str(drive))
-    found = set()
-    for candidate in candidates:
-        try:
-            root = comfy_root(candidate)
-            if root and not str(root).startswith(('\\\\', '//')):
-                found.add(str(root))
-        except OSError:
-            unreadable.append(str(candidate))
-    return {'installations': sorted(found), 'unreadable': unreadable,
-            'coverage': 'COMMON_LOCATIONS_ONLY', 'runtime_verified': False}
+            unreadable.append(str(seed))
+            continue
+        scanned.append(str(seed))
+        matches, used, hit_budget = _scan_for_comfy(seed, depth, unreadable, deadline)
+        visited += used
+        truncated = truncated or hit_budget
+        found.update(str(path) for path in matches)
+    return {
+        'installations': sorted(found),
+        'unreadable': unreadable,
+        'coverage': 'BOUNDED_RECURSIVE_SCAN',
+        'scan': {
+            'configured_root_depth': CONFIGURED_ROOT_DEPTH,
+            'drive_depth': DRIVE_SCAN_DEPTH,
+            'directories_visited': visited,
+            'directory_budget': SCAN_DIRECTORY_BUDGET,
+            'time_budget_s': SCAN_TIME_BUDGET_S,
+            'truncated': truncated,
+            'seeds': scanned,
+        },
+        'runtime_verified': False,
+    }
+
+
+def _local_declared_dir(value: str, base: Path) -> Path | None:
+    """Resolve a path written in ComfyUI's own extra_model_paths.yaml.
+
+    Only local directories are accepted. Network/UNC paths, links, junctions
+    and missing directories are ignored: reading weights over SMB must never
+    become an implicit side effect of a read-only probe.
+    """
+    candidate = Path(os.path.expanduser(value))
+    if not candidate.is_absolute():
+        candidate = base / candidate
+    if not _is_local(candidate):
+        return None
+    try:
+        if candidate.is_symlink():
+            return None
+        resolved = candidate.resolve()
+        if not _is_local(resolved) or resolved != candidate:
+            return None
+        return resolved if resolved.is_dir() else None
+    except OSError:
+        return None
+
+
+def _declared_model_roots(root: Path) -> list[Path]:
+    """Model directories the existing ComfyUI itself declares.
+
+    People commonly keep weights outside the checkout and point ComfyUI at them
+    with ``extra_model_paths.yaml``.  Those roots hold exactly the models the
+    installation can actually load, so the read-only scan follows them instead
+    of only looking at ``<root>/models``.
+    """
+    config = root / 'extra_model_paths.yaml'
+    try:
+        if not config.is_file():
+            return []
+        lines = config.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return []
+    declared: list[Path] = []
+    base = root
+    for raw in lines:
+        line = raw.split('#', 1)[0].strip()
+        if not line or ':' not in line:
+            continue
+        key, _, value = line.partition(':')
+        key = key.strip().lower()
+        value = value.strip().strip('"\'')
+        if key == 'is_default':
+            continue
+        if key == 'base_path':
+            if value:
+                base = _local_declared_dir(value, base) or base
+            continue
+        if not value:
+            continue
+        directory = _local_declared_dir(value, base)
+        if directory and directory not in declared:
+            declared.append(directory)
+    return declared
 
 
 def inspect(root_value: str, catalog: dict) -> dict:
@@ -148,15 +318,26 @@ def inspect(root_value: str, catalog: dict) -> dict:
     root = comfy_root(selected)
     if root is None:
         raise HTTPException(422, '该目录不是 ComfyUI，请选择包含 main.py 的目录或整合包目录。')
-    # Inventory model files only. Junctions, external model paths and linked folders
-    # are deliberately not followed without selecting those roots separately.
+    # Inventory model files only. Links/junctions are never followed; the
+    # external roots ComfyUI itself declares in extra_model_paths.yaml are
+    # included because that is where the installation actually loads models
+    # from, which is exactly what the person downloaded.
     sizes: dict[int, list[tuple[Path, dict]]] = {}
     skipped = []
+    seen_files: set[str] = set()
+    model_roots: list[str] = []
     count = 0
-    models = root / 'models'
-    if models.resolve() != models:
-        skipped.append(str(models))
-    elif models.is_dir():
+    candidates = [root / 'models', *_declared_model_roots(root)]
+    for models in candidates:
+        if str(models) in model_roots:
+            continue
+        if models.resolve() != models:
+            skipped.append(str(models))
+            continue
+        if not models.is_dir():
+            continue
+        model_roots.append(str(models))
+
         def onerror(error):
             skipped.append(str(error.filename))
 
@@ -173,6 +354,10 @@ def inspect(root_value: str, catalog: dict) -> dict:
                 if file.resolve() != file:
                     skipped.append(str(file))
                     continue
+                key = str(file)
+                if key in seen_files:
+                    continue
+                seen_files.add(key)
                 try:
                     stat = file.stat()
                     sizes.setdefault(stat.st_size, []).append((file, _stat_identity(stat)))
@@ -197,7 +382,8 @@ def inspect(root_value: str, catalog: dict) -> dict:
                 missing.append(entry)
     software = _source_software_state(root, catalog)
     payload = {'root': str(root), 'software': software, 'matches': matches, 'missing': missing,
-               'skipped': skipped, 'scanned_files': count, 'runtime_verified': False,
+               'skipped': skipped, 'scanned_files': count, 'model_roots': model_roots,
+               'runtime_verified': False,
                'catalog_id': catalog['catalog_id'], 'catalog_version': catalog['catalog_version']}
     return {**payload, 'snapshot': graph_hash(payload),
             'candidate_bytes': sum(row['size'] for row in matches)}

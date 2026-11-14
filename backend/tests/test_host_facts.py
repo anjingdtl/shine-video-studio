@@ -124,6 +124,14 @@ def test_a_32gb_class_machine_is_not_rejected_by_a_round_gib_floor():
     assert qualify(_requirements(), host)["status"] == STATUS_SUPPORTED
     host = _host(ram={"status": "OK", "ram_mb": 30000, "ram_available_mb": 20000})
     verdict = qualify(_requirements(), host)
+    # Below the floor without a measured installed capacity is an unverified
+    # requirement, not a measured failure.  Only real inventory evidence may
+    # turn the missing reading into BLOCKED.
+    assert verdict["status"] == STATUS_UNKNOWN
+    assert "RAM_UNVERIFIED" in [row["code"] for row in verdict["unknowns"]]
+    host = _host(ram={"status": "OK", "ram_mb": 30000, "installed_mb": 16384,
+                      "ram_available_mb": 20000})
+    verdict = qualify(_requirements(), host)
     assert verdict["status"] == STATUS_BLOCKED
     assert verdict["blockers"][0]["code"] == "RAM_INSUFFICIENT"
     assert verdict["blockers"][0]["required"] == 31744
