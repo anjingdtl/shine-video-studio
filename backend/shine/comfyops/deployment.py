@@ -889,13 +889,19 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     # the directories that really exist before they can be whitelisted.
     from shine.comfyops.existing_installation import resolve_node_pack_dirs
     pack_dirs, missing_packs = resolve_node_pack_dirs(root, load_default_catalog())
+    # 真实安装缺节点包必须拦下：渲染器会把自定义节点全部禁用，缺包就得先补装。
+    # 只有离线/夹具环境才降级——而且必须把缺失如实记下来，不能变成静默通过。
+    node_pack_notes: list[dict] = []
     if missing_packs and capability == 'h3':
-        raise HTTPException(409, {
+        missing_detail = {
             "code": "NODE_PACK_DIRECTORY_MISSING",
             "missing": missing_packs,
             "message": "这些节点包在安装的 custom_nodes 里找不到对应目录；"
                        "请先在「安装与下载」补装节点，再重新生成运行配置。",
-        })
+        }
+        if getattr(settings, "node_pack_gate", "enforce") != "diagnose":
+            raise HTTPException(409, missing_detail)
+        node_pack_notes.append(missing_detail)
     whitelist.extend(sorted(pack_dirs.values()))
     log_dir = settings.comfyops_dir / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -920,6 +926,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     renderer = {
         "instance_id": instance.id,
         "node_pack_dirs": pack_dirs,
+        "node_pack_notes": node_pack_notes,
         "log_file": renderer_log,
         "installation": {"id": instance.id, "sha256": instance.sha256},
         "python": venv_python,
@@ -1022,6 +1029,7 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "env_keys": sorted(env_written),
         "deployed_files": results,
         "review_manifests": {role: str(setup_dir / "manifests" / (role.lower() + ".json")) for role in reviews},
+        "node_pack_notes": node_pack_notes,
     }
 
 

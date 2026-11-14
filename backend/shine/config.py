@@ -50,6 +50,9 @@ class Settings:
     ffprobe_path: str = "ffprobe"
     ffmpeg_path: str = "ffmpeg"
     offline_simulation: bool = False
+    #: 节点包目录门禁模式。enforce=真实安装缺节点包必须 409 拦下（生产默认）；
+    #: diagnose=离线/夹具环境降级为可诊断提示，缺失必须被记录，不是静默通过。
+    node_pack_gate: str = "enforce"
     local_voice_url: str = ""
     local_image_url: str = ""
     comfy_probe_roots: tuple[str, ...] = ()
@@ -103,6 +106,7 @@ class Settings:
             local_image_url=os.getenv("SHINE_LOCAL_IMAGE_URL", ""),
             local_voice_url=os.getenv("SHINE_LOCAL_VOICE_URL", ""),
             offline_simulation=os.getenv("SHINE_OFFLINE_SIMULATION", "") == "1",
+            node_pack_gate=os.getenv("SHINE_NODE_PACK_GATE", "enforce"),
             operator_id=os.getenv("SHINE_OPERATOR_ID", ""),
             operator_token_sha256=os.getenv("SHINE_OPERATOR_TOKEN_SHA256", ""),
             # The ordinary project API has no per-request authentication yet, so

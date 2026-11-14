@@ -648,7 +648,7 @@ def process_identity(pid):
             kernel.CloseHandle(handle)
     try:
         # comm may contain spaces/parentheses; field 22 follows its closing parenthesis.
-        stat = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
         if stat[0] == "Z":
             return None
         return stat[19]
@@ -685,7 +685,7 @@ def exclusive_file_lock(path):
         try:
             if path.exists():
                 try:
-                    owner = json.loads(path.read_text())
+                    owner = json.loads(path.read_text(encoding="utf-8"))
                     birth = process_identity(owner["pid"])
                     if birth is not None and birth == owner["birth"]:
                         raise ValueError("INSTALL_OWNER_ACTIVE")
@@ -814,10 +814,10 @@ class LocalInstaller:
         status = "ROLLED_BACK"
         if journal.exists():
             try:
-                state = json.loads(journal.read_text())
+                state = json.loads(journal.read_text(encoding="utf-8"))
             except json.JSONDecodeError as exc:
                 # Compatibility recovery for the old writer, only with its known phases.
-                legacy = journal.read_text()
+                legacy = journal.read_text(encoding="utf-8")
                 if legacy not in {"STAGED", "INSTALLED"}:
                     raise ValueError("INSTALL_JOURNAL_UNVERIFIABLE") from exc
                 state = {"phase": legacy, "had_destination": backup.exists()}

@@ -443,6 +443,10 @@ def make_studio(tmp_path: Path, *, max_upload_bytes: int = 25 * 1024 * 1024):
         max_upload_bytes=max_upload_bytes,
         secret_store_dir=data_dir / "secrets",
         worker_offline_after_seconds=30,
+        # A synthetic ComfyUI root has no real node packs on disk.  The fixture
+        # says so explicitly, so the gate reports the missing packs instead of
+        # refusing every configuration contract test.
+        node_pack_gate="diagnose",
     )
     app = create_app(settings=settings, database_url=database_url, asset_root=data_dir)
     app.state.engine.dispose()
@@ -457,6 +461,20 @@ def studio(tmp_path):
     with TestClient(app) as client:
         yield client, factory, tmp_path, settings
     app.state.engine.dispose()
+
+
+@pytest.fixture(autouse=True)
+def isolated_deployment_env(tmp_path, monkeypatch):
+    """Every test writes its own .env.
+
+    The deployment writer targets the repository-root .env by default.  That one
+    file is shared by every parallel shard — and with the operator's own
+    installation — so two shards overwrote each other's settings (and the
+    operator's .env).  Tests that need another path monkeypatch it themselves.
+    """
+    from shine.comfyops import deployment
+
+    monkeypatch.setattr(deployment, "ENV_PATH", tmp_path / "isolated-env")
 
 
 @pytest.fixture
