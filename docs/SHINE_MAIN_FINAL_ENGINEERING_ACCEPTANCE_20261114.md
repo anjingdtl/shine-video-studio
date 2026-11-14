@@ -9,13 +9,14 @@
 | 维度 | 结论 |
 | --- | --- |
 | 最新主线已知 CI 故障（L3 browser E2E） | **已修复**，本地隔离 E2E 全绿（21 条流程，`api_errors=[]`） |
-| 后端全量（8 分片） | **PASS**：8/8 分片 exit 0，160 模块 2124 用例，零 FAILED/ERROR |
-| 前端全量 / tsc / build | **PASS**：51 文件 296 用例；tsc 0；build 0 |
+| 后端全量（8 分片） | **PASS**：8/8 分片 exit 0，160 模块，零 FAILED/ERROR（最终口径复跑同绿） |
+| 前端全量 / tsc / build | **PASS**：52 文件 299 用例；tsc 0；build 0 |
 | Ruff / Alembic | **PASS**：`ruff check shine tests` 全过；head `f180d0010001`，无 drift |
 | 大纲版本 / 三档节奏 / 登场人物 | **PASS**（定向 + 全量 + 真实 MiniMax 旅程） |
 | 资源自整备 V2 / 下载链 / 变体启动配方 | **ENGINEERING_PASS**；W6A8 生产门禁保持关闭 |
 | ComfyUI 统一连接与安全恢复 | **ENGINEERING_PASS**；5080 真实连接/节点核验/出片见 §5 |
-| RTX 5080 真实生产 | 见 §5（隔离测试作品，受控窗口） |
+| RTX 5080 真实生产 | **RTX5080_HOST_PASS**：真实渲染器节点核验 4 方案、真实 H3 出片 PASSED（technical 过、semantic/final 诚实待人工）、GPU 回基线、租约释放（§5） |
+| 页面安全重启后台 | **PASS**：常驻监督+空闲门禁+Origin/标记契约，真实重启端到端生效（§2.7） |
 | RTX 4070 真机 | **EXEMPT_HARDWARE_UNAVAILABLE**（§6） |
 | W6A8 / RelayVSR / VLM 校准 | 保持真实阻断，见 §7 |
 
@@ -290,12 +291,17 @@ uv run --project backend --frozen --with playwright==1.62.0 \
 
 ## 10. PR 与合并风险
 
-- 收尾 PR：（创建后回填链接与 CI 结果）
-- 改动面：E2E 脚本对齐、5 个前端面板 deps 补齐 + 1 回归、后端变体启动合同
-  （新模块 + 显式 variant_id 门禁 + 只读端点）+ 9 回归、大纲回归补充。
+- 收尾 PR：<https://github.com/anjingdtl/shine-video-studio/pull/19>
+  （分支 `closeout/main-final-engineering-20261114`）。PR CI：Frontend build ✅、
+  L1/L2 见 run 43562877511；L3（Linux/Windows/E2E）按规则在 PR 事件跳过，
+  以本地隔离 E2E 作同等检查，合并后复核 main 完整 CI。
+- 改动面：E2E 脚本对齐、5 个前端面板 deps 补齐 + 回归、后端分镜 resume/异常路径
+  修复、变体启动合同（新模块 + 显式 variant_id 门禁 + 只读端点）+ 9 回归、
+  常驻监督进程 + 页面重启按钮 + 7 回归、大纲回归补充、验收报告。
 - 风险评估：默认路径行为不变（INT8 配置生成字节级不变、无 variant_id 调用不变）；
   前端 deps 补齐为行为修正（操作栏与面板状态同步），有红/绿对照回归；
-  新门禁只作用于显式选择变体的配置生成，且发生在写事务之前。
+  新门禁只作用于显式选择变体的配置生成，且发生在写事务之前；监督进程仅环回、
+  空闲门禁拒绝活工作、不引入 PID-only kill、独立记录不被 stop_shine 误杀。
 - 合并方式：PR 合并入 main 后推送 main（所有者权限，ruleset 允许）；不 force push。
 
 ## 附录 · 证据目录（Git 忽略，不进安装包）
