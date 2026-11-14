@@ -1,6 +1,6 @@
 import { History, RefreshCw } from 'lucide-react';
 import type { AuditPage } from '../api';
-import { auditActorLabels, auditEntityLabels, auditEventLabels, label } from '../constants';
+import { auditActorLabels, auditEntityLabels, auditEventLabel, label } from '../constants';
 
 type Props = {
   page: AuditPage | null;
@@ -27,7 +27,7 @@ export default function AuditPanel({ page, busy, onLoad, onMore }: Props) {
             <div className="audit-row" key={item.id}>
               <span className="audit-time">{new Date(item.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
               <span className="audit-actor">{label(auditActorLabels, item.actor)}</span>
-              <b>{label(auditEventLabels, item.event_type)}</b>
+              <b>{auditEventLabel(item.event_type, item.entity_type)}</b>
               <span className="audit-entity">{label(auditEntityLabels, item.entity_type)} · {item.entity_id.slice(0, 8)}…</span>
             </div>
           ))}
