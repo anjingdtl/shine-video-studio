@@ -412,18 +412,34 @@ def compute_journey(
     #    Materials are deliberately NOT a condition here: the design is done
     #    first, and what it asks for is answered in the next stage.
     shot_blockers: list[dict[str, Any]] = []
-    plan_mode = (plan.payload or {}).get("mode", "shots") if plan is not None else None
-    plan_materialized = bool(plan is not None and all(
-        episode.get("shot_ids") for episode in (plan.payload or {}).get("episodes", [])
+    # The storyboard stage follows the newest confirmed plan — the same ledger
+    # the per-episode panel and the auto-confirm write to.  A package pins the
+    # plan it froze; re-judging that old plan here would block the current work
+    # forever once later episodes land and confirm into a newer version.
+    storyboard_plan = latest_confirmed_plan(db, project_id) or plan
+    plan_mode = ((storyboard_plan.payload or {}).get("mode", "shots")
+                 if storyboard_plan is not None else None)
+    # The materialisation gate covers the current production scope: the episodes
+    # the package selected, or the whole plan while no package exists yet.
+    scoped_episode_ids: set[str] | None = None
+    if package is not None:
+        scoped_episode_ids = set(db.scalars(
+            select(DirectorPackageEpisode.episode_id)
+            .where(DirectorPackageEpisode.package_id == package.id)
+        ).all())
+    plan_materialized = bool(storyboard_plan is not None and all(
+        episode.get("shot_ids")
+        for episode in (storyboard_plan.payload or {}).get("episodes", [])
+        if scoped_episode_ids is None or episode.get("episode_id") in scoped_episode_ids
     ))
     # Per-episode storyboard state: a project whose second episode is still
     # pending must still show "1/2 集分镜已确认" and let the finished episode
     # move on to materials, packaging and shooting (streamline plan §3).
     episode_storyboard = []
-    if plan is not None and plan_mode == "sections":
+    if storyboard_plan is not None and plan_mode == "sections":
         from shine.materialprep.story import section_storyboard_shot_ids
 
-        for episode in (plan.payload or {}).get("episodes", []):
+        for episode in (storyboard_plan.payload or {}).get("episodes", []):
             landed = 0
             pending_sections = 0
             for section_id in episode.get("section_ids") or []:
@@ -443,7 +459,7 @@ def compute_journey(
                 "landed_shot_count": landed,
                 "pending_section_count": pending_sections,
             })
-    if plan is not None and plan_mode == "sections" and not plan_materialized:
+    if storyboard_plan is not None and plan_mode == "sections" and not plan_materialized:
         shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
                               "message": "按剧本分好的集还没有全部拆成镜头"})
     for shot_id in scope_shot_ids:
@@ -473,6 +489,8 @@ def compute_journey(
                   "package_shot_count": len(overview_shot_ids),
                   "scope_episode_ids": run_episode_ids,
                   "plan_mode": plan_mode, "plan_materialized": plan_materialized,
+                  "storyboard_plan_version": (
+                      storyboard_plan.version if storyboard_plan is not None else None),
                   "episode_total": len(episode_storyboard),
                   "episode_confirmed_count": len(confirmed_episodes),
                   "ready_episode_ids": [row["episode_id"] for row in confirmed_episodes],
