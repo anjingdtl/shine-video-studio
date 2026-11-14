@@ -138,6 +138,53 @@ export const STORAGE = {
   free_bytes: 1, free_gb: 100, paths: {}, drives: [],
 };
 
+/**
+ * 服务端唯一事实视图的最小桩：四项能力都没有资源、没有下一步之外的花样。
+ *
+ * 界面只读这一份，所以测试也必须提供它——否则「制作环境」会诚实地显示
+ * 「读取失败」，而测试要验证的其它事实就被这条错误淹没了。
+ */
+export function setupSummary(overrides: Record<string, unknown> = {}) {
+  const empty = (key: string, label: string) => ({
+    key, label, catalog: 'c', state: 'MISSING',
+    facts: {
+      FILES_FOUND: false, FILES_VERIFIED: false, RESOURCE_REGISTERED: false,
+      INSTANCE_BOUND: false, WORKFLOW_VALIDATED: false, RENDER_VERIFIED: false, PRODUCTION_READY: false,
+    },
+    summary: '本机还没有这套资源。',
+    next_step: { code: 'FILES_MISSING', label: '准备环境', reason: '本机还没有这套资源。', action: 'PREPARE_ENVIRONMENT', capability: key },
+    missing_files: [], missing_bytes: 0, advisories: [],
+  });
+  return {
+    snapshot_version: 1,
+    computed_at: '2026-11-14T00:00:00Z',
+    project_id: 'proj-1',
+    installation: { selected: null, candidates: [], choice_required: false },
+    capabilities: {
+      h3: empty('h3', 'H3 视频生成'),
+      image: empty('image', '素材出图'),
+      vlm: empty('vlm', '画面审片'),
+      asr: empty('asr', '语音核对'),
+    },
+    progress: [
+      { id: 'DETECT', label: '检测本机', state: 'ACTIVE' },
+      { id: 'FILES', label: '文件整备', state: 'PENDING' },
+      { id: 'REGISTER', label: '自动登记', state: 'PENDING' },
+      { id: 'BIND', label: '绑定与运行核对', state: 'PENDING' },
+      { id: 'TRIAL', label: '真实试镜', state: 'PENDING' },
+    ],
+    primary_capability: 'h3',
+    action_required: {
+      code: 'FILES_MISSING', label: '准备环境', reason: '本机还没有这套资源。',
+      action: 'PREPARE_ENVIRONMENT', capability: 'h3',
+    },
+    blockers: [],
+    preparation: { status: 'IDLE', task_id: null, current: null, steps: [], done: 0, total: 0, message: null },
+    manual_download_root: 'D:\\Shine\\manual-downloads',
+    ...overrides,
+  };
+}
+
 export function baseProject(overrides: Record<string, unknown> = {}) {
   return {
     id: 'proj-1', title: '雾港夜账', description: '', language: 'Chinese',
@@ -194,6 +241,8 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/setup\/llm-readiness$/, respond: () => jsonResponse({ status: 'READY', roles: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/voice-readiness$/, respond: () => jsonResponse({ status: 'BLOCKED', voice_master_capable: false, roles: [] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/environment$/, respond: () => jsonResponse(ENV_REPORT) },
+    { method: 'GET', pattern: /\/api\/v1\/setup\/summary/, respond: () => jsonResponse(setupSummary()) },
+    { method: 'POST', pattern: /\/api\/v1\/setup\/prepare\/execute$/, respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-test', steps: ['TARGET', 'RECIPE'] }) },
     { method: 'GET', pattern: /\/api\/v1\/setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({ installations: [] }) },
     { method: 'POST', pattern: /\/api\/v1\/setup\/existing-installations\/inspect$/, respond: () => jsonResponse({
       root: 'D:////ComfyUI', snapshot: 'a'.repeat(64), candidate_bytes: 0, scanned_files: 0,

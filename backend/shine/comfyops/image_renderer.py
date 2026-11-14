@@ -64,9 +64,41 @@ def load_image_recipe(settings) -> dict[str, Any]:
     if not path.is_file():
         raise HTTPException(409, {
             "code": "IMAGE_RENDERER_RECIPE_MISSING",
-            "detail": "还没有为本机生成受管运行配置。请先在基础配置里完成本机环境登记。",
+            "detail": "已经找到出图资源，本机还缺一份可启动的运行配置；"
+                      "在「设置 → 制作环境」里会自动补齐。",
+            "auto_recovery": "PREPARE_ENVIRONMENT",
         })
     return load_managed_recipe(str(path))
+
+
+def image_recipe_state(settings) -> dict[str, Any]:
+    """The recipe *as a fact*, for callers that must not raise.
+
+    ``GET /setup/image-readiness`` and ``GET /setup/summary`` both need to say
+    "the binding exists, the recipe does not" without turning the answer into a
+    failed request.  Reading the recipe through the validator here keeps a
+    damaged file a named ``INVALID`` rather than an exception at every caller.
+    """
+    path = recipe_path(settings)
+    state: dict[str, Any] = {"state": "MISSING", "path": str(path), "instance_id": None, "port": None,
+                             "code": "IMAGE_RENDERER_RECIPE_MISSING"}
+    if not path.is_file():
+        return state
+    try:
+        recipe = load_managed_recipe(str(path))
+    except HTTPException as exc:
+        detail = exc.detail
+        code = detail.get("code") if isinstance(detail, dict) else detail
+        return {**state, "state": "INVALID", "code": str(code or "COMFY_RECIPE_INVALID")}
+    renderer = recipe["renderer"]
+    return {
+        "state": "READY",
+        "path": str(path),
+        "instance_id": renderer.get("instance_id"),
+        "port": renderer.get("port"),
+        "recipe_sha256": graph_hash(renderer),
+        "code": None,
+    }
 
 
 def _record(factory, key: str, value: dict[str, Any]) -> None:

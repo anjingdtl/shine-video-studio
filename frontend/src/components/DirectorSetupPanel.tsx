@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
 import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
-import { SetupCenter } from './SetupCenter';
+import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { GuideTip } from './GuideTip';
@@ -57,6 +57,8 @@ type Props = {
   onDeleteWorkflow: (profileId: string) => void;
   onBindStandardParameters: (profileId: string) => void;
   onOpenExpert: () => void;
+  /** The complete preparation lives in 设置 → 制作环境; this only navigates. */
+  onOpenSettings: () => void;
 };
 
 function gib(bytes?: number | null): string {
@@ -75,7 +77,7 @@ function gib(bytes?: number | null): string {
  */
 export default function DirectorSetupPanel({
   focusTab = 'env', projectId, projectTitle, setProjectTitle, createProject,
-  system, refreshEpoch, onRefresh,
+  system, refreshEpoch, onRefresh, onOpenSettings,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
@@ -190,7 +192,23 @@ export default function DirectorSetupPanel({
     </section>}
 
     {tab === 'env' && <div className="setup-tab-body">
-      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch} onRefresh={onRefresh} />
+      {/*
+        导演页只展示同一个服务端事实的只读摘要。完整整备在「设置 → 制作环境」
+        一处完成：这里不再生成第二套安装计划，也不再独立判定「已就绪」。
+      */}
+      <SetupEnvironmentStatus
+        projectId={projectId}
+        readOnly
+        refreshEpoch={refreshEpoch}
+        onGoSettings={() => onOpenSettings?.()}
+      />
+      {onOpenSettings && <section className="card section-card setup-needs-project">
+        <div>
+          <b>完整整备在「设置 → 制作环境」</b>
+          <p>检测、核验、登记、下载、运行配置与真实试镜都在那一处收束；这里只显示结论。</p>
+        </div>
+        <button type="button" className="btn-secondary" onClick={() => onOpenSettings()}>打开设置</button>
+      </section>}
       <OutputDirectoryPanel />
     </div>}
 

@@ -56,6 +56,12 @@ class ImageRuntimeConfig(BaseModel):
     config_revision: int = 1
     instance_id: str = ""
     base_url: str = ""
+    #: The installation-level identity this binding belongs to.  It is the same
+    #: id the managed recipe, the H3 profiles and the service validation use, so
+    #: a binding can never quietly describe another physical install.
+    installation_id: str = ""
+    port: int | None = None
+    recipe_sha256: str = ""
     graph_sha256: str = ""
     parameter_map: dict[str, str] = Field(default_factory=dict)
     output_node_id: str = qwen_workflow.OUTPUT_NODE
@@ -305,9 +311,32 @@ def _renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
 
 
 def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dict[str, Any]:
-    """The four-layer report the setup card and the generate gate both read."""
+    """The four-layer report the setup card and the generate gate both read.
+
+    ``configured`` keeps its historic, narrow meaning - a binding was saved.
+    A saved binding is *not* a runnable renderer: the managed recipe is a
+    separate fact, and only ``binding_state == "READY"`` may tell a person the
+    image capability can actually start.  That distinction is what used to make
+    ``IMAGE_RENDERER_RECIPE_MISSING`` show up after a page had already said the
+    capability was configured.
+    """
+    from shine.comfyops.image_renderer import image_recipe_state
+
     config = load_config(settings)
     configured = bool(config.base_url and config.instance_id)
+    recipe = image_recipe_state(settings)
+    if not configured:
+        binding_state = "NOT_BOUND"
+    elif recipe["state"] != "READY":
+        binding_state = "PENDING_RECIPE"
+    elif recipe.get("instance_id") and recipe["instance_id"] != config.instance_id:
+        binding_state = "PENDING_RECIPE"
+    elif recipe.get("port") and config.port and int(recipe["port"]) != int(config.port):
+        binding_state = "PENDING_RECIPE"
+    elif config.recipe_sha256 and recipe.get("recipe_sha256") != config.recipe_sha256:
+        binding_state = "PENDING_RECIPE"
+    else:
+        binding_state = "READY"
     files = verify_model_files(config) if config.model_root else {"files": [], "problems": [], "complete": False}
     if config.model_root:
         # Store what was just hashed, so the next read does not hash 16 GiB again.
@@ -319,6 +348,9 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
     blockers: list[dict[str, Any]] = []
     if not configured:
         blockers.append({"code": "IMAGE_RUNTIME_NOT_BOUND", "layer": LAYER_NOT_CONFIGURED})
+    elif binding_state == "PENDING_RECIPE":
+        blockers.append({"code": "IMAGE_RENDERER_RECIPE_MISSING", "layer": LAYER_NOT_CONFIGURED,
+                         "auto_recovery": "PREPARE_ENVIRONMENT"})
     elif not files["complete"]:
         layer = LAYER_NOT_CONFIGURED
         blockers.extend(files["problems"])
@@ -343,6 +375,9 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
     }
     return {
         "configured": configured,
+        "runnable": binding_state == "READY" and layer != LAYER_NOT_CONFIGURED,
+        "binding_state": binding_state,
+        "recipe": recipe,
         "layer": layer,
         "families": families,
         "renderer": renderer,

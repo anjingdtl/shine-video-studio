@@ -73,9 +73,9 @@ describe('空数据库与两层界面入口', () => {
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
     // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
     expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    // 检测只由用户点击触发。
-    await user.click(screen.getByRole('button', { name: '检测本机' }));
-    expect(await screen.findByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
+    // 导演页只显示同一份服务端事实的只读摘要：完整整备在「设置 → 制作环境」。
+    expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeNull();
   });
 
   it('无项目时依赖项目的操作有明确说明', async () => {
@@ -166,9 +166,11 @@ describe('空数据库与两层界面入口', () => {
 
   it('全局刷新会重新读取设置页启动时失败的本机存储状态', async () => {
     let attempts = 0;
+    // 设置页现在有两处读同一份存储事实（制作环境卡 + 专业排查块），
+    // 所以「启动时读失败」要覆盖这一轮的两次读取，而不是只失败一次。
     stub.add({
       method: 'GET', pattern: /\/api\/v1\/setup\/storage$/,
-      respond: () => ++attempts === 1
+      respond: () => attempts++ < 2
         ? jsonResponse({ detail: 'API is starting' }, 500)
         : jsonResponse({ root: 'D:\\Shine', configured: true, system_drive: false,
           requires_selection: false, free_bytes: 1, free_gb: 100, paths: {}, drives: [] }),

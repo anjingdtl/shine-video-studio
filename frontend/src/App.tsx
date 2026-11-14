@@ -834,6 +834,7 @@ function App() {
               onValidateWorkflow={validateWorkflow}
               onDeleteWorkflow={deleteWorkflow}
               onBindStandardParameters={bindStandardParameters}
+              onOpenSettings={() => goToExpert('setup', 'setup')}
               onOpenExpert={() => { setUi('expert'); setView('production'); window.history.pushState(null, '', '#v/production/preproduction'); }}
             />}
             <SchemaNotice />

@@ -39,11 +39,15 @@ describe('安装向导里的 H3 变体推荐', () => {
     // The card belongs to the environment step, so the check runs first.
     await user.click(screen.getByRole('button', { name: '检测本机' }));
     expect(await screen.findByText('这台电脑能用哪套 H3 变体')).toBeInTheDocument();
-    expect(await screen.findByText('H3 Ref2VA NVFP4 候选（12GB 级）')).toBeInTheDocument();
-    expect(screen.getByText('候选 · 本机未准备')).toBeInTheDocument();
+    // 同一份事实会同时出现在「制作环境」卡和推荐卡里：两处都指向服务端，
+    // 所以这里允许出现多次，只要求它真的出现过。
+    expect((await screen.findAllByText('H3 Ref2VA NVFP4 候选（12GB 级）')).length).toBeGreaterThan(0);
+    expect(screen.getAllByText('候选 · 本机未准备').length).toBeGreaterThan(0);
     expect(screen.queryByText(/第三方声明/)).toBeNull();
+    // 「制作环境」卡与推荐卡读同一份服务端推荐：允许都读一次，但都必须来自
+    // 服务端，而不是界面自己编一套候选。
     await waitFor(() => {
-      expect(stub.callsOf('GET', /variant-recommendations$/)).toHaveLength(1);
+      expect(stub.callsOf('GET', /variant-recommendations$/).length).toBeGreaterThanOrEqual(1);
     });
   });
 });

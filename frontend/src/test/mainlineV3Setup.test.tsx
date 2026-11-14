@@ -123,9 +123,9 @@ let stub: StudioStub;
 beforeEach(() => { window.sessionStorage.clear(); });
 afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
-async function detect(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(screen.getByRole('button', { name: '检测本机' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: '重新检测' })).toBeEnabled(), { timeout: 20000 });
+async function detect() {
+  // 打开就检测：等「上次检测」出现，说明服务端事实已经回来。
+  await screen.findByText(/上次检测/, undefined, { timeout: 20000 });
 }
 
 async function prepareImageOnly(user: ReturnType<typeof userEvent.setup>) {
@@ -152,7 +152,7 @@ describe('C-01：下载准入按计划收窄，不再被无关站点一刀切', 
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await prepareImageOnly(user);
 
     // 图片计划进入了受控下载队列——无关站点失联没有拦下合法能力。
@@ -177,7 +177,7 @@ describe('C-01：下载准入按计划收窄，不再被无关站点一刀切', 
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
@@ -208,7 +208,7 @@ describe('C-02：H3 方案只约束 H3 能力', () => {
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
 
@@ -232,13 +232,15 @@ describe('C-03：文件已核验不冒充能力就绪', () => {
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
-    await detect(user);
+    await detect();
     await prepareImageOnly(user);
 
     await waitFor(() => expect(screen.getByRole('list', { name: '各项能力的准备结论' })).toBeTruthy(), { timeout: 20000 });
     const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
-    expect(outcomes).toHaveTextContent('文件已核验 · 运行待验证');
+    // V4.1：下载交给后台之后，界面只报「已排队，后台继续」——它拿不到终态就不
+    // 替安装器宣布结论，更不会把「文件已下载」说成「资源已就绪」。
+    expect(outcomes).toHaveTextContent('已排队，后台继续');
     expect(outcomes).not.toHaveTextContent('资源已就绪');
-    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
   });
 });

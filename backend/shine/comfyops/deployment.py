@@ -698,6 +698,9 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 
+IMAGE_CAPABILITY_CATALOG = "qwen-image-2.1-windows-x64"
+"""The image capability's own catalogue: separate bytes, separate licence."""
+
 
 def advisory_review_readiness(settings: Settings) -> dict:
     """Read-only inventory for optional local review resources.
@@ -760,16 +763,28 @@ def advisory_review_readiness(settings: Settings) -> dict:
 
 def generate_configuration(db, settings: Settings, project_id: str, *,
                            instance_name: str = 'shine-h3', port: int = 8188,
-                           variant_id: str | None = None) -> dict:
+                           variant_id: str | None = None,
+                           capability: str = 'h3') -> dict:
     """Generate the instance-bound managed recipe, review manifests and .env entries.
 
     Everything is derived from the deployed isolated instance and the repo, so a
     new machine needs no personal paths, GPU UUID hardcoding or hand-edited JSON.
     ``variant_id`` selects the startup contract whose memory floors the recipe
     carries; without it the default production variant is used, unchanged.
+
+    ``capability`` names *why* the recipe exists.  H3 and the image runtime share
+    one physical ComfyUI, one adapter and one lifecycle; what differs is the
+    evidence that must already exist before a recipe may be written.  An
+    H3 recipe needs the confirmed H3 weights, an image recipe needs the Qwen
+    image weights - a machine that only ever selected 素材出图 must not be sent
+    to download a video model, and must not be told its recipe is missing
+    forever.  Ownership requirements (adapter, python, revision, nodes) are
+    identical in both cases.
     """
     from shine.comfyops.instances import instance_identity, instance_root
 
+    if capability not in {'h3', 'image'}:
+        raise HTTPException(409, 'RUNTIME_CAPABILITY_UNKNOWN')
     # The variant contract is resolved before any transaction: an undetermined
     # startup (unknown render-time floors) is refused by name here and never
     # written into the recipe with the baseline's numbers.
@@ -809,7 +824,10 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     root = Path(payload["root"]).resolve()
     if adopted:
         from shine.comfyops.adoption import adopted_installation_blockers
-        blockers = adopted_installation_blockers(instance, load_default_catalog())
+        evidence_catalog = (load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)
+                            if capability == 'image' else load_default_catalog())
+        blockers = adopted_installation_blockers(instance, evidence_catalog,
+                                                 capability=capability)
         if blockers:
             raise HTTPException(409, {"code": "ADOPTED_INSTALLATION_CHANGED", "blockers": blockers})
         python = Path(payload["python"]).resolve()
@@ -821,19 +839,24 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     # 1) Prepare the handoff adapter. Adoption only validates existing bytes;
     # it never writes into the user's ComfyUI tree.
     adapter_dir = root / "custom_nodes" / "shine_comfy_handoff"
+    sampling_node = root / "custom_nodes" / "shine_h3_sampling_mode.py"
     results = []
     if adopted:
         if managed_recipe_adapter_identity(adapter_dir) != managed_recipe_adapter_identity(ADAPTER_DIR):
             raise HTTPException(409, "EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH")
         results.append({"status": "REUSED_EXISTING", "kind": "HANDOFF_ADAPTER"})
-        if not (root / "custom_nodes" / "shine_h3_sampling_mode.py").is_file():
+        if capability == 'h3' and not sampling_node.is_file():
+            # The H3 sampling mode is part of the H3 render contract.  An
+            # image-only installation never needed it, so its absence must not
+            # block an image recipe - and it is never written into the user's
+            # tree to make a check pass.
             raise HTTPException(409, "EXISTING_COMFY_SAMPLING_NODE_MISSING")
-        results.append({"status": "REUSED_EXISTING", "kind": "SAMPLING_NODE"})
+        if sampling_node.is_file():
+            results.append({"status": "REUSED_EXISTING", "kind": "SAMPLING_NODE"})
     else:
         for name in ("__init__.py", "barrier.py"):
             results.append(_deploy_repo_file(ADAPTER_DIR / name, adapter_dir / name, what="HANDOFF_ADAPTER"))
-        results.append(_deploy_repo_file(SAMPLING_NODE, root / "custom_nodes" / "shine_h3_sampling_mode.py",
-                                         what="SAMPLING_NODE"))
+        results.append(_deploy_repo_file(SAMPLING_NODE, sampling_node, what="SAMPLING_NODE"))
     # 2) GPU identity from the live probe — a generated recipe without the real
     # UUID would fail the renderer admission check at first production start.
     from shine.comfyops.host_env import probe_gpu
@@ -858,7 +881,9 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
                                      encoding="utf-8")
     recipe_path = setup_dir / "managed_recipe.json"
     adapter_identity = managed_recipe_adapter_identity(adapter_dir)
-    whitelist = ["shine_comfy_handoff", "shine_h3_sampling_mode.py"]
+    whitelist = ["shine_comfy_handoff"]
+    if sampling_node.is_file() or capability == 'h3':
+        whitelist.append("shine_h3_sampling_mode.py")
     node_packs = [cid for cid, c in _component_map(load_default_catalog()).items() if c["kind"] == "node"]
     whitelist.extend(sorted(node_packs))
     argv = [
@@ -898,8 +923,9 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
         "argv": argv,
         "pinned_files": [
             "{python}", "{root}" + SEP + "main.py", "{adapter_dir}" + SEP + "__init__.py",
-            "{adapter_dir}" + SEP + "barrier.py", "{root}" + SEP + "custom_nodes" + SEP
-            + "shine_h3_sampling_mode.py", "{bootstrap}",
+            "{adapter_dir}" + SEP + "barrier.py", "{bootstrap}",
+            *(["{root}" + SEP + "custom_nodes" + SEP + "shine_h3_sampling_mode.py"]
+              if (sampling_node.is_file() or capability == 'h3') else []),
         ],
     }
     reviews = {}
@@ -948,23 +974,32 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
     recipe = {"renderer": renderer, "reviews": reviews}
     from shine.comfyops.installer import durable_json
     durable_json(recipe_path, recipe)
-    from shine.comfyops.runtime_configuration import record_candidate
-    record_candidate(db, settings, project_id, recipe_path)
-    env_updates = {
-        "SHINE_DATA_DIR": str(settings.data_dir),
-        "SHINE_SETUP_RECIPE": str(recipe_path),
-        "SHINE_ENABLE_LOCAL_EXECUTION": "1",
-    }
-    env_written = _update_env_file(ENV_PATH, env_updates)
+    env_updates: dict = {}
+    env_written: list = []
+    if capability == 'h3':
+        # Only an H3 recipe is a *video runtime* candidate; an image recipe must
+        # not replace the project's activation record or claim the renderer.
+        from shine.comfyops.runtime_configuration import record_candidate
+        record_candidate(db, settings, project_id, recipe_path)
+        env_updates = {
+            "SHINE_DATA_DIR": str(settings.data_dir),
+            "SHINE_SETUP_RECIPE": str(recipe_path),
+            "SHINE_ENABLE_LOCAL_EXECUTION": "1",
+        }
+        env_written = _update_env_file(ENV_PATH, env_updates)
     add_audit(db, "comfyops", "DEPLOYMENT_CONFIGURATION_GENERATED", "comfy_instance", instance.id, {
-        "recipe": str(recipe_path), "adapter_sha256": adapter_identity,
+        "recipe": str(recipe_path), "adapter_sha256": adapter_identity, "capability": capability,
         "gpu_uuid": gpu["uuid"], "env_keys": sorted(env_updates),
     }, project_id=project_id)
     db.commit()
     return {
         "recipe": str(recipe_path),
         "recipe_sha256": graph_hash(recipe),
-        "activation_required": True,
+        "capability": capability,
+        "instance_id": instance.id,
+        "port": int(payload["port"]),
+        "root": str(root),
+        "activation_required": capability == 'h3',
         "adapter_sha256": adapter_identity,
         "gpu_uuid": gpu["uuid"],
         "env_file": str(ENV_PATH),

@@ -124,6 +124,34 @@ def test_the_image_path_submits_harvests_and_registers_a_candidate(api, tmp_path
         weights.mkdir(parents=True)
         weight = weights / "qwen.safetensors"
         weight.write_bytes(b"pinned-weight-bytes")
+        # A startable renderer needs a recipe: a saved binding alone is
+        # PENDING_RECIPE, and readiness must not pretend otherwise.
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        from shine.comfyops import image_renderer
+        from shine.comfyops.deployment import ADAPTER_DIR
+        from shine.comfyops.managed_recipe import adapter_identity
+
+        bootstrap = _Path(__file__).resolve().parents[2] / "scripts" / "managed_comfy_bootstrap.py"
+        image_renderer.recipe_path(settings).parent.mkdir(parents=True, exist_ok=True)
+        image_renderer.recipe_path(settings).write_text(json.dumps({
+            "renderer": {
+                "instance_id": "fake-instance",
+                "python": str(_Path(_sys.executable).resolve()),
+                "root": str(tmp_path),
+                "base_directory": str(tmp_path),
+                "runtime_data_root": str(tmp_path),
+                "bootstrap": str(bootstrap),
+                "adapter_dir": str(ADAPTER_DIR),
+                "adapter_sha256": adapter_identity(ADAPTER_DIR),
+                "gpu_uuid": "GPU-TEST",
+                "port": 8188,
+                "argv": ["{python}", "{bootstrap}", "--listen", "127.0.0.1", "--port", "{port}"],
+                "pinned_files": ["{python}", "{bootstrap}"],
+            },
+            "reviews": {},
+        }), encoding="utf-8")
         config = runtime.ImageRuntimeConfig(
             config_revision=1,
             instance_id="fake-instance",

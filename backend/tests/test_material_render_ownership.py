@@ -22,11 +22,44 @@ from tests.test_material_render_e2e import FakeRenderer
 
 def _prepare(factory, settings, project_id, base_url, models, *, idempotency_key):
     weight = models / "diffusion_models" / "qwen.safetensors"
+    # A startable renderer needs a recipe: a saved binding on its own is
+    # ``PENDING_RECIPE``, and readiness must not pretend otherwise.
+    import json
+    import sys
+    from pathlib import Path
+
+    from shine.comfyops import image_renderer
+    from shine.comfyops.deployment import ADAPTER_DIR
+    from shine.comfyops.managed_recipe import adapter_identity
+
+    root = Path(models).parent
+    bootstrap = Path(__file__).resolve().parents[2] / "scripts" / "managed_comfy_bootstrap.py"
+    recipe = {
+        "renderer": {
+            "instance_id": "managed-instance",
+            "python": str(Path(sys.executable).resolve()),
+            "root": str(root),
+            "base_directory": str(root),
+            "runtime_data_root": str(root),
+            "bootstrap": str(bootstrap),
+            "adapter_dir": str(ADAPTER_DIR),
+            "adapter_sha256": adapter_identity(ADAPTER_DIR),
+            "gpu_uuid": "GPU-TEST",
+            "port": 8188,
+            "argv": ["{python}", "{bootstrap}", "--listen", "127.0.0.1", "--port", "{port}"],
+            "pinned_files": ["{python}", "{bootstrap}"],
+        },
+        "reviews": {},
+    }
+    path = image_renderer.recipe_path(settings)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(recipe), encoding="utf-8")
     config = runtime.ImageRuntimeConfig(
         config_revision=1,
         instance_id="managed-instance",
         base_url=base_url,
         model_root=str(models),
+        port=8188,
         model_files=[{
             "role": "unet",
             "folder": "diffusion_models",

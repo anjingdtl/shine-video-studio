@@ -2,6 +2,7 @@ import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, timeoutSignal } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { SetupCenter } from './SetupCenter';
 import { VariantRecommendationCard } from './VariantRecommendation';
 import {
   approveAndExecuteSetupPlan,
@@ -870,6 +871,23 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       <LLMSetupPanel onChanged={onRefresh} />
       {notice && <div className={notice.kind === 'ok' ? 'ok-line' : 'error-line'}>{notice.text}</div>}
 
+      {/*
+        制作环境的唯一完整入口。检测、核验、登记、下载、绑定、运行合同与真实
+        试镜都在这一处收束；下面的专业设置只作为排查工具，不再独立判定「已就绪」。
+      */}
+      <SetupCenter
+        projectId={projectId}
+        refreshEpoch={refreshEpoch}
+        onRefresh={onRefresh}
+      />
+
+      {/*
+        专业排查留在本页，但不折叠：这些按钮和计划是运维证据，不是给普通用户
+        的第二步。真正的「一次确认」在上面那张制作环境卡里。
+      */}
+      <div className="setup-advanced">
+        <h3>高级排查：检测明细、已有安装与安装计划</h3>
+
       <div className="settings-block">
         <button className="btn-secondary" disabled={busy} onClick={detectEnvironment}>{checked ? '重新检测' : '检测本机'}</button>
         {!checked && <p role="status">还没有检测结果。检测是只读的：不会下载、复制或启动任何东西，也不需要项目。</p>}
@@ -953,7 +971,6 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         {progress && <p role="status">{progress}</p>}
       </div>
 
-      <details><summary>查看检测与安装详情（高级）</summary>
       <div className="settings-grid">
         <div className="settings-block">
           <h3>1 · 环境检查</h3>
@@ -1159,7 +1176,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           </>}
         </div>
       </div>
-      </details>
+      </div>
     </section>
   );
 }

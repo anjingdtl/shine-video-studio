@@ -57,7 +57,12 @@ def test_prepared_instance_does_not_start_an_unfenced_renderer(prep):
 def test_matching_name_on_another_identity_is_not_completed(prep, mode, port):
     project, _, _ = seed(prep, mode=mode, port=port, process={'is_mock': True})
     client, _, _ = prep
-    response = client.post('/api/v1/setup/next-instance-plan', json={'project_id': project})
+    # A request that names a port is answered for *that* identity: the same
+    # directory already belongs to another port, so reusing it is refused.
+    # (Omitting the port means "the identity this machine resolved to", which is
+    # tested in test_setup_one_stop_v41.)
+    body = {'project_id': project, **({'port': 8188} if mode == 'local' else {})}
+    response = client.post('/api/v1/setup/next-instance-plan', json=body)
     if mode == 'local':
         # The same directory already belongs to another port. Refuse to reuse
         # its identity or replace its files; this is not a second CREATE target.
