@@ -157,4 +157,28 @@ describe('大纲版本管理', () => {
     expect(stub.callsOf('POST', /director\/outline\/revision$/)[0].body)
       .toMatchObject({ expected_sha256: SHA1 });
   });
+
+  it('提供三档剧情节奏并在提取时提交所选节奏', async () => {
+    const user = userEvent.setup();
+    stubConsentAndTasks();
+    stub.add({ method: 'GET', pattern: /director\/outline$/, respond: () => jsonResponse({
+      artifact_id: 'o1', sha256: SHA1, markdown: MD1, questions: [], approved: true,
+      confirmed: true, confirmed_artifact_id: 'o1', payload: { pacing_label: '均衡剧情' },
+      versions: [version('o1', SHA1, { approved: true, confirmed: true })] }) });
+    stub.add({ method: 'POST', pattern: /story-preparation\/outlines$/,
+      respond: () => jsonResponse({ task_id: 'task-2', status: 'QUEUED' }) });
+
+    render(<OutlineConfirmationPanel projectId="p1" documentId="doc-1" documentHash={'b'.repeat(64)} />);
+    expect(await screen.findByText('紧凑剧情')).toBeInTheDocument();
+    expect(screen.getByText('均衡剧情')).toBeInTheDocument();
+    expect(screen.getByText('舒缓剧情')).toBeInTheDocument();
+    // 当前大纲的节奏标签如实显示（选项与横幅都含该词）。
+    expect(screen.getAllByText(/均衡剧情/).length).toBeGreaterThan(0);
+
+    await user.click(screen.getByRole('radio', { name: /紧凑剧情/ }));
+    await user.click(screen.getByRole('button', { name: '后台提取并归并总体大纲' }));
+    await waitFor(() => expect(stub.callsOf('POST', /story-preparation\/outlines$/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /story-preparation\/outlines$/)[0].body)
+      .toMatchObject({ pacing: 'compact' });
+  });
 });

@@ -6,6 +6,7 @@ import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { Meter } from './Meter';
+import { pacingOptions, type PacingValue } from '../constants';
 
 type Section = { production_section_id: string; order: number; title: string };
 type Outline = {
@@ -57,6 +58,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const [view, setView] = useState<DirectorOutline | null>(null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [facts, setFacts] = useState('');
+  const [pacing, setPacing] = useState<PacingValue>('balanced');
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
   const [problem, setProblem] = useState('');
@@ -85,6 +87,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const display = current ?? taskOutline;
   const versions = view?.versions ?? [];
   const questions = current ? current.questions : (taskOutline?.payload.questions ?? []);
+  const pacingLabel = typeof view?.payload?.pacing_label === 'string' ? view.payload.pacing_label : null;
   const editorText = editor ? editor.text : (view?.markdown ?? '');
   const dirty = !!editor && editor.text !== editor.original;
   const baseId = editor?.base ?? current?.artifact_id ?? '';
@@ -119,11 +122,12 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         document_id: documentId,
         expected_document_hash: documentHash,
         locked_facts: lockedFacts,
+        pacing,
       }));
     if (res.status === 'QUEUED' || res.status === 'RUNNING') {
       onMessage?.('大纲任务已排队；关掉页面也会由常驻 Worker 继续。');
     } else if (res.status === 'SUCCEEDED') {
-      onMessage?.('剧本与锁定事实和上次一致：复用已有大纲结果，没有重跑模型。要重新生成请修改锁定事实或导入新剧本。');
+      onMessage?.('剧本、锁定事实与节奏和上次一致：复用已有大纲结果，没有重跑模型。要重新生成请修改锁定事实、切换节奏或导入新剧本。');
     } else {
       onMessage?.(`沿用已有大纲任务（${TASK_STATUS_LABELS[res.status] ?? res.status}），未创建新任务。`);
     }
@@ -211,6 +215,17 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
       </label>
     </details>
+    <fieldset className="pacing-picker">
+      <legend>剧情节奏（决定大纲的叙事密度，切换后重新提取才生效）</legend>
+      {pacingOptions.map(([value, label, hint]) => (
+        <label key={value} className={`pacing-option${pacing === value ? ' active' : ''}`}>
+          <input type="radio" name="outline-pacing" value={value} checked={pacing === value}
+            onChange={() => setPacing(value)} />
+          <span className="pacing-label">{label}</span>
+          <span className="pacing-hint">{hint}</span>
+        </label>
+      ))}
+    </fieldset>
     {!railPresent && <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
       onClick={extractOutline}>
       {busy ? '提交中…' : '后台提取并归并总体大纲'}
@@ -244,7 +259,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
 
     {display && <div className="outline-body">
       <b>大纲版本 {display.artifact_id.slice(0, 8)} · {display.approved ? '你已确认' : '待你审阅'}
-        {display.user_edited ? ' · 用户编辑稿' : ''}</b>
+        {display.user_edited ? ' · 用户编辑稿' : ''}{pacingLabel ? ` · ${pacingLabel}` : ''}</b>
       {current && current.confirmed_artifact_id && current.confirmed_artifact_id !== current.artifact_id && (
         <p className="run-hint">当前确认依据是版本 {current.confirmed_artifact_id.slice(0, 8)}；
           这一版确认后才会成为分集、分镜和导演包的共同依据。</p>

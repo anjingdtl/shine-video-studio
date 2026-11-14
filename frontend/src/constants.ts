@@ -287,3 +287,11 @@ export const useAsOptions = [
 export const useAsLabels: Record<string, string> = Object.fromEntries(
   useAsOptions.map(([value, text]) => [value, text]),
 );
+
+/** 大纲生成节奏三档：与后端 materialprep/pacing.py 的声明一一对应。 */
+export const pacingOptions = [
+  ['compact', '紧凑剧情', '冲突密集、推进快，适合短时长快切。'],
+  ['balanced', '均衡剧情', '情节与人物/氛围均衡，默认节奏。'],
+  ['relaxed', '舒缓剧情', '氛围与内心停留多、节奏慢，适合文艺慢切。'],
+] as const;
+export type PacingValue = (typeof pacingOptions)[number][0];

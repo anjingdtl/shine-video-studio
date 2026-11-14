@@ -1499,3 +1499,24 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   草稿挂起 journey 仍认 v1→确认 v2→相同输入复用提示。证据
   `docs/ACCEPTANCE_20261114_OUTLINE_VERSIONS.md`。
 - 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-14 大纲节奏三档 + 登场人物介绍（用户报障：大纲无人物介绍）
+
+- **三档节奏是请求身份的一部分**。`materialprep/pacing.py` 声明 compact/balanced/relaxed
+  （紧凑/均衡/舒缓），`normalize_pacing` 只认三档、其余回退 balanced。`queue_outline` 与
+  `_merge` 都把 pacing 计入身份：切换节奏=新大纲输入，不重用旧结果。
+- **节奏只塑造归并叙事，不碰事实**。merge system 追加节奏指令（紧凑=压缩 beats/快升级；
+  舒缓=氛围/内心停留/细时间线）；叶子事实提取与素材准备共用 `scenes.prepare_scenes`，
+  不受 pacing 影响。source 分段/锁定事实/人物编号/production_sections 均不变。
+- **登场人物必须有介绍**。`OutlinePart` 增加 `characters[{name,introduction}]`；merge 被要求
+  为每个真实登场人物写 grounded 介绍（不臆造传记）；最终 payload `characters` 带
+  `introduction`（merge 优先、回退叶子描述）+ `pacing`/`pacing_label`。
+- **正文渲染登场人物**。`outline_to_markdown`/`markdown_to_outline` 增加 `## 登场人物` 锚点，
+  往返无损；编辑只改介绍、保留 entity_id/stable_identity。
+- **前端三档选择器**。`constants.ts::pacingOptions`；`OutlineConfirmationPanel` 与
+  `StoryPreparationPanel` 提取时提交 pacing，横幅显示当前节奏标签。
+- 回归（定向）：后端 story/streamline/outline-unblock 33 例 + merge 影响面 8 模块 82 例；
+  前端 outlineVersions(+1)/storyOutlineUnblock/materialPreparation 32 例 + 3 入口 22 例；
+  tsc/build/Ruff 通过。浏览器真实 MiniMax：选紧凑→新任务→正文出现登场人物介绍+「紧凑剧情」。
+  证据 `docs/ACCEPTANCE_20261114_OUTLINE_PACING_CHARACTERS.md`。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

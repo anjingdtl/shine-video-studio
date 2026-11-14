@@ -1,6 +1,6 @@
 """Versioned long-script preparation; API queues, the resident Worker executes."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import Field
@@ -25,6 +25,7 @@ class OutlineRequest(APIModel):
     document_id: str
     expected_document_hash: str = Field(min_length=64, max_length=64)
     locked_facts: list[str] = Field(default_factory=list, max_length=100)
+    pacing: Literal["compact", "balanced", "relaxed"] = "balanced"
 
 
 def _document(db, project_id, document_id, expected_hash=None):
@@ -106,7 +107,7 @@ def queue_outline(project_id: str, body: OutlineRequest, actor: Operator, db: DB
     if not document.text.strip():
         raise HTTPException(422, "STORY_DOCUMENT_EMPTY")
     try:
-        row = story.queue_outline(db, project_id, document, gateway, body.locked_facts)
+        row = story.queue_outline(db, project_id, document, gateway, body.locked_facts, body.pacing)
     except LLMError as exc:
         # The script is stored already; only this role's model is missing.  The
         # refusal names the role and the page that fixes it, instead of failing

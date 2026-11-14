@@ -45,6 +45,7 @@ DIRECTOR_STORYBOARD_RUN = "director_storyboard_run"
 #: is deterministic: rendering then parsing returns the same structure, so a
 #: user who edits nothing produces a byte-identical payload projection.
 OUTLINE_SUMMARY_HEADING = "## 故事梗概"
+OUTLINE_CHARACTERS_HEADING = "## 登场人物"
 OUTLINE_STORY_LINE_HEADING = "## 故事主线"
 OUTLINE_TIMELINE_HEADING = "## 时间线"
 OUTLINE_RELATIONSHIPS_HEADING = "## 人物关系"
@@ -63,6 +64,16 @@ def _bullet_list(items: list[str]) -> str:
 def outline_to_markdown(payload: dict[str, Any]) -> str:
     """Render the confirmed-outline structure as the editable body."""
     parts = [OUTLINE_SUMMARY_HEADING, "", str(payload.get("summary") or "").strip(), ""]
+    characters = list(payload.get("characters") or [])
+    if characters:
+        lines = []
+        for c in characters:
+            name = str(c.get("name") or "").strip()
+            if not name:
+                continue
+            intro = str(c.get("introduction") or "").strip()
+            lines.append(f"- {name}：{intro}" if intro else f"- {name}")
+        parts += [OUTLINE_CHARACTERS_HEADING, "", "\n".join(lines), ""]
     for heading, key in (
         (OUTLINE_STORY_LINE_HEADING, "story_line"),
         (OUTLINE_TIMELINE_HEADING, "timeline"),
@@ -89,14 +100,17 @@ def _split_bullets(block: str) -> list[str]:
 def markdown_to_outline(markdown: str, base: dict[str, Any]) -> dict[str, Any]:
     """Parse the edited body back into the outline structure.
 
-    Only the five anchored sections are read; everything else in the payload
-    (document provenance, production sections, characters, locked facts, leaf
-    artifacts) is carried over untouched.  A missing anchor keeps the base
-    value, so deleting a heading never silently erases confirmed content.
+    Only the six anchored sections are read; everything else in the payload
+    (document provenance, production sections, locked facts, leaf artifacts)
+    is carried over untouched.  A missing anchor keeps the base value, so
+    deleting a heading never silently erases confirmed content.  Editing the
+    登场人物 anchor rewrites introductions but keeps each named character's
+    entity_id / stable_identity from the base.
     """
     text = markdown or ""
     headings = [
         OUTLINE_SUMMARY_HEADING,
+        OUTLINE_CHARACTERS_HEADING,
         OUTLINE_STORY_LINE_HEADING,
         OUTLINE_TIMELINE_HEADING,
         OUTLINE_RELATIONSHIPS_HEADING,
@@ -115,6 +129,21 @@ def markdown_to_outline(markdown: str, base: dict[str, Any]) -> dict[str, Any]:
     payload = dict(base)
     if OUTLINE_SUMMARY_HEADING in blocks:
         payload["summary"] = blocks[OUTLINE_SUMMARY_HEADING].strip()
+    if OUTLINE_CHARACTERS_HEADING in blocks:
+        base_chars = {str(c.get("name")): c for c in (base.get("characters") or []) if c.get("name")}
+        parsed = []
+        for item in _split_bullets(blocks[OUTLINE_CHARACTERS_HEADING]):
+            name, sep, intro = item.partition("：")
+            if not sep:
+                name, sep, intro = item.partition(":")
+            name = name.strip()
+            if not name:
+                continue
+            prior = base_chars.get(name, {})
+            entry = {**prior, "name": name, "entity_id": prior.get("entity_id") or name,
+                     "introduction": intro.strip()}
+            parsed.append(entry)
+        payload["characters"] = parsed
     for heading, key in (
         (OUTLINE_STORY_LINE_HEADING, "story_line"),
         (OUTLINE_TIMELINE_HEADING, "timeline"),
