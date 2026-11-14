@@ -1,0 +1,170 @@
+name: shine-launcher-release
+
+# The release path for both products. A Studio release and a Launcher release
+# are signed with different keys, so neither product can sign for the other.
+#
+# The private keys live in GitHub Secrets and never enter the repository:
+#
+#   SHINE_STUDIO_RELEASE_SIGNING_KEY   base64 Ed25519 seed for studio manifests
+#   SHINE_LAUNCHER_RELEASE_SIGNING_KEY  base64 Ed25519 seed for launcher manifests
+#
+# The matching public keys are committed in config/launcher/trusted-publishers.json
+# and are what the launcher verifies against.
+
+on:
+  push:
+    tags:
+      - "studio-v*"
+      - "launcher-v*"
+  workflow_dispatch:
+    inputs:
+      product:
+        description: "studio or launcher"
+        required: true
+        type: choice
+        options: [studio, launcher]
+      version:
+        description: "version to sign, for example 1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sign:
+    name: Sign deployment manifest
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: rustup toolchain install 1.100.0 --profile minimal --component rustfmt,clippy
+
+      - name: Build the signing tool and the launcher
+        working-directory: launcher
+        run: cargo +1.100.0 build --locked --release --bin sign_manifest --bin shine-launcher
+
+      - name: Resolve product, version and signing key
+        id: release
+        shell: pwsh
+        env:
+          STUDIO_KEY: ${{ secrets.SHINE_STUDIO_RELEASE_SIGNING_KEY }}
+          LAUNCHER_KEY: ${{ secrets.SHINE_LAUNCHER_RELEASE_SIGNING_KEY }}
+          INPUT_PRODUCT: ${{ inputs.product }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          $tag = if ($env:GITHUB_REF -like "refs/tags/*") { $env:GITHUB_REF -replace "refs/tags/", "" } else { "" }
+          $product = if ($tag -like "studio-v*") { "studio" } elseif ($tag -like "launcher-v*") { "launcher" } else { $env:INPUT_PRODUCT }
+          if (-not $product) { throw "Unable to determine which product is being released." }
+          $version = if ($tag) { $tag -replace "^(studio|launcher)-v", "" } else { $env:INPUT_VERSION }
+          if (-not $version) { throw "Unable to determine the release version." }
+          $key = if ($product -eq "studio") { $env:STUDIO_KEY } else { $env:LAUNCHER_KEY }
+          if (-not $key) {
+            # Fail closed. A release without a signing key would produce an
+            # artifact the launcher refuses to install, so the job stops here
+            # rather than publishing something unsigned.
+            throw "Signing key for product '$product' is not configured. Set the matching GitHub Secret before releasing."
+          }
+          $keyFile = Join-Path $env:RUNNER_TEMP "$product-release-seed.b64"
+          Set-Content -LiteralPath $keyFile -Value $key.Trim() -Encoding ascii -NoNewline
+          "product=$product" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+          "keyfile=$keyFile" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      - name: Assemble the deployment manifest
+        id: manifest
+        shell: pwsh
+        env:
+          PRODUCT: ${{ steps.release.outputs.product }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          $commit = (git rev-parse HEAD).Trim()
+          $exe = Join-Path $env:GITHUB_WORKSPACE "launcher/target/release/shine-launcher.exe"
+          $hash = if (Test-Path -LiteralPath $exe) { (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant() } else { "" }
+          $size = if (Test-Path -LiteralPath $exe) { (Get-Item -LiteralPath $exe).Length } else { 0 }
+          $artifactUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$env:GITHUB_REF_NAME"
+          $manifest = [ordered]@{
+            protocol_version = "1.0"
+            studio = [ordered]@{
+              name = "Shine Video Studio"
+              version = $env:VERSION
+              channel = "stable"
+              commit = $commit
+              build_id = "$env:PRODUCT-$env:VERSION-$($commit.Substring(0,12))"
+            }
+            compatibility = [ordered]@{
+              min_launcher_version = "1.0.0"
+              supported_protocol_major = 1
+              platform = @("windows-x64")
+            }
+            artifacts = @(
+              [ordered]@{
+                id = "$($env:PRODUCT)-package"
+                url = "$artifactUrl/$($env:PRODUCT)-package.zip"
+                sha256 = $hash
+                size_bytes = $size
+              }
+            )
+            toolchain_catalog = "config/deployment/tools-windows-x64.json"
+            capability_catalogs = @(
+              "config/deployment/h3-ref2va-windows-x64.json",
+              "config/deployment/qwen-image-2.1-windows-x64.json"
+            )
+            workflow_root = "config/workflows"
+            operations = @("probe", "install", "repair", "start", "stop", "upgrade")
+            required_features = @("typed-operations-v1", "sha256-artifacts", "ed25519-manifest-signature", "relative-catalog-paths", "data-preservation-v1")
+            optional_features = @()
+            data_policy = "preserve-and-backup"
+          }
+          $path = Join-Path $env:RUNNER_TEMP "deployment-manifest.json"
+          $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $path -Encoding utf8
+          Get-Content -LiteralPath $path -Raw
+          "path=$path" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      - name: Sign the manifest
+        id: signed
+        shell: pwsh
+        env:
+          PRODUCT: ${{ steps.release.outputs.product }}
+          KEYFILE: ${{ steps.release.outputs.keyfile }}
+          MANIFEST: ${{ steps.manifest.outputs.path }}
+        run: |
+          $signed = Join-Path $env:RUNNER_TEMP "deployment-manifest.signed.json"
+          $keyId = "shine-$($env:PRODUCT)-release-2026"
+          & (Join-Path $env:GITHUB_WORKSPACE "launcher/target/release/sign_manifest.exe") `
+            --key $env:KEYFILE --key-id $keyId --input $env:MANIFEST --output $signed
+          if ($LASTEXITCODE -ne 0) { throw "Signing the deployment manifest failed." }
+          "path=$signed" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      - name: Verify the signed manifest against the committed trust anchors
+        shell: pwsh
+        env:
+          SIGNED: ${{ steps.signed.outputs.path }}
+        run: |
+          & (Join-Path $env:GITHUB_WORKSPACE "launcher/target/release/shine-launcher.exe") --verify-manifest $env:SIGNED
+          if ($LASTEXITCODE -ne 0) { throw "The signed manifest does not verify against the committed trust anchors." }
+
+      - name: Remove the private key from the runner
+        if: always()
+        shell: pwsh
+        env:
+          KEYFILE: ${{ steps.release.outputs.keyfile }}
+        run: |
+          if ($env:KEYFILE -and (Test-Path -LiteralPath $env:KEYFILE)) {
+            Remove-Item -LiteralPath $env:KEYFILE -Force
+          }
+
+      - name: Upload the signed deployment manifest
+        uses: actions/upload-artifact@v4
+        with:
+          name: signed-deployment-manifest-${{ steps.release.outputs.product }}-${{ steps.release.outputs.version }}
+          if-no-files-found: error
+          path: ${{ steps.signed.outputs.path }}
