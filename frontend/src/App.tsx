@@ -358,14 +358,21 @@ function App() {
       .map((blocker) => {
         const described = describeBlocker(blocker.code, blocker.message);
         // 已经站在这一页时，不提供指向本页的动作：点了地址栏不变、页面也不变，
-        // 用户只会得到一个零进展的按钮。
-        const targetPage = described.action ? blockerTargetPage(described.action.target) : null;
-        const selfLoop = targetPage !== null && targetPage === directorPage;
+        // 用户只会得到一个零进展的按钮。这时改指真正的上游前置（第 1 阶段大纲确认），
+        // 而不是把「要做什么」一起藏起来。
+        const direct = described.action;
+        const directPage = direct ? blockerTargetPage(direct.target) : null;
+        const selfLoop = directPage !== null && directPage === directorPage;
+        const fallback = selfLoop ? described.selfLoopAction : undefined;
+        const fallbackPage = fallback ? blockerTargetPage(fallback.target) : null;
+        const effective = selfLoop
+          ? (fallback && fallbackPage !== directorPage ? fallback : undefined)
+          : direct;
         return {
           code: blocker.code,
           reason: described.reason,
-          action: described.action && !selfLoop
-            ? { label: described.action.label, go: resolveBlockerTarget(described.action.target) }
+          action: effective
+            ? { label: effective.label, go: resolveBlockerTarget(effective.target) }
             : undefined,
         };
       });

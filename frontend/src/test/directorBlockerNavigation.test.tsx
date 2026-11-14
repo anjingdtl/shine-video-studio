@@ -41,6 +41,8 @@ describe('分集未确认的恢复入口', () => {
     expect(action?.label).toBe('去剧本统筹');
     expect(action?.target).toBe('plan-stage');
     expect(action?.target).not.toBe('package-stage');
+    // 同页自环时改指真正的上游前置：第 1 阶段的大纲确认。
+    expect(ERROR_ACTIONS.EPISODE_PLAN_NOT_CONFIRMED.selfLoopAction?.target).toBe('creative-stage');
   });
 
   it('在别的阶段页点「去剧本统筹」，落到 #d/assets 而不是 #d/package', async () => {
@@ -65,13 +67,19 @@ describe('分集未确认的恢复入口', () => {
     expect(window.location.hash).not.toBe('#d/package');
   });
 
-  it('站在剧本统筹页时，不再给出指向本页的自环动作', async () => {
+  it('站在剧本统筹页时，改指真正的上游前置（第 1 阶段确认大纲）', async () => {
     const user = userEvent.setup();
     render(<App />);
     await switchToDirector(user);
     await gotoDirectorPage(user, /剧本统筹/);
 
     await waitFor(() => expect(screen.getAllByText(/分集方案尚未确认/).length).toBeGreaterThan(0));
+    // 不再给一个点了不会前进的「去剧本统筹」。
     expect(screen.queryByRole('button', { name: '去剧本统筹' })).toBeNull();
+    // 改指真正的前置：第 1 阶段的大纲确认。
+    const toOutline = await screen.findAllByRole('button', { name: '去第 1 阶段确认大纲' });
+    expect(toOutline.length).toBeGreaterThan(0);
+    await user.click(toOutline[0]);
+    await waitFor(() => expect(window.location.hash).toBe('#d/creative'));
   });
 });
