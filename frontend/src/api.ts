@@ -392,6 +392,12 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
       if (typeof body.detail?.code === 'string') code = body.detail.code;
     } catch { /* keep HTTP status */ }
+    if (response.status === 500 && message === 'Internal Server Error') {
+      // 只有 FastAPI 的默认 500 文案没有诊断价值：把它换成说清结果的中文。
+      // 其它状态码（503 等）带着真实诊断原文，必须原样保留。
+      message = '服务端内部错误（HTTP 500）。这次请求没有完成，'
+        + '请稍后重试；若反复出现，请到工作台日志里查看原因。';
+    }
     throw new ApiError(message, response.status, code, detail);
   }
   if (response.status === 204) return undefined as T;

@@ -629,6 +629,67 @@ def assign_to_project(
     if semantic_existing:
         return semantic_existing
 
+    # 项目里已经有同一份内容时（另一个入口登记过同一张图），分配不得再新建一条：
+    # assets 表对 (project_id, sha256) 唯一，重复登记会撞约束。身份一致就幂等复用
+    # 那一份并补一条台账链接；身份不同则具名拒绝并说清下一步——绝不静默改写
+    # 项目里已经登记的主素材身份。
+    content_existing = db.scalar(
+        select(Asset).where(Asset.project_id == project_id, Asset.sha256 == digest)
+    )
+    if content_existing is not None:
+        same_identity = (
+            (content_existing.role or None) == (role or None)
+            and (content_existing.entity_id or None) == (entity_id or None)
+        )
+        if role == "voice" or not same_identity:
+            raise HTTPException(
+                409,
+                {
+                    "code": "ASSET_ALREADY_IN_PROJECT",
+                    "message": (
+                        "这份内容已经在项目里（现有用途：{role}，现有身份：{entity}）。"
+                        "请直接使用项目里已有的那份；若要登记成另一个身份，"
+                        "请先在项目素材里移除现有那份再分配。"
+                    ).format(
+                        role=content_existing.role or "未指定",
+                        entity=content_existing.entity_id or "未命名",
+                    ),
+                    "existing_asset_id": content_existing.id,
+                    "existing_role": content_existing.role,
+                    "existing_entity_id": content_existing.entity_id,
+                },
+            )
+        link = LibraryProjectLink(
+            project_id=project.id,
+            library_asset_id=version.library_asset_id,
+            library_version_id=version.id,
+            project_asset_id=content_existing.id,
+            project_voice_profile_id=None,
+            role=role,
+            entity_id=entity_id,
+            entity_key=entity_id or "",
+            usage_scope=usage_scope,
+            rights_snapshot_hash=assignment_snapshot(version, rights, project_id, role, entity_id, usage_scope),
+            idempotency_key=idempotency_key,
+            created_by=actor,
+        )
+        db.add(link)
+        db.flush()
+        add_audit(
+            db,
+            actor,
+            "LIBRARY_VERSION_ASSIGNED_TO_PROJECT",
+            "library_project_link",
+            link.id,
+            {
+                "library_asset_id": version.library_asset_id,
+                "library_version_id": version.id,
+                "project_asset_id": content_existing.id,
+                "reused_existing_project_asset": True,
+            },
+        )
+        return link
+
     asset_rights_payload = {
         "scope": "asset",
         "license_id": rights.license_kind,
@@ -775,6 +836,8 @@ def assign_to_project(
 
     from pathlib import Path
 
+    from sqlalchemy.exc import IntegrityError
+
     from shine.media.output_layout import store_project_asset
     from shine.media.output_names import readable_base
 
@@ -815,7 +878,16 @@ def assign_to_project(
         },
     )
     db.add(project_asset)
-    db.flush()
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        # 同一份内容已在项目里：这是可解释的具名拒绝，不是服务端故障。
+        db.rollback()
+        raise HTTPException(
+            409,
+            {"code": "PROJECT_ASSET_ALREADY_REGISTERED",
+             "message": "此项目已登记相同文件内容，请复用原项目素材身份"},
+        ) from exc
     project_voice = None
     if role == "voice" and global_voice is not None:
         candidate_payload = {
