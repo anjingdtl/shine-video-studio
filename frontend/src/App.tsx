@@ -35,6 +35,7 @@ import { DirectorShootPanel } from './components/DirectorShootPanel';
 import { EpisodeStoryboardPanel, ShotMaterialsPanel, StoryboardBookPanel } from './components/StreamlinePanels';
 import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
+import { ModuleGuide } from './components/RequiredAction';
 import { Meter } from './components/Meter';
 import { WorkStackMonitor } from './components/WorkStackMonitor';
 import { GuideTip } from './components/GuideTip';
@@ -91,6 +92,17 @@ const NAV_IDS = VIEW_GROUPS.flatMap((group) => group.items.map((item) => item.id
 const VIEW_TITLES: Record<ViewId, string> = Object.fromEntries(
   VIEW_GROUPS.map((group) => [group.view, group.title]),
 ) as Record<ViewId, string>;
+
+/** 导演模式每一阶段「为什么必须做」：页头引导块的一部分。 */
+const DIRECTOR_STAGE_WHY: Record<string, string> = {
+  '第 1 阶段': '大纲是后面分集、分镜和导演包的共同依据；没确认就没有可拍的依据。',
+  '第 2 阶段': '分集方案与冻结风格是导演包冻结的前提；没定稿就不能派发。',
+  '第 3 阶段': '镜头要引用已确认的分集与冻结的风格，否则拍出来接不成一部片。',
+  '第 4 阶段': '素材按已确认镜头准备；人物主素材要人工确认，缺的那张图由 H3 自行生成。',
+  '第 5 阶段': '导演包冻结本次要拍的集与绑定，派发时还会重新核对一次。',
+  '第 6 阶段': '整部作品只由一个运行推进，避免两批任务抢同一张显卡。',
+  '第 7 阶段': '技术完成不等于认可，交付前需要你自己看过。',
+};
 
 /** 导演模式：项目管理 + 七阶段制作页 + 不占流程序号的基础配置页。 */
 type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'materials' | 'package' | 'run' | 'deliver' | 'library' | 'setup';
@@ -345,19 +357,44 @@ function App() {
     (journey?.stages.find((stage) => stage.id === stageId)?.blockers ?? [])
       .map((blocker) => {
         const described = describeBlocker(blocker.code, blocker.message);
+        // 已经站在这一页时，不提供指向本页的动作：点了地址栏不变、页面也不变，
+        // 用户只会得到一个零进展的按钮。
+        const targetPage = described.action ? blockerTargetPage(described.action.target) : null;
+        const selfLoop = targetPage !== null && targetPage === directorPage;
         return {
           code: blocker.code,
           reason: described.reason,
-          action: described.action ? { label: described.action.label, go: resolveBlockerTarget(described.action.target) } : undefined,
+          action: described.action && !selfLoop
+            ? { label: described.action.label, go: resolveBlockerTarget(described.action.target) }
+            : undefined,
         };
       });
+  /** 目标语义键 → 导演页面：用于判断一个动作是不是指向当前页。 */
+  function blockerTargetPage(target: ErrorActionTarget): DirectorPage | null {
+    switch (target) {
+      case 'setup-models':
+      case 'setup-env': return 'setup';
+      case 'assets-stage': return 'materials';
+      case 'plan-stage': return 'assets';
+      case 'package-stage': return 'package';
+      case 'creative-stage': return 'creative';
+      case 'produce-stage': return 'produce';
+      case 'run-stage': return 'run';
+      case 'library': return 'library';
+      case 'consent': return 'creative';
+      case 'retry-scene': return 'materials';
+      case 'split-plan': return 'materials';
+    }
+  }
   function resolveBlockerTarget(target: ErrorActionTarget): () => void {
     switch (target) {
       case 'setup-models': return () => goToDirectorSetup('models');
       case 'setup-env': return () => goToDirectorSetup('env');
       case 'assets-stage': return () => goToDirectorPage('materials');
+      case 'plan-stage': return () => goToDirectorPage('assets');
       case 'package-stage': return () => goToDirectorPage('package');
-      case 'storyboard-stage': return () => goToDirectorPage('creative');
+      case 'creative-stage': return () => goToDirectorPage('creative');
+      case 'produce-stage': return () => goToDirectorPage('produce');
       case 'run-stage': return () => goToDirectorPage('run');
       case 'library': return () => goToDirectorPage('library');
       case 'consent': return () => goToDirectorPage('creative');
@@ -624,13 +661,13 @@ function App() {
     </section>
   );
 
-  /** 导演模式每一页统一的页头：我在哪一步、这一页要做什么、当前状态一眼可见。 */
+  /** 每一阶段为什么必须做：引导块要说清不做的代价，不只说这一步要做什么。 */
   const directorPageIntro = (kicker: string, title: ReactNode, desc: string, aside?: ReactNode) => (
     <header className="director-page-head">
       <div className="director-page-head-copy">
         <div className="eyebrow"><span className="eyebrow-line" /> {kicker}</div>
         <h1>{title}</h1>
-        <p>{desc}</p>
+        <ModuleGuide what={desc} why={DIRECTOR_STAGE_WHY[kicker]} />
       </div>
       {aside && <div className="director-page-head-aside">{aside}</div>}
     </header>
@@ -948,6 +985,7 @@ function App() {
                   projectId={projectId}
                   onMessage={report}
                   onDocumentReady={() => { setDocumentsVersion((n) => n + 1); }}
+                  onGoSetupModels={() => goToDirectorSetup('models')}
                 />
                 <p className="empty-inline">
                   文学四阶段（分卷、蓝图、分场剧本、五维故事记忆）在后台按你确认的大纲工作，不需要在这里再点一遍。
@@ -971,6 +1009,7 @@ function App() {
                   key={`book-${projectId}`}
                   projectId={projectId}
                   currentStyle={currentStyle}
+                  onGoStage={(target) => { resolveBlockerTarget(target)(); }}
                   onMessage={report}
                   onConfirmed={() => refreshAll().catch(() => undefined)}
                 />}
@@ -992,7 +1031,8 @@ function App() {
                 )}
                 <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
                   <EpisodeStoryboardPanel key={`ep-storyboard-${projectId}`} projectId={projectId}
-                    onMessage={report} onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
+                    onMessage={report} onJourneyRefresh={() => refreshAll().catch(() => undefined)}
+                    onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
                   {routes.length === 0 && <div className="blocked-callout">
                     <Sparkles size={15} />
                     <span>AI 分镜能力未就绪：还没有配置模型服务。你仍然可以在专业模式手工新建分镜，或</span>
@@ -1017,7 +1057,8 @@ function App() {
                     <span>分镜要求的必需素材还没有全部确认为主素材；缺失只影响用到它的镜头，其他镜头照常开拍。可选项可以直接跳过。</span>
                   </div>}
                   <ShotMaterialsPanel key={`shot-materials-${projectId}`} projectId={projectId}
-                    onMessage={report} onOpenLibrary={() => goToAssets('images')} />
+                    onMessage={report} onOpenLibrary={() => goToAssets('images')}
+                    onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
 
                   <section className="card section-card" id="project-assets">
                     <div className="section-heading">

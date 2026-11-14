@@ -2,10 +2,16 @@
  *  取代「；」join 整句一行：每条 blocker 一行，可行动的带「去处理」按钮。
  *  target 是语义导航键，由装配层（App）解析为真实跳转，前端不硬编码路由。 */
 export type ErrorActionTarget =
-  | 'setup-models' | 'setup-env' | 'assets-stage' | 'package-stage' | 'storyboard-stage'
-  | 'run-stage' | 'library' | 'retry-scene' | 'split-plan' | 'consent';
+  | 'setup-models' | 'setup-env' | 'assets-stage' | 'plan-stage' | 'package-stage'
+  | 'creative-stage' | 'produce-stage' | 'run-stage' | 'library' | 'retry-scene'
+  | 'split-plan' | 'consent';
 
-export type ErrorAction = { reason: string; action?: { label: string; target: ErrorActionTarget } };
+export type ErrorAction = {
+  reason: string;
+  /** 为什么这一步必须做：必做动作块要向人说清代价，不只说缺什么。 */
+  why?: string;
+  action?: { label: string; target: ErrorActionTarget };
+};
 
 export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   PENDING_WORKFLOW_MAPPING: { reason: '本作品还没登记生成方案', action: { label: '去基础配置登记', target: 'setup-models' } },
@@ -20,10 +26,30 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   LLM_TIMEOUT: { reason: '云端模型响应超时', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_RATE_LIMIT: { reason: '云端模型限流，稍后重试', action: { label: '重试这一场', target: 'retry-scene' } },
   MATERIAL_IDENTITY_AMBIGUOUS: { reason: '同一人物在多场外观描述不一致', action: { label: '按单场拆分计划', target: 'split-plan' } },
-  EPISODE_PLAN_NOT_CONFIRMED: { reason: '分集方案尚未确认', action: { label: '去剧本统筹', target: 'package-stage' } },
+  // 「去剧本统筹」必须真的落到剧本统筹（#d/assets）。它原来指向导演包（#d/package），
+  //  恢复动作把用户送到比来源更靠后的阶段，绕圈而不推进。
+  EPISODE_PLAN_NOT_CONFIRMED: { reason: '分集方案尚未确认', action: { label: '去剧本统筹', target: 'plan-stage' } },
   PACKAGE_NOT_CONFIRMED: { reason: '导演包尚未确认', action: { label: '去导演包', target: 'package-stage' } },
   NO_PACKAGE: { reason: '尚未生成导演包', action: { label: '去导演包', target: 'package-stage' } },
-  SCRIPT_NOT_PREPARED: { reason: '还没有剧本', action: { label: '去创意与剧本', target: 'storyboard-stage' } },
+  SCRIPT_NOT_PREPARED: { reason: '还没有剧本', action: { label: '去创意与剧本', target: 'creative-stage' } },
+  // 分镜必须基于一个已冻结的风格版本；风格在第②阶段与分集一起定稿。
+  STORYBOARD_STYLE_NOT_FROZEN: {
+    reason: '风格还没有冻结',
+    why: '分镜必须引用一个已冻结的风格版本，否则镜头与成片的风格无法对齐。',
+    action: { label: '去冻结风格', target: 'plan-stage' },
+  },
+  // 大纲是分集与分镜的共同依据；没确认大纲时，分集与分镜都不能开始。
+  SCRIPT_OUTLINE_NOT_CONFIRMED: {
+    reason: '剧本大纲还没有确认',
+    why: '分集、分镜和导演包都以你确认的那一版大纲为依据，大纲未确认时它们无法成立。',
+    action: { label: '去确认大纲', target: 'creative-stage' },
+  },
+  // 分集方案要先落到已应用的镜头上，才谈得上下游一致。
+  EPISODE_PLAN_NOT_MATERIALIZED: {
+    reason: '分集方案还没有落到镜头上',
+    why: '分集要按场次对应到已应用的镜头，否则这一集的镜头范围不成立。',
+    action: { label: '去把分集落到镜头', target: 'produce-stage' },
+  },
   IMAGE_RUNTIME_NOT_READY: { reason: '本机出图环境还没就绪', action: { label: '去基础配置', target: 'setup-env' } },
   LLM_NOT_CONFIGURED: { reason: '还没配置文本模型', action: { label: '去配置文本模型', target: 'setup-models' } },
 };
@@ -32,8 +58,8 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
 export function describeBlocker(
   code: string | undefined,
   message: string,
-): { reason: string; action?: { label: string; target: ErrorActionTarget } } {
+): { reason: string; why?: string; action?: { label: string; target: ErrorActionTarget } } {
   const known = code ? ERROR_ACTIONS[code] : undefined;
-  if (known) return { reason: known.reason, action: known.action };
+  if (known) return { reason: known.reason, why: known.why, action: known.action };
   return { reason: message || code || '需要处理' };
 }

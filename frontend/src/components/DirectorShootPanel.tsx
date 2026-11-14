@@ -283,18 +283,28 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
     }
   };
 
+  // 开拍按钮的真实文案与真实禁用原因：指引与右卡都必须照着它说，
+  // 否则会出现「指向一个页面上根本不存在的按钮」的假指引。
+  const startLabel = selected.length
+    ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集';
+  const startBlockedReason = !chosenVariantAvailable ? chosenVariantReason
+    : demo ? '当前是演示模式：先启用真实制作'
+      : !selected.length ? '至少选择一集' : undefined;
   const primary: RailAction | null = mode === 'package' && !running
-    ? { label: selected.length ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集',
+    ? { label: startLabel,
         onClick: () => void start(),
         loading: busy === 'start',
         disabled: busy !== '' || !selected.length || demo || !chosenVariantAvailable,
-        disabledReason: !chosenVariantAvailable ? chosenVariantReason : demo ? '当前是演示模式：先启用真实制作'
-          : !selected.length ? '至少选择一集' : undefined,
+        disabledReason: startBlockedReason,
         icon: <Clapperboard size={14} /> }
     : null;
-  useStageRail(`director-shoot-${mode}`, { priority: 1, primary },
+  // ⑥ 还没有运行时不留空卡：右栏必须说清这一步该做什么。
+  const secondary: RailAction[] = mode === 'run' && !run && onNavigate
+    ? [{ label: '去导演包选择要拍的集', onClick: () => onNavigate('package') }]
+    : [];
+  useStageRail(`director-shoot-${mode}`, { priority: 1, primary, secondary },
     [mode, selected, busy, demo, running, chosenVariantAvailable,
-      variantId, acceleratorId, secondPass, upscale]);
+      variantId, acceleratorId, secondPass, upscale, run]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -328,7 +338,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
           </div>
           <span className={`head-chip ${selected.length ? 'ok' : ''}`}>{selected.length} 集已选</span>
         </div>
-        <GuideTip>三步：勾选要拍的集 → 确认模型版本 → 点底部「确认拍摄方案并开始真实制作」</GuideTip>
+        <GuideTip>三步：勾选要拍的集 → 确认模型版本 → 点{railPresent ? '右侧操作栏的' : '下方的'}「{startLabel}」
+          {startBlockedReason ? `（当前不可点：${startBlockedReason}）` : ''}</GuideTip>
 
         <div className="shoot-episode-list">
           {episodes.map((episode) => {

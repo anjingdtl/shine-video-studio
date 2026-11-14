@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, json, fetchDirectorOutline, reviseDirectorOutline } from '../api';
 import type { DirectorOutline, OutlineVersion } from '../api';
-import { ScriptTextConsent } from './ScriptTextConsent';
+import { ScriptTextConsent, type ScriptwriterConsentState } from './ScriptTextConsent';
+import { RequiredAction } from './RequiredAction';
 import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
@@ -48,11 +49,13 @@ function versionTime(iso: string): string {
  * 版本管理：当前最新版本（含未确认草稿）以 director/outline 视图为准，
  * 任务列表只负责进度；保存修改产生新草稿，旧版本保留，确认哪版哪版才是依据。
  */
-export function OutlineConfirmationPanel({ projectId, documentId, documentHash, onMessage }: {
+export function OutlineConfirmationPanel({ projectId, documentId, documentHash, onMessage, onGoSetupModels }: {
   projectId: string;
   documentId: string;
   documentHash: string;
   onMessage?: (message: string) => void;
+  /** 角色没配模型时，把用户送到导演模式内的文本模型配置页。 */
+  onGoSetupModels?: () => void;
 }) {
   const [tasks, setTasks] = useState<StoryTask[]>([]);
   const [view, setView] = useState<DirectorOutline | null>(null);
@@ -62,7 +65,12 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const [busy, setBusy] = useState(false);
   const submitting = useRef(false);
   const [problem, setProblem] = useState('');
+  const [scriptwriterConfigured, setScriptwriterConfigured] = useState(false);
   const [scriptwriterAllowed, setScriptwriterAllowed] = useState(false);
+  const applyScriptwriterState = useCallback((state: ScriptwriterConsentState) => {
+    setScriptwriterConfigured(state.configured);
+    setScriptwriterAllowed(state.allowed);
+  }, []);
 
   const load = useCallback(async () => {
     const rows = await api<StoryTask[]>(
@@ -97,6 +105,16 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const lockedFacts = facts.split('\n').map((row) => row.trim()).filter(Boolean);
   const blockedSameInput = outlineTask?.status === 'NEEDS_REVIEW'
     && JSON.stringify(lockedFacts) === JSON.stringify(outlineTask.progress.locked_facts ?? []);
+  // 「角色没配模型」与「没授权」是两个事实。压成一个布尔值时，没配模型的角色
+  // 会被说成「还没授权」：用户点多少次授权都解不开主按钮，理由还指向已完成的动作。
+  const modelMissing = !scriptwriterConfigured;
+  const consentMissing = scriptwriterConfigured && !scriptwriterAllowed;
+  const outlineBlockReason = modelMissing
+    ? '编剧角色还没有配置模型，无法提取大纲'
+    : consentMissing ? '先在上方授权剧本文字发送' : undefined;
+  const outlineGuide = modelMissing
+    ? { label: '去配置文本模型', go: () => onGoSetupModels?.() }
+    : undefined;
 
   async function act(call: () => Promise<unknown>, success?: string) {
     if (submitting.current) return;
@@ -172,12 +190,12 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   let outlinePrimary: RailAction | null = null;
   if (needsConsentResume) {
     outlinePrimary = { label: '恢复大纲任务', onClick: resumeOutline, loading: busy, disabled: busy || !scriptwriterAllowed,
-      disabledReason: scriptwriterAllowed ? undefined : '先在上方授权剧本文字发送' };
+      disabledReason: outlineBlockReason, guide: outlineGuide };
   } else if (!display) {
     outlinePrimary = { label: '后台提取并归并总体大纲', onClick: extractOutline, loading: busy,
       disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
-      disabledReason: !scriptwriterAllowed ? '先在上方授权剧本文字发送'
-        : blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined };
+      disabledReason: outlineBlockReason ?? (blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined),
+      guide: outlineGuide };
   } else if (!display.approved) {
     outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
       disabled: busy || display.stale };
@@ -186,14 +204,14 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     // 重新生成」的提示没有可点的入口。
     outlinePrimary = { label: '补充锁定事实后重新提取大纲', onClick: extractOutline, loading: busy,
       disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
-      disabledReason: !scriptwriterAllowed ? '先在上方授权剧本文字发送'
-        : blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined };
+      disabledReason: outlineBlockReason ?? (blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined),
+      guide: outlineGuide };
   }
   useStageRail('outline-confirm', {
     priority: 1,
     primary: outlinePrimary,
     running: running ? { label: '大纲提取中', done: outlineTask?.summary?.done, total: outlineTask?.summary?.total } : null,
-  }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing]);
+  }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterConfigured, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing]);
 
   return <section className="card section-card outline-confirm" id="outline-confirm">
     <div className="section-heading compact">
@@ -207,8 +225,15 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         : display ? <span className="head-chip warn">待确认大纲</span> : null}
     </div>
 
+    {modelMissing && (
+      <RequiredAction
+        what="先给「编剧」角色配置一个文本模型。"
+        why="总体大纲由编剧角色调用模型提取。角色没有模型时，授权与提取都不会真正发生，按多少次授权也解不开主按钮。"
+        action={{ label: '去配置文本模型', go: () => onGoSetupModels?.() }}
+      />
+    )}
     <ScriptTextConsent projectId={projectId} documentId={documentId}
-      expanded={!scriptwriterAllowed} onScriptwriterAccess={setScriptwriterAllowed} />
+      expanded={!scriptwriterAllowed} onScriptwriterState={applyScriptwriterState} />
     <details className="advanced-fold">
       <summary>锁定事实（高级：每行一条；变更会创建新的大纲输入并重新提取）</summary>
       <label className="material-field"><span>补充锁定事实</span>
@@ -226,7 +251,8 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         </label>
       ))}
     </fieldset>
-    {!railPresent && <button type="button" className="btn-primary" disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
+    {!railPresent && <button type="button" className="btn-primary" title={outlineBlockReason}
+      disabled={busy || running || blockedSameInput || !scriptwriterAllowed}
       onClick={extractOutline}>
       {busy ? '提交中…' : '后台提取并归并总体大纲'}
     </button>}

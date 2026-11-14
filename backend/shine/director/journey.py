@@ -330,9 +330,12 @@ def compute_journey(
     # is the authority; another script's old shots must not light this stage
     # (J06).
     script_done = bool(outline and outline.approved_at) or (document is None and bool(shots))
+    # The summary and the blockers must describe the same fact: a hand-built shot
+    # list is a script basis only when no script document was imported (J06), so
+    # "已手工建立 N 个分镜" may not stand next to an imported script.
     if outline and outline.approved_at:
         script_summary = f"大纲已确认（{outline.sha256[:8]}）"
-    elif shots:
+    elif shots and document is None:
         script_summary = f"已手工建立 {len(shots)} 个分镜"
     elif outline:
         script_summary = "剧本大纲待确认"
@@ -344,13 +347,26 @@ def compute_journey(
         script_summary = "创意简报待确认"
     else:
         script_summary = "还没有剧本：输入想法或导入现成剧本"
+    # A stage that already has a script must not say "还没有剧本": the blocker
+    # names what is really missing (the confirmed outline), so the recovery
+    # action on the page points at the step that actually blocks.
+    script_blockers: list[dict[str, Any]] = []
+    if not script_done:
+        if outline:
+            script_blockers = [{"code": "SCRIPT_OUTLINE_NOT_CONFIRMED",
+                                "message": "剧本大纲还没有确认：确认这一版之后才能进入分集。"}]
+        elif document:
+            script_blockers = [{"code": "SCRIPT_OUTLINE_NOT_CONFIRMED",
+                                "message": f"已有剧本「{document.filename}」，先整理并确认总体大纲。"}]
+        else:
+            script_blockers = [{"code": "SCRIPT_NOT_PREPARED",
+                                "message": "输入想法生成剧本，或导入现成剧本并确认大纲"}]
     stages.append({
         "id": "script",
         "label": "创意与剧本",
         "done": script_done,
         "summary": script_summary,
-        "blockers": [] if script_done else [{"code": "SCRIPT_NOT_PREPARED",
-                                            "message": "输入想法生成剧本，或导入现成剧本并确认大纲"}],
+        "blockers": script_blockers,
         "facts": {
             "document_id": document.id if document else None,
             "document_sha256": document.sha256 if document else None,

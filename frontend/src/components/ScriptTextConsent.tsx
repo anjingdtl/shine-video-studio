@@ -33,11 +33,16 @@ const ROLE_LABELS: Record<string, string> = {
  */
 const ACTIVE_PANELS = new Map<string, number>();
 
-export function ScriptTextConsent({ projectId, documentId, expanded = false, onScriptwriterAccess }: {
+/** 编剧角色的两个独立事实：角色有没有配模型、剧本文字有没有被授权发送。
+ *  两者曾经被压成一个布尔值，于是「角色没配模型」被显示成「还没授权」，
+ *  用户反复点授权也解不开主按钮（见 OutlineConfirmationPanel 的禁用理由）。 */
+export type ScriptwriterConsentState = { configured: boolean; allowed: boolean };
+
+export function ScriptTextConsent({ projectId, documentId, expanded = false, onScriptwriterState }: {
   projectId: string;
   documentId: string;
   expanded?: boolean;
-  onScriptwriterAccess?: (allowed: boolean) => void;
+  onScriptwriterState?: (state: ScriptwriterConsentState) => void;
 }) {
   const [scope, setScope] = useState<TextScope | null>(null);
   const [busy, setBusy] = useState(false);
@@ -72,18 +77,30 @@ export function ScriptTextConsent({ projectId, documentId, expanded = false, onS
     return () => { current = false; };
   }, [documentId, path, primary]);
 
-  const scriptwriterAllowed = scope?.roles.some((row) => row.role === 'scriptwriter' && row.allowed) ?? false;
-  useEffect(() => { onScriptwriterAccess?.(scriptwriterAllowed); }, [onScriptwriterAccess, scriptwriterAllowed]);
+  const scriptwriterRow = scope?.roles.find((row) => row.role === 'scriptwriter');
+  const scriptwriterConfigured = scriptwriterRow?.configured ?? false;
+  const scriptwriterAllowed = scriptwriterRow?.allowed ?? false;
+  useEffect(() => {
+    onScriptwriterState?.({ configured: scriptwriterConfigured, allowed: scriptwriterAllowed });
+  }, [onScriptwriterState, scriptwriterConfigured, scriptwriterAllowed]);
 
   async function decide(granted: boolean) {
     if (!scope) return;
     setBusy(true); setNotice(''); setProblem('');
     try {
-      setScope(await api<TextScope>(path, json('POST', {
+      const next = await api<TextScope>(path, json('POST', {
         document_id: documentId, expected_document_hash: scope.document_sha256,
         expected_scope_hash: scope.scope_hash, granted,
-      })));
-      setNotice(granted ? '已保存文字发送授权。' : '已撤回文字发送授权；已经发送的请求无法撤回。');
+      }));
+      setScope(next);
+      // 没有任何角色配了模型时，服务端不会写入任何授权行。此时说「授权已保存」是假成功，
+      // 用户会以为已经授权、然后卡在永远解不开的主按钮上。
+      const configuredCount = next.roles.filter((row) => row.configured).length;
+      setNotice(granted
+        ? (configuredCount > 0
+          ? '已保存文字发送授权。'
+          : '还没有配置任何文本模型，授权暂不生效：请先到「基础配置」配置文本模型。')
+        : '已撤回文字发送授权；已经发送的请求无法撤回。');
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error));
       setScope(await api<TextScope>(`${path}/${documentId}`).catch(() => null));

@@ -100,6 +100,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   CREATIVE_BRIEF_STALE: '这一版创意简报已失效，请保存新的一版。',
   CREATIVE_SCRIPT_ROLE_NOT_CONFIGURED: '还没有给「编剧」角色配置文本模型。请先到基础配置里配置文本模型。',
   SCRIPT_OUTLINE_NOT_CONFIRMED: '先确认剧本大纲，再按剧本分集。',
+  STORYBOARD_STYLE_NOT_FROZEN: '风格还没有冻结。分镜必须基于一个已冻结的风格版本。',
   SCRIPT_OUTLINE_HAS_NO_SECTIONS: '已确认的大纲里没有可分的场次，请重新整理大纲。',
   EPISODE_SECTION_NOT_STORYBOARDED: '还有场次没有拆成镜头。请先为这些场次生成并应用分镜，再把分集落到镜头上。',
   EPISODE_PLAN_NOT_MATERIALIZED: '分集方案里的场次还没有全部落到镜头上，先点「把分集落到镜头」。',

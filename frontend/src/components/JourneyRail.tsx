@@ -132,6 +132,11 @@ export function JourneyBridge<P extends string>({ stages, activeStageId, onNavig
   const index = stages.findIndex((stage) => stage.id === activeStageId);
   const previous = index > 0 ? stages[index - 1] : null;
   const next = index >= 0 && index < stages.length - 1 ? stages[index + 1] : null;
+  // 没有下一阶段只说明「这里是最后一步」，不说明「七个阶段都完成了」。
+  // 完成态只能来自服务端 /journey；本组件拿不到它，就不能自己宣布完成。
+  const atLastStage = index >= 0 && index === stages.length - 1;
+  const bridgeHint = next ? `接下来：${next.text}`
+    : atLastStage ? '已经是最后一个阶段' : '没有下一阶段';
   return (
     <nav className="journey-bridge" aria-label="阶段衔接">
       <button type="button" className="bridge-step" disabled={!previous}
@@ -141,9 +146,9 @@ export function JourneyBridge<P extends string>({ stages, activeStageId, onNavig
         <span>{previous ? '上一阶段' : '已经是第一阶段'}</span>
       </button>
       <button type="button" className="bridge-home" onClick={onHome}>回到项目管理</button>
-      <span className="bridge-hint">{next ? `接下来：${next.text}` : '全部阶段已完成'}</span>
+      <span className="bridge-hint">{bridgeHint}</span>
       <button type="button" className="bridge-step next" disabled={!next}
-        title={next ? '前往下一阶段' : '最后阶段：交付完成'}
+        title={next ? '前往下一阶段' : '已经是最后一个阶段'}
         onClick={() => next && onNavigate(next)}>
         <span>{next ? '下一阶段' : '最后阶段'}</span>
         <ArrowRight size={14} />
