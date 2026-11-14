@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
+from shine.comfyops.capability import REVIEW_RUNTIME_REQUIREMENTS
 from shine.comfyops.installer import TRUSTED_DOWNLOAD_HOSTS, PackageFile, PackageSpec, SourceWheelBuild, safe_target
 from shine.comfyops.managed_recipe import adapter_identity as managed_recipe_adapter_identity
 from shine.comfyops.models import (
@@ -291,14 +292,24 @@ def default_variant_requirements() -> dict:
 def resolve_variant(catalog: dict, requested: list[str]) -> dict | None:
     """The variant a plan installs, or None when the plan is component-only.
 
-    A plan binds a variant when it carries that variant's checkpoint
-    components.  A candidate variant is never bound automatically: its files
-    live in their own catalog and it is never part of the default download.
+    The catalog is the boundary.  A plan binds a variant only when the
+    catalog *is* that variant's catalog and it carries the variant's
+    checkpoint components.  The Qwen Image catalog declares no video variant,
+    so an image plan can never bind the H3 production variant - the image
+    weights are prepared under their own capability, not under the video
+    admission gate.  A candidate variant is never bound automatically either:
+    its files live in their own catalog and it is never part of the default
+    download.
     """
     from shine.comfyops.variants import list_variant_manifests
 
+    catalog_variant = str(catalog.get("variant_id") or "")
+    if not catalog_variant:
+        return None
     wanted = set(requested or [])
     for manifest in list_variant_manifests():
+        if str(manifest.get("variant_id") or "") != catalog_variant:
+            continue
         required = set(manifest.get("required_component_ids") or [])
         if required and required <= wanted:
             return manifest
@@ -891,8 +902,8 @@ def generate_configuration(db, settings: Settings, project_id: str, *,
             "manifest": str(manifest_path),
             "runtime_packages": str(setup_dir / "review-runtime"),
             "port": REVIEW_PORTS[role],
-            "min_ram_mb": 4096 if role == "VLM" else 2048,
-            "min_vram_mb": 8000 if role == "VLM" else 4000,
+            "min_ram_mb": REVIEW_RUNTIME_REQUIREMENTS[role]["min_ram_mb"],
+            "min_vram_mb": REVIEW_RUNTIME_REQUIREMENTS[role]["min_vram_mb"],
             "argv": [
                 "{python}", str(REPO_ROOT / "scripts" / "local_review_isolated_server.py"),
                 "--manifest", "{manifest}", "--runtime-packages", "{runtime_packages}",
