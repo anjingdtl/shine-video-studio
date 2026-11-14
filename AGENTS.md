@@ -1436,7 +1436,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   CI 抖动窗口（产品默认 120s 不变）；权重证据包入口用例补 `fake_deployment_host`
   隔离系统盘存储策略（CI Windows 临时目录在系统盘使 require_storage 抛错，把
   NOT_VERIFIED 误成 NOT_AVAILABLE）；浏览器 E2E 大纲主操作已收进页面级操作栏，
-  断言改读 `.action-rail`。均未删测试/放宽安全拒绝。
+  断言改读 `.action-rail`。均未删测试/放宽安全拒绝。另修预存 CI 配置缺口：
+  L1 quick job 未装 FFmpeg（L2/L3 才装），候选 QC 全解码返回 unavailable 致
+  `CANDIDATE_NOT_APPROVED`（main 上被 Ruff 失败掩盖）；给 L1 补 FFmpeg 安装步骤。
 - **回归口径**：后端 8 分片全 exit 0、零 FAILED/ERROR（2106 用例）；两处首轮失败
   （test_renderer_supervisor、test_v13_e2e）均为本会话 `NO_PROXY` 含 `[::1]` 的
   httpx 假失败，`env -u NO_PROXY -u no_proxy` 复跑通过。前端 49 文件/287 项、

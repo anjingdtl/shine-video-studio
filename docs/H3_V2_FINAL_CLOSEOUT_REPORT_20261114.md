@@ -68,6 +68,7 @@
 | Windows `test_gpu_release_confirmation` 两项 | 阳性阶段 50ms 释放窗口短于 CI Windows 冷 httpx 客户端 + TCP 往返延迟，确认释放被误判未确认 | 阳性阶段放宽到抗抖动窗口（`RELEASE_WINDOW_S=5`），产品默认 120s 不变；拒绝阶段保持短窗口 |
 | Windows `test_production_gate_weight_evidence::test_the_package_entry_refuses_what_the_gate_refuses` | 缺 `fake_deployment_host`；CI Windows pytest 临时目录在系统盘 → `require_storage` 抛 `CHOOSE_DEPLOYMENT_DIRECTORY_OUTSIDE_SYSTEM_DRIVE` → 缓存读不到 → `NOT_AVAILABLE` 而非 `NOT_VERIFIED` | 补 fixture 隔离存储盘策略，还原字节核验判定（已在系统盘 basetemp 复现并验证修复） |
 | 浏览器 E2E 大纲文案 | 收敛提交把页面唯一主操作收进页面级操作栏，按钮不再在 `#outline-confirm` 内 | 断言改读 `.action-rail`（真实产品 surface） |
+| L1 quick `test_v13_preparation` 两项 `CANDIDATE_NOT_APPROVED` | **预存 CI 配置缺口**：L1 quick job 未装 FFmpeg（L2/L3 才装），候选 QC 的 `_full_decode_check` 返回 `unavailable` → `QC_FAILED`。main 上被 Ruff UP037 失败掩盖（Ruff 先于测试），修复 Ruff 后暴露 | 给 L1 quick job 补 FFmpeg/FFprobe 安装步骤（与 L2/L3 一致）。非代码回归：同一 quick 命令在本机 Windows（有 FFmpeg）通过 |
 
 均未删除失败测试、未放宽安全拒绝；仅隔离环境干扰与同步真实 UI 行为。
 
