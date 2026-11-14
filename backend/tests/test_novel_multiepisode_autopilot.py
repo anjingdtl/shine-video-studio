@@ -262,8 +262,8 @@ def test_retry_accepts_a_post_response_fault_without_explicit_outcome(api):
     external_outcome was never stamped (a post-processing fault) is a decided
     refusal, not an UNKNOWN: the episode retry must authorize one new call
     instead of demanding reconciliation."""
-    from tests.test_director_streamline import _prepare_project
     from shine.models import AgentTaskRecord
+    from tests.test_director_streamline import _prepare_project
 
     client, factory, settings = api
     prepared = _prepare_project(client, sections=4)
