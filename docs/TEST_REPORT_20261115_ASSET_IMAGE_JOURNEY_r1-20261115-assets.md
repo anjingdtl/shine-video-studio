@@ -314,3 +314,126 @@ R1 里我用「发出请求即算成功」判定过「经 `#d/projects` 进入�
 
 `PENDING_WORKFLOW_MAPPING`、`IMAGE_WORKER_LOST` / 「再生成一版」显式按钮、GPU 租约说明与下一步、图像槽位家族顺序、出图候选人工晋升——仍全部**未运行**，原因不变：本机出图能力门（`CATALOG_VARIANT_UNDECLARED`）把链路挡在第 1 步，无真实出图可做。诚实边界不变：全程离线模拟，`h3_connected=false`、`production_mode=DEMO`，未发生真实 H3 渲染，不构成真实链路验收。
 
+
+---
+
+## 8. R2 第二轮复测：A6 关闭、A7 新增（合并缺口型回归）（2026-11-15 03:5x–04:2x）
+
+### 8.1 A6 复测：**修复通过** ✅
+
+修复方本轮改动（仍在共享工作树**未提交**状态）：`backend/shine/asset_center/service.py`（+74/-1，幂等复用 + 具名拒绝）、`frontend/src/api.ts`（+6，只替换 FastAPI 默认 500 文案）、`frontend/src/test/apiError.test.ts`（+9）、新增 `backend/tests/test_asset_assignment_duplicate.py`。
+
+浏览器实测（隔离实例 API 8020，Web 5191/5192）：
+
+| 场景 | 预期 | 实测 |
+| --- | --- | --- |
+| 项目内**已有**同内容素材（sha256 相同） | 幂等复用或具名拒绝 | **409**，响应体 `{"detail":{"code":"ASSET_ALREADY_IN_PROJECT","message":"这份内容已经在项目里（现有用途：generic，现有身份：林岚3）。请直接使用项目里已有的那份；若要登记成另一个身份，请先在项目素材里移除现有那份再分配。","existing_asset_id":"9ad5ded3-473b-4d08-825e-fc4d68486aa9","existing_role":"generic","existing_entity_id":"林岚3"}}` |
+| 界面呈现 | 中文说明 + 现有身份 + 下一步 | 页面显示「**这份内容已经在项目里（现有用途：generic，现有身份：林岚3）。请直接使用项目里已有的那份；若要登记成另一个身份，请先在项目素材里移除现有那份再分配。（ASSET_ALREADY_IN_PROJECT）**」 |
+
+R1 的裸英文「500 Internal Server Error」已消失，取而代之的是具名错误码 + 中文说明 + **现有身份**与**下一步动作**（先移除再分配）。符合团队「原始错误码不是屏上唯一信息」「必做动作块」口径。
+
+证据：`.local-acceptance/r1-20261115-assets/shots/64-a1fix-cold-deeplink-duplicate.png`、`63-a7-spa-navigation.png`；`a6_ui_retest.json`、`a7_repro.json`、`a1_verify_5192.json`
+
+### 8.2 A7【P1】**未合入即回归**：`#a/assignments` 深链入口在主干上依然分配不出去，且失败提示指错了原因
+
+- **症状**
+  直接打开或刷新 `#a/assignments`（冷启动，非界面内跳转）时，「目标作品」下拉**看起来已选中**「测评-r1-assets-01」，「分配到作品」按钮**也是可点的**（未禁用），但点下去**不产生任何网络请求**，页面只显示「**请选择作品和已晋升版本，并填写作品内素材身份。**」——而「目标作品」明明显示着已选，用户被指向了一个错误的原因。
+
+- **编号复现步骤**
+  1. 用干净浏览器上下文打开 `http://127.0.0.1:5191/#a/assignments`（5191 = 当前共享工作树的源码，冷启动、不先访问任何导演页面）
+  2. 观察「目标作品」下拉：显示「测评-r1-assets-01」
+  3. 「全局素材版本」选 `sample_asset2 · V1`、「作品内身份名称」填「林岚」
+  4. 点「分配到作品」
+  5. **实际**：**没有任何 `POST /api/v1/asset-center/assignments` 请求**；页面出现「请选择作品和已晋升版本，并填写作品内素材身份。」；台账无新增
+  6. 对照：先在导演工作台逛过、再界面内跳转进素材中心（同一 SPA 会话内的同文档导航），同样的选择与点击 → **请求正常发出**
+
+- **期望行为**
+  目标作品的初值应在作品列表异步到达后回填，或控件在无有效值时显示「请选择作品」空选项并禁用提交按钮；失败提示不得指向与真实原因相反的方向。
+
+- **实际行为与机理（已取证到 React 内部状态）**
+  | 观测点 | 冷启动直接深链 | 界面内跳转 |
+  | --- | --- | --- |
+  | DOM `select.value` | `43a83a6f-9608-4e55-a4ca-479f5ee1fcda` | 同左 |
+  | DOM `select.selectedIndex` | `0` | `0` |
+  | **React 内部 `value`（读 `__reactProps$`）** | **`""`（空串）** | `43a83a6f-…` |
+  | 点击后是否发请求 | **否** | 是 |
+
+  成因三步：
+  1. `frontend/src/asset-center/AssetsWorkspace.tsx:1025` `useState(projectId || projects[0]?.id || '')` —— 初值**只在首屏取一次**；
+  2. `frontend/src/App.tsx:686` `if (ui === 'assets') return <AssetsWorkspace …>` —— assets 早返回**不受 `projectsLoaded` 门禁**，深链冷启动时 `useStudio` 的 `/projects` 还没回来，此时 `projects=[]`、`projectId=''`，组件就在空数据上挂载；
+  3. 受控 `<select value={''}>` 找不到匹配 option，浏览器回落到显示第一项，而 React state 仍是空串 → 控件与状态不一致；提交按钮的 `disabled` 只看 `selectedVersion`，因此按钮可点却必然被守卫拦下。
+
+- **原始错误码**
+  无 HTTP 错误码——**请求从未发出**，纯前端守卫：`AssetsWorkspace.tsx:1041` `if (!targetProject || !selectedVersion) { setError('请选择作品和已晋升版本，并填写作品内素材身份。'); return; }`
+
+- **归属：合并缺口，不是新写的代码缺陷**
+  `chore/asset-assign-a1-20261115` 的 `4c38d77`「fix(assets): 项目分配页在作品列表异步到达后回填目标作品」正是这三步成因的修复（`useEffect` 随 `projects` 回填 `targetProject` + 补「请选择作品」空选项）。但该提交**只在分支上**，`git branch -a --contains 4c38d77` 仅返回 `chore/asset-assign-a1-20261115`；`origin/main` 仍是 `63f50be`，当前共享工作树 HEAD 是 `fix/node-pack-gate-offline-fixture-20261115`（`9e34736`），二者都不含它。
+
+- **修复树上的实测复测（通过）**
+  用 `git worktree` 拉出 `4c38d77`（目录 `.local-acceptance/r1-20261115-assets/wt-a1`），起独立 vite 于 **5192**（不碰共享依赖、不占他人端口），冷启动直连 `http://127.0.0.1:5192/#a/assignments`：
+  - `target_react = "43a83a6f-…"`（**非空**，回填生效）
+  - 点击 → **正常发出 POST** → 同内容分配得 **409 ASSET_ALREADY_IN_PROJECT**（文案与 8.1 一致）
+  - 即：**A7 的代码修复有效，缺的是合入 main**。合入后需由测评方按 §8.6 矩阵复测。
+
+- **截图路径**
+  `.local-acceptance/r1-20261115-assets/shots/62-a7-cold-deeplink.png`（冷启动：DOM 有值 / React 空串 / 点击无请求 / 守卫文案）、`63-a7-spa-navigation.png`（界面内跳转：请求正常发出）、`64-a1fix-cold-deeplink-duplicate.png`（修复树冷启动：回填生效 + 409）、`65-a1fix-cold-deeplink-new-asset.png`
+
+- **影响面**
+  素材中心最常用的入口（深链 / 刷新 / 从桌面或消息直接打开）在这条路径上**完全无法完成分配**，且失败提示把用户指向错误的原因（让人去动一个看起来没问题的下拉），属于「用户会反复重试却永远不通」的静默死路；按钮可点会让它更像偶发而非必然，更难自查。同时它暴露按钮禁用条件（`!selectedVersion`）与守卫条件（`!targetProject || !selectedVersion`）不一致。
+
+### 8.3 对我自己在 §7.1 的结论的澄清（不是推翻）
+
+§7.1 记录「A1 复测：已修复并通过」——**该结论成立**：当时 5190 跑的工作树正带着 `4c38d77` 的未提交改动，冷启动直连深链实测「目标作品已回填、POST 201」。本轮新增的事实是：**那批改动后来只被提交到 `chore/asset-assign-a1-20261115` 分支，工作树随后切到别的分支，主干与当前工作树都不再含它**。所以今天的准确记账是：
+
+- A1 的**前端修复有效**（两棵带修复的树实测均通过：5190 于 02:4x、5192 worktree 于本轮）；
+- A1 的**后端修复有效**（本轮 A6 复测连带确认：POST 正常发出并落库）；
+- 但**两者都尚未进入 main**（A6 那批还在共享工作树未提交，A1 前端在 `4c38d77` 未合），因此对用户而言 `#a/assignments` 深链入口**此刻仍然是坏的**；
+- 记账方式应为「**A1 = 已修待合（后端在工作树未提交、前端在 `4c38d77` 未合）**」，而不是「A1 已关闭」。
+
+### 8.4 代码现状盘点（供合并决策，2026-11-15 04:0x 实测）
+
+| 位置 | 内容 | 状态 |
+| --- | --- | --- |
+| `chore/asset-assign-a1-20261115`（已推送 origin） | `4c38d77` 前端 A1/A7 修复 + `frontend/src/test/assetsWorkspace.test.tsx`（+74）+ `842a247` 本报告 | **待合 main** |
+| 共享工作树 HEAD `fix/node-pack-gate-offline-fixture-20261115`（`9e34736`） | node-pack 门禁离线降级 | 已提交于分支 |
+| 共享工作树未提交 | `backend/shine/asset_center/service.py` +74/-1、`frontend/src/api.ts` +6、`frontend/src/test/apiError.test.ts` +9、未跟踪 `backend/tests/test_asset_assignment_duplicate.py`（= A6 修复） | **未提交，未落分支** |
+| `origin/main` | `63f50be` | 不含 A1/A7、不含 A6 |
+
+两条线触及文件不重叠，但 `chore/asset-assign-a1-20261115` 的基线是 `afaef8a`，合 main 前需把 `9e34736` 一并带入，否则 node-pack 门禁降级修复会掉。
+
+### 8.5 环境事故披露（二）：共享 `frontend/node_modules` 被他人 `npm install` 洗坏
+
+2026-11-15 03:14，Qoder CN 会话在 `frontend` 下执行了 `npm install`，导致共享 `node_modules` 顶层仅剩 136 项、`@babel` 整个目录缺失 → 任何**新启动**的 vite 报 `Cannot find package '@babel/core'`。后果：我的 5190 web 已死，小导演 5180 因进程未重启而侥幸存活。**我的重启没有触发 npm**（日志无 npm 记录、`package-lock.json` 未改、依赖回执指纹匹配）。恢复需要装依赖，按红线**我没有擅自执行 npm**。
+
+本轮全部验证改用「目录联接 + 独立 `cacheDir` + 独立端口」的隔离前端完成，**未改共享依赖、未占用他人端口**（8010/5180/8000 均未触碰）：
+
+| 端口 | 源码来源 | 用途 |
+| --- | --- | --- |
+| 5191 | 目录联接 → 共享工作树 `frontend/src` | 复现 A7（主干现状） |
+| 5192 | 目录联接 → `4c38d77` worktree `frontend/src` | 复测 A1/A7 修复树 |
+
+### 8.6 复测矩阵（合入后照此三连复测）
+
+| 入口 | 树 | 预期 |
+| --- | --- | --- |
+| 冷启动直开 `#a/assignments` | 含 `4c38d77` | 「目标作品」回填为真实 id；点击发出 POST；同内容 → 409 `ASSET_ALREADY_IN_PROJECT`；异内容 → 201 + 「已分配到作品。项目素材编号：…」 |
+| 界面内跳转（导演工作台 → 素材中心 → 项目分配） | 同上 | 同上（不得因有回填而退化） |
+| 作品列表为空 / 后端不可达 | 同上 | 必须给出可解释文案或禁用按钮，**不得**再出现「看着已选、点了无请求」 |
+
+### 8.7 结论与未运行清单
+
+- **A1**：已修待合（后端在工作树未提交、前端 `4c38d77` 未合 main）。
+- **A6**：**复测通过**（409 具名 + 中文说明 + 现有身份 + 下一步）。
+- **A7【P1】**：**新增**，代码修复已在 `4c38d77` 且实测有效，**待合 main**；合入前 `#a/assignments` 深链入口对用户仍坏。
+- **A2/A3/A4/A5**：维持 R1 结论，未在本轮变更（A2 按「一次只修一个」未动）。
+- **仍未运行（禁脑补）**：`PENDING_WORKFLOW_MAPPING`、`IMAGE_WORKER_LOST` / 「再生成一版」显式按钮、GPU 租约说明与下一步、图像槽位家族顺序、出图候选人工晋升、角色绑定 proposal→确认→apply、`CHARACTER_NAME_ALREADY_IN_USE` 界面验证。原因不变：本机出图能力门（`CATALOG_VARIANT_UNDECLARED`）把链路挡在第 1 步，且本机无可用文本模型。诚实边界不变：全程离线模拟，`h3_connected=false`、`production_mode=DEMO/NOT_ACTIVATED`，未发生真实 H3 渲染，不构成真实出图链路验收。
+
+### 8.8 投递状态
+
+`post_group`（群「Shine 实景测评组」`grp_e251e930ccd2`）本轮 **7 次**被平台并发守卫拒收（`群正在讨论中` / `无法确认工具调用来自哪个正在进行的回复`），`message_bot` 私信同样被拒；只读类调用（`list_team`）正常，判定为**平台派发通道问题、非我的参数错误**。本轮结论正文已落盘：
+
+- `.local-acceptance/r1-20261115-assets/PENDING_GROUP_POST_A1-verify-A6.md`（群回执可直接粘贴正文）
+- `.local-acceptance/r1-20261115-assets/PENDING_GROUP_POST_round2-A6-A7.md`（本轮 A6/A7 摘要，可直接粘贴正文）
+
+通道恢复后请据上述文件补投；补投前以本报告 §8 为准。
+
