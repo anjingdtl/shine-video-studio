@@ -199,6 +199,21 @@ def plan_install(body: InstallRequest, db: DBSession, settings: SettingsDep):
     require_project(db, body.project_id)
     if not body.isolated:
         raise HTTPException(409, "EXISTING_INSTANCE_REQUIRES_LOCAL_BACKUP_AND_IDLE_QUEUE")
+    if body.executor == "local":
+        from shine.comfyops.deployment import h3_catalog_closure_requested
+
+        if h3_catalog_closure_requested(body.package_ids):
+            # One admission for H3 weights (C-04a): the setup route owns the
+            # variant qualification and the candidate acknowledgement.  This
+            # expert route keeps serving diagnosis (fake executor), review
+            # weights and custom packages, but it no longer hosts a second,
+            # weaker H3 admission.
+            raise HTTPException(409, {
+                "code": "H3_INSTALL_PLAN_USES_SETUP_ADMISSION",
+                "message": "H3 权重的本地安装计划必须从「制作环境」(/setup/install-plan) 创建："
+                           "那里有变体资格复核与候选变体确认。这条专业路由只保留演练执行、"
+                           "审片权重与自定义包；请改用制作环境入口。",
+            })
     packages, seen, visiting = [], set(), set()
 
     def include(identity):
