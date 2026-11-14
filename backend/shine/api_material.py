@@ -89,6 +89,9 @@ class ImageRuntimeBody(APIModel):
     base_url: str
     model_root: str
     expected_config_revision: int = Field(default=0, ge=0)
+    #: The port this binding belongs to.  It is the installation identity's own
+    #: port, so a non-default install can never be recorded as 8188.
+    port: int | None = Field(default=None, ge=1024, le=65535)
 
 
 class ValidateBody(APIModel):
@@ -922,37 +925,44 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     base_url = require_loopback_url(body.base_url, allow_remote=bool(settings.allow_remote_comfyui))
     # The bound URL and the managed recipe must agree on the port: a mismatch
     # used to start a renderer on the recipe port while submitting prompts to
-    # whatever answered on base_url (audit R13).  A missing recipe (binding
-    # before the local configuration was generated) keeps the old behaviour.
-    from shine.comfyops.image_renderer import load_image_recipe
+    # whatever answered on base_url (audit R13).  A missing recipe is a
+    # *different* fact and is reported as PENDING_RECIPE below.
+    from urllib.parse import urlparse
+
+    from shine.comfyops.image_renderer import image_recipe_state
 
     try:
-        recipe = load_image_recipe(settings)
-    except HTTPException:
-        recipe = None
-    if recipe is not None and recipe["renderer"].get("instance_id") == body.instance_id:
-        recipe_port = int(recipe["renderer"].get("port") or 0)
+        bound_port = int(body.port or urlparse(base_url).port or instance.payload.get("port") or 0)
+    except ValueError:
         bound_port = 0
-        try:
-            from urllib.parse import urlparse
-
-            bound_port = int(urlparse(base_url).port or 0)
-        except ValueError:
-            bound_port = 0
+    recipe = image_recipe_state(settings)
+    if recipe["state"] == "READY" and recipe.get("instance_id") == body.instance_id:
+        recipe_port = int(recipe.get("port") or 0)
         if recipe_port and bound_port and recipe_port != bound_port:
             raise HTTPException(409, {
                 "code": "IMAGE_RUNTIME_URL_MISMATCH",
-                "detail": "绑定的 base_url 端口与受管运行配置的渲染端口不一致；请绑定同一端口。",
+                "detail": "绑定的端口与受管运行配置的渲染端口不一致；请绑定同一端口。",
                 "recipe_port": recipe_port,
                 "bound_port": bound_port,
             })
     current = runtime.load_config(settings)
     if body.expected_config_revision and current.config_revision != body.expected_config_revision:
         raise HTTPException(409, {"code": "IMAGE_RUNTIME_CONFIG_STALE", "actual": current.config_revision})
+    # Re-binding the same physical target is not a new decision: it must not
+    # bump the revision, invalidate the fingerprint or force re-validation.
+    if (current.instance_id == body.instance_id and current.base_url == base_url
+            and current.model_root == body.model_root and current.port == (bound_port or None)):
+        return {"config_revision": current.config_revision, "digest": runtime.config_digest(settings),
+                "binding_state": "READY" if recipe["state"] == "READY" else "PENDING_RECIPE",
+                "recipe": recipe, "unchanged": True,
+                "readiness": runtime.readiness(db, settings)}
     config = runtime.ImageRuntimeConfig(
         config_revision=current.config_revision + 1,
         instance_id=body.instance_id,
         base_url=base_url,
+        installation_id=body.instance_id,
+        port=bound_port or None,
+        recipe_sha256=(recipe.get("recipe_sha256") or "") if recipe["state"] == "READY" else "",
         model_root=body.model_root,
         graph_sha256="",
         parameter_map={},
@@ -961,9 +971,13 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     )
     runtime.save_config(settings, config)
     add_audit(db, actor, "IMAGE_RUNTIME_BOUND", "comfy_instance", body.instance_id,
-              {"config_revision": config.config_revision, "base_url": base_url})
+              {"config_revision": config.config_revision, "base_url": base_url,
+               "installation_id": config.installation_id, "port": config.port,
+               "recipe_state": recipe["state"]})
     db.commit()
     return {"config_revision": config.config_revision, "digest": runtime.config_digest(settings),
+            "binding_state": "READY" if recipe["state"] == "READY" else "PENDING_RECIPE",
+            "recipe": recipe,
             "readiness": runtime.readiness(db, settings)}
 
 
