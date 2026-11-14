@@ -22,11 +22,18 @@ def test_managed_group_stops_child_and_grandchild(tmp_path):
     )
     group = OwnedProcessGroup.launch([sys.executable, "-c", code, str(marker)], cwd=tmp_path)
     try:
+        # The child creates the marker before it writes the pid into it, so
+        # waiting for the file alone can read an empty marker under load.
         deadline = time.monotonic() + 15
-        while not marker.is_file() and time.monotonic() < deadline:
+        child_pid = 0
+        while time.monotonic() < deadline:
+            if marker.is_file():
+                raw = marker.read_text().strip()
+                if raw:
+                    child_pid = int(raw)
+                    break
             time.sleep(0.05)
-        assert marker.is_file()
-        child_pid = int(marker.read_text())
+        assert child_pid, "the child never wrote its pid into the marker"
         root_birth, child_birth = process_identity(group.pid), process_identity(child_pid)
         assert root_birth and child_birth
         assert group.owns(group.pid, root_birth)
@@ -51,8 +58,16 @@ def test_supervisor_crash_kills_its_owned_group(tmp_path):
     supervisor = subprocess.run([sys.executable, "-c", code, str(tmp_path), str(marker)],
                                 capture_output=True, timeout=20, check=False)
     assert supervisor.returncode == 0, supervisor.stderr.decode(errors="replace")
-    assert marker.is_file()
-    pid = int(marker.read_text())
+    deadline = time.monotonic() + 15
+    pid = 0
+    while time.monotonic() < deadline:
+        if marker.is_file():
+            raw = marker.read_text().strip()
+            if raw:
+                pid = int(raw)
+                break
+        time.sleep(0.05)
+    assert pid, "the supervisor never wrote its pid into the marker"
     deadline = time.monotonic() + 10
     while process_identity(pid) is not None and time.monotonic() < deadline:
         time.sleep(0.05)
