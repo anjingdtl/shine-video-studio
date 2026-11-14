@@ -12,7 +12,7 @@
 | 维度 | 结论 | 依据 |
 | --- | --- | --- |
 | ENGINEERING_PASS | **通过** | 小说→两集交付全旅程 E2E(mock LLM+假渲染边界,真实 FFmpeg 装配);后端 8 分片全量(仅 3 个基线预存失败,已对干净 origin/main 复核);前端 52 文件/305 项;tsc/build/Ruff/Alembic 全绿 |
-| LLM_STORYBOARD_PASS | **进行中(真实调用成功)** | 真实 MiniMax-M3.1-flash:大纲提取 SUCCEEDED、分镜书确认+风格冻结、五工种链 scriptwriter/director 已 SUCCEEDED、cinematographer 在途;真实数据验证 WP1 标题段合并 |
+| LLM_STORYBOARD_PASS | **未签署(ep-01 整集 APPLIED,ep-02 阻塞)** | 真实 MiniMax:大纲 SUCCEEDED、分镜书+风格冻结、**ep-01 整集 APPLIED(17 镜,五工种全链+自动落镜+WP3 自动确认)**；ep-02 cinematographer length+UNKNOWN(输出预算截断,WP7 目标问题)待核对授权重发;WP1 标题段合并真实生效 |
 | RTX5080_MULTIEPISODE_PASS | **NOT_RUN(待 LLM 拆镜完成后开拍)** | H3 运行时已 ACTIVE/services_verified(1281 节点,4 方案,43.97GB 权重核验);受真实 LLM 拆镜耗时阻塞,尚未进入真实 H3 拍摄 |
 | FULL_AUTOPILOT_PASS | **未签署** | 需前述真实两集 H3 出片完成后方可签署 |
 
@@ -62,7 +62,7 @@
 (均为硬件/目录 RAM 门槛相关,与本轮改动模块无交集;git diff 确认未触及 comfyops/deployment、recommendation、install qualification。)
 `test_v13_e2e` 首轮失败为本会话 `NO_PROXY` 含 `[::1]` 的 httpx 假失败,`env -u NO_PROXY` 复跑通过(AGENTS.md 已记录)。
 
-**PR #22 CI**(commit `3af7643`):L1 backend quick **success**、Frontend build **success**、L2 backend integration 运行中、L3(main-only)skipped。首轮 L1 失败仅因新测试 import 排序(Ruff I001),已修复。
+**PR #22 CI**:PR 运行 `43577689848` **完整 success(23m22s,L1 backend quick + L2 backend integration + Frontend build 全绿)**。首轮 L1 失败仅因新测试 import 排序(Ruff I001),已修复(3af7643)。WP7 基础提交 683b86b 后 PR CI 重跑 queued。
 
 ### 3.3 前端 / 静态 / 迁移
 - `tsc --noEmit`:0 错误。
@@ -82,8 +82,10 @@
 - **WP1 真实生效**:拆镜 unit[0] 把 7 字标题段「雨夜钟表铺」合并进第一章单元(`merged_section_ids` 记录),五工种不再对纯标题出镜；4 单元/2 集。
 - 五工种链**首单元完整成功**(真实 MiniMax):scriptwriter→director→cinematographer→continuity_supervisor→editor 全 SUCCEEDED,`apply_camera` 自动落镜,cursor 推进 1/4,ep-01 IN_PROGRESS。
 - 真实生产暴露并修复 2 个缺陷(§1 真实-1/真实-2),修复后拆镜不再立即阻塞。
+- **ep-01 整集 APPLIED**(2 单元,8+9=17 镜,真实 MiniMax 五工种链 + 自动落镜 + WP3 整集自动确认)；素材缺口为可选 notice(`H3_CHARACTER_REFERENCE_MISSING`/`H3_SPEAKER_REFERENCE_MISSING`,按 2026-11-08 素材可选裁定不硬阻滞)。
+- **ep-02 BLOCKED**(unit_index 2,cinematographer):`LLM_FORMAT` + `provider_finish_reason=length` + `external_outcome=UNKNOWN`。根因:cinematographer `completion_cap=9007`,9 镜 CameraPlan + reasoning 超上限→流截断→无可用答案(`received_result_sha256=None`,phase 停 WAITING_PROVIDER)→判 UNKNOWN。**这是输出预算截断问题,正是 WP7 逐镜小调用要消除的**(§10)。
 
-边界:真实 LLM 长响应耗时较长(升级预算+宿主代理),完整 4 单元拆镜仍在进行;UNKNOWN 安全门禁全程生效(不盲重发,核对+一次性授权重发)。
+边界:真实 LLM 长响应耗时较长(升级预算+宿主代理)；ep-02 cinematographer 为 length+UNKNOWN,按门禁需核对+一次性授权重发(不盲重发),重发仍可能撞同一上限,需 WP7 逐镜拆解或提高 cinematographer 预算方能稳定通过。完整 4 单元拆镜未全绿,LLM_STORYBOARD_PASS 未签署。
 
 ## 5. RTX 5080 真实 H3 双集(RTX5080_MULTIEPISODE_PASS,NOT_RUN)
 
@@ -94,7 +96,7 @@
 ## 6. 失败注入与恢复(第四轮)
 
 工程层由定向回归覆盖:`test_film_unknown_outcomes`、`test_scene_dead_worker`、`test_story_unknown_resend`、`test_material_scene_safety`、`test_agent_retry_and_rate_limit`、`test_novel_multiepisode_autopilot`(后处理故障重试)等,均在全量内通过。
-真实层本轮实测:LLM_FORMAT 有界重试(superseded 旧行)、UNKNOWN 核对门禁(STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION 正确生效)、后处理故障重试授权。真实 Worker 崩溃/H3 中断的注入待真实拍摄阶段执行。
+真实层本轮实测:LLM_FORMAT 有界重试(superseded 旧行)、UNKNOWN 核对门禁(STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION 正确生效)、后处理故障重试授权。**天然真实失败样本**:ep-02 cinematographer `completion_cap=9007` 不足→`finish_reason=length` 流截断→无可用答案→`external_outcome=UNKNOWN`,门禁正确拦下不盲重发(需核对+一次性授权)。此样本印证 WP7 输出预算根因(§10)。真实 Worker 崩溃/H3 中断的注入待真实拍摄阶段执行。
 
 ## 7. 安全门禁保留(未放宽)
 
@@ -114,3 +116,22 @@
 ## 9. 事故与恢复记录(诚实披露)
 
 本轮在建立基线对照 worktree 时,`git worktree remove --force` 沿 venv 目录联接误删了共享 venv 的部分 site-packages。已用 `uv sync --frozen --reinstall` 从 uv.lock 精确恢复全部依赖,核心导入与全量回归验证通过；正式栈(另一 agent,端口 8000)全程未受影响(其模块已载入内存,且使用独立 uv python)。验收栈随后正常重启。
+
+## 10. WP7 拆镜时延根因与逐镜小调用基础(本轮新增)
+
+**根因实测(验收库 `agent_task_records`/`llm_call_attempts`)**:每次拆镜输入仅 4–39KB(1.3–10.7K tokens),切输入到 0.3M 无效；时延由 **reasoning tokens** 主导:
+
+| 角色 | 输入 tok | 可见答案 | reasoning tok | 单次耗时 |
+| --- | --- | --- | --- | --- |
+| scriptwriter | 4366 | ~2159 | 12882 | 106s |
+| director | 6522 | ~1891 | 10476 | 84.5s |
+| editor | 9359 | ~1010 | 1411 | **13.9s** |
+| scene_prep | 5633 | ~2392 | 15353 | 135s |
+
+同款模型 low 档 editor 秒级,scriptwriter/director 一次产出整份合同烧 10–13K 思考。MiniMax-M3.1-Flash 强制思考、`reasoning_effort=low` 已最低、无硬 token 上限,`max_completion_tokens` 含思考(设小→length 空答案)。差在**单次任务粒度**,即编程 agent「小步聚焦调用」经验。ep-02 cinematographer 的 length+UNKNOWN(§4)正是此问题的真实失败样本。
+
+**已交付并独立验证的基础**(commit `683b86b`):
+- `shine/agents/crew_decompose.py`:scriptwriter 一次全局字段调用 + N 次逐 beat 小调用,每次外部调用独立子任务落 durable intent + UNKNOWN 门禁(独立 role_id 隔离 resume/replay),server 拼装回原 ScriptBreakdown,kind/sha/lineage 不变。
+- `tests/test_crew_decompose.py`:schema 感知 mock + 真实 DB 两项回归绿；Ruff 干净。
+
+**主路集成留待下一专项(用户裁定)**:接入实测为 breaking change——scriptwriter 1→N 调用需迁移 ~30+ 耦合测试合同(test_film_crew 13 处 + test_crew_prompt_contract/test_director_streamline/test_novel_multiepisode_autopilot 等多文件);段落预切分把 beat 数量从模型创作决定改为 server 段落决定,需 two-pass(先定 beat 边界再逐 beat 填)保创作分段。为守全量回归绿,主路接入已回退,保留已验证 helper 为基础。剩余:测试合同迁移 + two-pass + director 逐镜 + 真实 A/B 实测。**时延降低尚未真正交付,不声称已优化。**
