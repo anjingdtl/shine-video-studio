@@ -49,6 +49,8 @@ export type InstallationAttemptView = {
   pause_requested: boolean;
   terminal: boolean;
   resumable: boolean;
+  waiting_for_target?: boolean;
+  waiting_behind_attempt_id?: string | null;
   created_at?: string | null;
 };
 

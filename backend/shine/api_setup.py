@@ -603,8 +603,30 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         entry["installed"] = installed_by_scan or installed_by_evidence
         entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
         # "Bound" is a separate fact from "verified": the bytes were checked,
-        # and the current managed renderer reads them from that very place.
+        # and the current instance really reads them from the registered
+        # directory (an adopted external installation counts, and is labelled).
         entry["bound"] = bool(weights) and all(row.get("consumable") for row in weights)
+        facts = (readiness_report or {}).get("facts") or {}
+        entry["facts"] = {
+            "FILES_FOUND": bool(entry["installed"]),
+            "FILES_VERIFIED": bool(entry["verified"]),
+            "RESOURCE_REGISTERED": bool(entry["verified"]),
+            "INSTANCE_BOUND": bool(entry["bound"]),
+            "WORKFLOW_VALIDATED": bool(entry["runtime_validated"]),
+            "TRIAL_READY": bool(entry["trial_ready"]),
+            "PRODUCTION_READY": bool((readiness_report or {}).get("production_ready")),
+            **facts,
+        }
+        binding = (readiness_report or {}).get("instance_binding") or {}
+        entry["binding"] = {
+            "instance_id": binding.get("instance_id"),
+            "mode": binding.get("mode"),
+            "source": binding.get("source"),
+            "root": binding.get("root"),
+            "evidence": sorted({str(row.get("binding_reason")) for row in weights
+                                if row.get("binding_reason")}),
+        }
+        entry["next_step"] = (readiness_report or {}).get("next_step")
         entry["production_ready"] = bool((readiness_report or {}).get("production_ready"))
         accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
         # Seven decoupled facts.  ``available`` keeps its historic meaning -
@@ -625,11 +647,29 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         elif not entry["runtime_validated"]:
             entry["reason"] = "还没在本机核对节点"
         elif not entry["bound"]:
-            entry["reason"] = "权重已核验，但当前受管实例还没绑定"
+            entry["reason"] = "权重已核验，但当前实例还没绑定到这些文件"
         elif not accepted:
             entry["reason"] = "候选方案：可准备资源与试镜，暂不能正式开拍"
         else:
             entry["reason"] = "本机已就绪"
+        blocking = []
+        if not entry["facts"].get("FILES_FOUND"):
+            blocking.append({"code": "FILES_MISSING", "message": "本机没有这套权重"})
+        if not entry["facts"].get("FILES_VERIFIED"):
+            blocking.append({"code": "FILES_NOT_VERIFIED", "message": "权重已就位但还没有逐字节核验"})
+        if not entry["facts"].get("INSTANCE_BOUND"):
+            blocking.append({"code": "INSTANCE_NOT_BOUND",
+                             "message": "当前 ComfyUI 实例的模型目录里读不到已核验的权重"})
+        if not entry["profiles_registered"]:
+            blocking.append({"code": "PROFILES_NOT_REGISTERED", "message": "生成方案还没登记到当前作品"})
+        if not entry["runtime_validated"]:
+            blocking.append({"code": "RUNTIME_NOT_VALIDATED", "message": "还没在本机核对节点与输入"})
+        if (readiness_report or {}).get("real_render") is None:
+            blocking.append({"code": "REAL_RENDER_NOT_VERIFIED", "message": "还没有用这个方案真实出片"})
+        if not accepted:
+            blocking.append({"code": "ACCEPTANCE_STATUS_NOT_SUPPORTED",
+                             "message": f"验收状态是 {acceptance}，不能当作正式生产"})
+        entry["blocking_reasons"] = blocking
         rows.append(entry)
     return {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
 

@@ -25,6 +25,9 @@ export const QA_CHECK_LABELS: Record<string, string> = {
 };
 
 export const ERROR_CODE_LABELS: Record<string, string> = {
+  INSTALL_TARGET_CONFLICT: '安装目录正被另一项安装使用，已自动排队等待前一项完成。',
+  WAITING_FOR_TARGET: '正在等待前面的资源安装任务完成。',
+  EXISTING_COMFY_VERSION_UNVERIFIED: '无法确认这台 ComfyUI 的软件身份（既没有本地版本声明，也没有正在运行的服务版本）。原安装没有被修改；可以先启动一次 ComfyUI 再检测。',
   RESOURCE_IMPORT_IN_PROGRESS: '同一批本机文件正在准备，请等待完成后再检查。',
   RESOURCE_INVENTORY_CHANGED: '本机文件或模型清单已经变化，请重新检测后再复用。',
   RESOURCE_SNAPSHOT_CHANGED_OR_INELIGIBLE: '资源清单已变化或尚未核实，请重新检测。',
@@ -162,7 +165,9 @@ function describeDetail(detail: unknown): string {
       `「${row.shot_name ?? row.shot_id ?? '镜头'}」${row.message ?? row.code ?? '无法执行'}`);
     const runnable = payload.runnable_shot_ids ?? [];
     const tail = runnable.length ? `；其余 ${runnable.length} 个镜头仍可开拍` : '';
-    return `${payload.message ?? '这一批里有镜头无法执行'}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
+    const headline = typeof payload.message === 'string' ? payload.message
+      : (payload.message ? describeDetail(payload.message) : '这一批里有镜头无法执行');
+    return `${headline}${parts.length ? '：' + parts.join('；') : ''}${tail}`;
   }
   if (detail && typeof detail === 'object' && 'code' in detail
       && (detail as { code?: unknown }).code === 'STORYBOARD_BEAT_UNCOVERED') {
@@ -174,20 +179,27 @@ function describeDetail(detail: unknown): string {
     const covered = payload.details?.beats_covered;
     const count = typeof total === 'number' && typeof covered === 'number'
       ? `（${total} 个节拍中还有 ${total - covered} 个没有镜头）` : '';
-    return `${payload.message ?? '有剧情节拍没有被任何镜头覆盖，不能落镜'}${count}`
+    const headline = typeof payload.message === 'string' ? payload.message
+      : '有剧情节拍没有被任何镜头覆盖，不能落镜';
+    return `${headline}${count}`
       + '请补镜头后重新生成分镜。';
   }
   if (detail && typeof detail === 'object' && 'code' in detail
       && typeof (detail as { code?: unknown }).code === 'string') {
-    const coded = detail as { code: string; message?: string; blockers?: string[] };
-    const base = coded.message || ERROR_CODE_LABELS[coded.code] || coded.code;
+    const coded = detail as { code: string; message?: unknown; blockers?: string[] };
+    const base = typeof coded.message === 'string'
+      ? coded.message
+      : (coded.message ? describeDetail(coded.message)
+        : (ERROR_CODE_LABELS[coded.code] || coded.code));
     const blockers = Array.isArray(coded.blockers) && coded.blockers.length
       ? `：${coded.blockers.join('；')}` : '';
     return `${base}${blockers}（${coded.code}）`;
   }
   if (detail && typeof detail === 'object' && 'message' in detail) {
+    const raw = (detail as { message?: unknown }).message;
+    const message = typeof raw === 'string' ? raw : describeDetail(raw);
     const code = 'code' in detail && detail.code ? `（${String(detail.code)}）` : '';
-    return `${String(detail.message)}${code}`;
+    return `${message}${code}`;
   }
   if (detail && typeof detail === 'object' && 'code' in detail && detail.code) {
     const code = String(detail.code);
@@ -1758,6 +1770,25 @@ export type VariantAvailability = {
   production_ready: boolean;
   available: boolean;
   reason: string;
+  /** 七个解耦事实：文件已找到 / 已核验 / 已登记 / 已绑定 / 工作流已核对 / 试镜就绪 / 正式生产。 */
+  facts?: {
+    FILES_FOUND: boolean;
+    FILES_VERIFIED: boolean;
+    RESOURCE_REGISTERED: boolean;
+    INSTANCE_BOUND: boolean;
+    WORKFLOW_VALIDATED: boolean;
+    TRIAL_READY: boolean;
+    PRODUCTION_READY: boolean;
+  };
+  binding?: {
+    instance_id: string | null;
+    mode: string;
+    source: string | null;
+    root: string | null;
+    evidence: string[];
+  };
+  blocking_reasons?: Array<{ code: string; message: string }>;
+  next_step?: { code: string; label: string; reason: string; action: string | null; blocked: boolean } | null;
 };
 
 export const getVariantAvailability = (projectId: string) =>

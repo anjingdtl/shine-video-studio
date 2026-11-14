@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.existing_installation import comfy_root, inspect, local_path
+from shine.comfyops.host_env import probe_comfy_service
 from shine.comfyops.instances import instance_identity
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, InstallationPlan
 from shine.models import AuditEvent
@@ -145,6 +146,87 @@ def _verified_key(item: dict) -> tuple[str, str, str, int]:
     return item.get("component_id"), item.get("relative_path"), item.get("sha256"), item.get("size")
 
 
+def _receipt_file_paths(report: dict) -> dict[tuple[str, str], Path]:
+    """The one file each verified match was read from.
+
+    The audit record stores per-file hashes but not paths (absolute paths are
+    redacted from audit payloads).  The inspection snapshot *does* bind every
+    candidate path to its size and modification time, and the verification was
+    performed against that exact snapshot.  Reusing a path here therefore
+    reuses the same evidence standard as the receipt itself: same snapshot,
+    same size, same mtime.  When two different files carry the same size (a
+    duplicate copy), the choice is ambiguous and no receipt is written for
+    that component instead of guessing.
+    """
+    found: dict[tuple[str, str], Path] = {}
+    for match in report.get("matches", []):
+        sources = [Path(row) for row in (match.get("sources") or [])]
+        if not sources:
+            continue
+        identities = set()
+        for source in sources:
+            try:
+                stat = source.stat()
+            except OSError:
+                continue
+            identities.add((getattr(stat, "st_dev", None), getattr(stat, "st_ino", None),
+                            stat.st_size, getattr(stat, "st_mtime_ns", None)))
+        if len(identities) == 1:
+            found[(match["component_id"], match["relative_path"])] = sources[0]
+    return found
+
+
+def _save_adoption_receipts(db, report: dict, catalog: dict, verified_files: list[dict]) -> int:
+    """Write path-bound receipts so readiness can reuse the verified bytes.
+
+    Older receipts recorded one package directory.  An external installation
+    keeps its weights in the user's own ``models/<family>`` tree, so the
+    receipt must record the exact file that was hashed.  Nothing is copied and
+    no byte is read again here.
+    """
+    from pathlib import Path as _Path
+
+    from shine.comfyops.existing_installation import declared_model_family_roots
+    from shine.comfyops.verification_receipts import save_receipt
+
+    verified_keys = {_verified_key(item) for item in verified_files}
+    paths = _receipt_file_paths(report)
+    root = _Path(report["root"])
+    allowed_roots = [root, *[directory for dirs in declared_model_family_roots(root).values()
+                             for directory in dirs]]
+    written = 0
+    for component in catalog.get("components", []):
+        if component.get("kind") not in {"model", "review-model"}:
+            continue
+        files = component.get("files") or []
+        if not files:
+            continue
+        if any((component["component_id"], item["relative_path"], item["sha256"], item["size"])
+               not in verified_keys for item in files):
+            continue
+        file_paths = {}
+        for item in files:
+            source = paths.get((component["component_id"], item["relative_path"]))
+            if source is None:
+                break
+            file_paths[item["relative_path"]] = source
+        else:
+            save_receipt(
+                db,
+                variant_id=(catalog.get("variant") or {}).get("variant_id")
+                if isinstance(catalog.get("variant"), dict) else None,
+                catalog_id=catalog.get("catalog_id"),
+                catalog_version=catalog.get("catalog_version"),
+                component=component,
+                root=root,
+                directory=root,
+                file_paths=file_paths,
+                allowed_roots=allowed_roots,
+            )
+            written += 1
+    return written
+
+
 def adopt_existing_installation(
     db,
     settings,
@@ -165,8 +247,27 @@ def adopt_existing_installation(
     report = inspect(str(selected), catalog)
     if report["snapshot"] != snapshot:
         raise HTTPException(409, "已有目录或模型清单变化，请重新检测后确认；本次没有下载任何文件。")
-    if report["software"].get("version_status") != "INSTALLED_VERSION_MATCH":
-        raise HTTPException(409, "EXISTING_COMFY_VERSION_NOT_PINNED")
+    service = probe_comfy_service(port)
+    software = report["software"]
+    version_status = software.get("version_status")
+    version_source = software.get("version_source")
+    version_confidence = software.get("version_confidence")
+    if (version_status == "INSTALLED_VERSION_UNKNOWN" and service["is_comfyui"]
+            and service.get("version")):
+        # The running service is itself a trusted identity source.  It proves
+        # which ComfyUI answered, not that it is the pinned Git revision.
+        version_status = "INSTALLED_VERSION_OBSERVED"
+        version_source = "/system_stats"
+        version_confidence = "MEDIUM"
+    if version_status not in {
+        "INSTALLED_VERSION_MATCH",
+        "INSTALLED_VERSION_MODIFIED",
+        "INSTALLED_VERSION_MISMATCH",
+        "INSTALLED_VERSION_OBSERVED",
+    }:
+        # Neither a local declaration nor the running service can name the
+        # software.  Registering it would be a guess.
+        raise HTTPException(409, "EXISTING_COMFY_VERSION_UNVERIFIED")
     python_value = report["software"].get("runtime", {}).get("python_executable")
     if not python_value or not Path(python_value).is_file():
         raise HTTPException(409, "EXISTING_COMFY_PYTHON_NOT_FOUND")
@@ -251,6 +352,7 @@ def adopt_existing_installation(
         replaced_probe_row = True
 
     h3_verified_files = [item for item in verified_files if _verified_key(item) in required]
+    receipt_count = _save_adoption_receipts(db, report, catalog, verified_files)
     review_components = {
         component["component_id"]: len(component.get("files", []))
         for component in catalog.get("components", []) if component.get("kind") == "review-model"
@@ -258,10 +360,23 @@ def adopt_existing_installation(
     review_counts = {component: sum(1 for item in verified_files if item.get("component_id") == component)
                      for component in review_components}
     adoption = {
-        "version": 1,
+        "version": 2,
         "snapshot": snapshot,
         "catalog_id": catalog["catalog_id"],
         "source_revision": report["software"].get("actual_revision"),
+        "version_status": version_status,
+        "version_source": version_source,
+        "version_confidence": version_confidence,
+        "service_identity": {
+            "port": port,
+            "is_comfyui": service["is_comfyui"],
+            "version": service.get("version"),
+            "version_source": service.get("version_source"),
+        },
+        "node_packages": {
+            "count": len((report.get("node_packages") or {}).get("packages") or []),
+            "expected_by_catalog": (report.get("node_packages") or {}).get("expected_by_catalog") or [],
+        },
         "python": str(Path(python_value).resolve()),
         "python_sha256": hashlib.sha256(Path(python_value).read_bytes()).hexdigest(),
         "node_fingerprints": node_fingerprints,
@@ -271,6 +386,7 @@ def adopt_existing_installation(
         ],
         "review_model_file_counts": review_counts,
         "review_model_expected_counts": review_components,
+        "path_bound_receipts": receipt_count,
         "confirmed_by": actor,
     }
     plan_payload = {

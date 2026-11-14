@@ -4,6 +4,7 @@ import {
   MonitorCheck, RefreshCw, Video,
 } from 'lucide-react';
 import { api, json, timeoutSignal } from '../api';
+import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
 import {
   approveAndExecuteSetupPlan, isQueuedInstallation, waitForInstallationAttempt,
@@ -205,6 +206,11 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   const [catalog, setCatalog] = useState<CatalogSummary | null>(restored?.catalog ?? null);
   /** 已采用的 ComfyUI 根目录：存在时不再创建受管实例，直接复用。 */
   const [adoptedRoot, setAdoptedRoot] = useState<string | null>(restored?.adoptedRoot ?? null);
+  /**
+   * 后端权威的「这套方案在本机处于哪一步」。界面不再用扫描文件数
+   * 推断生产事实：扫描只看目录，核验/绑定/登记/节点核对各有自己的证据。
+   */
+  const [availabilityRows, setAvailabilityRows] = useState<VariantAvailability[] | null>(null);
   const [variantId, setVariantId] = useState(restored?.variantId ?? '');
   const [caps, setCaps] = useState(restored?.caps ?? { image: true, vlm: false, asr: false });
   const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
@@ -245,7 +251,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       // 作品 id 在首屏是异步到达的：没有作品时不去问「已采用的安装」，
       // 等 id 到了 effect 会重新检测一次。
       const availability = projectId
-        ? await api<{ adopted_root?: string | null }>(
+        ? await api<{ adopted_root?: string | null; variants?: VariantAvailability[] }>(
           `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
         ).catch(() => null)
         : null;
@@ -253,6 +259,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       setEnv(environment); setStorage(disk); setRuntime(state); setReadiness(ready);
       setImage(imageState); setVariants(variantRows); setCatalog(catalogRows);
       setAdoptedRoot(availability?.adopted_root ?? null);
+      setAvailabilityRows(availability?.variants ?? null);
       const root = existing.installations?.[0];
       let main: ExistingScan | null = null;
       let imageInstall: ExistingScan | null = null;
@@ -291,13 +298,18 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     void detect();
   }, [refreshEpoch, detect]);
 
-  // 作品 id 异步到达或切换时，只补一个轻量的「已采用安装」读取，不重跑检测。
+  // 作品 id 异步到达或切换时，只补一个轻量的「已采用安装 / 方案事实」读取，
+  // 不重跑检测。
   useEffect(() => {
     if (!projectId || phase !== 'ready') return;
     let alive = true;
-    api<{ adopted_root?: string | null }>(
+    api<{ adopted_root?: string | null; variants?: VariantAvailability[] }>(
       `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
-    ).then((row) => { if (alive) setAdoptedRoot(row.adopted_root ?? null); }).catch(() => {});
+    ).then((row) => {
+      if (!alive) return;
+      setAdoptedRoot(row.adopted_root ?? null);
+      setAvailabilityRows(row.variants ?? null);
+    }).catch(() => {});
     return () => { alive = false; };
   }, [projectId, phase]);
 
@@ -309,9 +321,17 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   }, [variants]);
 
   const selectedVariant = allVariants.find((row) => row.variant_id === variantId) ?? null;
+  const availabilityOf = (id: string | undefined) =>
+    id ? availabilityRows?.find((row) => row.variant_id === id) ?? null : null;
+  const selectedAvailability = availabilityOf(selectedVariant?.variant_id);
   const selectedPresence = selectedVariant ? variantPresence(selectedVariant, scan) : { found: 0, required: 0 };
   const comfyInstalled = !!scan?.software?.installed;
-  const h3Complete = selectedPresence.required > 0 && selectedPresence.found === selectedPresence.required;
+  // 生产事实以后端台账为准：扫描只说明「目录里有这些文件」。
+  // 只有后端也读不到时才退回扫描计数，且扫描结果永远不等于「已核验」。
+  const h3Complete = selectedAvailability
+    ? selectedAvailability.installed
+    : selectedPresence.required > 0 && selectedPresence.found === selectedPresence.required;
+  const h3Verified = selectedAvailability ? selectedAvailability.verified : false;
 
   const componentFiles = useMemo(() => Object.fromEntries(
     (catalog?.components ?? []).map((row) => [row.component_id, row.files]),
@@ -384,12 +404,26 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       const ready = await api<Readiness>('/setup/readiness');
       ensure();
       const filesReady = ready.layers.some((layer) => layer.layer === 'L2_files_verified' && layer.status === 'READY');
+      // 以后端台账的最新事实决定「要不要动权重」：只信扫描结果会导致
+      // 已核验的 44GB 权重被再次规划下载。
+      const freshAvailability = projectId
+        ? await api<{ variants?: VariantAvailability[] }>(
+          `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
+        ).catch(() => null)
+        : null;
+      ensure();
+      if (freshAvailability?.variants) setAvailabilityRows(freshAvailability.variants);
+      const freshRow = freshAvailability?.variants?.find(
+        (row) => row.variant_id === selectedVariant?.variant_id,
+      ) ?? null;
+      const evidenceInstalled = freshRow?.installed ?? h3Complete;
+      const evidenceVerified = freshRow?.verified ?? (selectedAvailability ? h3Verified : filesReady);
 
-      if (!filesReady || !h3Complete) {
+      if (!evidenceVerified) {
         // 先尝试复用本机已有安装：只读核验 + 登记，不复制、不下载。
         // 仅当选中的方案权重确实在本机时才复用；选了别的方案就直接下载它。
         let reused = false;
-        if (h3Complete && comfyInstalled && scan) {
+        if (evidenceInstalled && comfyInstalled && scan) {
           setRunning({ label: '核验本机已有权重…', note: '只读哈希，不复制、不修改你的 ComfyUI' });
           try {
             const verify = await api<{ status: string; rejected?: unknown[]; verified?: unknown[] }>(
@@ -611,6 +645,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     {phase === 'ready' && <>
       <p className="setup-verdict"><b>{verdict}</b></p>
 
+      {selectedAvailability && !selectedAvailability.production_ready && selectedAvailability.next_step && (
+        <p className="run-hint" data-testid="setup-next-step">
+          还差一步：{selectedAvailability.next_step.label}。{selectedAvailability.next_step.reason}
+        </p>
+      )}
+
       <div className="setup-facts">
         <span>显卡 {variants?.host.gpu ?? '未识别'}</span>
         <span>显存 {mbAsGib(variants?.host.vram_mb)}</span>
@@ -645,15 +685,18 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         <div className="setup-preset-list">
           {allVariants.map((row) => {
             const presence = variantPresence(row, scan);
-            const local = presence.required > 0 && presence.found === presence.required;
+            const fact = availabilityOf(row.variant_id);
+            const local = fact ? fact.installed : presence.required > 0 && presence.found === presence.required;
             const blocked = row.acceptance_status === 'BLOCKED';
             // 已有一套权重不锁死其他方案：候选也可选、可显式确认后下载；
             // 只有没有可核对权重来源的 BLOCKED 槽位才禁用。
             const selectable = !blocked;
-            const reason = local ? '本机已找到这套权重'
-              : row.auto_download_allowed ? `需要下载 ${gib(row.total_bytes)}`
-                : blocked ? '这套没有可核对的权重来源，暂不能使用'
-                  : '候选 · 未真机验收；确认后可下载权重（下载不等于验收）';
+            const reason = fact
+              ? fact.reason
+              : local ? '本机已找到这套权重'
+                : row.auto_download_allowed ? `需要下载 ${gib(row.total_bytes)}`
+                  : blocked ? '这套没有可核对的权重来源，暂不能使用'
+                    : '候选 · 未真机验收；确认后可下载权重（下载不等于验收）';
             return <label key={row.variant_id} className={`setup-preset${variantId === row.variant_id ? ' active' : ''}${selectable ? '' : ' disabled'}`}>
               <input type="radio" name="h3-preset" checked={variantId === row.variant_id} disabled={!selectable || !!running}
                 onChange={() => setVariantId(row.variant_id)} />
@@ -662,7 +705,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
                 <em>{reason}</em>
               </span>
               <span className={`chip ${local ? 'ok' : row.auto_download_allowed ? '' : 'warn'}`}>
-                {local ? '本机已有' : row.auto_download_allowed ? '可安装' : blocked ? '候选' : '候选 · 可下载'}
+                {fact?.verified && fact.bound ? '本机已核验 · 已绑定'
+                  : fact?.verified ? '本机已核验'
+                    : local ? '本机已有' : row.auto_download_allowed ? '可安装' : blocked ? '候选' : '候选 · 可下载'}
               </span>
             </label>;
           })}
@@ -672,7 +717,11 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       <div className="setup-capabilities">
         <h3>要准备哪些能力 <GuideTip tight>勾选才会下载；不勾的以后可以随时回来补</GuideTip></h3>
         <label className="setup-cap locked">
-          <Video size={14} /><span><b>H3 视频生成</b><em>{selectedPresence.found}/{selectedPresence.required || 6} 个权重文件已找到</em></span>
+          <Video size={14} /><span><b>H3 视频生成</b><em>
+            {selectedAvailability?.verified
+              ? (selectedAvailability.bound ? '权重已逐字节核验，并已绑定到当前 ComfyUI 实例' : '权重已逐字节核验，等待实例绑定')
+              : `${selectedPresence.found}/${selectedPresence.required || 6} 个权重文件已找到`}
+          </em></span>
           <span className="chip ok">必装</span>
         </label>
         <label className="setup-cap">
@@ -742,7 +791,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
 
       {running && <p className="run-hint" role="status">{running.label}{running.note ? ` · ${running.note}` : ''}</p>}
       {attempt && !attempt.terminal && <p className="run-hint">
-        已确认 {gib(attempt.confirmed_bytes)} / {gib(attempt.total_bytes)} · 关闭页面不会中断下载
+        {attempt.stage === 'WAITING_FOR_TARGET' || attempt.waiting_for_target
+          ? '正在等待前面的资源安装任务完成；轮到这个任务时会自动开始，不需要你重复点击。'
+          : `已确认 ${gib(attempt.confirmed_bytes)} / ${gib(attempt.total_bytes)} · 关闭页面不会中断下载`}
       </p>}
       {result && <p className="ok-line" role="status">{result}</p>}
       {problem && phase === 'ready' && <p className="form-error" role="alert">{problem}</p>}

@@ -343,9 +343,9 @@ def test_the_same_install_request_is_one_plan_and_one_attempt(prep, monkeypatch)
 
 
 @pytest.mark.windows_only
-def test_two_different_component_sets_cannot_share_the_same_storage_root(prep, monkeypatch):
-    """Different content in the same directory is a conflicting identity."""
-    client, _, _ = prep
+def test_two_different_component_sets_share_the_same_storage_root_by_waiting(prep, monkeypatch):
+    """Different content in the same directory waits; it is never a dead end."""
+    client, factory, _ = prep
     monkeypatch.setenv("SHINE_ENABLE_LOCAL_EXECUTION", "1")
     if os.name != "nt":
         pytest.skip("the local package executor only runs on the authorized Windows host")
@@ -359,14 +359,20 @@ def test_two_different_component_sets_cannot_share_the_same_storage_root(prep, m
                      f"/comfyops/install-plans/{first['plan_id']}/approve")
     plan_b = approve(client, {"id": second["plan_id"]}, "install",
                      f"/comfyops/install-plans/{second['plan_id']}/approve")
-    post(client, f"/comfyops/install-plans/{first['plan_id']}/execute",
-         {"plan_hash": plan_a["sha256"], "executor": "local"}, operator=True, expected=(200, 202))
-    refused = client.post(
-        f"/api/v1/comfyops/install-plans/{second['plan_id']}/execute",
-        json={"plan_hash": plan_b["sha256"], "executor": "local"}, headers=HEADERS,
-    )
-    assert refused.status_code == 409, refused.text
-    assert "INSTALL_TARGET_CONFLICT" in refused.text
+    queued_a = post(client, f"/comfyops/install-plans/{first['plan_id']}/execute",
+                    {"plan_hash": plan_a["sha256"], "executor": "local"},
+                    operator=True, expected=(200, 202))
+    from shine.comfyops.installation import claim_next_attempt
+
+    # A Worker claim is what takes the directory write right; the next request
+    # then waits instead of being refused.
+    assert claim_next_attempt(factory, "test-worker") == queued_a["attempt_id"]
+    queued_b = post(client, f"/comfyops/install-plans/{second['plan_id']}/execute",
+                    {"plan_hash": plan_b["sha256"], "executor": "local"},
+                    operator=True, expected=(200, 202))
+    assert queued_a["attempt_id"] != queued_b["attempt_id"]
+    assert queued_b["stage"] == "WAITING_FOR_TARGET"
+    assert queued_b["waiting_for_target"] is True
 
 
 def test_the_install_plan_states_the_combination_that_was_really_chosen(prep):

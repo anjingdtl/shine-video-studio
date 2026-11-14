@@ -476,6 +476,10 @@ def _queued_response(attempt, requested_plan, *, reused: bool) -> dict:
         "status": view["status"],
         "stage": view["stage"],
         "reused": reused,
+        # A target shared with another plan is a visible waiting state, not a
+        # refusal.  The caller can show "waiting for the previous install".
+        "waiting_for_target": view["waiting_for_target"],
+        "waiting_behind_attempt_id": view["waiting_behind_attempt_id"],
         # The attempt's own identity.  A caller that lost its response can
         # keep working from this hash even when its request named another plan.
         "plan_id": attempt.plan_id,

@@ -153,6 +153,124 @@ def _same_directory(left: str | None, right: str | None) -> bool:
         return False
 
 
+#: The family aliases the pinned ComfyUI revision exposes.  A file placed in
+#: either directory is loaded by the same folder_paths entry.
+_FAMILY_ALIASES = {
+    "text_encoders": ("clip",),
+    "diffusion_models": ("unet",),
+}
+
+
+def current_instance(db: Session, settings) -> dict[str, Any]:
+    """The instance a readiness check is about, or an explicit absence.
+
+    The configured runtime wins; when no configuration exists yet, an adopted
+    installation is still a real instance and is used.  Nothing is started or
+    written here.
+    """
+    from shine.comfyops.models import ComfyInstance
+
+    instance = None
+    source = None
+    try:
+        from shine.comfyops.runtime_configuration import _current_identity
+
+        identity = _current_identity(db, settings) or {}
+        instance_id = identity.get("instance_id")
+        if instance_id:
+            instance = db.get(ComfyInstance, instance_id)
+            source = "RUNTIME_CONFIGURATION"
+    except Exception:  # noqa: BLE001 - no configuration is a fact, not a failure
+        instance = None
+    if instance is None:
+        try:
+            rows = db.scalars(select(ComfyInstance)).all()
+        except Exception:  # noqa: BLE001 - an unreadable ledger is an absence
+            rows = []
+        adopted = [row for row in rows
+                   if isinstance(row.payload, dict) and row.payload.get("adopted")
+                   and row.payload.get("root")]
+        instance = adopted[0] if adopted else None
+        source = "ADOPTED_REGISTRATION" if instance is not None else None
+    if instance is None or not isinstance(instance.payload, dict):
+        return {"instance_id": None, "mode": "NONE", "root": None,
+                "families": {}, "source": None, "adopted": False}
+    payload = instance.payload
+    root = payload.get("root")
+    adopted = bool(payload.get("adopted") or payload.get("external_installation"))
+    families: dict[str, list[str]] = {}
+    if root:
+        try:
+            from shine.comfyops.existing_installation import declared_model_family_roots
+
+            declared = declared_model_family_roots(Path(root))
+            families = {family: [str(directory) for directory in directories]
+                        for family, directories in declared.items()}
+        except Exception:  # noqa: BLE001 - an unreadable declaration is absent
+            families = {}
+    return {
+        "instance_id": instance.id,
+        "mode": "ADOPTED_EXTERNAL_INSTALLATION" if adopted else "MANAGED_INSTALLATION",
+        "root": str(root) if root else None,
+        "models_root": str(Path(root) / "models") if root else None,
+        "families": families,
+        "adopted": adopted,
+        "source": source,
+    }
+
+
+def _family_directories(component: dict[str, Any], binding_info: dict[str, Any],
+                        managed: dict[str, str]) -> list[Path]:
+    """Every directory the current instance may read this family from."""
+    family = str(component.get("destination_family") or "")
+    names = (family, *_FAMILY_ALIASES.get(family, ())) if family else ()
+    directories: list[Path] = []
+    models_root = binding_info.get("models_root")
+    for name in names:
+        if models_root:
+            directories.append(Path(models_root) / name)
+        for value in (binding_info.get("families") or {}).get(name, []):
+            directories.append(Path(value))
+    for key, value in managed.items():
+        if key in names:
+            directories.append(Path(value))
+    unique: list[Path] = []
+    for directory in directories:
+        try:
+            resolved = directory.resolve()
+        except OSError:
+            resolved = directory
+        if resolved not in unique:
+            unique.append(resolved)
+    return unique
+
+
+def _paths_inside(receipt: dict[str, Any], directories: list[Path]) -> bool:
+    if not directories:
+        return False
+    recorded = [
+        Path(row["path"]) for row in (receipt.get("files") or [])
+        if isinstance(row, dict) and row.get("path")
+    ]
+    if recorded:
+        for path in recorded:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return False
+            if not any(resolved.is_relative_to(directory) for directory in directories):
+                return False
+        return True
+    directory = receipt.get("directory")
+    if not directory:
+        return False
+    try:
+        resolved = Path(directory).resolve()
+    except OSError:
+        return False
+    return any(resolved == other or resolved.is_relative_to(other) for other in directories)
+
+
 def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     """Per component: are the pinned bytes here, and were they really verified?
 
@@ -176,6 +294,7 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
 
     cache = _cache_dir(settings)
     bound = managed_model_bindings(db, settings)
+    instance_binding = current_instance(db, settings)
     registry = {row.id: row for row in db.scalars(select(ModelPackage)).all()}
     evidence: list[dict[str, Any]] = []
     for component in _required_components(binding.catalog, binding.profiles):
@@ -207,9 +326,20 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
         installed_path = installed_directory(settings, component)
         installed = str(installed_path) if installed_path is not None else None
         in_place = bool(receipt["verified"] and _same_directory(verified_directory, installed))
-        bound_here = bool(receipt["verified"] and any(
-            _same_directory(verified_directory, directory) for directory in bound.values()))
+        family_directories = _family_directories(component, instance_binding, bound)
+        bound_here = bool(receipt["verified"]
+                          and _paths_inside(receipt.get("receipt") or {}, family_directories))
         consumable = bool(receipt["verified"] and (in_place or bound_here))
+        if not receipt["verified"]:
+            binding_reason = "NO_VERIFIED_BYTES"
+        elif in_place:
+            binding_reason = "MANAGED_PACKAGE_STORE"
+        elif bound_here:
+            binding_reason = ("ADOPTED_INSTALLATION_FAMILY_DIRECTORY"
+                              if instance_binding["mode"] == "ADOPTED_EXTERNAL_INSTALLATION"
+                              else "MANAGED_INSTANCE_BINDING")
+        else:
+            binding_reason = "VERIFIED_ELSEWHERE_NOT_BOUND"
         evidence.append({
             "component_id": component_id,
             "registry_status": None if row is None else str(row.status),
@@ -223,6 +353,7 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
                 "reason": receipt["reason"],
                 "identity": receipt["identity"],
                 "directory": (receipt.get("receipt") or {}).get("directory"),
+                "paths_verified": bool(receipt.get("paths_verified")),
                 "verified_at": (receipt.get("receipt") or {}).get("verified_at"),
             },
             "cache": {"verified": cached["verified"], "present": cached["present"],
@@ -237,6 +368,9 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
             "verified": bool(files) and (receipt["verified"] or cached["verified"]),
             "verified_directory": verified_directory,
             "installed_directory": installed,
+            "destination_family": component.get("destination_family"),
+            "instance_directories": [str(row) for row in family_directories],
+            "binding_reason": binding_reason,
             "in_place": in_place,
             "bound_to_instance": bound_here,
             "consumable": consumable,
@@ -336,6 +470,7 @@ def _layer(state: str, detail: str, **extra: Any) -> dict[str, Any]:
 def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]:
     """The five layers of one variant on this machine, plus one next step."""
     weights = weight_evidence(db, settings, binding)
+    instance_binding = current_instance(db, settings)
     profiles = _profile_rows(db, project_id, binding.profile_names)
     profile_ids = [row["profile_id"] for row in profiles if row["profile_id"]]
     render = _real_render(db, project_id, profile_ids)
@@ -423,6 +558,22 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
         missing_profiles=missing_profiles,
         unvalidated=unvalidated,
     )
+    files_found = bool(weights) and all(row["prepared"] for row in weights)
+    files_verified = bool(weights) and all(row["verified"] for row in weights)
+    instance_bound = bool(weights) and all(row["consumable"] for row in weights)
+    workflow_validated = bool(profiles) and all(row["validated"] for row in profiles)
+    trial_ready = bool(files_verified and instance_bound and workflow_validated)
+    if files_verified and not instance_bound and next_step["code"] not in {
+        "PROFILE_NOT_REGISTERED", "PROFILE_NOT_VALIDATED",
+    }:
+        next_step = {
+            "code": "WEIGHTS_NOT_BOUND",
+            "label": "把已核验的权重绑定到当前 ComfyUI 实例",
+            "reason": "权重字节已核验，但当前实例登记的真实模型目录里读不到它们；"
+                      "请重新检测并采用这台 ComfyUI，或检查 extra_model_paths.yaml。",
+            "action": "BIND_INSTANCE",
+            "blocked": False,
+        }
 
     return {
         "variant_id": binding.variant_id,
@@ -441,6 +592,18 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
         "reached_layer": LAYER_IDS[reached] if reached < len(LAYER_IDS) else LAYER_IDS[-1],
         "reached_label": LAYER_LABELS[LAYER_IDS[reached]] if reached < len(LAYER_IDS) else LAYER_LABELS[LAYER_IDS[-1]],
         "production_ready": reached >= len(LAYERS),
+        # Seven separate facts.  ``available`` (the historic production gate)
+        # is not one of them: a file on disk is never a runtime claim.
+        "facts": {
+            "FILES_FOUND": files_found,
+            "FILES_VERIFIED": files_verified,
+            "RESOURCE_REGISTERED": files_verified,
+            "INSTANCE_BOUND": instance_bound,
+            "WORKFLOW_VALIDATED": workflow_validated,
+            "TRIAL_READY": trial_ready,
+            "PRODUCTION_READY": reached >= len(LAYERS),
+        },
+        "instance_binding": instance_binding,
         "next_step": next_step,
         "weights": weights,
         "profiles": profiles,

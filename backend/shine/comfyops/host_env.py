@@ -25,6 +25,26 @@ from pathlib import Path
 
 BOOTSTRAP_INSTALLABLE = {"uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe"}
 
+#: The fixed command whitelist.  A probe may only ask for one of these names;
+#: a caller-supplied executable path is never accepted.  The tuple is the
+#: lookup order per platform and is a project fact, not a PATH guess.
+TOOL_EXECUTABLES: dict[str, tuple[str, ...]] = {
+    "uv": ("uv.exe", "uv"),
+    "node": ("node.exe", "node"),
+    "npm": ("npm.cmd", "npm.exe", "npm"),
+    "pwsh": ("pwsh.exe", "pwsh"),
+    "ffmpeg": ("ffmpeg.exe", "ffmpeg"),
+    "ffprobe": ("ffprobe.exe", "ffprobe"),
+}
+
+#: Windows scripts cannot be passed to CreateProcess as an application name.
+#: They are executed through the system command processor with a fixed flag set.
+WINDOWS_SCRIPT_SUFFIXES = (".cmd", ".bat")
+
+RESOLUTION_MANAGED = "MANAGED_TOOL_DIR"
+RESOLUTION_PROCESS_PATH = "PROCESS_PATH"
+RESOLUTION_MISSING = "NOT_FOUND"
+
 #: The ports a service may be moved to when the preferred one is not usable.
 #: The range starts right after the historical 8188 and is only ever probed.
 PORT_FALLBACK_WINDOW = 64
@@ -77,30 +97,174 @@ def _run(probe: CommandProbe) -> tuple[bool, str]:
     return True, (result.stdout or "") + (result.stderr or "")
 
 
-def _run_with_path(probe: CommandProbe, search_paths: list[str] | None) -> tuple[bool, str]:
-    """Run a probe with the managed tool directory in front of PATH.
+def _is_windows_host(windows: bool | None = None) -> bool:
+    return os.name == "nt" if windows is None else bool(windows)
 
-    A freshly installed tool is written to a directory the running API process
-    does not have on its inherited PATH (Windows only re-reads PATH for new
-    processes).  Prepending the *managed* directory makes the just-installed
-    executable findable without restarting the workbench and without trusting
-    whatever a user shell happens to export.
+
+def _inherited_path_entries() -> list[str]:
+    value = os.environ.get("PATH") or os.environ.get("Path") or ""
+    return [entry for entry in value.split(os.pathsep) if entry]
+
+
+def _candidate_names(name: str, windows: bool) -> tuple[str, ...]:
+    names = TOOL_EXECUTABLES[name]
+    if windows:
+        return names
+    return tuple(row for row in names if not row.lower().endswith((".exe", ".cmd", ".bat")))
+
+
+def _looks_executable(path: Path, windows: bool) -> bool:
+    try:
+        if not path.is_file():
+            return False
+        if windows:
+            return path.suffix.lower() in {".exe", ".cmd", ".bat"} or not path.suffix
+        return os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def resolve_tool_executable(name: str, search_paths: list[str] | None = None, *,
+                            windows: bool | None = None) -> dict:
+    """Resolve one whitelisted tool to an absolute path without trusting input.
+
+    This is the fix for the "installed but still reported missing" defect:
+    adding a directory to a child process' PATH environment block does *not*
+    make Windows' ``CreateProcess`` search it, because the application name is
+    resolved against the *parent's* PATH.  The tool is therefore resolved here,
+    against the managed tool directory first, and the absolute path is what
+    gets executed.
+
+    Only names from :data:`TOOL_EXECUTABLES` are accepted.  A caller cannot
+    pass an executable path, a relative path or an unknown command.
+    """
+    if name not in TOOL_EXECUTABLES:
+        raise ValueError("UNKNOWN_TOOL " + str(name))
+    on_windows = _is_windows_host(windows)
+    managed = [entry for entry in (search_paths or []) if entry]
+    directories = [*managed, *_inherited_path_entries()]
+    candidates = _candidate_names(name, on_windows)
+    for directory in directories:
+        try:
+            base = Path(directory).expanduser()
+        except (OSError, ValueError):
+            continue
+        if not base.is_absolute():
+            # A relative PATH entry is resolved against the current directory,
+            # which is not a stable identity for a tool.  Skip it.
+            continue
+        for candidate in candidates:
+            path = base / candidate
+            if not _looks_executable(path, on_windows):
+                continue
+            try:
+                resolved = str(path.resolve())
+            except OSError:
+                resolved = str(path)
+            return {
+                "resolved": True,
+                "tool": name,
+                "path": resolved,
+                "candidate": candidate,
+                "source": (RESOLUTION_MANAGED if directory in managed
+                           else RESOLUTION_PROCESS_PATH),
+                "managed_root": directory if directory in managed else None,
+                "is_script": candidate.lower().endswith(WINDOWS_SCRIPT_SUFFIXES),
+                "searched": directories,
+            }
+    return {
+        "resolved": False,
+        "tool": name,
+        "path": None,
+        "candidate": None,
+        "source": RESOLUTION_MISSING,
+        "managed_root": None,
+        "is_script": False,
+        "searched": directories,
+    }
+
+
+def _windows_script_argv(executable: str, arguments: list[str]) -> list[str]:
+    """The only legal way to run a ``.cmd``/``.bat`` shim from Python.
+
+    ``subprocess`` with ``shell=False`` calls ``CreateProcess``, whose first
+    argument must be a real executable image; a command script is not one.
+    The script is therefore handed to the system command processor with fixed
+    flags.  The extra outer quotes are required by ``cmd /s /c`` when the
+    script path contains spaces (the managed directory usually does).
+    """
+    comspec = (os.environ.get("COMSPEC") or os.environ.get("ComSpec")
+               or str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"))
+    command = subprocess.list2cmdline([executable, *arguments])
+    return [comspec, "/d", "/s", "/c", f'"{command}"']
+
+
+def executable_argv(resolution: dict, arguments: list[str], *,
+                    windows: bool | None = None) -> list[str]:
+    """The argv that runs a resolved tool, honouring the Windows script rule."""
+    if not resolution.get("resolved") or not resolution.get("path"):
+        raise FileNotFoundError("TOOL_NOT_RESOLVED")
+    executable = str(resolution["path"])
+    if _is_windows_host(windows) and executable.lower().endswith(WINDOWS_SCRIPT_SUFFIXES):
+        return _windows_script_argv(executable, list(arguments))
+    return [executable, *arguments]
+
+
+def _environment_with_search_paths(search_paths: list[str] | None) -> dict | None:
+    """A child environment whose PATH starts with the managed tool directory.
+
+    The resolved absolute executable does not need this; the shim's own child
+    processes (``npm`` starts ``node``) do.
     """
     if not search_paths:
-        return _run(probe)
+        return None
     environment = dict(os.environ)
     existing = environment.get("PATH") or environment.get("Path") or ""
     environment["PATH"] = os.pathsep.join([*search_paths, existing])
+    return environment
+
+
+def _run_resolved(resolution: dict, name: str, search_paths: list[str] | None, *,
+                  windows: bool | None = None) -> tuple[bool, str]:
+    arguments = {
+        "uv": ["--version"],
+        "node": ["--version"],
+        "npm": ["--version"],
+        "pwsh": ["-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"],
+        "ffmpeg": ["-version"],
+        "ffprobe": ["-version"],
+    }[name]
     try:
+        argv = executable_argv(resolution, arguments, windows=windows)
         result = subprocess.run(
-            probe.args, shell=False, capture_output=True, text=True, timeout=30,
-            errors="replace", env=environment,
+            argv, shell=False, capture_output=True, text=True, timeout=30,
+            errors="replace", env=_environment_with_search_paths(search_paths),
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, subprocess.TimeoutExpired, FileNotFoundError):
         return False, ""
     if result.returncode != 0:
         return False, ""
     return True, (result.stdout or "") + (result.stderr or "")
+
+
+def _run_with_path(probe: CommandProbe, search_paths: list[str] | None) -> tuple[bool, str]:
+    """Run a probe from the managed tool directory when the tool is one of ours.
+
+    Kept for callers that build a :class:`CommandProbe` directly.  The command
+    name is resolved to an absolute path first; see
+    :func:`resolve_tool_executable` for why a PATH prefix alone is not enough.
+    """
+    if not probe.args:
+        return False, ""
+    name = Path(str(probe.args[0])).name
+    if name.lower().endswith((".exe", ".cmd", ".bat")):
+        name = Path(name).stem
+    if name not in TOOL_EXECUTABLES:
+        return _run(probe)
+    resolution = resolve_tool_executable(name, search_paths)
+    if not resolution["resolved"]:
+        return False, ""
+    return _run_resolved(resolution, name, search_paths)
 
 
 def _version_of(text: str, pattern: str) -> str:
@@ -115,19 +279,23 @@ def _at_floor(version: str, floor: str) -> bool:
     return key(version) >= key(floor)
 
 
-def probe_command(name: str, *, runner=None, search_paths: list[str] | None = None) -> dict:
+def probe_command(name: str, *, runner=None, search_paths: list[str] | None = None,
+                  windows: bool | None = None) -> dict:
     """One CLI tool: present / version / at_floor / how it was found.
 
     ``search_paths`` are the managed tool directories checked in front of the
     inherited PATH, so a tool installed a minute ago is detected without a
-    workbench restart.  The returned ``command`` is the resolved executable
-    identity when the OS can name it; nothing here installs or starts a tool.
+    workbench restart.  The tool is resolved to an absolute path and executed
+    by that path; a Windows ``.cmd`` shim is run through the system command
+    processor.  The returned ``command`` is the resolved executable identity.
     """
-    runner = runner or (lambda probe: _run_with_path(probe, search_paths))
-    npm = "npm.cmd" if os.name == "nt" else "npm"
+    if name not in TOOL_EXECUTABLES:
+        raise ValueError("UNKNOWN_TOOL " + str(name))
+    resolution = resolve_tool_executable(name, search_paths, windows=windows)
+    npm = "npm.cmd" if _is_windows_host(windows) else "npm"
     if name == "pwsh":
         probe = CommandProbe(["pwsh", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"])
-    elif name in {"uv", "node", "npm", "ffmpeg", "ffprobe"}:
+    else:
         args = {
             "uv": ["uv", "--version"],
             "node": ["node", "--version"],
@@ -136,9 +304,12 @@ def probe_command(name: str, *, runner=None, search_paths: list[str] | None = No
             "ffprobe": ["ffprobe", "-version"],
         }[name]
         probe = CommandProbe(args)
+    if runner is not None:
+        present, output = runner(probe)
+    elif resolution["resolved"]:
+        present, output = _run_resolved(resolution, name, search_paths, windows=windows)
     else:
-        raise ValueError("UNKNOWN_TOOL " + name)
-    present, output = runner(probe)
+        present, output = False, ""
     version = _version_of(output, probe.version_pattern)
     floor = FLOOR_VERSIONS[name]
     return {
@@ -147,9 +318,14 @@ def probe_command(name: str, *, runner=None, search_paths: list[str] | None = No
         "at_floor": _at_floor(version or "0", floor),
         "min_version": floor,
         "tool": name,
-        # The probe cannot tell which PATH entry answered; it only claims that
-        # the managed directory was searched in front of the process PATH.
-        "search_scope": "MANAGED_THEN_PROCESS_PATH" if search_paths else "PROCESS_PATH",
+        "command": resolution["path"],
+        "resolved_path": resolution["path"],
+        "resolution": resolution["source"],
+        "resolution_kind": "COMMAND_SCRIPT" if resolution["is_script"] else "EXECUTABLE",
+        # The probe reports the scope it really searched.  It never claims a
+        # process PATH answer when the tool came from the managed directory.
+        "search_scope": ("MANAGED_THEN_PROCESS_PATH" if search_paths
+                         else "PROCESS_PATH"),
         "requires_environment_refresh": bool(search_paths and present),
     }
 
@@ -536,6 +712,25 @@ def _probe_comfy_http(port: int) -> dict:
         "comfyui_version": ((payload.get("system") or {}).get("comfyui_version")
                             if isinstance(payload, dict) else None),
         "device_count": len(payload.get("devices") or []) if isinstance(payload, dict) else None,
+    }
+
+
+def probe_comfy_service(port: int) -> dict:
+    """Read-only identity evidence of a ComfyUI service on loopback.
+
+    A reachable HTTP server is not a ComfyUI identity; the contract requires
+    the ``/system_stats`` shape (``system`` + ``devices``).  The reported
+    version comes from that response and is labelled with its source.
+    """
+    probe = _probe_comfy_http(port)
+    return {
+        "port": port,
+        "reachable": bool(probe.get("reachable")),
+        "is_comfyui": bool(probe.get("comfyui")),
+        "version": probe.get("comfyui_version"),
+        "version_source": "/system_stats" if probe.get("comfyui_version") else None,
+        "device_count": probe.get("device_count"),
+        "probe": "/system_stats",
     }
 
 
