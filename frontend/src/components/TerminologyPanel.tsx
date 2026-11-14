@@ -127,6 +127,9 @@ export default function TerminologyPanel({ projectId, busy, onMessage }: Props) 
         </button>
       </div>
 
+      {revisions.length === 0 && (
+        <div className="empty-inline">还没有人名对照表。在上方填写标准写法并「保存为新版本」后，真实审片时识别模型会先收到这张表。</div>
+      )}
       {revisions.length > 0 && (
         <div className="shot-list">
           {revisions.map((row) => (
@@ -243,6 +246,9 @@ export function SubtitlePanel({ projectId, busy, onMessage }: Props) {
         </button>
       </div>
 
+      {revisions.length === 0 && (
+        <div className="empty-inline">还没有字幕版本。在上方添加字幕行并「保存为新版本」；只有已批准的版本会在交付时合成进成片。</div>
+      )}
       {revisions.length > 0 && (
         <div className="shot-list">
           {revisions.map((row) => (

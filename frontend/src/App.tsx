@@ -294,6 +294,12 @@ function App() {
 
   useEffect(() => { if (ui !== 'assets') window.localStorage.setItem('shine-interface', ui); }, [ui]);
 
+  /** D-R4-06：进入交付视图自动读一次最新操作记录，不必先手动点刷新。 */
+  useEffect(() => {
+    if (view !== 'delivery' || !projectId) return;
+    loadAudit(projectId, 0).catch((error: Error) => report(error.message, 'error'));
+  }, [view, projectId, loadAudit]);
+
   /**
    * 生成方案没手动选过时自动挑一个：单镜头开拍与一键开拍用同一套默认，
    * 用户不必先去「请选择…」里做一次技术选择。优先带画面宽高的 Ref2VA 方案。
