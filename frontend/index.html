@@ -3,8 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#f5f4f0" />
+    <meta name="theme-color" content="#f1f5fb" />
     <title>Shine 视频工作台</title>
+    <script>
+      // Restore the stored interface theme before styles paint, so a dark-theme
+      // user never sees a light flash. Values mirror src/theme/themes.ts.
+      (function () {
+        var ids = ['light', 'dark', 'xianxia', 'cyberpunk', 'cinema', 'comic'];
+        var id = 'light';
+        try {
+          var stored = window.localStorage.getItem('shine-theme');
+          if (stored && ids.indexOf(stored) >= 0) id = stored;
+        } catch (error) { /* blocked storage falls back to light */ }
+        var dark = id === 'dark' || id === 'xianxia' || id === 'cyberpunk' || id === 'cinema';
+        document.documentElement.dataset.theme = id;
+        document.documentElement.dataset.appearance = dark ? 'dark' : 'light';
+        document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

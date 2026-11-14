@@ -92,7 +92,7 @@ describe('制作环境：检测快照与候选下载', () => {
     await user.click(screen.getByRole('button', { name: '重复下载' }));
     expect(screen.queryByRole('group', { name: '重复下载确认' })).toBeNull();
     expect(checkbox).toBeChecked();
-    expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeEnabled();
   });
 
   it('可自动补装的基础工具不阻断准备入口，并显示具体软件与端口', async () => {
@@ -115,7 +115,7 @@ describe('制作环境：检测快照与候选下载', () => {
     await detect(user);
     expect(screen.getByRole('group', { name: '基础工具补装' })).toHaveTextContent('FFmpeg + FFprobe');
     expect(screen.getByText(/服务端口 8189/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeEnabled();
     expect(screen.queryByText(/先处理硬件或工具阻断项/)).toBeNull();
   });
 
@@ -131,6 +131,6 @@ describe('制作环境：检测快照与候选下载', () => {
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
     await detect(user);
     expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
   });
 });

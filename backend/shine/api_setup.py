@@ -45,6 +45,11 @@ class InstallPlanRequest(BaseModel):
     #: candidate's weights (2026-11-14 user decision).  Acceptance status and
     #: every production gate stay unchanged; BLOCKED variants never download.
     candidate_download_acknowledged: bool = False
+    #: The capability the person asked to prepare.  This is a *declaration*,
+    #: not a switch: the server re-derives the capability from the catalog it
+    #: owns and refuses a mismatch by name, so no request can borrow another
+    #: capability's admission or escape its own.
+    capability: str | None = None
 
 
 class ResourceResolveRequest(BaseModel):
@@ -684,14 +689,37 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
     The browser may hide a button, but the button is not the gate: the
     server runs the same qualification again for every plan, so a request
     that skips the user interface is refused in exactly the same way.
+
+    The *capability* decides which qualification applies.  A plan that
+    prepares image or review weights is never refused because the H3 video
+    variant does not fit this card, and a plan that prepares the H3 weights
+    never borrows the image capability's rules.  The capability comes from the
+    server owned catalog, never from the request.
     """
     from shine.comfyops import variants as variant_manifests
+    from shine.comfyops.capability import (
+        CAPABILITY_H3,
+        CAPABILITY_IMAGE,
+        catalog_capability,
+        plan_capability,
+        runtime_advisories,
+        runtime_requirements,
+    )
     from shine.comfyops.host_env import probe_host_facts
 
     raw = deployment.load_deployment_catalog(body.catalog)
     valid_ids = {c["component_id"] for c in raw["components"]}
     if not set(body.components) <= valid_ids:
         raise HTTPException(422, "CATALOG_COMPONENT_UNKNOWN")
+    capability = plan_capability(catalog_capability(body.catalog, raw), raw, body.components)
+    if body.capability is not None and body.capability != capability:
+        raise HTTPException(409, {
+            "code": "CAPABILITY_CATALOG_MISMATCH",
+            "message": "这次请求声明的能力和资源清单实际所属的能力不一致，已拒绝；"
+                       "能力由服务端按清单判定，不接受前端自报。",
+            "declared_capability": body.capability,
+            "actual_capability": capability,
+        })
     catalog_variant = str(raw.get("variant_id") or "")
     if catalog_variant and body.variant_id and body.variant_id != catalog_variant:
         raise HTTPException(409, {"code": "VARIANT_CATALOG_MISMATCH"})
@@ -711,47 +739,67 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
         except (OSError, ValueError, FileNotFoundError):
             raise HTTPException(422, "VARIANT_MANIFEST_UNKNOWN") from None
     qualification = None
-    if variant is not None:
-        env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
-        qualification = variant_manifests.qualify(variant_manifests.variant_requirements(variant), env)
-        if not variant.get("auto_download_allowed"):
-            acceptance = str(variant.get("acceptance_status") or "")
-            if acceptance == "BLOCKED" or not body.candidate_download_acknowledged:
-                raise HTTPException(409, {
-                    "code": "VARIANT_NOT_DOWNLOADABLE",
-                    "message": "这个变体还没有进入自动安装路径；它的验收状态是 "
-                               + acceptance + "。候选权重可以在制作环境卡片里"
-                               "显式确认后下载（下载不等于验收）；BLOCKED 变体没有"
-                               "可核对的权重来源，不能下载。",
-                    "variant_id": variant.get("variant_id"),
-                    "acceptance_status": acceptance,
-                })
-            from shine.services import add_audit
+    runtime_facts: dict = {}
+    if capability == CAPABILITY_H3:
+        if variant is not None:
+            env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
+            qualification = variant_manifests.qualify(variant_manifests.variant_requirements(variant), env)
+            candidate_ack = False
+            if not variant.get("auto_download_allowed"):
+                acceptance = str(variant.get("acceptance_status") or "")
+                if acceptance == "BLOCKED" or not body.candidate_download_acknowledged:
+                    raise HTTPException(409, {
+                        "code": "VARIANT_NOT_DOWNLOADABLE",
+                        "message": "这个变体还没有进入自动安装路径；它的验收状态是 "
+                                   + acceptance + "。候选权重可以在制作环境卡片里"
+                                   "显式确认后下载（下载不等于验收）；BLOCKED 变体没有"
+                                   "可核对的权重来源，不能下载。",
+                        "variant_id": variant.get("variant_id"),
+                        "acceptance_status": acceptance,
+                    })
+                candidate_ack = True
+                from shine.services import add_audit
 
-            add_audit(
-                db, "local-user", "CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED",
-                "variant", str(variant.get("variant_id")),
-                {"acceptance_status": acceptance, "catalog_id": raw.get("catalog_id")},
-                project_id=body.project_id,
-            )
-        if qualification["status"] == variant_manifests.STATUS_BLOCKED:
-            # A measured incompatibility never becomes a download: the plan
-            # would prepare bytes this machine cannot execute.  UNKNOWN stays
-            # different: a requirement could not be read, so resource
-            # preparation is allowed and every production gate stays closed.
-            raise HTTPException(409, {
-                "code": "HOST_NOT_QUALIFIED",
-                "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
-                "variant_id": variant.get("variant_id"),
-                "status": qualification["status"],
-                "blockers": qualification["blockers"],
-                "unknowns": qualification["unknowns"],
-            })
+                add_audit(
+                    db, "local-user", "CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED",
+                    "variant", str(variant.get("variant_id")),
+                    {"acceptance_status": acceptance, "catalog_id": raw.get("catalog_id")},
+                    project_id=body.project_id,
+                )
+            if qualification["status"] != variant_manifests.STATUS_SUPPORTED:
+                # A production variant is admitted only on a host that was
+                # *measured* to be sufficient.  A candidate whose thresholds are
+                # still unknown is the candidate's nature: the person confirmed
+                # it explicitly, the preparation is allowed, and every
+                # production gate stays shut.  A measured incompatibility
+                # (BLOCKED) is refused in both cases.
+                if qualification["status"] == variant_manifests.STATUS_BLOCKED or not candidate_ack:
+                    raise HTTPException(409, {
+                        "code": "HOST_NOT_QUALIFIED",
+                        "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。"
+                                   "这次只影响 H3 视频方案：基础工具补装和独立图片、审片权重的下载不受影响。",
+                        "capability": CAPABILITY_H3,
+                        "variant_id": variant.get("variant_id"),
+                        "status": qualification["status"],
+                        "blockers": qualification["blockers"],
+                        "unknowns": qualification["unknowns"],
+                    })
+    else:
+        # The image and review capabilities are prepared under their own rules.
+        # Their runtime floors are reported, not enforced here: downloading a
+        # weight is storage bound, running it is compute bound, and the runtime
+        # gate stays where it belongs - at the renderer that has to load it.
+        requirements = runtime_requirements(capability, raw, body.components)
+        runtime_facts = {
+            "requirements": requirements,
+            "advisories": runtime_advisories(requirements, _host_facts(settings)),
+        }
     plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free,
                                           variant=variant, qualification=qualification,
                                           configuration={
-                                              "h3_video": True,
-                                              "image_prep": bool(body.include_image_capability),
+                                              "h3_video": capability == CAPABILITY_H3,
+                                              "image_prep": capability == CAPABILITY_IMAGE
+                                              or bool(body.include_image_capability),
                                           })
     companion = []
     if body.include_image_capability:
@@ -777,10 +825,28 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
             "download_bytes": plan.payload["download_bytes"], "disk_required": plan.payload["disk_required"],
             "packages": [p["id"] for p in plan.payload["packages"]],
             "variant_id": (variant or {}).get("variant_id"),
+            "capability": capability,
             "qualification": qualification,
+            "runtime_requirements": runtime_facts.get("requirements", {}),
+            "runtime_advisories": runtime_facts.get("advisories", []),
             "configuration": plan.payload.get("configuration"),
             "companion_plans": companion,
             "download_breakdown": plan.payload.get("download_breakdown")}
+
+
+def _host_facts(settings: SettingsDep) -> dict:
+    """The host report for advisories only - a failed probe is not a refusal.
+
+    The advisory answers "can this machine run the capability".  A machine
+    whose facts cannot be read is *unknown*, which never blocks a download and
+    never reports the capability as ready.
+    """
+    from shine.comfyops.host_env import probe_host_facts
+
+    try:
+        return probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir) or {}
+    except Exception:  # noqa: BLE001 - an unreadable host is unknown, not blocked
+        return {}
 
 
 @router.post("/instance-chain", deprecated=True)
