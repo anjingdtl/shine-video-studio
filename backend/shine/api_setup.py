@@ -79,7 +79,10 @@ class InstanceChainRequest(BaseModel):
     catalog: str = "h3-ref2va-windows-x64"
     project_id: str
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
-    port: int = Field(default=8188, ge=1024, le=65535)
+    #: Omitted means "the installation this machine resolved to"; an explicit
+    #: value is honoured and echoed back, so the caller can see the identity the
+    #: rest of the preparation will reuse.
+    port: int | None = Field(default=None, ge=1024, le=65535)
     mode: str = Field(default="local", pattern=r"^(fake|local)$")
     #: The one variant the person chose on the setup card.  When present, the
     #: plan is assembled from *that* variant's catalog and the request is
@@ -91,10 +94,18 @@ class ConfigurationRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
-    port: int = Field(default=8188, ge=1024, le=65535)
+    #: The port the recipe is generated for.  Omitted means "the installation
+    #: this machine already resolved to" - never a silent 8188.  A caller that
+    #: prepared a plan on 8189 and then generated configuration without naming
+    #: the port used to get a recipe for 8188, which is exactly the identity
+    #: split that produced IMAGE_RENDERER_RECIPE_MISSING on a healthy install.
+    port: int | None = Field(default=None, ge=1024, le=65535)
     #: The variant whose startup contract supplies the recipe's memory floors.
     #: Omitted = the default production variant, exactly the previous behavior.
     variant_id: str | None = Field(default=None, max_length=80)
+    #: ``image`` writes the same instance-bound recipe for the 素材出图 runtime.
+    #: It does not create a video runtime candidate and never claims H3 is ready.
+    capability: Literal["h3", "image"] = "h3"
 
 
 class RuntimeActivationRequest(BaseModel):
@@ -161,6 +172,10 @@ class ExistingInstallationAdoptRequest(ExistingModelImportRequest):
     project_id: str
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
     port: int = Field(default=8188, ge=1024, le=65535)
+    #: Which weight set this confirmation covers.  ``h3`` keeps every previous
+    #: requirement; ``image`` lets an installation that only holds the Qwen
+    #: weights be reused for 素材出图 without downloading a video model first.
+    capability: Literal["h3", "image"] = "h3"
 
 
 def _inspection_catalog(variant_id: str | None = None, catalog: str | None = None) -> dict:
@@ -326,6 +341,15 @@ def adopt_existing(body: ExistingInstallationAdoptRequest, actor: Operator, sett
     """Confirm an existing H3 install for reuse without copying or downloading it."""
     from shine.comfyops.adoption import adopt_existing_installation
 
+    # An image-only confirmation must not be judged against the video catalogue:
+    # letting the adoption layer pick by capability is what keeps a Qwen-only
+    # installation reusable without a second, contradictory manifest.
+    if body.catalog or body.variant_id:
+        catalog = _inspection_catalog(body.variant_id, body.catalog)
+    elif body.capability == 'h3':
+        catalog = _inspection_catalog(None, None)
+    else:
+        catalog = None
     return adopt_existing_installation(
         db,
         settings,
@@ -335,6 +359,8 @@ def adopt_existing(body: ExistingInstallationAdoptRequest, actor: Operator, sett
         name=body.instance_name,
         port=body.port,
         actor=actor,
+        capability=body.capability,
+        catalog=catalog,
     )
 
 
@@ -931,13 +957,16 @@ def next_instance_plan(body: InstanceChainRequest, settings: SettingsDep, db: DB
         ).catalog
     else:
         raw = deployment.load_deployment_catalog(body.catalog)
-    port, port_state = _resolve_service_port(db, body.port)
+    requested_port, instance_name, _target = _runtime_target(
+        db, settings, port=body.port, instance_name=body.instance_name)
+    port, port_state = _resolve_service_port(db, requested_port)
     plan, action = deployment.next_instance_plan(db, settings, raw, body.project_id,
-                                                 instance_name=body.instance_name, port=port,
+                                                 instance_name=instance_name, port=port,
                                                  mode=body.mode)
     header = {
         "requested_port": body.port,
         "port": port,
+        "instance_name": instance_name,
         "port_identity": port_state.get("identity"),
         "port_selected_by_server": port != body.port,
     }
@@ -956,15 +985,40 @@ def configuration(body: ConfigurationRequest, actor: Operator, settings: Setting
     require_project(db, body.project_id)
     require_idle_configuration(db)
     db.rollback()  # Wheel verification and extraction do not hold a SQLite transaction.
-    port, port_state = _resolve_service_port(db, body.port)
+    port, instance_name, target = _runtime_target(
+        db, settings, port=body.port, instance_name=body.instance_name)
+    port, port_state = _resolve_service_port(db, port)
     runtime = prepare_review_runtime(settings, deployment.load_default_catalog())
-    result = deployment.generate_configuration(db, settings, body.project_id,
-                                               instance_name=body.instance_name, port=port,
-                                               variant_id=body.variant_id)
+    result = deployment.generate_configuration(
+        db, settings, body.project_id, instance_name=instance_name, port=port,
+        variant_id=body.variant_id, capability=body.capability)
     return {**result, "review_runtime_preparation": runtime,
             "requested_port": body.port, "port": port,
+            "installation_id": (target or {}).get("instance_id"),
             "port_identity": port_state.get("identity"),
             "port_selected_by_server": port != body.port}
+
+
+def _runtime_target(db, settings, *, port: int | None, instance_name: str | None):
+    """The physical installation this request is really about.
+
+    Every step of one preparation - plan, profiles, recipe, image binding,
+    service validation - resolves its port and instance name here, so one call
+    cannot pick 8189 and the next fall back to the default 8188.
+    """
+    from shine.comfyops.setup_summary import resolve_installation
+
+    try:
+        resolved = resolve_installation(db, settings)
+    except Exception:  # noqa: BLE001 - an unreadable ledger must not fabricate a target
+        resolved = {"selected": None}
+    selected = resolved.get("selected") or {}
+    if port is None:
+        candidate = selected.get("port")
+        port = int(candidate) if isinstance(candidate, int) and not isinstance(candidate, bool) else 8188
+    if (not instance_name or instance_name == "shine-h3") and selected.get("name"):
+        instance_name = str(selected["name"])
+    return int(port), instance_name or "shine-h3", selected
 
 
 @router.get("/variant-startup-contract")
@@ -1476,3 +1530,252 @@ def configure_voice_runtime(body: VoiceRuntimeRequest, actor: Operator, settings
         'role_runtimes': {role: spec.model_dump(mode="json") for role, spec in config.runtimes().items()},
         'readiness': voice_readiness(db, settings),
     }
+
+
+# --- one-stop setup: summary, reconcile, prepared downloads ------------------
+#
+# These four routes are a facade over machinery that already exists.  They never
+# download, hash a multi-GB weight synchronously, start a process or register a
+# duplicate row: the facts come from the receipt/package/instance ledgers, and
+# everything long belongs to the resident Worker.
+
+
+class ReconcileRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    #: The installation the person is looking at.  Omitted = the one this
+    #: machine already resolved to (never "the first entry of a scan list").
+    path: str | None = Field(default=None, max_length=1024)
+    project_id: str | None = None
+    capability: Literal["h3", "image"] = "h3"
+    #: Adopt is the one confirmation that represents the instance.  Detection
+    #: alone never takes ownership of an external ComfyUI.
+    adopt: bool = False
+    port: int | None = Field(default=None, ge=1024, le=65535)
+
+
+class ManualFilesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str | None = None
+    capability: Literal["h3", "image"] = "h3"
+
+
+class InstallationChoiceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    path: str = Field(min_length=1, max_length=1024)
+    port: int | None = Field(default=None, ge=1024, le=65535)
+    project_id: str | None = None
+
+
+class PrepareRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_id: str
+    capabilities: list[Literal["h3", "image", "vlm", "asr"]] = Field(min_length=1, max_length=4)
+    installation_path: str | None = Field(default=None, max_length=1024)
+    port: int | None = Field(default=None, ge=1024, le=65535)
+    variant_id: str | None = Field(default=None, max_length=80)
+    #: Runtime contract validation starts services for a moment.  It is part of
+    #: the same authorization, but a person may decline it explicitly.
+    verify_runtime: bool = True
+
+
+class PreparePlanRequest(PrepareRequest):
+    disk_free: int = Field(default=0, ge=0)
+    include_candidate_ack: bool = False
+
+
+_discovery_cache: dict[tuple[str, ...], tuple[float, list[str]]] = {}
+_DISCOVERY_TTL_SECONDS = 30.0
+
+
+def _discovered_roots(settings, db) -> list[str]:
+    """Scan only when the ledger knows nothing, and never twice within a tick.
+
+    A fresh machine has no instance row, so every ``GET /setup/summary`` would
+    otherwise walk the configured roots again - and the page polls while a
+    preparation runs.  The cache is short lived and keyed by the roots, so a
+    newly copied ComfyUI still shows up within half a minute.
+    """
+    import time
+
+    from shine.comfyops.setup_summary import _instance_rows
+
+    if _instance_rows(db):
+        return []
+    key = tuple(str(row) for row in settings.comfy_probe_roots)
+    now = time.monotonic()
+    cached = _discovery_cache.get(key)
+    if cached is not None and now - cached[0] < _DISCOVERY_TTL_SECONDS:
+        return list(cached[1])
+    from shine.comfyops.existing_installation import discover
+
+    try:
+        found = list(discover(list(settings.comfy_probe_roots)).get("installations") or [])
+    except Exception:  # noqa: BLE001 - a failed scan is "nothing found", never a fake hit
+        found = []
+    _discovery_cache[key] = (now, found)
+    return found
+
+
+@router.get("/summary")
+def setup_summary(settings: SettingsDep, db: DBSession, project_id: str | None = None):
+    """The single read-only snapshot every setup entry point shares.
+
+    ``GET`` performs no mutation: no file is written, no service is started and
+    no package is registered.  Detection is read-only discovery of what is
+    already on the machine.
+    """
+    from shine.comfyops.setup_summary import summary
+
+    return summary(db, settings, project_id=project_id, discovered=_discovered_roots(settings, db))
+
+
+@router.get("/missing-files")
+def setup_missing_files(settings: SettingsDep, db: DBSession, capabilities: str | None = None):
+    """Exactly the files that are absent, with their fixed source and target.
+
+    A "missing files" list derived from a download error would be a list of what
+    one host failed to serve.  This one is derived from the pinned catalogues,
+    so it is the same list whether the network works or not.
+    """
+    from shine.comfyops.setup_summary import missing_files
+
+    wanted = [row.strip() for row in (capabilities or "").split(",") if row.strip()]
+    return missing_files(db, settings, capabilities=wanted or None)
+
+
+@router.post("/reconcile")
+def setup_reconcile(body: ReconcileRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Prove what is there and register it.  Idempotent, single-flight.
+
+    This is the "no more manual registration" route: it reuses existing receipts,
+    hashes only what changed, registers verified components exactly once and -
+    when the person explicitly asked for it - adopts the installation.
+    """
+    from shine.comfyops.setup_reconcile import reconcile_installation
+    from shine.comfyops.setup_summary import resolve_installation
+
+    if body.project_id:
+        from shine.services import require_project
+
+        require_project(db, body.project_id)
+    path = body.path
+    port = body.port
+    if not path:
+        resolved = resolve_installation(db, settings, discovered=_discovered_roots(settings, db))
+        selected = resolved.get("selected") or {}
+        path = selected.get("root")
+        port = port or selected.get("port")
+    if not path:
+        raise HTTPException(409, {
+            "code": "NO_INSTALLATION_FOUND",
+            "message": "这台电脑上还没有可用的 ComfyUI 安装；先准备环境或确认已有安装。",
+        })
+    db.rollback()  # hashing and adoption open their own transaction boundaries
+    return reconcile_installation(
+        db, settings, path=path, project_id=body.project_id, capability=body.capability,
+        adopt=body.adopt, port=port, actor=actor,
+    )
+
+
+@router.post("/manual-files/reconcile")
+def setup_manual_files(body: ManualFilesRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Import files a person downloaded by hand, into the existing cache.
+
+    The staging directory is fixed by the server, the SHA-256 is checked against
+    the pinned catalogue and the copy lands in the content-addressed cache the
+    installer already consumes.  The browser never names a path.
+    """
+    from shine.comfyops.setup_reconcile import manual_files_reconcile
+
+    db.rollback()
+    return manual_files_reconcile(db, settings, capability=body.capability, actor=actor)
+
+
+@router.post("/installation-choice")
+def setup_installation_choice(body: InstallationChoiceRequest, actor: Operator, db: DBSession):
+    """Remember which ComfyUI this machine uses, so nobody is asked twice."""
+    from shine.comfyops.setup_summary import record_installation_choice
+
+    value = record_installation_choice(db, root=body.path, port=body.port, actor=actor,
+                                       project_id=body.project_id)
+    db.commit()
+    return {"status": "CONFIRMED", **value}
+
+
+@router.post("/prepare-plan")
+def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSession):
+    """What this authorization would change, before anything is approved.
+
+    It creates no plan and starts nothing: the sizes, the components, the
+    sources and the side effects are computed from the same catalogues the
+    installer uses, so the number a person approves is the number that will be
+    fetched.  The actual download plan is still created by ``POST
+    /install-plan`` - one approval entry, not two.
+    """
+    from shine.comfyops.setup_summary import capability_report, resolve_installation
+    from shine.services import require_project
+
+    require_project(db, body.project_id)
+    resolved = resolve_installation(db, settings, path=body.installation_path,
+                                    discovered=_discovered_roots(settings, db))
+    selected = resolved.get("selected") or {}
+    reports = {capability: capability_report(db, settings, capability, installation=selected,
+                                             project_id=body.project_id)
+               for capability in body.capabilities}
+    plans = []
+    for capability, report in reports.items():
+        missing = report.get("missing_files") or []
+        plans.append({
+            "capability": capability,
+            "label": report["label"],
+            "catalog": report.get("catalog"),
+            "download_bytes": sum(int(row.get("size") or 0) for row in missing),
+            "components": sorted({row["component_id"] for row in missing}),
+            "files": len(missing),
+            "needs_download": bool(missing),
+            "needs_recipe": capability in {"h3", "image"},
+            "starts_services": bool(body.verify_runtime) and capability == "h3",
+            "changes_external_installation": False,
+        })
+    return {
+        "project_id": body.project_id,
+        "installation": resolved,
+        "capabilities": reports,
+        "plans": plans,
+        "download_bytes": sum(row["download_bytes"] for row in plans),
+        "will_start_gpu": any(row["starts_services"] for row in plans),
+        "will_modify_user_comfyui": False,
+        "authorization": {
+            "summary": "本次只下载缺失的固定文件、登记已核验的本机文件并生成运行配置；"
+                       "不会删除你的模型，也不会终止别人的 ComfyUI。",
+            "verify_runtime": body.verify_runtime,
+        },
+    }
+
+
+@router.post("/prepare/execute")
+def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Queue the durable preparation the person just authorized.
+
+    The route returns immediately: the resident Worker advances the steps, so a
+    closed tab, a restart or a reboot resumes instead of restarting.
+    """
+    from shine.comfyops.setup_preparation import enqueue
+    from shine.services import require_project
+
+    require_project(db, body.project_id)
+    value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
+                    installation_path=body.installation_path, port=body.port,
+                    variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor)
+    db.commit()
+    return {"status": value.get("status"), "task_id": value.get("task_id"),
+            "steps": [row["id"] for row in value.get("steps") or []],
+            "message": value.get("message")}
+
+
+@router.post("/prepare/cancel")
+def setup_prepare_cancel(actor: Operator, db: DBSession):
+    from shine.comfyops.setup_preparation import cancel
+
+    value = cancel(db, actor=actor)
+    return {"status": value.get("status") or "IDLE", "task_id": value.get("task_id")}
