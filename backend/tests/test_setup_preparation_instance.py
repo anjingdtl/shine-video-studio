@@ -102,3 +102,26 @@ def test_instance_step_needs_review_stops_named(studio, monkeypatch):
     detail = setup_preparation._step_instance(factory, settings, {"project_id": project_id, "request": {}})
     assert detail["status"] == "FAILED"
     assert detail["code"] == "INSTANCE_REQUIRES_RECONCILIATION"
+
+
+def test_runtime_closure_gap_bare_machine(studio):
+    _client, factory, _tmp, settings = studio
+    from shine.comfyops.setup_summary import runtime_closure_gap
+    with factory() as db:
+        gap = runtime_closure_gap(db, settings, None)
+    assert gap["instance_present"] is False
+    assert gap["instance_ladder"] == ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
+    assert "comfyui" in gap["missing_components"]
+
+
+def test_prepare_plan_reports_runtime_gap_and_closure(studio):
+    client, _factory, _tmp, _settings = studio
+    project_id = create_project(client)
+    response = client.post("/api/v1/setup/prepare-plan",
+                           json={"project_id": project_id, "capabilities": ["h3"]})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["runtime_gap"]["instance_ladder"][0] == "CREATE"
+    h3 = next(row for row in body["plans"] if row["capability"] == "h3")
+    assert "comfyui" in h3["components"]
+    assert h3["download_bytes"] > 0
