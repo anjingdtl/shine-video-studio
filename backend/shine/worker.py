@@ -4267,6 +4267,22 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     if installation:
         return f"installation:{installation}"
 
+    # An authorized preparation that is still unfinished is durable work: the
+    # recipe, the image binding, the project profiles and the service contract
+    # are advanced here, one step per tick, so closing the page never leaves
+    # the machine half-configured.  It runs after the installation queue (the
+    # bytes come first) and before the video runtime check, because a fresh
+    # machine has no runtime yet - that is exactly when it matters.
+    try:
+        from shine.comfyops.setup_preparation import advance as advance_setup
+
+        setup_step = advance_setup(session_factory, settings, worker_id)
+    except Exception as exc:  # noqa: BLE001 - a setup step must not kill the tick
+        logger.warning("setup_preparation_step_failed error=%s", type(exc).__name__)
+        setup_step = None
+    if setup_step:
+        return setup_step
+
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.
     # The bound must stay a bound and never become a freeze: the counter is only
