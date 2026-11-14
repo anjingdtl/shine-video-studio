@@ -2252,6 +2252,8 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .setup-outcomes li em{font-style:normal;color:var(--muted);flex:1;min-width:160px}
 .setup-outcomes li.setup-outcome-blocked{border-color:var(--warn-line, var(--line));background:var(--surface-3)}
 .setup-outcomes li.setup-outcome-blocked span,.setup-outcomes li.setup-outcome-failed span{color:var(--warn-ink)}
+/* 文件已核验不是能力就绪：中性强调，不用成功色。 */
+.setup-outcomes li.setup-outcome-files_ready span{color:var(--ink-soft)}
 .setup-warn{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-caption);color:var(--warn-ink)}
 .setup-image-test{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:12px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
 .setup-image-test>div{display:flex;flex-direction:column;gap:2px;flex:1;min-width:180px}

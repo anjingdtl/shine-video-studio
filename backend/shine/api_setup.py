@@ -694,6 +694,36 @@ def connectivity():
     return {**report, "blockers": connectivity_blockers(report)}
 
 
+class PlanConnectivityRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    catalog: str = "h3-ref2va-windows-x64"
+    components: list[str] = Field(min_length=1, max_length=14)
+
+
+@router.post("/connectivity/for-plan")
+def connectivity_for_plan(body: PlanConnectivityRequest):
+    """Plan-scoped download admission for one component closure.
+
+    The four-site diagnostic above stays untouched; this endpoint answers a
+    narrower question - "can this plan's own remaining downloads reach their
+    sources".  A capability whose files only download from one host is never
+    blocked because an unrelated host is down, and a blocked answer names the
+    exact sources and components it blocks instead of failing the whole
+    preparation.  The capability is derived from the server owned catalog,
+    exactly like ``POST /install-plan`` derives it.
+    """
+    from shine.comfyops.capability import catalog_capability, plan_capability
+    from shine.comfyops.connectivity import preflight_for_components
+
+    raw = deployment.load_deployment_catalog(body.catalog)
+    valid_ids = {c["component_id"] for c in raw["components"]}
+    if not set(body.components) <= valid_ids:
+        raise HTTPException(422, "CATALOG_COMPONENT_UNKNOWN")
+    capability = plan_capability(catalog_capability(body.catalog, raw), raw, body.components)
+    report = preflight_for_components(raw, body.components)
+    return {**report, "catalog": raw["catalog_id"], "capability": capability}
+
+
 @router.get("/catalog")
 def catalog_summary():
     raw = deployment.load_deployment_catalog()

@@ -125,14 +125,16 @@ type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr';
  * What one capability ended up as.
  *
  * A capability that could not be prepared says why and stops there: it never
- * takes the other - legal - capabilities down with it.  "READY" means the
- * bytes are on disk and verified; it is not a claim that the capability can
- * run on this machine.
+ * takes the other - legal - capabilities down with it.  The vocabulary keeps
+ * two different facts apart: "FILES_READY" states the pinned bytes are on
+ * disk and hash-verified (the installer's honest terminal stage
+ * FILES_VERIFIED_PENDING_RUNTIME), while "READY" claims the runtime contract
+ * was verified too.  Neither is a claim of a real generation.
  */
 type CapabilityOutcome = {
   key: CapabilityKey;
   label: string;
-  status: 'READY' | 'REUSED' | 'BLOCKED' | 'FAILED';
+  status: 'READY' | 'FILES_READY' | 'REUSED' | 'BLOCKED' | 'FAILED';
   note: string;
 };
 
@@ -438,8 +440,43 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     return `确认准备 H3 权重（约 ${gib(row.bytes)}）`;
   }, [capabilityRows, pendingRepair, selectedVariant]);
 
+  // The H3 scheme is a condition of the H3 capability alone: preparing only
+  // image or review weights must not wait for an H3 variant that was never
+  // asked for (a machine with no installable H3 scheme stays able to prepare
+  // the other - legal - capabilities).
   const canPrepare = !!projectId && !envBlocked && !running && !!storage && !storage.requires_selection
-    && !!selectedVariant;
+    && (!caps.h3 || !!selectedVariant);
+
+  /**
+   * Plan-scoped download admission (C-01).
+   *
+   * Only the sources this capability's own components really download from
+   * may block this capability; the four-site report stays a diagnostic view.
+   * The preflight is advisory admission: when it cannot run (an older
+   * backend, a busy API), the persistent installation attempt remains the
+   * real gate - a skipped preflight never turns into a fake success.
+   */
+  const preflightSources = async (body: Record<string, unknown>): Promise<string | null> => {
+    try {
+      const report = await api<{
+        blocked?: string[];
+        required?: Array<{
+          probe_id: string | null; label: string; host: string;
+          status: string; component_ids?: string[];
+        }>;
+      }>('/setup/connectivity/for-plan', json('POST', {
+        catalog: body.catalog, components: body.components,
+      }));
+      if (!report.blocked?.length) return null;
+      const rows = (report.required ?? []).filter((row) => row.probe_id && report.blocked?.includes(row.probe_id));
+      const named = rows.length
+        ? rows.map((row) => `${row.label}（${(row.component_ids ?? []).join('、')}）`).join('；')
+        : report.blocked.join('、');
+      return `需要下载的源无法连接：${named}。先在本机浏览器打开对应站点；企业代理或 VPN 要在启动服务前设好，然后重试；其它能力不受影响。`;
+    } catch {
+      return null; // 预检本身不可用时，安装尝试仍是真正的门
+    }
+  };
 
   async function prepare() {
     if (!projectId) { onNeedProject?.(); return; }
@@ -465,11 +502,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       }
       const port = environment.port?.selected ?? environment.port?.port;
       if (!port) throw new Error('服务端口状态读取不到，不能安全地准备 ComfyUI。');
-      if (downloadBytes > 0) {
-        setRunning({ label: '检查下载网络…', note: '' });
-        const network = await api<{ blocked: string[] }>('/setup/connectivity');
-        if (network.blocked.length) throw new Error(`下载源无法连接：${network.blocked.join('、')}`);
-      }
       /**
        * One install plan, one capability.
        *
@@ -488,15 +520,20 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         );
         ensure();
         const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, ensure, { wait: false });
+        let stage = '';
         if (isQueuedInstallation(queued)) {
-          await waitForInstallationAttempt(queued.attempt_id, (view) => {
+          // The attempt's own terminal stage is the honest outcome: files
+          // verified is not runtime verified, and the capability's result
+          // below must not blur the two (C-03).
+          const view = await waitForInstallationAttempt(queued.attempt_id, (progress) => {
             if (mounted.current) {
-              setAttempt(view);
-              setRunning({ label: `${label}…`, note: `${gib(view.confirmed_bytes)} / ${gib(view.total_bytes)}` });
+              setAttempt(progress);
+              setRunning({ label: `${label}…`, note: `${gib(progress.confirmed_bytes)} / ${gib(progress.total_bytes)}` });
             }
           });
+          stage = String(view.stage ?? '');
         }
-        return plan;
+        return { plan, stage };
       };
 
       /** A refusal keeps its own words; the other capabilities keep going. */
@@ -562,21 +599,34 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         } else {
           const components = new Set<string>(STRUCTURE_COMPONENTS);
           for (const id of selectedVariant ? weightIdsOf(selectedVariant) : []) components.add(id);
+          const body = {
+            catalog: selectedVariant?.catalog_id ?? 'h3-ref2va-windows-x64',
+            components: [...components],
+            project_id: projectId,
+            disk_free: storage?.free_bytes ?? 0,
+            variant_id: selectedVariant?.variant_id,
+            candidate_download_acknowledged: !!selectedVariant && !selectedVariant.auto_download_allowed,
+          };
           try {
-            await runPlan(`准备${label}`, {
-              catalog: selectedVariant?.catalog_id ?? 'h3-ref2va-windows-x64',
-              components: [...components],
-              project_id: projectId,
-              disk_free: storage?.free_bytes ?? 0,
-              variant_id: selectedVariant?.variant_id,
-              candidate_download_acknowledged: !!selectedVariant && !selectedVariant.auto_download_allowed,
-            }, `约 ${gib(h3Bytes)}`);
-            outcome = { key: 'h3', label, status: 'READY', note: note || '权重已下载并逐字节核验。' };
+            // Only the sources this plan's own components download from may
+            // block this plan; an unrelated host outage stays diagnostic.
+            const blockedNote = await preflightSources(body);
+            if (blockedNote) {
+              outcome = { key: 'h3', label, status: 'BLOCKED', note: blockedNote };
+            } else {
+              const { stage } = await runPlan(`准备${label}`, body, `约 ${gib(h3Bytes)}`);
+              outcome = stage === 'FILES_VERIFIED_PENDING_RUNTIME'
+                ? {
+                  key: 'h3', label, status: 'FILES_READY',
+                  note: note || '权重文件已下载并逐字节核验；能否在这台机器上出片，要等受管运行环境启动核验。',
+                }
+                : { key: 'h3', label, status: 'READY', note: note || '权重已下载并逐字节核验。' };
+            }
           } catch (error) {
             outcome = failed('h3', label, error);
           }
         }
-        h3Ready = outcome.status === 'READY' || outcome.status === 'REUSED';
+        h3Ready = outcome.status === 'READY' || outcome.status === 'FILES_READY' || outcome.status === 'REUSED';
         report.push(outcome);
       }
 
@@ -611,17 +661,25 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       }
       for (const item of independent) {
         try {
-          const plan = await runPlan(`准备${item.label}`, item.body, `约 ${gib(item.bytes)}`);
+          // Same plan-scoped admission as H3: only this capability's own
+          // sources can stop it, and a refusal keeps its own words.
+          const blockedNote = await preflightSources(item.body);
+          if (blockedNote) {
+            report.push({ key: item.key, label: item.label, status: 'BLOCKED', note: blockedNote });
+            continue;
+          }
+          const { plan, stage } = await runPlan(`准备${item.label}`, item.body, `约 ${gib(item.bytes)}`);
           // The capability's own runtime floor is reported next to the result:
           // the bytes are on disk, and the card still says what this machine
           // cannot do with them yet.
           const advisories = (plan.runtime_advisories ?? [])
             .map((row) => row.message ?? row.code ?? '').filter(Boolean).join('；');
+          const filesOnly = stage === 'FILES_VERIFIED_PENDING_RUNTIME';
           report.push({
-            key: item.key, label: item.label, status: 'READY',
-            note: advisories
-              ? `资源已下载并逐字节核验。${advisories}`
-              : '资源已下载并逐字节核验。',
+            key: item.key, label: item.label, status: filesOnly ? 'FILES_READY' : 'READY',
+            note: (filesOnly
+              ? '文件已下载并逐字节核验；运行验证还没做，第一次使用时会自动核验。'
+              : '资源已下载并逐字节核验。') + (advisories ? advisories : ''),
           });
         } catch (error) {
           report.push(failed(item.key, item.label, error));
@@ -688,13 +746,16 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       }
 
       // ---- 4. 没有进入生产激活：如实报告每项能力的结论 -----------------
-      const ready = report.filter((row) => row.status === 'READY' || row.status === 'REUSED');
+      // 「文件已核验」与「已就绪」是两个结论：文件就绪不说成能力就绪。
+      const ready = report.filter((row) => row.status === 'READY' || row.status === 'FILES_READY' || row.status === 'REUSED');
       const blocked = report.filter((row) => row.status === 'BLOCKED' || row.status === 'FAILED');
       if (!ready.length) {
         setProblem(blocked.map((row) => `${row.label}：${row.note}`).join('\n') || '这次没有需要准备的能力。');
         return;
       }
-      const done = ready.map((row) => `${row.label}已就绪`).join('、');
+      const done = ready.map((row) => row.status === 'FILES_READY'
+        ? `${row.label}文件已核验（运行待验证）`
+        : `${row.label}已就绪`).join('、');
       const rest = blocked.length
         ? `；${blocked.map((row) => `${row.label}未完成（${row.note}）`).join('；')}`
         : '';
@@ -978,7 +1039,11 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       {outcomes.length > 0 && <ul className="setup-outcomes" aria-label="各项能力的准备结论">
         {outcomes.map((row) => <li key={row.key} className={`setup-outcome-${row.status.toLowerCase()}`}>
           <b>{row.label}</b>
-          <span>{row.status === 'READY' ? '资源已就绪' : row.status === 'REUSED' ? '已复用本机已有资源' : '未完成'}</span>
+          <span>{row.status === 'READY'
+            ? '资源已就绪'
+            : row.status === 'FILES_READY'
+              ? '文件已核验 · 运行待验证'
+              : row.status === 'REUSED' ? '已复用本机已有资源' : '未完成'}</span>
           <em>{row.note}</em>
         </li>)}
       </ul>}
