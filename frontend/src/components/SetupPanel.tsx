@@ -1005,7 +1005,7 @@ function activateRuntime() {    const candidate = runtime?.candidate;
               </tbody>
             </table>
             {env.blockers.length > 0 && <div className="guardrail-note">
-              本机阻断项：{env.blockers.map((b) => b.code + (b.tool ? `(${b.tool})` : '')).join('、')}。
+              本机阻断项：{env.blockers.map(blockerText).join('；')}。
               可安装项运行：<code>pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1</code>
             </div>}
           </>}
