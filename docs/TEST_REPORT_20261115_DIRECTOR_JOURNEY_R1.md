@@ -5,7 +5,7 @@
 - **执行角色**：小导演（视频创作全旅程测评员）
 - **隔离实例**：API `http://127.0.0.1:8010` / Web `http://127.0.0.1:5180`
 - **实例启动**：`pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/start_eval_instance.ps1 -DataDir .local-acceptance/eval-20261115 -ApiPort 8010 -WebPort 5180`
-- **证据目录**：`.local-acceptance/eval-20261115/shots/`（15 张 PNG）
+- **证据目录**：`.local-acceptance/eval-20261115/shots/`（22 张 PNG）
 - **被测代码树**：`main@1e05bfa`，工作树有 30 个他人未提交改动，本轮**未修改任何代码**
 
 ## 0. 诚实边界（先说清楚）
@@ -203,6 +203,10 @@
 
 **批次尚未收口（不能据此派全量回归）**：后端 8 分片回归仍在跑且 shard-1 出现一个 F 未定位；前端全量 67 文件通过 / 2 文件失败，两个失败文件都在并行会话正在改的文件上；D2/D4 冲突未收敛；D4、D7、D8 尚未修；**未提交任何 commit**，工作树 31 项改动，且当前 HEAD 在 `fix/stack-lifecycle-dependencies-20261115` 而非 `main`，本轮成果尚未落在 main。
 
+**文件归属核查（2026-11-15 02:07，只读）**：本轮 R2 的代码落盘方是 **Qoder CN**（本机安装于 `F:/QodercnNew/Qoder CN`，工程 session `5633a246-1b19-41fb-bcfb-d1096b6e4019`，计划 `slow-hill-tench.md`「工作栈生命周期 + 全流程依赖一键整备」）。证据三条：① 修复师会话自己在群回执中点名——「D1/D2/D3/D6/D7 已由另一个并行会话落盘……我避开了它正在动的 `errorActions.ts`、`App.tsx`、`StreamlinePanels.tsx`、`DirectorShootPanel.tsx`」，另一条明确写「启动器 EPIPE 问题：**已被 Qoder CN 修掉**」；② 该 Qoder session 的 tasks 6/6 `completed`、会话 jsonl 写至 02:02:11，且产出 commit `66caf31`（02:01:40），其内容（`start_shine.ps1` / `start_eval_instance.ps1` / `start_dev.ps1` + 前端必做块）正落在其计划范围内；③ **git author 全部是同一 identity**（`anjingdtl@gmail.com`），无法据 git 区分 owner，必须以工具痕迹与时间线为准。上述四个文件 mtime 停在 01:31–01:38，此后 30 分钟未再被写，已随 `66caf31` 定稿。
+
+**顺带记录一条运维口径**：`start_shine.ps1` 用 `Start-Process` 拉起的子进程仍持有外层 shell 的 stdout/stderr 句柄，所以用带超时的后台任务去跑它，任务会**挂满超时**才以「failed」结束——那是**超时**，不是启动失败。区分方法：看输出里有没有「API is listening on port …」与「Process record: …processes.json」这两行；有就是启动成功，实例与任务状态无关。
+
 **诚实边界（不变）**：以上均为**代码层与前端回归**层面的结论。本机 `h3_connected=false`、`production_mode=BLOCKED`，D1–D8 的**真实生产验收尚未开始**，不得据本节宣称真实 H3 渲染或成片验收通过。
 
 ## 4B. R2 修复后的浏览器实测复核（2026-11-15 晚间）
@@ -215,10 +219,21 @@
 | D4（后端） | **已修**。`/journey` 的 `script` 阶段 blockers 由 `SCRIPT_NOT_PREPARED` 变为 **`SCRIPT_OUTLINE_NOT_CONFIRMED`**，且 summary 仍为「已有剧本「sample-script.md」，待整理大纲」——同一响应内部不再自相矛盾 | `16-creative-after-fix.png` |
 | D4（前端） | **已修**。卡片由「还没有剧本 / 去创意与剧本」改为「剧本大纲还没有确认」，指向本页的动作消失，入口自环消除 | `16-creative-after-fix.png` |
 | D6 | **已修**。DOM 可查到 `.module-guide`：「这一步要做什么：写想法或导入剧本；确认大纲后进入统筹。/ 为什么必须做：大纲是后面分集、分镜和导演包的共同依据；没确认就没有可拍的依据。」；`#d/assets` 同样有「为什么必须做：分集方案与冻结风格是导演包冻结的前提；没定稿就不能派发。」 | `16-creative-after-fix.png`、`17-assets-after-fix.png` |
-| D2 | **部分已修**。按 D2/D4 的裁定口径，`#d/assets` 本页的「去剧本统筹」按钮已消失（自环抑制生效），页面不再提供指向本页的动作 | `17-assets-after-fix.png` |
-| 启动器 stdin | **已修且实证**。本次重启**刻意不挂保活**：父 shell 退出后实例仍健康（8010/5180 监听、`/health` ok、Web 200），`web.err.log` 为空、无 EPIPE。修复前同一配方在父 shell 退出后 vite 必然 `read EPIPE` 崩溃、API 一并消失 | `16-creative-after-fix.png` |
+| D2 | **部分已修**。按 D2/D4 的裁定口径，`#d/assets` 本页的「去剧本统筹」按钮已消失（自环抑制生效），页面不再提供指向本页的动作。映射层 `plan-stage → #d/assets` 与异页跳转已落地并转绿；**裁定第 3 条（同页改指第 1 阶段）已于 02:08 落地并实测通过**，见下方「裁定第 3 条落地复验」 | `17-assets-after-fix.png`、`21-assets-selfloop-fixed.png`、`22-assets-to-creative-landed.png` |
+| D3 | **已修**。点「生成分镜」返回 409 后，页面除中文原因外新增统一必做动作块：「这一步要做什么：风格还没有冻结 / 为什么必须做：分镜必须引用一个已冻结的风格版本，否则镜头与成片的风格无法对齐。/ **[去冻结风格]**」按钮 | `18-produce-after-fix.png` |
+| D7 | **已修**。指引改为「三步：勾选要拍的集 → 确认模型版本 → 点**右侧操作栏**的「先选择要拍的集」（当前不可点：本机没有这套权重）」，指向真实按钮、说明位置与禁用原因；全页已无「确认拍摄方案并开始真实制作」这个不存在的按钮 | `19-package-after-fix.png` |
+| D8 | **已修**。`#d/run` 右侧卡不再是空卡，改为「去导演包选择要拍的集」按钮 | `20-run-after-fix.png` |
+| 启动器 stdin | **已修且实证（二次核实后证据比初判更强）**。本次重启**刻意不挂保活**；启动器打印完「API is listening on port 8010 / Shine Web: http://127.0.0.1:5180 / Process record: processes.json」后，外层 pwsh **并未立刻退出**——子进程仍持有 stdout/stderr 句柄，命令一直挂到 900s 超时被**强杀**。父 shell 被强杀后实例仍健康（8010/5180 监听、`/health` ok、Web 200），`web.err.log` 为空、无 EPIPE。修复前同一配方在父 shell 退出后 vite 必然 `read EPIPE` 崩溃、API 一并消失 | `16-creative-after-fix.png` |
 
-**残留缺口（裁定第 3 条未落地）**：`#d/assets` 本页上「分集方案尚未确认」旁**没有**给出指向真正上游前置的「去第 1 阶段确认大纲」动作；用户目前只能靠页面正文「先确认大纲（第 1 阶段），再在这里生成分镜书。」与顶部步骤条的「下一步 创意与剧本」找到路径。建议在 blocker 旁直接给出该动作，否则「同页不自环」只是把死路隐藏成了死胡同。
+**D2/D4 裁定的代码落地核查（2026-11-15 02:05）**：映射层已对——`errorActions.ts` 中 `EPISODE_PLAN_NOT_CONFIRMED → target: 'plan-stage'`、`SCRIPT_NOT_PREPARED → target: 'creative-stage'`（新增），`App.tsx` 中 `case 'plan-stage' → 'assets'`、`case 'creative-stage' → 'creative'` 均已生效。`directorBlockerNavigation.test.tsx` 三个用例（映射单测 / 异页跳转落 `#d/assets` / 同页不再给自环动作）**已全绿**：定向执行 `npm.cmd test -- --no-file-parallelism directorBlockerNavigation directorModuleGuide` → 2 files / 6 tests passed，退出码 0；`directorModuleGuide.test.tsx` 3 项同样全绿。
+
+**裁定第 3 条落地复验（2026-11-15 02:12–02:13）**：该条缺口**已修复**。实现方式：`errorActions.ts` 的 `ErrorAction` 增加 `selfLoopAction` 字段，`EPISODE_PLAN_NOT_CONFIRMED` 配 `selfLoopAction: { label: '去第 1 阶段确认大纲', target: 'creative-stage' }`；`App.tsx` 的装配点（`describeBlocker` → `blockerTargetPage` → 自环判定）在目标页等于当前页时**回退渲染** `selfLoopAction`，而不是把动作一并藏掉；`directorBlockerNavigation.test.tsx` 第三个用例已按我建议的验收断言改写为「改指真正的上游前置」，并断言点击后落到 `#d/creative`。
+
+- **定向回归**：`npm.cmd test -- --no-file-parallelism directorBlockerNavigation` → **1 file / 3 tests passed，退出码 0**。
+- **浏览器实测（真实旅程数据，非桩）**：在 `#d/assets` 页，右侧卡片「分集方案尚未确认」旁**已出现**「去第 1 阶段确认大纲」按钮（可点）；点击后地址栏变为 `#d/creative`，该页显示「编剧角色还没有配置模型，无法提取大纲」与「去配置文本模型 ›」——用户被一路引导到真正能解开阻塞的地方。
+- **D2至此三条裁定全部成立**：异页跳对（`plan-stage → #d/assets`）、同页不自环、同页改指上游前置（`creative-stage`）。
+
+**次要观察（P2，不单独记为缺陷）**：D3 修复后，错误行仍是「风格还没有冻结。分镜必须基于一个已冻结的风格版本。（`STORYBOARD_STYLE_NOT_FROZEN`）」——裸码以括号形式留在用户可见文本里。它已不再是屏上唯一信息，**符合** AGENTS.md 的硬要求，但作为面向普通用户的文案，括号里的内部码仍是噪音，建议收敛到「详细信息」折叠里。
 
 **诚实边界**：以上仅为界面与接口层的复核。本机 `h3_connected=false`、`production_mode=BLOCKED`，**D1–D8 的真实生产验收仍未开始**，不得据本节宣称真实 H3 渲染或成片验收通过。
 
@@ -245,6 +260,11 @@
 | `15-generate-storyboard-book.png` | 生成分镜书 422 → `SCRIPT_OUTLINE_NOT_CONFIRMED` 无动作按钮 | D3c |
 | `16-creative-after-fix.png` | R2 修复后创意页：`.module-guide` 落地、阻塞理由改口、入口自环消除 | 4B：D1/D4/D6 |
 | `17-assets-after-fix.png` | R2 修复后剧本统筹页：同页自环按钮已抑制 | 4B：D2 |
+| `18-produce-after-fix.png` | R2 修复后镜头拆解页：409 渲染为必做动作块 + 「去冻结风格」 | 4B：D3 |
+| `19-package-after-fix.png` | R2 修复后导演包页：指引指向真实按钮并说明禁用原因 | 4B：D7 |
+| `20-run-after-fix.png` | R2 修复后视频生产页：右侧空卡补上「去导演包选择要拍的集」 | 4B：D8 |
+| `21-assets-selfloop-fixed.png` | 裁定第 3 条落地：剧本统筹页出现「去第 1 阶段确认大纲」 | 4B：D2 |
+| `22-assets-to-creative-landed.png` | 点击该动作后落到 `#d/creative`，该页给出「去配置文本模型」出口 | 4B：D2 |
 
 ## 6. 收工声明
 
