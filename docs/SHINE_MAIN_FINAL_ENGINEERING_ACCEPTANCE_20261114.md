@@ -23,10 +23,15 @@
 ## 1. 验收基准与隔离
 
 - 远端基准 main SHA：`1c7cfd3205724fdb6514cdb602a459e7d545b869`
-  （`feat: 大纲生成三档剧情节奏 + 登场人物介绍`）。fetch 后确认 main 未再前进。
+  （`feat: 大纲生成三档剧情节奏 + 登场人物介绍`）。收尾期间 main 前进至
+  `ebb7800`（PR #17 Launcher V1.0、PR #18 新机自愈，均已合并）；已合并 origin/main
+  并解决 `api_setup.py` 冲突（保留本轮 `variant_id` 门禁与 main 的端口解析双方改动），
+  合并后受影响回归 49 项全过、Ruff/导入干净。
 - 收尾 worktree：`F:/ClaudeWorkSpace/projects/shine-main-closeout-20261114`，
   分支 `closeout/main-final-engineering-20261114`（自 origin/main 新建）。
-  未触碰其他 Agent 的 worktree，未触碰 PR #17（Launcher，OPEN）的并行开发。
+  未触碰其他 Agent 的 worktree；PR #17 的并行开发内容经合并纳入，未覆盖。
+- 收尾 PR #19 已合并入 main，merge commit `c1918075b9ce9267cedaef2426d751af04ccf6aa`；
+  本地 main 已同步并推送（所有者权限，ruleset 允许；不 force push）。
 - PR #16（H3 资源自整备 V2.0 最终收尾）已合并（`fd176f1`）；其成果本轮只核查不重做。
 - 基准 CI run <https://github.com/anjingdtl/shine-video-studio/actions/runs/43550015947>：
   L1 backend quick ✅、L3 backend full (Linux) ✅、Frontend build ✅、
