@@ -309,7 +309,10 @@ function App() {
     // Switching works never shows the previous work's stages while loading.
     setJourney((current) => (current && current.project_id === projectId ? current : null));
     setJourneyState('loading');
-    getJourney(projectId)
+    // The journey and the overview must describe the SAME scope: a deep link
+    // that names a package projects that package everywhere, never the newest
+    // package here and the named one there (C-06a).
+    getJourney(projectId, directorPackageId ? { packageId: directorPackageId } : undefined)
       .then((row) => { if (alive) { setJourney(row); setJourneyState('ready'); setJourneyError(''); } })
       .catch((error) => {
         if (!alive) return;
@@ -318,7 +321,7 @@ function App() {
         setJourneyError(error instanceof Error ? error.message : String(error));
       });
     return () => { alive = false; };
-  }, [projectId, dataEpoch, journeyRetry]);
+  }, [projectId, dataEpoch, journeyRetry, directorPackageId]);
   /** V2 统一只读投影：项目与按集状态都来自这一份聚合，前端不自行猜完成度。 */
   const [overview, setOverview] = useState<DirectorOverview | null>(null);
   useEffect(() => {
@@ -329,7 +332,7 @@ function App() {
       .then((row) => { if (alive) setOverview(row); })
       .catch(() => { if (alive) setOverview(null); });
     return () => { alive = false; };
-  }, [projectId, dataEpoch, directorPackageId]);
+  }, [projectId, dataEpoch, journeyRetry, directorPackageId]);
   const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
   ), [journey]);

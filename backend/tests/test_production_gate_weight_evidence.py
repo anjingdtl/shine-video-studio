@@ -31,9 +31,16 @@ INSTANCE_ID = "local:http://127.0.0.1:8188"
 
 
 def _component(component_id: str = "synthetic-weights") -> dict:
+    # A weight component declares the model family it belongs to: the
+    # binding proof (PR #23) reads the family's directories from the
+    # instance's extra_model_paths.yaml, so a component without a family can
+    # never prove the renderer reads its bytes from anywhere.  The synthetic
+    # component used to omit it and the "bound is consumable" counterexample
+    # went red the moment the family contract landed.
     return {
         "component_id": component_id,
         "revision": "rev-1",
+        "destination_family": "checkpoints",
         "files": [{"relative_path": "weights.bin",
                    "sha256": hashlib.sha256(PAYLOAD).hexdigest(),
                    "size": len(PAYLOAD)}],

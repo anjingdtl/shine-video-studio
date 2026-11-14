@@ -181,10 +181,11 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图已就绪/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
     const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
     expect(outcomes).toHaveTextContent('素材出图');
-    expect(outcomes).toHaveTextContent('资源已就绪');
+    // 文件核验完成是文件层面的结论，不再写成「资源已就绪」。
+    expect(outcomes).toHaveTextContent('文件已核验 · 运行待验证');
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
@@ -231,7 +232,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图已就绪/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
     const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
     expect(outcomes).toHaveTextContent('H3 视频生成');
     expect(outcomes).toHaveTextContent('未完成');
@@ -262,7 +263,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(screen.getByText(/素材出图已就绪/)).toBeTruthy(), { timeout: 20000 });
+    await waitFor(() => expect(screen.getByText(/素材出图文件已核验（运行待验证）/)).toBeTruthy(), { timeout: 20000 });
     // 只提交了图片计划：H3 权重没有重新下载。
     const plans = planBodies();
     expect(plans).toHaveLength(1);
