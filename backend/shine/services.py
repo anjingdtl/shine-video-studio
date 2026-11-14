@@ -1164,11 +1164,32 @@ def project_terminology_hint(db: Session, project_id: str) -> str:
     return table.hint()
 
 
+def _terminology_rows(terms: list[Any]) -> list[dict[str, Any]]:
+    """The table's rows as plain dicts.
+
+    The API hands over Pydantic models while the table parser validates plain
+    dicts.  A model is converted here, so a caller's type mistake is never
+    blamed on the person's table; a row that is neither a dict nor a model
+    is refused with the named error instead of becoming a wrong hint.
+    """
+    rows: list[dict[str, Any]] = []
+    for row in terms:
+        if isinstance(row, dict):
+            rows.append(row)
+            continue
+        dump = getattr(row, "model_dump", None)
+        if callable(dump):
+            rows.append(dict(dump()))
+            continue
+        raise HTTPException(status_code=422, detail="TERMINOLOGY_ROW_INVALID")
+    return rows
+
+
 def save_project_terminology(
     db: Session,
     project: Project,
     *,
-    terms: list[dict[str, Any]],
+    terms: list[Any],
     notes: str = "",
     created_by: str,
     source: str = "human",
@@ -1181,7 +1202,7 @@ def save_project_terminology(
     from shine.quality.terminology import TerminologyError, parse_table
 
     try:
-        table = parse_table(terms, notes)
+        table = parse_table(_terminology_rows(terms), notes)
     except TerminologyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     current = db.scalar(

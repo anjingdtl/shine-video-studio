@@ -1002,7 +1002,8 @@ def create_app(
 
         project = require_project(db, project_id)
         row = save_project_terminology(
-            db, project, terms=body.terms, notes=body.notes, created_by=body.created_by or "operator",
+            db, project, terms=[term.model_dump() for term in body.terms],
+            notes=body.notes, created_by=body.created_by or "operator",
             source=body.source or "human",
         )
         add_audit(db, body.created_by or "operator", "PROJECT_TERMINOLOGY_SAVED", "project_terminology",

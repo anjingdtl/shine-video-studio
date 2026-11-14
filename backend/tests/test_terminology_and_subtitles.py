@@ -108,6 +108,111 @@ def test_the_script_mentions_seed_the_table_for_a_human_to_confirm():
     assert "周砚" in found
     assert "陆清明" in found
 
+# ---------------------------------------------------------------------------
+# D-R4-01：人名对照表保存必然失败
+# ---------------------------------------------------------------------------
+
+
+def test_saving_a_real_term_through_the_api_succeeds(api):
+    """填一条真实词条曾必然 422：模型对象被当成 dict 校验（TERMINOLOGY_ROW_INVALID）。
+
+    表格要真能存进去，ASR 的专名提示才有词条可用。
+    """
+    client, factory, settings = api
+    project_id = create_project(client, "人名对照表")
+    response = client.post(
+        f"/api/v1/projects/{project_id}/terminology",
+        json={"terms": [{"canonical": "周砚", "aliases": ["周烨"]}]},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["revision"] == 1
+    assert body["terms"] == [{"canonical": "周砚", "aliases": ["周烨"]}]
+
+
+def test_an_empty_table_is_still_accepted(api):
+    """留空曾能成功；这条守住修复没有把空表也一起拒掉。"""
+    client, factory, settings = api
+    project_id = create_project(client, "空表")
+    response = client.post(f"/api/v1/projects/{project_id}/terminology", json={"terms": []})
+    assert response.status_code == 200, response.text
+    assert response.json()["revision"] == 1
+
+
+def test_an_illegal_term_still_fails_with_its_named_error(api):
+    """入口防御不得吞掉具名错误：空白词条仍是 TERMINOLOGY_TERM_EMPTY。"""
+    client, factory, settings = api
+    project_id = create_project(client, "非法词条")
+    response = client.post(
+        f"/api/v1/projects/{project_id}/terminology",
+        json={"terms": [{"canonical": "   "}]},
+    )
+    assert response.status_code == 422, response.text
+    assert "TERMINOLOGY_TERM_EMPTY" in response.text
+
+
+def test_the_api_hands_the_service_plain_rows(api, monkeypatch):
+    """入口必须把模型转成 plain dict：服务层的防御是第二道闸，不是唯一的一道路。"""
+    from fastapi import HTTPException
+
+    import shine.services as services_module
+
+    client, factory, settings = api
+    project_id = create_project(client, "传递类型")
+    captured: dict[str, list[str]] = {}
+
+    def capture(db, project, *, terms, notes, created_by, source):
+        captured["types"] = [type(row).__name__ for row in terms]
+        raise HTTPException(status_code=500, detail="captured")
+
+    monkeypatch.setattr(services_module, "save_project_terminology", capture)
+    response = client.post(
+        f"/api/v1/projects/{project_id}/terminology",
+        json={"terms": [{"canonical": "周砚"}]},
+    )
+    assert response.status_code == 500, response.text
+    assert captured["types"] == ["dict"]
+
+
+def test_the_service_accepts_the_models_the_api_hands_over(api):
+    """服务层入口的防御：模型也能存，不必每个调用方都记得转换。"""
+    from shine.models import Project
+    from shine.schemas import TerminologyTerm
+    from shine.services import save_project_terminology
+
+    client, factory, settings = api
+    project_id = create_project(client, "模型行")
+    with factory() as db:
+        project = db.get(Project, project_id)
+        row = save_project_terminology(
+            db, project, terms=[TerminologyTerm(canonical="周砚", aliases=["周烨"])], created_by="operator")
+        db.commit()
+        assert row.revision == 1
+        assert row.terms == [{"canonical": "周砚", "aliases": ["周烨"]}]
+
+
+def test_the_service_refuses_a_row_it_cannot_read_and_keeps_the_named_errors(api):
+    """读不懂的行仍是具名错误；别名不是列表也仍是具名错误，都不被吞。"""
+    from fastapi import HTTPException
+
+    from shine.models import Project
+    from shine.services import save_project_terminology
+
+    client, factory, settings = api
+    project_id = create_project(client, "坏行")
+    with factory() as db:
+        project = db.get(Project, project_id)
+        with pytest.raises(HTTPException) as unreadable:
+            save_project_terminology(db, project, terms=["周砚"], created_by="operator")
+        assert unreadable.value.status_code == 422
+        assert unreadable.value.detail == "TERMINOLOGY_ROW_INVALID"
+
+        with pytest.raises(HTTPException) as bad_aliases:
+            save_project_terminology(
+                db, project, terms=[{"canonical": "周砚", "aliases": "周烨"}], created_by="operator")
+        assert bad_aliases.value.status_code == 422
+        assert "TERMINOLOGY_ALIASES_INVALID" in str(bad_aliases.value.detail)
+
 
 # ---------------------------------------------------------------------------
 # The ASR hint reaches the recognizer
