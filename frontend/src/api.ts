@@ -1261,6 +1261,11 @@ export const isStaleRuntimeState = (exc: unknown): boolean =>
 /* ======================= 导演模式收束（①–④ streamline） ======================= */
 
 /** ① 可编辑大纲：Markdown 正文 + 提示性疑问 + 一次确认。 */
+export type OutlineVersion = {
+  artifact_id: string; sha256: string; created_at: string;
+  approved: boolean; stale: boolean; user_edited: boolean;
+  revision_of?: string | null; confirmed: boolean;
+};
 export type DirectorOutline = {
   artifact_id: string | null;
   sha256?: string;
@@ -1268,12 +1273,15 @@ export type DirectorOutline = {
   questions: string[];
   user_edited?: boolean;
   approved?: boolean;
+  stale?: boolean;
   confirmed: boolean;
   confirmed_artifact_id?: string | null;
+  payload?: Record<string, unknown>;
+  versions?: OutlineVersion[];
 };
 
-export const fetchDirectorOutline = (projectId: string) =>
-  api<DirectorOutline>(`/projects/${projectId}/director/outline`);
+export const fetchDirectorOutline = (projectId: string, artifactId?: string) =>
+  api<DirectorOutline>(`/projects/${projectId}/director/outline${artifactId ? `?artifact_id=${artifactId}` : ''}`);
 
 export const reviseDirectorOutline = (projectId: string, markdown: string, expectedSha256: string) =>
   api<{ artifact_id: string; sha256: string; markdown: string; questions: string[] }>(

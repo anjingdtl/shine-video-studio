@@ -1,11 +1,9 @@
-"""The versioned H3 variant manifests, the low-end candidates and the W4 slot.
+"""The versioned H3 variant manifests and the low-end candidates.
 
 These tests pin the identity discipline:
 
 * every unknown field is declared, and nothing is guessed;
 * the candidate variants never inherit the acceptance of the INT8 baseline;
-* the W4 slot stays blocked with explicit "unknown" pins until a human
-  supplies them;
 * the default ready set contains only the audited baseline, and every model
   file it references is pinned in the deployment catalog;
 * a candidate catalog carries the runtime closure and the same model closure
@@ -35,7 +33,6 @@ GENERATOR = REPO / "scripts" / "generate_deployment_catalog.py"
 BASELINE = "h3-ref2va-int8-convrot"
 LOWEND = "ref2va-lowend-candidate"
 NVFP4 = "ref2va-nvfp4-lowend"
-W4 = "ref2va-w4-convrot"
 
 #: The loaders whose file name identifies a model file in a workflow graph.
 MODEL_INPUTS = ("unet_name", "clip_name", "vae_name", "model_name", "lora_name", "model_path")
@@ -112,19 +109,18 @@ def test_only_the_baseline_is_the_default_and_the_only_supported_one():
     manifests = {m["variant_id"]: m for m in variants.list_variant_manifests()}
     assert manifests[BASELINE]["default_recommended"] is True
     assert manifests[BASELINE]["acceptance_status"] == "SUPPORTED"
-    for candidate_id in (LOWEND, NVFP4, W4):
+    for candidate_id in (LOWEND, NVFP4):
         candidate = manifests[candidate_id]
         assert candidate["acceptance_status"] in {"CANDIDATE", "BLOCKED"}
         assert candidate["default_recommended"] is False
         assert candidate["auto_download_allowed"] is False
-    assert manifests[W4]["source"] == "THIRD_PARTY_UNVERIFIED"
     assert manifests[NVFP4]["source"] == "THIRD_PARTY_PINNED"
     assert manifests[LOWEND]["source"] == "OFFICIAL_PINNED"
 
 
 def test_the_candidates_inherit_nothing_from_the_baseline():
     baseline = _manifest(BASELINE)
-    for candidate_id in (LOWEND, NVFP4, W4):
+    for candidate_id in (LOWEND, NVFP4):
         candidate = _manifest(candidate_id)
         assert candidate["variant_id"] != baseline["variant_id"]
         assert candidate["catalog_id"] != baseline["catalog_id"]
@@ -191,27 +187,6 @@ def test_the_nvfp4_candidate_states_the_publishers_claims_as_claims():
         assert item["is_project_measurement"] is False
 
 
-def test_the_w4_slot_is_blocked_and_carries_no_invented_identity():
-    slot = _manifest(W4)
-    assert slot["acceptance_status"] == "BLOCKED"
-    assert slot["source"] == "THIRD_PARTY_UNVERIFIED"
-    for entry in slot["files"]:
-        assert entry["repository"] == "unknown"
-        assert entry["revision"] == "unknown"
-        assert entry["relative_path"] == "unknown"
-        assert entry["size"] == "unknown"
-        assert entry["sha256"] == "unknown"
-        assert entry["url"] == "unknown"
-        assert entry["license"]["id"] == "unknown"
-    required = {entry["id"] for entry in slot["required_inputs"]}
-    assert required == {
-        "TRUSTED_REPOSITORY_URL", "PINNED_REVISION", "EXACT_FILE_NAME", "EXACT_SIZE",
-        "SHA256", "LICENSE_TEXT", "REQUIRED_NODE_VERSIONS", "MEASURED_RESOURCE_FLOORS",
-    }
-    for entry in slot["required_inputs"]:
-        assert entry["requirement"] and entry["detail"]
-
-
 def test_the_twelve_gib_tier_prefers_the_pinned_nvfp4_candidate():
     report = recommendation.recommend_variants(_host(12288))
     assert report["tier"] == "lowend_12gb"
@@ -231,13 +206,10 @@ def test_the_twelve_gib_tier_prefers_the_pinned_nvfp4_candidate():
     lowend = by_id[LOWEND]
     assert lowend["acceptance_status"] == "CANDIDATE"
     assert lowend["status"] != "SUPPORTED"
-    w4 = by_id[W4]
-    assert w4["acceptance_status"] == "BLOCKED"
-    assert w4["status"] == "BLOCKED"
-    assert w4["usable_in_production"] is False
     # The preference order inside the tier: pinned NVFP4, then the official
-    # w6a8 candidate, then the named W4 slot that no audited repository has.
-    assert [row["variant_id"] for row in report["candidates"]] == [NVFP4, LOWEND, W4]
+    # w6a8 candidate.  The unverified W4 slot was removed by user decision
+    # (2026-11-14): no audited repository ever carried it.
+    assert [row["variant_id"] for row in report["candidates"]] == [NVFP4, LOWEND]
 
 
 def test_a_sixteen_gib_machine_gets_the_audited_baseline():

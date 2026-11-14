@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, json } from '../api';
 import { OutlineTaskRetry, type OutlineRetry } from './OutlineTaskRetry';
+import { pacingOptions, type PacingValue } from '../constants';
 
 type Section = { production_section_id: string; order: number; title: string; start_offset: number; end_offset: number; estimated_duration_s: number };
 type Outline = { artifact_id: string; sha256: string; approved: boolean; stale: boolean; questions_sha256?: string | null; payload: {
@@ -57,6 +58,7 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
   const [tasks, setTasks] = useState<StoryTask[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [facts, setFacts] = useState('');
+  const [pacing, setPacing] = useState<PacingValue>('balanced');
   const [continuity, setContinuity] = useState<Record<string, string>>({});
   const [carryover, setCarryover] = useState<Record<string, ContinuityInfo>>({});
   const [message, setMessage] = useState('');
@@ -128,8 +130,20 @@ export function StoryPreparationPanel({ projectId, documentId, documentHash, sty
       <label className="material-field"><span>补充锁定事实（每行一条；变更会创建新大纲输入）</span>
         <textarea value={facts} onChange={(e) => setFacts(e.target.value)} rows={3} />
       </label>
+      <fieldset className="pacing-picker">
+        <legend>剧情节奏（切换后重新提取才生效）</legend>
+        {pacingOptions.map(([value, label, hint]) => (
+          <label key={value} className={`pacing-option${pacing === value ? ' active' : ''}`}>
+            <input type="radio" name="material-outline-pacing" value={value} checked={pacing === value}
+              onChange={() => setPacing(value)} />
+            <span className="pacing-label">{label}</span>
+            <span className="pacing-hint">{hint}</span>
+          </label>
+        ))}
+      </fieldset>
       <button type="button" disabled={busy || !documentId} onClick={() => action(() => api(`/projects/${projectId}/story-preparation/outlines`, json('POST', {
         document_id: documentId, expected_document_hash: documentHash, locked_facts: facts.split('\n').map((s) => s.trim()).filter(Boolean),
+        pacing,
       })))}>后台提取并归并总体大纲</button>
       {outlineTask && <p>大纲任务 {outlineTask.task_id.slice(0, 8)} · {TASK_STATUS_LABELS[outlineTask.status] ?? outlineTask.status} · {outlineTask.summary?.label ?? outlineTask.progress.stage} · 已完成 {outlineTask.summary?.done ?? outlineTask.progress.cursor}/{outlineTask.summary?.total ?? '?'}（{outlineTask.summary?.percent ?? 0}%）</p>}
       <p>关闭页面后由常驻 Worker 继续；刷新只查询进度。未知模型结果只核对，不自动重发。</p>

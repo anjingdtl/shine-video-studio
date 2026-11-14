@@ -39,6 +39,11 @@ VERSION = "story-outline-v1"
 CONTINUITY_KIND = "SectionContinuityState"
 
 
+class OutlineCharacter(APIModel):
+    name: str = Field(min_length=1, max_length=100)
+    introduction: str = Field(default="", max_length=600)
+
+
 class OutlinePart(APIModel):
     schema_version: Literal["1.0"] = "1.0"
     summary: str = Field(min_length=1, max_length=1200)
@@ -46,6 +51,7 @@ class OutlinePart(APIModel):
     timeline: list[Annotated[str, Field(max_length=300)]] = Field(max_length=16)
     relationships: list[Annotated[str, Field(max_length=300)]] = Field(max_length=24)
     questions: list[Annotated[str, Field(max_length=300)]] = Field(max_length=12)
+    characters: list[OutlineCharacter] = Field(default_factory=list, max_length=24)
 
 
 def source_sections(project_id, document):
@@ -78,11 +84,14 @@ def source_sections(project_id, document):
 REUSABLE_TASK_STATUSES = ("QUEUED", "RUNNING", "PAUSED", "NEEDS_REVIEW", "SUCCEEDED")
 
 
-def queue_outline(db, project_id, document, gateway, facts):
+def queue_outline(db, project_id, document, gateway, facts, pacing=None):
+    from shine.materialprep.pacing import normalize_pacing
+    pacing = normalize_pacing(pacing)
     profile = gateway.profile_for_role(db, "scriptwriter")
     fingerprint = text_consent.fingerprint(profile)
     base = {"project": project_id, "document": document.id, "hash": document.sha256,
-            "facts": facts, "profile": fingerprint, "tool": OUTLINE_RUN, "version": VERSION}
+            "facts": facts, "profile": fingerprint, "tool": OUTLINE_RUN, "version": VERSION,
+            "pacing": pacing}
     base_identity = digest(base)
     # Every attempt of this document is found, not only the first one: the
     # base identity travels in the trace of each attempt.
@@ -106,7 +115,7 @@ def queue_outline(db, project_id, document, gateway, facts):
                "provider_fingerprint": fingerprint, "stage": "EXTRACT", "cursor": 0,
                "leaf_artifact_ids": [], "level": 0, "level_inputs": [], "level_outputs": [],
                "production_sections": source_sections(project_id, document), "automatic_replay": False,
-               "base_identity": base_identity})
+               "pacing": pacing, "base_identity": base_identity})
     db.add(row)
     db.flush()
     add_audit(db, "local-user", "STORY_OUTLINE_QUEUED", "agent_task", row.id,
@@ -239,7 +248,9 @@ def _extract_segment_chars(gateway, profile) -> int:
     return max(MAX_SCENE_CHARS, min(200_000, int(budget.burst_input_limit * 0.8)))
 
 
-def _merge(factory, gateway, project_id, document, ids, facts):
+def _merge(factory, gateway, project_id, document, ids, facts, pacing=None):
+    from shine.materialprep.pacing import normalize_pacing, pacing_instruction
+    pacing = normalize_pacing(pacing)
     with factory() as db:
         profile = gateway.profile_for_role(db, "scriptwriter")
         nodes = [db.get(AgentArtifact, key) for key in ids]
@@ -248,19 +259,24 @@ def _merge(factory, gateway, project_id, document, ids, facts):
         context = {"parts": [{"summary": n.payload_json.get("summary"),
                     "timeline": n.payload_json.get("timeline", []),
                     "relationships": n.payload_json.get("relationships", []),
-                    "characters": [r.get("name") for r in n.payload_json.get("requirements", [])
+                    "characters": [{"name": r.get("name"), "description": r.get("description", "")}
+                                   for r in n.payload_json.get("requirements", [])
                                    if r.get("family") == "character"]} for n in nodes],
-                   "locked_facts": facts}
+                   "locked_facts": facts, "pacing": pacing}
         schema = OutlinePart.model_json_schema()
         system = ("Merge only these source-backed outline parts in their order. Preserve chronology, conflicts, "
                   "relationships and locked facts; report uncertainty as questions. Do not invent scenes, "
-                  "dialogue, asset IDs, production completion or H3 prompts. Return the declared shallow JSON.")
+                  "dialogue, asset IDs, production completion or H3 prompts. Return the declared shallow JSON. "
+                  "For every main character that really appears, write a short introduction (identity, appearance, "
+                  "temperament) grounded only in the supplied part descriptions into characters[].introduction; "
+                  "never invent a biography. " + pacing_instruction(pacing))
         budget = budget_report(context, schema, system, gateway.config_for(profile))
         if not budget["fits"]:
             return {"status": "FAILED", "error_code": "LLM_CONTEXT_BUDGET_EXCEEDED", "budget": budget}
         fingerprint = text_consent.fingerprint(profile)
     identity = digest({"tool": OUTLINE_TOOL, "version": VERSION, "project": project_id,
-                       "document": document.sha256, "inputs": ids, "context": context, "provider": fingerprint})
+                       "document": document.sha256, "inputs": ids, "context": context, "provider": fingerprint,
+                       "pacing": pacing})
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
         old = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.request_identity == identity))
@@ -715,7 +731,8 @@ def _run_pending_story_unit(factory, settings, worker_id, *, gateway=None, heart
                 state["merge_skipped"] = "single_leaf"
             elif state["stage"] == "MERGE" and state["cursor"] < len(state["level_inputs"]):
                 ids = state["level_inputs"][state["cursor"]:state["cursor"] + 3]
-                merged = _merge(factory, gateway, project_id, document, ids, state["locked_facts"])
+                merged = _merge(factory, gateway, project_id, document, ids, state["locked_facts"],
+                                state.get("pacing"))
                 if merged["status"] != "SUCCEEDED":
                     state["blocked_subtasks"] = [merged]
                     _finish_step(factory, task_id, version, worker_id, state,
@@ -736,14 +753,25 @@ def _run_pending_story_unit(factory, settings, worker_id, *, gateway=None, heart
                     leaves = [db.get(AgentArtifact, key) for key in state["leaf_artifact_ids"]]
                     names = sorted({r["name"] for leaf in leaves for r in leaf.payload_json.get("requirements", [])
                                     if r.get("family") == "character"})
+                    leaf_desc: dict[str, str] = {}
+                    for leaf in leaves:
+                        for r in leaf.payload_json.get("requirements", []):
+                            if r.get("family") == "character" and r.get("description") and not leaf_desc.get(r["name"]):
+                                leaf_desc[r["name"]] = r["description"]
+                    merge_intro = {c.get("name"): c.get("introduction", "")
+                                   for c in final.payload_json.get("characters", []) if c.get("name")}
+                    from shine.materialprep.pacing import normalize_pacing, pacing_label
+                    pacing = normalize_pacing(state.get("pacing"))
                     payload = {**final.payload_json, "document_id": document.id, "document_sha256": document.sha256,
                         "original_text_sha256": hashlib.sha256(document.text.encode()).hexdigest(),
                         "offset_unit": "unicode_codepoint",
                         "production_sections": state["production_sections"],
                         "characters": [{"name": name, "entity_id": name,
+                                        "introduction": merge_intro.get(name) or leaf_desc.get(name, ""),
                                         "stable_identity": str(uuid5(NAMESPACE_URL,
                                                                      f"shine:{project_id}:character:{name}"))}
                                        for name in names],
+                        "pacing": pacing, "pacing_label": pacing_label(pacing),
                         "source_locked_facts": [{"scene_key": leaf.payload_json["scene_key"],
                                                  "locked_facts": leaf.payload_json.get("locked_facts", []),
                                                  "artifact_id": leaf.id} for leaf in leaves],

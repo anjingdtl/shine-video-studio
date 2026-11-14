@@ -1450,3 +1450,73 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md`；回归
   `test_resource_resolver_v2`（+2）、`test_graph_compiler`、`directorRun.test.tsx`（+1）、
   `timeoutSignal.test.ts`（新增）。
+
+## 2026-11-14 设置可用性与输出目录迁移修复轮（用户裁定）
+
+- **环境检测只由用户点击触发**：`SetupCenter` 挂载/切页不再自动检测；检测结果存
+  sessionStorage 快照（含方案选择与能力勾选），回来直接读快照并显示「上次检测」时间；
+  「刷新全部状态」是唯一的重新检测入口；切页只补顶卡轻量状态读取。
+  回归 `frontend/src/test/setupCenter.test.tsx`（4 项），`setupEntry`/`directorEntries`
+  改为点击「检测本机」后断言。
+- **候选权重下载解锁（用户裁定，覆盖 2026-11-09「候选下载关闭」的下载层决定；
+  验收状态与生产门禁不变）**：`POST /setup/install-plan` 新增
+  `candidate_download_acknowledged`；候选（CANDIDATE/EXPERIMENTAL）显式确认后可下载，
+  审计 `CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED`；BLOCKED 仍拒绝。候选的硬件门槛
+  unknown 记录但不阻挡已确认下载，实测 BLOCKED 仍拒绝。UI 候选 radio 可选
+  （BLOCKED 禁用），确认卡写明「下载不等于验收」。回归
+  `test_install_plan_qualification.py`（+3）。
+- **能力勾选「本机已找到权重」标红**（`.cap-found-warn`）；勾选时二次确认
+  「重复下载 / 仅复用，不下载 / 取消」；重复下载计入下载体积并走安装计划。
+- **输出目录迁移不再被历史缺文件挡死**：源文件已缺失的台账记录具名报告并跳过
+  （路径保持不变），其余文件仍逐字节核验、哈希不一致仍拒绝；响应带
+  `missing/missing_count`，面板如实显示。真实台账副本端到端：132 迁移 / 133 缺失报告。
+  回归 `test_output_directory.py::test_missing_sources_are_reported_and_skipped_not_fatal`。
+- **W4 ConvRot 第三方槽位按用户裁定删除**（`config/deployment/variants/ref2va-w4-convrot.json`
+  移除；未知变体 404 `VARIANT_MANIFEST_UNKNOWN`）。2026-11-07「登记为显式未钉住候选槽位」
+  的描述自此失效；历史文档保留为记录。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-14 大纲版本管理轮（用户报障：确认后保存新版本无进度/状态）
+
+- **未确认草稿不得顶掉确认依据**。`director/basis.py::outline_for_document` 改为优先返回
+  该文档**最新已确认**大纲；仅当从未确认时才回退最新草稿（legacy 无 document_id 回退保留，
+  且 legacy 已确认优先于本文档草稿）。修复前它取「最新非 stale」含草稿，使
+  `_confirmed_outline`/journey/分集/导演包在草稿挂起时全部翻成「未确认」。
+- **大纲接口暴露版本链**。`GET /director/outline` 增加 `versions`（同文档最近 30 版，含
+  approved/stale/user_edited/revision_of/confirmed/sha/created_at）并支持 `?artifact_id=`
+  读指定版本（404 具名）。确认仍走唯一 `confirm_outline_artifact`，旧版本不重写。
+- **面板以视图为当前版本真相**。`OutlineConfirmationPanel` 不再用任务附带的旧产物渲染
+  横幅/徽章/确认按钮；保存新版本后立即显示「待你审阅 · 用户编辑稿」+「当前确认依据是版本 X」
+  + 确认入口；版本历史折叠列表可「确认此版 / 查看正文」（旧版载入编辑器、以旧版 sha 保存）；
+  编辑器 dirty 跟踪，未改动不可保存。
+- **重新提取如实报告复用**。相同（剧本+锁定事实+provider）输入 `queue_outline` 复用旧
+  SUCCEEDED 任务（不重跑模型）；前端按回执区分：QUEUED/RUNNING=已排队，SUCCEEDED=「复用已有
+  大纲结果，没有重跑模型」，不再谎报排队。保存新版本是同步草稿创建，无需模型调用，文案写明。
+- 回归（定向，用户裁定不做全量）：后端 `test_director_streamline`（+版本链用例）/
+  `test_story_preparation`/`test_story_outline_unblock` 及 basis 影响面 6 模块共 85 例；
+  前端新增 `outlineVersions.test.tsx`（3）+ `storyOutlineUnblock`（7）+ 4 个入口文件 43 例；
+  tsc/build/Ruff 通过。浏览器真实 MiniMax 旅程：提取进度透传→确认 v1→保存 v2 草稿可见→
+  草稿挂起 journey 仍认 v1→确认 v2→相同输入复用提示。证据
+  `docs/ACCEPTANCE_20261114_OUTLINE_VERSIONS.md`。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-14 大纲节奏三档 + 登场人物介绍（用户报障：大纲无人物介绍）
+
+- **三档节奏是请求身份的一部分**。`materialprep/pacing.py` 声明 compact/balanced/relaxed
+  （紧凑/均衡/舒缓），`normalize_pacing` 只认三档、其余回退 balanced。`queue_outline` 与
+  `_merge` 都把 pacing 计入身份：切换节奏=新大纲输入，不重用旧结果。
+- **节奏只塑造归并叙事，不碰事实**。merge system 追加节奏指令（紧凑=压缩 beats/快升级；
+  舒缓=氛围/内心停留/细时间线）；叶子事实提取与素材准备共用 `scenes.prepare_scenes`，
+  不受 pacing 影响。source 分段/锁定事实/人物编号/production_sections 均不变。
+- **登场人物必须有介绍**。`OutlinePart` 增加 `characters[{name,introduction}]`；merge 被要求
+  为每个真实登场人物写 grounded 介绍（不臆造传记）；最终 payload `characters` 带
+  `introduction`（merge 优先、回退叶子描述）+ `pacing`/`pacing_label`。
+- **正文渲染登场人物**。`outline_to_markdown`/`markdown_to_outline` 增加 `## 登场人物` 锚点，
+  往返无损；编辑只改介绍、保留 entity_id/stable_identity。
+- **前端三档选择器**。`constants.ts::pacingOptions`；`OutlineConfirmationPanel` 与
+  `StoryPreparationPanel` 提取时提交 pacing，横幅显示当前节奏标签。
+- 回归（定向）：后端 story/streamline/outline-unblock 33 例 + merge 影响面 8 模块 82 例；
+  前端 outlineVersions(+1)/storyOutlineUnblock/materialPreparation 32 例 + 3 入口 22 例；
+  tsc/build/Ruff 通过。浏览器真实 MiniMax：选紧凑→新任务→正文出现登场人物介绍+「紧凑剧情」。
+  证据 `docs/ACCEPTANCE_20261114_OUTLINE_PACING_CHARACTERS.md`。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

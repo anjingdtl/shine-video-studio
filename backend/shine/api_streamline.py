@@ -35,20 +35,36 @@ class OutlineRevisionBody(APIModel):
 
 
 @router.get("/projects/{project_id}/director/outline")
-def director_outline(project_id: str, db: DBSession) -> dict[str, Any]:
-    """The current outline as an editable body, with questions as hints."""
+def director_outline(project_id: str, db: DBSession, artifact_id: str | None = None) -> dict[str, Any]:
+    """The current outline as an editable body, with questions as hints.
+
+    ``artifact_id`` reads one specific version (for the version history);
+    without it the newest non-stale outline wins.  The response always carries
+    the version chain of the same document so the workbench can show which
+    version is confirmed, which is a fresh draft and which was invalidated.
+    """
     from shine.api_director import _confirmed_outline
 
     require_project(db, project_id)
-    # Prefer the newest non-stale outline (a fresh edit before confirmation),
-    # falling back to the confirmed one.
-    row = db.scalars(select(AgentArtifact).where(
-        AgentArtifact.project_id == project_id, AgentArtifact.kind == "StoryOutline",
-        AgentArtifact.stale.is_(False),
-    ).order_by(AgentArtifact.created_at.desc())).first()
+    if artifact_id is not None:
+        row = db.get(AgentArtifact, artifact_id)
+        if row is None or row.project_id != project_id or row.kind != "StoryOutline":
+            raise HTTPException(404, "STORY_OUTLINE_NOT_FOUND")
+    else:
+        # Prefer the newest non-stale outline (a fresh edit before confirmation),
+        # falling back to the confirmed one.
+        row = db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project_id, AgentArtifact.kind == "StoryOutline",
+            AgentArtifact.stale.is_(False),
+        ).order_by(AgentArtifact.created_at.desc())).first()
     confirmed = _confirmed_outline(db, project_id)
     if row is None:
-        return {"artifact_id": None, "markdown": "", "questions": [], "confirmed": False}
+        return {"artifact_id": None, "markdown": "", "questions": [], "confirmed": False,
+                "versions": []}
+    version_rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == "StoryOutline",
+        AgentArtifact.payload_json["document_id"].as_string() == row.payload_json.get("document_id"),
+    ).order_by(AgentArtifact.created_at.desc()).limit(30)).all()
     return {
         "artifact_id": row.id,
         "sha256": row.sha256,
@@ -59,6 +75,14 @@ def director_outline(project_id: str, db: DBSession) -> dict[str, Any]:
         "approved": bool(row.approved_at),
         "confirmed": bool(confirmed and confirmed.id == row.id),
         "confirmed_artifact_id": confirmed.id if confirmed else None,
+        "versions": [
+            {"artifact_id": v.id, "sha256": v.sha256, "created_at": v.created_at.isoformat(),
+             "approved": bool(v.approved_at), "stale": bool(v.stale),
+             "user_edited": bool(v.payload_json.get("user_edited")),
+             "revision_of": v.payload_json.get("revision_of"),
+             "confirmed": bool(confirmed and confirmed.id == v.id)}
+            for v in version_rows
+        ],
     }
 
 

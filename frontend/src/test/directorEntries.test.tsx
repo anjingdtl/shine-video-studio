@@ -241,10 +241,11 @@ describe('基础配置：一次检测、一处确认', () => {
     window.history.replaceState(null, '', '#d/setup');
     render(<App />);
 
-    // 自动检测后只有一行结论，不再是整页的变体说明。
+    // 检测只由用户点击触发；点一次后给出一行结论与能力勾选。
+    await user.click(await screen.findByRole('button', { name: '检测本机' }));
     expect(await screen.findByText(/可以运行 H3 Ref2VA INT8 ConvRot/)).toBeInTheDocument();
     expect(screen.getByText('H3 Ref2VA INT8 ConvRot（当前生产基线）')).toBeInTheDocument();
-    expect(screen.getByText(/候选方案：本机还没有跑通，暂不能直接安装/)).toBeInTheDocument();
+    expect(screen.getByText(/候选 · 未真机验收；确认后可下载权重/)).toBeInTheDocument();
     // 下载确认就在检测卡里，不需要再往下找另一个按钮。
     const confirm = screen.getByRole('button', { name: /确认并下载安装|确认并完成配置/ });
     expect(confirm).toBeInTheDocument();

@@ -224,3 +224,30 @@ def test_clip_name_carries_project_and_type(studio):
     with factory() as db:
         project = db.get(Project, project_id)
         assert clip_filename(db, project, db.get(Job, job_id)) == "雾港夜账_视频_001镜_未分集.mp4"
+
+
+def test_missing_sources_are_reported_and_skipped_not_fatal(api, tmp_path):
+    """历史缺文件不挡迁移：具名报告、路径不变，存在的文件仍逐字节核验。"""
+    client, factory, settings = api
+    project_id = create_project(client, "雾港夜账")
+    asset = upload_asset(client, project_id, PNG, "角色.png", entity_id="易千寒")
+    gone = upload_asset(client, project_id, PNG + b"distinct-bytes", "旧道具.png", entity_id="旧道具")
+    with factory() as db:
+        missing_path = db.get(Asset, gone["id"]).storage_path
+    (settings.data_dir / missing_path).unlink()
+    new_root = tmp_path / "作品输出"
+
+    response = client.put(
+        "/api/v1/settings/output-directory", json={"path": str(new_root)}, headers=LOCAL
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["missing_count"] == 1
+    assert payload["missing"][0]["path"] == missing_path
+    assert payload["moved"] >= 1
+
+    with factory() as db:
+        row = db.get(Asset, asset["id"])
+        assert (new_root / row.storage_path).read_bytes() == PNG
+        kept = db.get(Asset, gone["id"])
+        assert kept.storage_path == missing_path

@@ -390,6 +390,9 @@ def _variant_option(manifest: dict[str, Any], env: dict[str, Any]) -> dict[str, 
         "workflow_profile_ids": manifest.get("workflow_profile_ids") or [],
         "graph_sha256": manifest.get("graph_sha256") or {},
         "required_component_ids": manifest.get("required_component_ids") or [],
+        "install_component_ids": manifest.get("install_component_ids")
+        or sorted({str(entry.get("component_id")) for entry in manifest.get("files") or []
+                   if entry.get("component_id")}),
         "auto_download_allowed": bool(manifest.get("auto_download_allowed")),
         "total_bytes": sum(sizes),
         "requirements": requirements,
@@ -429,10 +432,9 @@ def recommend_variants(env: dict[str, Any], *, manifests: list[dict[str, Any]] |
     ]
     if tier == TIER_LOWEND:
         notes.append(
-            "本机属于 12GB 级档位：偏好顺序是「已钉住的 NVFP4 第三方量化候选 → 官方 w6a8 低端机候选 → "
-            "用户点名但官方/第三方仓库都没有的 W4 槽位（阻断）」。三者都还没有真机验收，"
-            "所以这一档位目前没有可用于生产的变体；发布方的分档表也只覆盖 8–12GB 的 RTX 50/Blackwell，"
-            "Ada 架构的 12GB 卡不在其覆盖范围内。"
+            "本机属于 12GB 级档位：偏好顺序是「已钉住的 NVFP4 第三方量化候选 → 官方 w6a8 低端机候选」。"
+            "两者都还没有真机验收，所以这一档位目前没有可用于生产的变体；"
+            "发布方的分档表也只覆盖 8–12GB 的 RTX 50/Blackwell，Ada 架构的 12GB 卡不在其覆盖范围内。"
         )
     return {
         "tier": tier,

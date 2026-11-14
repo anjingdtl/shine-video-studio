@@ -88,6 +88,53 @@ def test_outline_is_queued_claimed_resumed_and_merged_with_complete_source(api, 
     assert _queue(client, project, doc) == task_id
 
 
+def test_outline_pacing_is_part_of_identity_and_characters_carry_introductions(api, monkeypatch):
+    from shine.director import streamline
+
+    client, factory, project, doc = setup_scene(api, monkeypatch)
+    gateway = LLMGateway(SecretStore(api[2].secret_store_dir), mock_responder=responder)
+
+    def queue(pacing):
+        r = client.post(f"/api/v1/projects/{project}/story-preparation/outlines", json={
+            "document_id": doc["id"], "expected_document_hash": doc["sha256"],
+            "locked_facts": [], "pacing": pacing}, headers=LOCAL)
+        assert r.status_code == 202, r.text
+        return r.json()["task_id"]
+
+    compact = queue("compact")
+    # Same input, different pacing => a distinct outline input, not a reuse.
+    relaxed = queue("relaxed")
+    assert compact != relaxed
+    # Same pacing reuses the queued task.
+    assert queue("compact") == compact
+
+    for _ in range(70):
+        if not story.run_pending_story_task(factory, api[2], "worker", gateway=gateway):
+            break
+    with factory() as db:
+        task = db.get(AgentTaskRecord, compact)
+        assert task.status == "SUCCEEDED", task.trace
+        outline = db.get(AgentArtifact, task.trace["outline_artifact_id"])
+        payload = outline.payload_json
+        assert payload["pacing"] == "compact"
+        assert payload["pacing_label"] == "紧凑剧情"
+        assert payload["characters"], "outline must list appearing characters"
+        assert all(c.get("introduction") for c in payload["characters"]), \
+            "every character needs an introduction grounded in the source"
+        md = streamline.outline_to_markdown(payload)
+        assert "## 登场人物" in md
+        back = streamline.markdown_to_outline(md, payload)
+        assert back["characters"][0]["introduction"] == payload["characters"][0]["introduction"]
+
+
+def test_outline_rejects_unknown_pacing(api, monkeypatch):
+    client, factory, project, doc = setup_scene(api, monkeypatch)
+    r = client.post(f"/api/v1/projects/{project}/story-preparation/outlines", json={
+        "document_id": doc["id"], "expected_document_hash": doc["sha256"],
+        "pacing": "turbo"}, headers=LOCAL)
+    assert r.status_code == 422
+
+
 def test_unknown_extraction_survives_worker_restart_and_cannot_resume_into_replay(api, monkeypatch):
     client, factory, project, doc = setup_scene(api, monkeypatch)
     calls = []

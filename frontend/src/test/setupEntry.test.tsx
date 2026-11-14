@@ -72,7 +72,9 @@ describe('空数据库与两层界面入口', () => {
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
     // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
     expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /确认并下载安装|确认并完成配置/ })).toBeDisabled();
+    // 检测只由用户点击触发。
+    await user.click(screen.getByRole('button', { name: '检测本机' }));
+    expect(await screen.findByRole('button', { name: /确认并下载安装|确认并完成配置/ })).toBeDisabled();
   });
 
   it('无项目时依赖项目的操作有明确说明', async () => {

@@ -279,6 +279,53 @@ def test_outline_edit_conflict_refuses_stale_sha(api):
     assert response.status_code == 409
 
 
+def test_outline_version_chain_tracks_draft_and_confirmed(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=2)
+    project, outline = prepared["project"], prepared["outline"]
+
+    current = client.get(f"/api/v1/projects/{project}/director/outline").json()
+    assert [v["artifact_id"] for v in current["versions"]] == [outline["id"]]
+    assert current["versions"][0]["confirmed"] is True
+
+    revision = client.post(
+        f"/api/v1/projects/{project}/director/outline/revision",
+        json={"expected_sha256": current["sha256"],
+              "markdown": current["markdown"].replace("一夜之间。", "雨夜改稿。")},
+        headers=LOCAL)
+    assert revision.status_code == 201, revision.text
+    body = revision.json()
+
+    view = client.get(f"/api/v1/projects/{project}/director/outline").json()
+    assert view["artifact_id"] == body["artifact_id"]
+    assert view["approved"] is False
+    assert view["confirmed"] is False
+    assert view["user_edited"] is True
+    assert view["confirmed_artifact_id"] == outline["id"]
+    chain = view["versions"]
+    assert [v["artifact_id"] for v in chain] == [body["artifact_id"], outline["id"]]
+    assert chain[0]["revision_of"] == outline["id"]
+    assert chain[0]["user_edited"] is True
+    assert chain[1]["confirmed"] is True
+
+    old = client.get(
+        f"/api/v1/projects/{project}/director/outline?artifact_id={outline['id']}").json()
+    assert old["artifact_id"] == outline["id"]
+    assert old["markdown"] == current["markdown"]
+
+    # A pending draft must not displace the confirmed basis downstream.
+    book = client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book",
+        json={"episode_count": 1, "target_seconds": 60, "tolerance_seconds": 15},
+        headers=LOCAL)
+    assert book.status_code == 201, book.text
+
+    missing = client.get(
+        f"/api/v1/projects/{project}/director/outline"
+        "?artifact_id=00000000-0000-0000-0000-000000000000")
+    assert missing.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # ② storyboard book
 # ---------------------------------------------------------------------------
