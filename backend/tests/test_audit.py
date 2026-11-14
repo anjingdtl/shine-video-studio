@@ -52,6 +52,34 @@ def test_project_audit_is_complete_filterable_and_paginated(studio):
     assert any(item["event_type"] == "SHOT_REVISED" for item in shot_events["items"])
 
 
+
+
+def test_audit_rows_name_the_thing_they_are_about(studio):
+    """D-R4-03：实体列曾只显示 8 位 id 片段，谁也读不懂那一串是谁。
+
+    审计记录要能回答「对什么做了什么」：项目名、素材文件名这类能读的名字才有意义。
+    拿不到名字的类型（这里是没有名字字段的生成任务）保留 id 供排查，不编造名字。
+    """
+    client, _factory, _root, _settings = studio
+    project_id = create_project(client, "雾港")
+    asset = upload_asset(client, project_id, PNG + b"named", "雾港夜景.png")
+    approve_lock(client, asset["id"])
+
+    asset_items = client.get(
+        f"/api/v1/projects/{project_id}/events?entity_type=asset"
+    ).json()["items"]
+    assert asset_items, "素材应该留下审计记录"
+    assert "雾港夜景.png" in {item["entity_label"] for item in asset_items}
+
+    project_items = client.get(
+        f"/api/v1/projects/{project_id}/events?entity_type=project"
+    ).json()["items"]
+    assert "雾港" in {item["entity_label"] for item in project_items}
+
+    job_items = client.get(
+        f"/api/v1/projects/{project_id}/events?entity_type=job"
+    ).json()["items"]
+    assert all(item["entity_label"] is None for item in job_items)
 def test_audit_payloads_never_store_absolute_paths_or_credentials(studio):
     client, _factory, _root, _settings = studio
     project_id = create_project(client)

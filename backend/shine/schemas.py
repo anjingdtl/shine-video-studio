@@ -631,6 +631,9 @@ class AuditEventItem(APIModel):
     event_type: str
     entity_type: str
     entity_id: str
+    #: The readable name of the thing this row is about.  It is a name, not
+    #: an id: eight characters of an id tell the reader nothing.
+    entity_label: str | None = None
     payload: dict[str, Any]
     created_at: datetime
 

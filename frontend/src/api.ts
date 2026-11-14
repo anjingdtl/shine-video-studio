@@ -664,7 +664,8 @@ export type WorkflowProfile = {
 
 export type AuditItem = {
   id: string; project_id: string | null; actor: string; event_type: string;
-  entity_type: string; entity_id: string; payload: Record<string, unknown>; created_at: string;
+  entity_type: string; entity_id: string; entity_label?: string | null;
+  payload: Record<string, unknown>; created_at: string;
 };
 
 export type AuditPage = { items: AuditItem[]; total: number; limit: number; offset: number };

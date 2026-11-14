@@ -41,12 +41,14 @@ from shine.models import (
     ProductionSeries,
     Project,
     ProjectTerminology,
+    ProviderProfile,
     QCReport,
     QualityGate,
     RepairRecord,
     Shot,
     StyleVersion,
     WorkerInstance,
+    WorkflowProfile,
     utcnow,
 )
 from shine.quality.advisory_queue import advisory_reviews_for_job
@@ -193,6 +195,36 @@ def _style_data(style: StyleVersion) -> dict[str, Any]:
         "approval_note": style.approval_note,
         "frozen_at": style.frozen_at,
     }
+
+
+def _audit_entity_label(db: Session, entity_type: str, entity_id: str) -> str | None:
+    """The readable name of the thing an audit row is about.
+
+    An audit row stores only the id of what it touched.  Eight characters of
+    that id tell the reader nothing; the name does.  A type without a readable
+    name keeps the id, and the front end falls back to it.
+    """
+    from shine.asset_center.models import LibraryAsset, LibraryVersion
+
+    getters = {
+        "project": (Project, "title"),
+        "shot": (Shot, "name"),
+        "asset": (Asset, "filename"),
+        "provider_profile": (ProviderProfile, "name"),
+        "workflow_profile": (WorkflowProfile, "name"),
+        "library_asset": (LibraryAsset, "title"),
+        "library_version": (LibraryVersion, "filename"),
+    }
+    entry = getters.get(entity_type)
+    if entry is None:
+        return None
+    model, field = entry
+    row = db.get(model, entity_id)
+    if row is None:
+        return None
+    value = getattr(row, field, None)
+    text = str(value).strip() if value else ""
+    return text or None
 
 
 def _terminology_data(row: ProjectTerminology) -> dict[str, Any]:
@@ -1866,6 +1898,7 @@ def create_app(
                     event_type=row.event_type,
                     entity_type=row.entity_type,
                     entity_id=row.entity_id,
+                    entity_label=_audit_entity_label(db, row.entity_type, row.entity_id),
                     payload=row.payload,
                     created_at=row.created_at,
                 )
