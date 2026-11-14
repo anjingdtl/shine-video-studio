@@ -176,6 +176,13 @@ export function RealProductionWizard({
   const [reusedBytes, setReusedBytes] = useState(0);
   const [llmRequired, setLlmRequired] = useState(false);
   const [needProject, setNeedProject] = useState(false);
+  /** The node-pack downgrade notice.
+   *
+   *  It deliberately lives outside the stage list: a later stage overwrites the
+   *  stage note, so a downgrade that only rides on that note disappears and the
+   *  run looks complete while those nodes stay disabled.  This line cannot be
+   *  overwritten by any stage. */
+  const [nodePackNotice, setNodePackNotice] = useState('');
   const cancelled = useRef(false);
   const mounted = useRef(true);
   const operation = useRef(false);
@@ -261,7 +268,7 @@ export function RealProductionWizard({
     cancelled.current = false;
     setStages(INITIAL_STAGES.map((stage) => ({ ...stage, status: 'pending', note: '' })));
     setFinished(null); setLlmRequired(false); setReuseOffer(null); setRepairOffer(null); setVariantOffer(null);
-    setReusedBytes(0); setNeedProject(false);
+    setReusedBytes(0); setNeedProject(false); setNodePackNotice('');
     const alive = () => !cancelled.current && mounted.current;
     const onlyDiagnose = mode === 'diagnose';
 
@@ -599,6 +606,13 @@ export function RealProductionWizard({
         if (warning) {
           // The gate was lowered for this environment: say so instead of letting
           // the run look complete while those nodes stay disabled.
+          //
+          //  The stage note alone is not enough: the stages that follow
+          //  ("正在检查本机 H3 服务与工作流" and "H3 服务与工作流已验证") write the
+          //  same stage id and overwrite it, which left the downgrade invisible
+          //  to the person.  The fact therefore also lives in its own line that
+          //  no later stage can erase.
+          setNodePackNotice(warning);
           setStage('workflows', { status: 'warn', note: `运行配置已生成，但${warning}` });
         }
       } catch (error) {
@@ -838,6 +852,11 @@ export function RealProductionWizard({
             </li>
           ))}
         </ol>
+        {nodePackNotice && (
+          <div className="wizard-reuse" data-testid="wizard-node-pack-notice" role="status">
+            <p><b>这次运行有节点包被禁用：</b>{nodePackNotice}</p>
+          </div>
+        )}
         {llmRequired && <LLMSetupPanel onChanged={onRefresh} />}
         {reuseOffer && (
           <div className="wizard-reuse" data-testid="wizard-reuse">
