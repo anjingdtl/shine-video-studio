@@ -247,7 +247,7 @@ describe('基础配置：一次检测、一处确认', () => {
     expect(screen.getByText('H3 Ref2VA INT8 ConvRot（当前生产基线）')).toBeInTheDocument();
     expect(screen.getByText(/候选 · 未真机验收；确认后可下载权重/)).toBeInTheDocument();
     // 下载确认就在检测卡里，不需要再往下找另一个按钮。
-    const confirm = screen.getByRole('button', { name: /确认并下载安装|确认并完成配置/ });
+    const confirm = screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
     expect(confirm).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeInTheDocument();
     expect(screen.getByRole('checkbox', { name: /画面审片/ })).toBeInTheDocument();
