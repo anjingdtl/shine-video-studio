@@ -46,16 +46,17 @@
 ## 3.2 共享环境红线（2026-11-15 事故后定）
 
 - **绝不执行 `npm ci` / `npm install`**。它会先删掉 `frontend/node_modules`；本机在跑的 vite 占用 `esbuild.exe`，Windows 上直接 EPERM 失败，即使成功也会洗掉共享依赖、打断用户与其他 agent 正在运行的工作台。2026-11-15 曾因此把共享 `node_modules` 洗掉一半（vite 整个消失）、8000/5173 工作台掉线，后用 `npm --prefix frontend ci`（194 包）按锁文件还原修复。要装依赖先停下来问人。
-- **绝不抢占他人端口**。8010/5180 可能被别的 agent 建设占用；起实例前先 `Get-NetTCPConnection` 查端口，被占用就换 8020/5190，或改用已在运行的实例。
+- **绝不抢占他人端口**。起实例前先 `Get-NetTCPConnection` 查端口，被占用就换端口（如 8040/5210），或改用已在运行的实例。最新端口实况见团队记忆 `shine.ports`（多套栈常并行，随时会变）。
+- ⚠️ **静态根目录服务是事故源**。2026-11-15 实测：8000 端口被别的 agent 用 `python -m http.server 8000 --bind 127.0.0.1` 直接服务仓库根，`.env`、`.git`、`.local-data` 可被本机 HTTP 读取。不得对本仓库这样起静态服务；发现即上报用户，不擅自停止他人进程。
 - **起停任何工作栈前先问用户或总控**。
 
 ## 4. 隔离运行（成员默认）
 
-- 数据目录：`.local-acceptance/<run-id>-<who>/`；端口：视频线 8010/5180，素材线 8011/5181。**不碰 `.local-data/`**（用户真实项目）。
+- 数据目录：`.local-acceptance/<run-id>-<who>/`；端口以团队记忆 `shine.ports` 为准（2026-11-15 06:25 实测三套栈已占 8010/5180、8020/5190、8030/5200）。**不碰 `.local-data/`**（用户真实项目）。
 - 起（**已验证**，复用现有依赖、不重装）：`pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/start_eval_instance.ps1 -DataDir <dir> -ApiPort <api> -WebPort <web>`
   它按 `start_shine.ps1` 的同一口径写 `run/receipts.json`（`backend/uv.lock` 与 `frontend/package-lock.json` 的 SHA256），复用现有 `.venv` 与 `node_modules`；实测 API 8010 / Web 5180 能正常起来（worker 在线、mock 可用、`h3_connected=false`）。
 - 停：`backend/.venv/Scripts/python.exe scripts/stop_shine.py --data-dir <dir>`
-- **起之前先查端口**（`Get-NetTCPConnection`）：8010/5180 可能被别的 agent 建设占用，被占用就换 8020/5190，或改用已在运行的实例。
+- **起之前先查端口**（`Get-NetTCPConnection`），被占用就换端口，或改用已在运行的实例。
 
 ## 5. 浏览器实操
 
