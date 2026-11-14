@@ -40,4 +40,22 @@ describe('接口错误文案', () => {
     const error = await api('/comfyops/install-plans/x/execute').catch((caught: unknown) => caught);
     expect((error as ApiError).message).toContain('已自动排队等待');
   });
+
+  it('人物重名拒绝带名字后缀时给出中文说明与下一步，而不是裸码串', async () => {
+    respond(409, { detail: 'CHARACTER_NAME_ALREADY_IN_USE:林岚' });
+    const error = await api('/projects/p/storyboard/character-binding/apply', json('POST', {}))
+      .catch((caught: unknown) => caught);
+    const message = (error as ApiError).message;
+    expect(message).toContain('林岚');
+    expect(message).toContain('另一张人物素材');
+    expect(message).toContain('改一个不重复的名字');
+    expect(message).not.toBe('CHARACTER_NAME_ALREADY_IN_USE:林岚');
+  });
+
+  it('人物重名裸码也有兜底说明', async () => {
+    respond(409, { detail: 'CHARACTER_NAME_ALREADY_IN_USE' });
+    const error = await api('/projects/p/storyboard/character-binding/apply', json('POST', {}))
+      .catch((caught: unknown) => caught);
+    expect((error as ApiError).message).toContain('一个名字只能对应一张人物素材');
+  });
 });
