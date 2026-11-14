@@ -32,7 +32,7 @@
 | 5 | 安装身份与目录绑定，移动目录可能改变 Installation ID | **已关闭**。身份改为随机持久化令牌 + 目录内身份文件；目录搬迁/换盘/重新 Clone 不改身份；0.1.x 路径哈希 ID 作为别名继续可解析 | `launcher/src/identity.rs`、`installation_registry.rs` 及单测 |
 | 6 | Windows CI 只验证 `--smoke-check`，没有真实 GUI 操作验收 | **部分关闭**。新增无界面 `--self-test`（真实驱动注册表/升级状态机/能力规划/协议校验）与 `--verify-manifest`；CI 改为双自检。**真人 GUI 操作仍 PENDING**（见 5.1） | `launcher/src/main.rs`、`launcher/packaging/build_windows.ps1`、`launcher/packaging/ci/launcher-windows.yml` |
 | 7 | 上一轮报告称 PR #13 保持 Draft，但该 PR 实际已合并 | **已更正**。本报告与实现状态文档均按真实状态表述；PR #13 于 2026-11-13 前后以 merge commit 合入 main | 本报告第 0 节、PR #17 描述 |
-| 8 | 主线近期 CI 存在 Ruff 和浏览器 E2E 失败 | **已核实，未在本 PR 内修复**。本轮实测 `ruff check backend` 在当前 main 上**全部通过**（ruff 0.12.3），Ruff 失败已不复现；浏览器 E2E（`web-e2e`）在 PR 上按条件 skip，未取得证据。后端另有 **2 条 RelayVSR 既有回归**、前端另有 **13 条既有失败**，均在纯净 main 检出上复现，属导演/素材业务线，本 PR 不改业务代码 —— 详见第 4.5 节 | 本报告第 4.5 节；纯净 `origin/main@1c7cfd32` 检出复现 |
+| 8 | 主线近期 CI 存在 Ruff 和浏览器 E2E 失败 | **已核实，未在本 PR 内修复**。本轮实测 `ruff check backend` 在当前 main 上**全部通过**（ruff 0.12.3），Ruff 失败已不复现；**浏览器 E2E（`L3 browser E2E`）确认仍在失败**，失败步骤 `Browser approval and voice flow on an isolated database` 在合并前的 `main@1c7cfd32`（run `43550015947`）与合并后的 main 上**同一位置同样失败**，属导演/审批/配音流程的既有问题，与启动器无关、本 PR 不改业务代码。后端方面，8 分片并行回归的 2 条抖动为并发时序敏感用例（单独跑全绿），详见第 4.5.1 节 | 本报告第 4.5 节；main 上 `ci` 运行记录 |
 
 ## 2. L0–L5 分阶段状态
 
@@ -147,7 +147,8 @@ grep -H "^FAILED\|^ERROR" chunk-*.log
 ```
 
 环境：Python 3.12.16 独立 venv（`/workspace/backend-venv`），pytest 8.4.1、
-ruff 0.12.3，系统 ffmpeg/ffprobe 均在位。
+ruff 0.12.3，系统 ffmpeg/ffprobe 均在位，且项目声明依赖
+`imageio-ffmpeg==0.6.0`（`backend/pyproject.toml`）已按 CI 的真实条件补齐。
 
 | 分片 | 测试文件 | 选中用例 | 退出码 |
 | --- | --- | --- | --- |
@@ -158,30 +159,51 @@ ruff 0.12.3，系统 ffmpeg/ffprobe 均在位。
 | chunk-ae | 27 | 293 | 0 |
 | chunk-af | 27 | 259 | 0 |
 | chunk-ag | 27 | 248 | 0 |
-| chunk-ah | 27 | 406 | 1 |
-| **合计** | **219** | **2627** | 3 片非零 |
+| chunk-ah | 27 | 406 | 0 |
+| **合计** | **219** | **2627** | **2 片非零** |
 
-按 `AGENTS.md` 的判定口径，**8 分片并行回归未全绿**，失败共 4 条，已逐条定性：
+按 `AGENTS.md` 的判定口径，**8 分片并行回归未全绿**，失败共 2 条，已逐条定性：
 
 | 失败用例 | 分片 | 定性 | 证据 |
 | --- | --- | --- | --- |
-| `test_sdk_role_process.py::test_child_timeout_waits_for_exit_and_never_replays` | aa | **并发时序敏感，非本分支引入** | 单独跑该模块 29/29 全通过；首次 8 分片运行时同文件另一条用例也失败，重跑时反而通过——典型的进程启动握手超时抖动 |
+| `test_sdk_role_process.py::test_child_timeout_waits_for_exit_and_never_replays` | aa | **并发时序敏感，非本分支引入** | 单独跑该模块 29/29 全通过（`[shine-tier] total=29 selected=29`）；三轮 8 分片中该文件的失败用例在两轮之间发生过变化，典型的子进程启动握手超时抖动 |
 | `test_runtime_activation.py::test_real_resident_worker_observes_activation_and_blocks_changed_files` | ab | **并发时序敏感，非本分支引入** | 同上，单独跑该模块全通过；失败点为常驻进程在超时内未回报启动成功 |
-| `test_relay_upscale_stage.py::test_full_chain_with_available_backend` | ah | **main 既回归，非本分支引入** | 在**纯净 `origin/main@1c7cfd32` 检出**上单跑该文件，**同样失败**（`FileNotFoundError: 'missing-ffmpeg'`） |
-| `test_relay_upscale_stage.py::test_not_exactly_2x_is_a_named_refusal` | ah | **main 既有回归，非本分支引入** | 同上，纯净 main 检出同样失败 |
 
 关键佐证：
 
 - `git diff origin/main..HEAD -- backend/` **为空**——本分支对后端**零改动**，
   上述失败不可能由本分支代码引起。
-- `test_relay_upscale_stage.py` 的失败根因是 RelayVSR 新增链路里
-  `relayvsr.mux_source_audio()` 直接 `subprocess.run(['missing-ffmpeg', ...])`，
-  未捕获 `FileNotFoundError`（只判 `returncode != 0`），导致"缺 ffmpeg"这一预期
-  场景抛出未捕获异常而不是返回命名拒绝。该文件属于 RelayVSR 业务线，
-  **不在本任务授权范围内，本轮不修**，已如实登记为 main 既有回归。
+- 两条失败用例都断言"子进程/常驻进程在超时内完成启动握手"，在 8 路并行、
+  容器 CPU 受限时会超时；单独跑则稳定通过。这是 `AGENTS.md` 明确要求用
+  "单独跑同一模块"复核的情形。
 
-> 结论：本分支不引入任何后端回归；后端回归在 main 上同样存在，需由 RelayVSR
-> 业务线负责人修复。
+> 结论：本分支不引入任何后端回归。8 分片并行口径下仍有 2 条并发时序敏感用例
+> 抖动，单独跑全绿；属于环境并行度问题，不是代码缺陷。
+
+##### 一次自查纠正（记录在案）
+
+本次验收前两轮跑分时，`test_relay_upscale_stage.py` 有 2 条失败
+（`test_full_chain_with_available_backend`、`test_not_exactly_2x_is_a_named_refusal`），
+在**纯净 `origin/main@1c7cfd32` 检出**上同样复现，一度被登记为"main 既有回归"。
+**该结论是错的，现已更正。**
+
+真实根因是**本轮沙箱缺少项目已声明的依赖 `imageio-ffmpeg==0.6.0`**（PyPI 下载
+被截断，只拿到不完整的 wheel）：
+
+- `backend/shine/comfyops/relay_stage.py::_resolve_ffmpeg()` 在配置路径
+  （测试里是 `missing-ffmpeg`）不在 PATH 时，会回退到
+  `imageio_ffmpeg.get_ffmpeg_exe()` 取真实 FFmpeg；
+- 依赖缺失 → 回退失败 → `subprocess.run(['missing-ffmpeg', ...])` 抛
+  `FileNotFoundError`，于是测试以异常而非"命名拒绝"结束；
+- CI 通过 `uv sync --project backend --locked` **必定**装上该依赖，
+  所以 CI 的 `L3 backend full (Linux)` 在同一 commit 上是 **success**
+  （run `43550015947`），与本地失败并不矛盾。
+
+补齐该依赖后：`test_relay_upscale_stage.py` **5 条全过**，
+第 8 分片 `chunk-ah` 退出码回到 0，上表即补齐依赖后的最终结果。
+
+这一条记在这里，是为了说明：**"在纯净 main 上同样复现"并不能单独证明
+"main 既有回归"**——必须再确认两侧依赖环境一致。
 
 #### 4.5.2 Python 静态检查
 
