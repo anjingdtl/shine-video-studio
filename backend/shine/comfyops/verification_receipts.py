@@ -163,33 +163,47 @@ def directory_files(directory: Path | None, component: dict,
             "reason": None if verified else ("MISSING_FILES" if not present else "BYTES_CHANGED")}
 
 
-def _recorded_file(directory: Path | None, entry: dict) -> dict:
+def _recorded_file(directory: Path | None, entry: dict, absolute: Path | None = None) -> dict:
     relative = str(entry.get("relative_path") or "")
     record = {"relative_path": relative,
               "sha256": str(entry.get("sha256") or "").lower(),
               "size": int(entry.get("size") or 0)}
-    if directory is not None:
+    target = absolute if absolute is not None else (
+        directory / relative if directory is not None else None)
+    if target is not None:
         try:
-            stat = (directory / relative).stat()
+            stat = target.stat()
             record["mtime_ns"] = stat.st_mtime_ns
         except OSError:
             record["mtime_ns"] = None
+        if absolute is not None:
+            # An in-place verification of a user installation does not share a
+            # single package directory: every verified file carries its own
+            # absolute path, so readiness can re-check exactly what was read.
+            record["path"] = str(absolute)
     return record
 
 
 def save_receipt(db, *, variant_id: str | None, catalog_id: str | None,
                  catalog_version: str | None, component: dict,
-                 root: Path | None, directory: Path | None) -> dict:
+                 root: Path | None, directory: Path | None,
+                 file_paths: dict[str, Path] | None = None,
+                 allowed_roots: list[Path] | None = None) -> dict:
     """Record a complete, verified component under its content identity.
 
     Only a full set of matching files produces a receipt.  A receipt is a fact
     about this directory at this moment, so a later byte change is caught by
     :func:`verify_receipt`, not hidden by the row.
+
+    ``file_paths`` maps each pinned relative path to the absolute file that was
+    really hashed.  It is used by in-place verification of an existing
+    installation, where files of one component may not live in one directory.
     """
     from shine.models import AppSetting
 
     component_id = str(component.get("component_id") or "")
     identity = component_identity(component)
+    paths = {str(key): Path(value) for key, value in (file_paths or {}).items()}
     receipt = {
         "schema": RECEIPT_SCHEMA,
         "variant_id": variant_id,
@@ -200,8 +214,9 @@ def save_receipt(db, *, variant_id: str | None, catalog_id: str | None,
         "identity": identity,
         "root": str(root) if root is not None else None,
         "directory": str(directory) if directory is not None else None,
+        "allowed_roots": [str(Path(row)) for row in (allowed_roots or [])] or None,
         "files": [
-            _recorded_file(directory, entry)
+            _recorded_file(directory, entry, paths.get(str(entry.get("relative_path") or "")))
             for entry in (component.get("files") or [])
         ],
         "verified_at": datetime.now(UTC).isoformat(),
@@ -248,6 +263,71 @@ def find_any_receipt(db, component_id: str) -> dict | None:
     return matches[-1].value
 
 
+def _verify_recorded_paths(receipt: dict, component: dict) -> dict | None:
+    """Re-check a receipt whose files were verified at absolute paths.
+
+    Returns ``None`` when the receipt is not path-based (older schema).  Every
+    recorded path must stay inside the receipt's root; a path that escaped the
+    selected installation is not evidence about that installation.
+    """
+    recorded = {
+        str(row.get("relative_path")): row
+        for row in (receipt.get("files") or [])
+        if isinstance(row, dict)
+    }
+    entries = component.get("files") or []
+    if not entries or any(not (recorded.get(str(entry.get("relative_path"))) or {}).get("path")
+                          for entry in entries):
+        return None
+    root = receipt.get("root")
+    allowed = [Path(row) for row in (receipt.get("allowed_roots") or ([root] if root else []))]
+    allowed_roots = []
+    for row in allowed:
+        try:
+            allowed_roots.append(row.resolve())
+        except OSError:
+            continue
+    rows = []
+    for entry in entries:
+        relative = str(entry.get("relative_path") or "")
+        pinned = recorded.get(relative) or {}
+        target = Path(str(pinned.get("path")))
+        if not target.is_absolute() or ".." in target.parts:
+            rows.append({"relative_path": relative, "present": False, "verified": False,
+                         "reason": "INVALID_RECORDED_PATH"})
+            continue
+        try:
+            resolved = target.resolve()
+        except OSError:
+            rows.append({"relative_path": relative, "present": False, "verified": False,
+                         "reason": "PATH_UNREADABLE"})
+            continue
+        if allowed_roots and not any(resolved.is_relative_to(root) for root in allowed_roots):
+            rows.append({"relative_path": relative, "present": False, "verified": False,
+                         "reason": "PATH_OUTSIDE_INSTALLATION"})
+            continue
+        try:
+            stat = resolved.stat()
+        except OSError:
+            rows.append({"relative_path": relative, "present": False, "verified": False,
+                         "reason": "MISSING_FILE"})
+            continue
+        if (pinned.get("size") == stat.st_size
+                and pinned.get("mtime_ns") == stat.st_mtime_ns
+                and pinned.get("sha256") == str(entry.get("sha256") or "").lower()):
+            rows.append({"relative_path": relative, "present": True, "verified": True,
+                         "size": stat.st_size, "reused": True, "path": str(resolved)})
+            continue
+        check = file_digest(resolved, str(entry.get("sha256") or ""),
+                            int(entry.get("size") or 0))
+        rows.append({"relative_path": relative, **check, "path": str(resolved)})
+    present = all(row.get("present") for row in rows) if rows else False
+    verified = bool(rows) and all(row.get("verified") for row in rows)
+    return {"verified": verified, "present": present, "files": rows,
+            "reason": None if verified else ("MISSING_FILES" if not present else "BYTES_CHANGED"),
+            "paths_verified": True}
+
+
 def verify_receipt(db, *, component: dict, variant_id: str | None,
                    catalog_id: str | None, catalog_version: str | None,
                    cache_dir: Path | None = None) -> dict:
@@ -255,7 +335,8 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
 
     A registry row, a same-named cache file or a receipt for another revision
     is not evidence.  The receipt must carry the same content identity and its
-    recorded directory must still contain the exact pinned files.
+    recorded directory (or its recorded per-file paths) must still contain the
+    exact pinned files.
     """
     component_id = str(component.get("component_id") or "")
     expected = component_identity(component)
@@ -275,14 +356,16 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
     if catalog_id and receipt.get("catalog_id") not in {None, catalog_id}:
         return {"verified": False, "present": False, "reason": "RECEIPT_CATALOG_CHANGED",
                 "identity": expected, "receipt": receipt}
-    directory = receipt.get("directory")
-    recorded = {
-        str(row.get("relative_path")): row
-        for row in (receipt.get("files") or [])
-        if isinstance(row, dict)
-    }
-    check = directory_files(Path(directory) if directory else None, component,
-                            recorded=recorded)
+    check = _verify_recorded_paths(receipt, component)
+    if check is None:
+        directory = receipt.get("directory")
+        recorded = {
+            str(row.get("relative_path")): row
+            for row in (receipt.get("files") or [])
+            if isinstance(row, dict)
+        }
+        check = directory_files(Path(directory) if directory else None, component,
+                                recorded=recorded)
     return {
         "verified": check["verified"],
         "present": check["present"],
@@ -290,6 +373,7 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
         "identity": expected,
         "receipt": receipt,
         "files": check["files"],
+        "paths_verified": bool(check.get("paths_verified")),
     }
 
 

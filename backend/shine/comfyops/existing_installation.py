@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -30,6 +31,119 @@ def comfy_root(path: Path) -> Path | None:
         if (candidate / 'main.py').is_file() and (candidate / 'comfy').is_dir():
             return candidate.resolve()
     return None
+
+
+#: Files a ComfyUI checkout ships that declare a release version.  The version
+#: is evidence of *which software* is installed; it is deliberately not turned
+#: into a Git revision, because the two are different facts.
+_VERSION_FILES = ('comfyui_version.py', 'version.py', 'pyproject.toml')
+_VERSION_PATTERN = re.compile(
+    r'(?:__version__|version)\s*[:=]\s*["\']([0-9][^"\']*)["\']', re.IGNORECASE,
+)
+
+
+def declared_version(root: Path) -> tuple[str | None, str | None]:
+    """Read a locally declared version, with the file that declared it.
+
+    Never executes anything and never infers a commit.  A missing declaration
+    stays unknown rather than being guessed from a directory name.
+    """
+    for name in _VERSION_FILES:
+        path = root / name
+        try:
+            if not path.is_file() or path.is_symlink():
+                continue
+            text = path.read_text(encoding='utf-8', errors='replace')[:65536]
+        except OSError:
+            continue
+        match = _VERSION_PATTERN.search(text)
+        if match:
+            return match.group(1).strip(), name
+    return None, None
+
+
+def _git_commit(path: Path) -> str | None:
+    if not (path / '.git').exists():
+        return None
+    try:
+        result = subprocess.run(
+            ['git', '-C', str(path), 'rev-parse', 'HEAD'],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=5,
+            check=False, env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'},
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def node_package_inventory(root: Path, catalog: dict) -> dict:
+    """Every custom node package on disk, with the evidence it really has.
+
+    Installed is a directory fact; a source revision is separate evidence.  A
+    package without a readable version is reported as ``VERSION_UNKNOWN`` -
+    never assigned a guessed release.
+    """
+    expected = {
+        component['component_id']
+        for component in catalog.get('components', [])
+        if component.get('kind') == 'node'
+    }
+    custom = root / 'custom_nodes'
+    packages = []
+    skipped = []
+    if custom.is_dir():
+        try:
+            entries = sorted(custom.iterdir(), key=lambda row: row.name.lower())
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.name.startswith(('.', '__')) or entry.name in {'__pycache__'}:
+                continue
+            if entry.is_symlink():
+                skipped.append({'name': entry.name, 'reason': 'SYMLINK_NOT_FOLLOWED'})
+                continue
+            if not entry.is_dir():
+                # A single-file node (the project's own sampling node, for
+                # example) is a real package too.
+                if entry.suffix == '.py' and entry.is_file():
+                    packages.append({
+                        'name': entry.name,
+                        'path': str(entry),
+                        'kind': 'SINGLE_FILE_NODE',
+                        'version': None,
+                        'version_source': None,
+                        'version_status': 'VERSION_UNKNOWN',
+                        'git_commit': None,
+                        'required_by_catalog': entry.name in expected,
+                    })
+                continue
+            version, version_source = declared_version(entry)
+            commit = _git_commit(entry)
+            packages.append({
+                'name': entry.name,
+                'path': str(entry),
+                'kind': 'CUSTOM_NODE_PACKAGE',
+                'version': version,
+                'version_source': version_source,
+                'version_status': (
+                    'VERSION_DECLARED' if version
+                    else ('GIT_REVISION_OBSERVED' if commit else 'VERSION_UNKNOWN')
+                ),
+                'git_commit': commit,
+                'required_by_catalog': entry.name in expected,
+                # Mapping a node *class* to the package that registers it needs
+                # the running service's object_info; a directory scan cannot
+                # claim it.
+                'node_class_mapping': 'REQUIRES_RUNNING_SERVICE',
+            })
+    return {
+        'source': 'READ_ONLY_DIRECTORY_SCAN',
+        'custom_nodes_root': str(custom),
+        'expected_by_catalog': sorted(expected),
+        'packages': packages,
+        'skipped': skipped,
+        'node_class_mapping_verified': False,
+    }
 
 
 def _source_software_state(root: Path, catalog: dict) -> dict:
@@ -64,14 +178,27 @@ def _source_software_state(root: Path, catalog: dict) -> dict:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    local_version, local_version_source = declared_version(root)
     if actual and expected and actual != expected:
         version_status = "INSTALLED_VERSION_MISMATCH"
     elif actual and expected and tracked_clean is False:
         version_status = "INSTALLED_VERSION_MODIFIED"
     elif actual and expected and tracked_clean is True:
         version_status = "INSTALLED_VERSION_MATCH"
+    elif local_version:
+        # A release number read from the installation itself is real evidence
+        # of which software is installed.  It is not a Git commit and is never
+        # compared to the pinned revision as if it were one.
+        version_status = "INSTALLED_VERSION_OBSERVED"
     else:
         version_status = "INSTALLED_VERSION_UNKNOWN"
+    version_source = "git" if actual else local_version_source
+    version_confidence = (
+        "HIGH" if version_status == "INSTALLED_VERSION_MATCH"
+        else ("MEDIUM" if version_status in {"INSTALLED_VERSION_MODIFIED",
+                                            "INSTALLED_VERSION_MISMATCH",
+                                            "INSTALLED_VERSION_OBSERVED"} else "NONE")
+    )
 
     python_candidates = (
         root.parent / "python_embeded" / "python.exe",
@@ -88,12 +215,23 @@ def _source_software_state(root: Path, catalog: dict) -> dict:
         "version_status": version_status,
         "actual_revision": actual,
         "expected_revision": expected or None,
+        "actual_version": local_version,
+        "version_source": version_source,
+        "version_confidence": version_confidence,
         "tracked_files_clean": tracked_clean,
         "runtime": {
             "status": "PYTHON_PRESENT_COMPATIBILITY_UNVERIFIED" if python else "PYTHON_NOT_FOUND",
             "python_executable": str(python) if python else None,
         },
         "nodes": nodes,
+        "version_evidence": {
+            "sources": [row for row in (
+                "git_revision" if actual else None,
+                local_version_source,
+            ) if row],
+            "pinned_revision_compared": bool(actual and expected),
+            "version_is_not_a_commit": True,
+        },
         "node_revisions_verified": False,
     }
 
@@ -275,6 +413,44 @@ def _local_declared_dir(value: str, base: Path) -> Path | None:
         return None
 
 
+def declared_model_family_roots(root: Path) -> dict[str, list[Path]]:
+    """The model directories the installation declares, grouped by family.
+
+    ComfyUI reads this file at startup; a read-only parse is evidence of which
+    directory a *family* (``unet``, ``clip``, ``vae``...) really comes from.
+    The same defensive rules as :func:`_declared_model_roots` apply: local
+    directories only, links and network paths ignored.
+    """
+    config = root / 'extra_model_paths.yaml'
+    families: dict[str, list[Path]] = {}
+    try:
+        if not config.is_file() or config.is_symlink():
+            return families
+        lines = config.read_text(encoding='utf-8', errors='replace').splitlines()
+    except OSError:
+        return families
+    base = root
+    for raw in lines:
+        line = raw.split('#', 1)[0].strip()
+        if not line or ':' not in line:
+            continue
+        key, _, value = line.partition(':')
+        key = key.strip().lower()
+        value = value.strip().strip('"\'')
+        if key == 'is_default':
+            continue
+        if key == 'base_path':
+            if value:
+                base = _local_declared_dir(value, base) or base
+            continue
+        if not value:
+            continue
+        directory = _local_declared_dir(value, base)
+        if directory and directory not in families.setdefault(key, []):
+            families[key].append(directory)
+    return families
+
+
 def _declared_model_roots(root: Path) -> list[Path]:
     """Model directories the existing ComfyUI itself declares.
 
@@ -383,6 +559,12 @@ def inspect(root_value: str, catalog: dict) -> dict:
     software = _source_software_state(root, catalog)
     payload = {'root': str(root), 'software': software, 'matches': matches, 'missing': missing,
                'skipped': skipped, 'scanned_files': count, 'model_roots': model_roots,
+               'models_root': str(root / 'models'),
+               'declared_model_family_roots': {
+                   family: [str(directory) for directory in directories]
+                   for family, directories in sorted(declared_model_family_roots(root).items())
+               },
+               'node_packages': node_package_inventory(root, catalog),
                'runtime_verified': False,
                'catalog_id': catalog['catalog_id'], 'catalog_version': catalog['catalog_version']}
     return {**payload, 'snapshot': graph_hash(payload),
@@ -456,14 +638,26 @@ def register_verified_packages(db, verified: list[dict], catalog: dict,
 
     components = _component_map(catalog)
     registered = []
+    root_path = Path(root) if root else None
+    allowed_roots = (
+        [root_path, *[directory for dirs in declared_model_family_roots(root_path).values()
+                      for directory in dirs]]
+        if root_path is not None else []
+    )
     for component_id, row in rows.items():
         if row.status == 'UNVERIFIED_ORIGIN':
             row.status = 'FILES_VERIFIED_PENDING_RUNTIME'
             registered.append(component_id)
         # An in-place verification proves the files at the selected existing
-        # installation, not at the isolated-package directory.  The receipt
-        # says exactly which directory was read, so readiness cannot borrow
-        # this evidence for a different copy (J04).
+        # installation, not at the isolated-package directory.  Each verified
+        # file's absolute path is recorded, so readiness re-checks exactly the
+        # bytes that were hashed and cannot borrow this evidence for another
+        # copy (J04).
+        file_paths = {
+            item['relative_path']: Path(item['source'])
+            for item in verified
+            if item.get('component_id') == component_id and item.get('source')
+        }
         variant_block = catalog.get('variant')
         save_receipt(
             db,
@@ -472,8 +666,10 @@ def register_verified_packages(db, verified: list[dict], catalog: dict,
             catalog_id=catalog.get('catalog_id'),
             catalog_version=catalog.get('catalog_version'),
             component=components[component_id],
-            root=Path(root) if root else None,
-            directory=Path(root) if root else None,
+            root=root_path,
+            directory=root_path,
+            file_paths=file_paths or None,
+            allowed_roots=allowed_roots or None,
         )
     return registered
 
