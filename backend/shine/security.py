@@ -115,9 +115,11 @@ def is_loopback_peer(host: str) -> bool:
     if value in LOOPBACK_HOSTS:
         return True
     try:
-        return ip_address(value).is_loopback
+        address = ip_address(value)
     except ValueError:
         return False
+    mapped = getattr(address, "ipv4_mapped", None)
+    return (mapped or address).is_loopback
 
 
 def is_loopback_url(url: str) -> bool:

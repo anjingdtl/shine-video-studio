@@ -63,11 +63,10 @@ STATUS_BLOCKED = "BLOCKED"
 STATUS_UNKNOWN = "UNKNOWN"
 QUALIFICATION_STATUSES = (STATUS_SUPPORTED, STATUS_BLOCKED, STATUS_UNKNOWN)
 
-#: A machine sold as "32 GB" reports about 31.7 GB of usable memory.  A
-#: manifest that declares a round-GiB floor therefore has to be read in the
-#: units the host reports, otherwise the recommendation would reject a
-#: machine the installer accepts - exactly the "three different conclusions"
-#: this service replaces.
+#: A machine sold as "32 GB" may report slightly less usable memory than the
+#: round-GiB floor.  This slack covers a small reservation, nothing more; a
+#: larger gap is explained only by the hardware inventory (see below), never by
+#: widening this number.
 DECLARED_FLOOR_SLACK_MB = 1024
 
 _SHA256 = re.compile(r"^[a-f0-9]{64}$")
@@ -477,12 +476,38 @@ def qualify(requirements: dict[str, Any], env: dict[str, Any]) -> dict[str, Any]
             })
         else:
             floor = effective_floor_mb(int(min_ram))
+            installed = ram.get("installed_mb")
             if int(total_ram) < int(floor):
-                blockers.append({
-                    "code": "RAM_INSUFFICIENT",
-                    "message": f"需要至少 {floor} MB 内存，本机 {int(total_ram)} MB",
-                    "required": int(floor), "actual": int(total_ram),
-                })
+                # A rounded floor may exceed what Windows reports by more than
+                # the fixed slack, because firmware and the iGPU reserve part
+                # of a retail kit.  Only a *measured* installed capacity can
+                # bridge that gap; an unreadable inventory stays UNKNOWN.
+                if (isinstance(installed, int | float) and not isinstance(installed, bool)
+                        and int(installed) >= int(min_ram)):
+                    warnings.append({
+                        "code": "RAM_RESERVED_MEMORY",
+                        "message": f"系统报告可用 {int(total_ram)} MB，实装 {int(installed)} MB；"
+                                   "差额是硬件保留内存，按实装容量判定达标。",
+                        "reported": int(total_ram), "installed": int(installed),
+                        "required": int(min_ram),
+                    })
+                elif isinstance(installed, int | float) and not isinstance(installed, bool):
+                    blockers.append({
+                        "code": "RAM_INSUFFICIENT",
+                        "message": f"需要至少 {floor} MB 内存，本机 {int(total_ram)} MB",
+                        "required": int(floor), "actual": int(total_ram),
+                    })
+                else:
+                    # The reported total is below the floor and the hardware
+                    # inventory could not be read.  That is an unverified
+                    # requirement, not a measured failure: it stays UNKNOWN so
+                    # no variant is falsely marked incompatible.
+                    unknowns.append({
+                        "code": "RAM_UNVERIFIED",
+                        "message": f"系统报告 {int(total_ram)} MB，低于门槛 {floor} MB，"
+                                   "但读不到实装内存容量；需要复核，不能确认达标。",
+                        "required": int(floor), "actual": int(total_ram),
+                    })
 
     min_commit = requirements.get("min_commit_mb")
     commit = env.get("commit") or {}

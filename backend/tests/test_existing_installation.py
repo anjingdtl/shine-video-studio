@@ -34,7 +34,7 @@ def catalog(data=b'correct model'):
     }]}
 
 
-def test_discovery_finds_portable_at_common_depth_without_recursive_disk_scan(tmp_path):
+def test_discovery_finds_portable_at_common_depth_with_bounded_scan(tmp_path):
     parent = tmp_path / 'AIGC2026' / 'ComfyUI_bundle'
     root = installation(parent)
     # Put the portable root in the shape found in common Windows bundles.
@@ -42,13 +42,46 @@ def test_discovery_finds_portable_at_common_depth_without_recursive_disk_scan(tm
     root = parent / 'ComfyUI_renamed' / 'ComfyUI'
     result = existing.discover([str(root.parent)], drives=[tmp_path])
     assert str(root) in result['installations']
-    assert result['coverage'] == 'COMMON_LOCATIONS_ONLY'
+    assert result['coverage'] == 'BOUNDED_RECURSIVE_SCAN'
     assert result['runtime_verified'] is False
+    assert result['scan']['truncated'] is False
     # Direct portable layout is found automatically without a configured root.
     simple = tmp_path / 'AIGC2026' / 'ComfyUI_simple'
     (simple / 'ComfyUI' / 'comfy').mkdir(parents=True)
     (simple / 'ComfyUI' / 'main.py').touch()
     assert str(simple / 'ComfyUI') in existing.discover([], drives=[tmp_path])['installations']
+
+
+def test_discovery_finds_deep_download_layout(tmp_path):
+    """A download nested several levels down is still found by the bounded walk."""
+    root = tmp_path / 'Downloads' / 'AIGC' / 'ComfyUI_windows_portable' / 'ComfyUI'
+    (root / 'comfy').mkdir(parents=True)
+    (root / 'main.py').write_text('raise RuntimeError("must never execute")')
+    result = existing.discover([], drives=[tmp_path])
+    assert str(root) in result['installations']
+    assert result['scan']['directories_visited'] >= 4
+    # A declared root is the person's explicit instruction, so it is walked too.
+    assert str(root) in existing.discover([str(tmp_path / 'Downloads')], drives=[])['installations']
+
+
+def test_discovery_skips_system_and_cache_trees(tmp_path):
+    root = tmp_path / 'Windows' / 'ComfyUI'
+    (root / 'comfy').mkdir(parents=True)
+    (root / 'main.py').touch()
+    assert existing.discover([], drives=[tmp_path])['installations'] == []
+
+
+def test_discovery_endpoint_searches_the_chosen_root(prep, tmp_path):
+    client, _, _ = prep
+    root = tmp_path / 'Downloads' / 'bundle' / 'ComfyUI'
+    (root / 'comfy').mkdir(parents=True)
+    (root / 'main.py').touch()
+    response = client.get('/api/v1/setup/existing-installations',
+                          params={'root': str(tmp_path / 'Downloads')})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert str(root) in body['installations']
+    assert body['coverage'] == 'BOUNDED_RECURSIVE_SCAN'
 
 
 def test_inspection_is_read_only_and_size_never_means_verified(tmp_path):
@@ -63,6 +96,31 @@ def test_inspection_is_read_only_and_size_never_means_verified(tmp_path):
     assert report['software']['version_status'] == 'INSTALLED_VERSION_UNKNOWN'
     assert sorted(str(p) for p in tmp_path.rglob('*')) == before
     assert source.read_bytes() == b'wrong!! model'
+
+
+def test_inspection_scans_model_roots_declared_by_the_installation(tmp_path):
+    """Weights kept outside ComfyUI but declared in extra_model_paths.yaml are found."""
+    root = installation(tmp_path)
+    external = tmp_path / 'weights' / 'unet'
+    external.mkdir(parents=True)
+    (external / 'outside.safetensors').write_bytes(b'correct model')
+    (root / 'extra_model_paths.yaml').write_text(
+        'shared:\n'
+        f'    base_path: {tmp_path / "weights"}\n'
+        '    unet: unet\n',
+        encoding='utf-8',
+    )
+    report = existing.inspect(str(root), catalog())
+    assert report['matches'][0]['status'] == 'PENDING_HASH'
+    assert str(external) in report['model_roots']
+
+
+def test_inspection_ignores_declared_network_roots(tmp_path):
+    root = installation(tmp_path)
+    (root / 'extra_model_paths.yaml').write_text(
+        'remote:\n    unet: \\\\server\\share\\unet\n', encoding='utf-8',
+    )
+    assert existing.inspect(str(root), catalog())['matches'] == []
 
 
 def test_verify_confirms_matching_models_in_place_without_cache_copy(tmp_path):

@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SetupCenter } from '../components/SetupCenter';
-import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse, ENV_REPORT } from './studioStub';
 
 const INT8 = {
   variant_id: 'h3-ref2va-int8-convrot', title: 'H3 Ref2VA INT8 ConvRot（当前生产基线）',
@@ -93,5 +93,44 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(screen.queryByRole('group', { name: '重复下载确认' })).toBeNull();
     expect(checkbox).toBeChecked();
     expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeEnabled();
+  });
+
+  it('可自动补装的基础工具不阻断准备入口，并显示具体软件与端口', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse({
+      ...ENV_REPORT,
+      findings: [
+        { code: 'TOOL_MISSING_INSTALLABLE', repairability: 'AUTO_REPAIRABLE', scopes: ['BOOTSTRAP'],
+          package_id: 'ffmpeg', tools: ['ffmpeg', 'ffprobe'], message: '缺少 FFmpeg + FFprobe' },
+        { code: 'GPU_VRAM_BELOW_FLOOR', repairability: 'HARDWARE_INCOMPATIBLE',
+          scopes: ['VARIANT_QUALIFICATION', 'PRODUCTION_ACTIVATION'], message: '显存低于标准档门槛' },
+      ],
+      repair_plan: {
+        plan_id: 'toolrepair-' + 'c'.repeat(32), status: 'COMPLETE', download_bytes: 194_182_300,
+        packages: [{ package_id: 'ffmpeg', label: 'FFmpeg + FFprobe' }],
+      },
+      port: { status: 'OK', port: 8188, selected: 8189, identity: 'FOREIGN_PROCESS' },
+    }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    await detect(user);
+    expect(screen.getByRole('group', { name: '基础工具补装' })).toHaveTextContent('FFmpeg + FFprobe');
+    expect(screen.getByText(/服务端口 8189/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeEnabled();
+    expect(screen.queryByText(/先处理硬件或工具阻断项/)).toBeNull();
+  });
+
+  it('真正占用资源准备的条件仍阻断自动准备', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/environment$/, respond: () => jsonResponse({
+      ...ENV_REPORT,
+      findings: [{ code: 'RAM_BELOW_FLOOR', repairability: 'HARDWARE_INCOMPATIBLE',
+        scopes: ['RESOURCE_PREPARATION', 'VARIANT_QUALIFICATION'], message: '实装内存不足' }],
+      repair_plan: { plan_id: 'toolrepair-' + 'd'.repeat(32), status: 'NOTHING_TO_REPAIR',
+        download_bytes: 0, packages: [] },
+    }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    await detect(user);
+    expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: /确认并下载安装/ })).toBeDisabled();
   });
 });

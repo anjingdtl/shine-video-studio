@@ -291,6 +291,33 @@ impl TrustedPublisherStore {
         &self,
         parsed: ParsedManifest,
     ) -> Result<VerifiedDeploymentManifest, ProtocolError> {
+        self.verify_manifest(parsed, ReleaseProduct::Studio)
+    }
+
+    /// Verify a launcher release manifest.
+    ///
+    /// The launcher trusts a *separate* publisher key from the studio, so a
+    /// key that may sign a studio package can never sign the launcher
+    /// executable, and the other way around.
+    pub fn verify_launcher_manifest(
+        &self,
+        parsed: ParsedManifest,
+    ) -> Result<VerifiedDeploymentManifest, ProtocolError> {
+        self.verify_manifest(parsed, ReleaseProduct::Launcher)
+    }
+
+    /// The publisher keys the launcher trusts, for display.
+    pub fn trusted_publishers(&self) -> Vec<&TrustedPublisher> {
+        let mut publishers: Vec<&TrustedPublisher> = self.keys.values().collect();
+        publishers.sort_by(|left, right| left.key_id.cmp(&right.key_id));
+        publishers
+    }
+
+    fn verify_manifest(
+        &self,
+        parsed: ParsedManifest,
+        product: ReleaseProduct,
+    ) -> Result<VerifiedDeploymentManifest, ProtocolError> {
         let signature = &parsed.manifest.signature;
         if signature.algorithm != "ed25519" {
             return Err(ProtocolError::InvalidSignature(
@@ -301,7 +328,7 @@ impl TrustedPublisherStore {
             .keys
             .get(&signature.key_id)
             .ok_or_else(|| ProtocolError::UnknownPublisher(signature.key_id.clone()))?;
-        if !publisher.products.contains(&ReleaseProduct::Studio) {
+        if !publisher.products.contains(&product) {
             return Err(ProtocolError::PublisherScopeNotAllowed(
                 signature.key_id.clone(),
             ));
@@ -470,6 +497,15 @@ fn validate_manifest(
     Ok(())
 }
 
+/// True when a URL points at an accepted release source.
+///
+/// The same policy governs manifest artifacts and launcher downloads, so a
+/// file can never reach the disk from a host that the protocol would have
+/// rejected.
+pub fn is_allowed_release_url(raw: &str) -> bool {
+    validate_release_url(raw).is_ok()
+}
+
 fn validate_release_url(raw: &str) -> Result<(), ProtocolError> {
     let url =
         Url::parse(raw).map_err(|_| ProtocolError::InvalidField("artifact url".to_owned()))?;
@@ -525,7 +561,12 @@ fn is_safe_publisher_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn compute_source_identity(bytes: &[u8]) -> Result<[u8; 32], ProtocolError> {
+/// The canonical identity of a manifest document.
+///
+/// The identity covers the whole declarative manifest with the identity and
+/// the signature removed, so a signature can never be moved to a different
+/// manifest.
+pub fn compute_source_identity(bytes: &[u8]) -> Result<[u8; 32], ProtocolError> {
     let mut document: Value = serde_json::from_slice(bytes)?;
     let object = document
         .as_object_mut()
@@ -577,12 +618,20 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::{
-        ProtocolError, TrustedPublisherStore, compute_source_identity, decode_hex_identity,
-        parse_manifest,
+        ProtocolError, ReleaseProduct, TrustedPublisherStore, compute_source_identity,
+        decode_hex_identity, parse_manifest,
     };
 
     const FIXTURE: &str =
         include_str!("../../config/launcher/test-fixtures/deployment-protocol-v1-minimal.json");
+    /// A manifest signed by the production studio publisher key.
+    ///
+    /// Only the public signature is stored. It is a permanent regression test
+    /// that the trust anchor committed to the repository really does verify
+    /// a manifest, and that a tampered manifest no longer does.
+    const SIGNED_PRODUCTION_FIXTURE: &str = include_str!(
+        "../../config/launcher/test-fixtures/deployment-protocol-v1-signed-production.json"
+    );
     const SCHEMA: &str = include_str!("../../config/launcher/deployment-protocol-v1.schema.json");
 
     fn signed_fixture() -> (Vec<u8>, String, String) {
@@ -624,17 +673,71 @@ mod tests {
     }
 
     #[test]
-    fn schema_and_fixture_are_valid_json_and_embedded_trust_is_empty() {
+    fn schema_and_fixture_are_valid_json_and_the_trust_anchors_are_separated() {
         let schema: Value = serde_json::from_str(SCHEMA).unwrap();
         let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
         assert_eq!(schema["title"], "Shine Deployment Protocol V1");
         assert_eq!(fixture["protocol_version"], "1.0");
-        assert_eq!(
-            TrustedPublisherStore::embedded()
-                .unwrap()
-                .trusted_key_count(),
-            0
+
+        let store = TrustedPublisherStore::embedded().unwrap();
+        // Production trust anchors are configured, one per product, so a
+        // studio key can never sign a launcher update or the other way round.
+        assert_eq!(store.trusted_key_count(), 2);
+        let publishers = store.trusted_publishers();
+        assert_eq!(publishers.len(), 2);
+        assert!(
+            publishers
+                .iter()
+                .any(|publisher| publisher.products == vec![ReleaseProduct::Studio])
         );
+        assert!(
+            publishers
+                .iter()
+                .any(|publisher| publisher.products == vec![ReleaseProduct::Launcher])
+        );
+    }
+
+    #[test]
+    fn a_manifest_signed_by_the_production_publisher_verifies_against_the_committed_anchor() {
+        let bytes = SIGNED_PRODUCTION_FIXTURE.as_bytes();
+        let parsed = parse_manifest(bytes, "1.0.0", "windows-x64").unwrap();
+        let store = TrustedPublisherStore::embedded().unwrap();
+        let verified = store.verify_studio_manifest(parsed).unwrap();
+        assert_eq!(verified.verified_key_id(), "shine-studio-release-2026");
+        assert_eq!(
+            verified.source_identity(),
+            "4c32c9713eabd2d3ed6d0daf69608ce0f9c7cbf5b495bdbbf6a693106c774354"
+        );
+    }
+
+    #[test]
+    fn a_tampered_production_manifest_stops_verifying() {
+        let mut value: Value = serde_json::from_str(SIGNED_PRODUCTION_FIXTURE).unwrap();
+        value["artifacts"][0]["size_bytes"] = json!(999);
+        let tampered = serde_json::to_vec(&value).unwrap();
+        // The canonical identity no longer matches the manifest.
+        assert!(matches!(
+            parse_manifest(&tampered, "1.0.0", "windows-x64"),
+            Err(ProtocolError::InvalidSourceIdentity)
+        ));
+    }
+
+    #[test]
+    fn a_launcher_manifest_needs_a_launcher_scoped_publisher() {
+        let (bytes, public_key, _) = signed_fixture();
+        let parsed = parse_manifest(&bytes, "1.0.0", "windows-x64").unwrap();
+        // The fixture is signed by the unit test key, which is scoped to the
+        // studio in the helper store.
+        let store = test_trust_store(&public_key, &["launcher"]);
+        assert!(store.verify_launcher_manifest(parsed).is_ok());
+
+        let (bytes, public_key, _) = signed_fixture();
+        let parsed = parse_manifest(&bytes, "1.0.0", "windows-x64").unwrap();
+        let store = test_trust_store(&public_key, &["studio"]);
+        assert!(matches!(
+            store.verify_launcher_manifest(parsed),
+            Err(ProtocolError::PublisherScopeNotAllowed(_))
+        ));
     }
 
     #[test]

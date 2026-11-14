@@ -1,0 +1,53 @@
+{
+  "artifacts": [
+    {
+      "id": "studio-package",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "size_bytes": 123456,
+      "url": "https://github.com/anjingdtl/shine-video-studio/releases/download/test/ShineStudio.zip"
+    }
+  ],
+  "capability_catalogs": [
+    "config/deployment/h3-ref2va-windows-x64.json"
+  ],
+  "compatibility": {
+    "min_launcher_version": "1.0.0",
+    "platform": [
+      "windows-x64"
+    ],
+    "supported_protocol_major": 1
+  },
+  "data_policy": "preserve-and-backup",
+  "operations": [
+    "probe",
+    "install",
+    "repair",
+    "start",
+    "stop",
+    "upgrade"
+  ],
+  "optional_features": [
+    "test-fixture-marker"
+  ],
+  "protocol_version": "1.0",
+  "required_features": [
+    "typed-operations-v1",
+    "sha256-artifacts",
+    "ed25519-manifest-signature"
+  ],
+  "signature": {
+    "algorithm": "ed25519",
+    "key_id": "shine-studio-release-2026",
+    "value": "uvJTEtedOA5VeT5uh2fkOEcwofSsnq899sfiwkifJz2neW6nykByUDcuxOyWv9VzMnwWhhRE4KJSXetqAb5nDQ=="
+  },
+  "source_identity": "4c32c9713eabd2d3ed6d0daf69608ce0f9c7cbf5b495bdbbf6a693106c774354",
+  "studio": {
+    "build_id": "test-build-001",
+    "channel": "stable",
+    "commit": "0123456789abcdef0123456789abcdef01234567",
+    "name": "Shine Video Studio",
+    "version": "0.3.0"
+  },
+  "toolchain_catalog": "config/deployment/tools-windows-x64.json",
+  "workflow_root": "config/workflows"
+}

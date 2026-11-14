@@ -76,6 +76,10 @@ class InstanceChainRequest(BaseModel):
     instance_name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$", default="shine-h3")
     port: int = Field(default=8188, ge=1024, le=65535)
     mode: str = Field(default="local", pattern=r"^(fake|local)$")
+    #: The one variant the person chose on the setup card.  When present, the
+    #: plan is assembled from *that* variant's catalog and the request is
+    #: refused if the named catalog belongs to another variant.
+    variant_id: str | None = None
 
 
 class ConfigurationRequest(BaseModel):
@@ -170,10 +174,22 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
 
 
 @router.get('/existing-installations')
-def existing_installations(settings: SettingsDep):
+def existing_installations(settings: SettingsDep, root: str | None = None):
+    """Bounded discovery inside declared roots, fixed drives and an optional root.
+
+    ``root`` is the directory the person already chose (for example the
+    deployment storage root).  It is searched several levels deep so a nested
+    download is not invisible just because it is not at a fixed depth.
+    """
+    from pathlib import Path
+
     from shine.comfyops.existing_installation import discover
 
-    return discover(list(settings.comfy_probe_roots))
+    roots = [*settings.comfy_probe_roots]
+    # A stale/network path chosen earlier must not make the whole scan fail.
+    if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
+        roots.append(root)
+    return discover(roots)
 
 
 @router.post('/existing-installations/inspect')
@@ -330,13 +346,127 @@ def update_storage(body: StorageRequest, actor: Operator, settings: SettingsDep,
 
 
 @router.get("/environment")
-def environment(settings: SettingsDep):
-    from shine.comfyops.host_env import probe_host_environment, setup_blockers
+def environment(settings: SettingsDep, db: DBSession):
+    """Read-only host report plus the classified findings and the repair plan.
 
-    report = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
-    return {**report, "blockers": setup_blockers(report),
-            "advisory_reviews": deployment.advisory_review_readiness(settings),
-            "bootstrap": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1"}
+    Nothing in this handler downloads, installs, edits PATH or starts a
+    process.  The repair plan is assembled from the same pinned manifest the
+    installer uses, so the numbers a person approves are the numbers the
+    installer will fetch.
+    """
+    from shine.comfyops.environment_repair import build_repair_plan, managed_tool_roots, read_repair_state
+    from shine.comfyops.host_env import environment_findings, probe_host_environment, setup_blockers
+    from shine.comfyops.tool_inventory import inspect_packages
+
+    roots = managed_tool_roots(settings)
+    report = probe_host_environment(
+        settings.data_dir, deployment_dir=settings.comfyops_dir,
+        tool_paths=[str(roots["bin_root"])],
+        owned_ports=_owned_ports(db),
+    )
+    findings = environment_findings(report)
+    plan = build_repair_plan(settings, report, state=read_repair_state(db))
+    pwsh_ready = bool((report.get("tools") or {}).get("pwsh", {}).get("at_floor"))
+    entry = "pwsh" if pwsh_ready else "powershell.exe"
+    return {
+        **report,
+        "blockers": setup_blockers(report),
+        "findings": findings,
+        "tool_packages": inspect_packages(report.get("tools") or {}),
+        "repair_plan": plan,
+        # PowerShell 7 may be the missing tool; the bootstrap entry must be the
+        # stock Windows PowerShell 5.1 that is always present.
+        "bootstrap": f"{entry} -NoProfile -ExecutionPolicy Bypass -File scripts/bootstrap.ps1",
+        "advisory_reviews": deployment.advisory_review_readiness(settings),
+    }
+
+
+def _owned_ports(db) -> set[int]:
+    """Ports recorded for Shine-managed instances; never guessed from a bind."""
+    from sqlalchemy import select
+
+    from shine.comfyops.models import ComfyInstance
+
+    ports: set[int] = set()
+    try:
+        rows = db.scalars(select(ComfyInstance)).all()
+    except Exception:  # noqa: BLE001 - an unreadable registry is not a free port
+        return ports
+    for row in rows:
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        port = payload.get("port")
+        if isinstance(port, int) and not isinstance(port, bool):
+            ports.add(port)
+    return ports
+
+
+@router.get("/tool-repair-plan")
+def tool_repair_plan(settings: SettingsDep, db: DBSession):
+    """The environment repair plan, re-derived from live facts on every read."""
+    from shine.comfyops.environment_repair import build_repair_plan, managed_tool_roots, read_repair_state
+    from shine.comfyops.host_env import probe_host_environment
+
+    roots = managed_tool_roots(settings)
+    report = probe_host_environment(
+        settings.data_dir, deployment_dir=settings.comfyops_dir,
+        tool_paths=[str(roots["bin_root"])],
+        owned_ports=_owned_ports(db),
+    )
+    return build_repair_plan(settings, report, state=read_repair_state(db))
+
+
+class ToolRepairRequest(BaseModel):
+    """Only the plan identity.  No command, URL, path or has argument."""
+
+    model_config = ConfigDict(extra="forbid")
+    plan_id: str = Field(pattern=r"^toolrepair-[a-f0-9]{32}$")
+
+
+def _resolve_service_port(db, requested: int) -> tuple[int, dict]:
+    """Re-detect the port at the moment it is about to be used.
+
+    A port that was free when the page rendered may be taken a second later;
+    the binding decision is therefore taken here, not in the browser.  A
+    Shine-owned or adoptable ComfyUI keeps its port; a foreign process only
+    moves this service to a verified-free alternative.
+    """
+    from shine.comfyops.host_env import probe_port
+
+    state = probe_port(requested, owned_ports=_owned_ports(db))
+    selected = state.get("selected")
+    return (int(selected) if isinstance(selected, int) else requested), state
+
+
+@router.post("/tool-repair/execute")
+def execute_tool_repair(body: ToolRepairRequest, actor: Operator, settings: SettingsDep, db: DBSession):
+    """Run the approved bootstrap on this machine and re-probe the tools.
+
+    Loopback operator only (the dependency enforces it), fixed argument vector,
+    no shell, no administrator elevation, and the same installer the product
+    already ships.  A repeated request re-reads the plan identity, so a stale
+    or fabricated plan id is refused instead of executed.
+    """
+    import os
+
+    from shine.comfyops.environment_repair import RepairPlanChanged, execute_repair
+
+    if os.getenv("SHINE_ENABLE_LOCAL_EXECUTION") != "1":
+        raise HTTPException(409, {
+            "code": "LOCAL_EXECUTION_NOT_ENABLED",
+            "message": "本机执行尚未启用；不会执行安装。"
+                       "请先运行一键安装流程或在 .env 设置 SHINE_ENABLE_LOCAL_EXECUTION=1。",
+        })
+    # A long download must not hold the request's database transaction open.
+    db.rollback()
+    try:
+        return execute_repair(db, settings, actor, body.plan_id)
+    except RepairPlanChanged:
+        raise HTTPException(409, {
+            "code": "TOOL_REPAIR_PLAN_CHANGED",
+            "message": "计划内容已经变化（工具已补齐或清单更新）；请重新读取计划后再确认，没有执行任何安装。",
+        }) from None
+    except ValueError as exc:
+        raise HTTPException(409, {"code": str(exc), "message": "补装被安全策略拒绝，没有执行任何命令。"}) from None
 
 
 @router.post("/deployment-recommendations")
@@ -584,7 +714,6 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
     if variant is not None:
         env = probe_host_facts(settings.data_dir, deployment_dir=settings.comfyops_dir)
         qualification = variant_manifests.qualify(variant_manifests.variant_requirements(variant), env)
-        candidate_ack = False
         if not variant.get("auto_download_allowed"):
             acceptance = str(variant.get("acceptance_status") or "")
             if acceptance == "BLOCKED" or not body.candidate_download_acknowledged:
@@ -597,7 +726,6 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
                     "variant_id": variant.get("variant_id"),
                     "acceptance_status": acceptance,
                 })
-            candidate_ack = True
             from shine.services import add_audit
 
             add_audit(
@@ -606,18 +734,19 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
                 {"acceptance_status": acceptance, "catalog_id": raw.get("catalog_id")},
                 project_id=body.project_id,
             )
-        if qualification["status"] != variant_manifests.STATUS_SUPPORTED:
-            # 显式确认的候选下载：门槛未核实（UNKNOWN）是候选的本性，记录但不
-            # 阻挡；实测不兼容（BLOCKED）仍然拒绝。生产门禁不受影响。
-            if qualification["status"] == "BLOCKED" or not candidate_ack:
-                raise HTTPException(409, {
-                    "code": "HOST_NOT_QUALIFIED",
-                    "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
-                    "variant_id": variant.get("variant_id"),
-                    "status": qualification["status"],
-                    "blockers": qualification["blockers"],
-                    "unknowns": qualification["unknowns"],
-                })
+        if qualification["status"] == variant_manifests.STATUS_BLOCKED:
+            # A measured incompatibility never becomes a download: the plan
+            # would prepare bytes this machine cannot execute.  UNKNOWN stays
+            # different: a requirement could not be read, so resource
+            # preparation is allowed and every production gate stays closed.
+            raise HTTPException(409, {
+                "code": "HOST_NOT_QUALIFIED",
+                "message": "这台电脑没有通过这套变体的硬件资格复核；绕过界面直接调用接口也一样会被拒绝。",
+                "variant_id": variant.get("variant_id"),
+                "status": qualification["status"],
+                "blockers": qualification["blockers"],
+                "unknowns": qualification["unknowns"],
+            })
     plan = deployment.create_install_plan(db, settings, raw, body.components, body.project_id, body.disk_free,
                                           variant=variant, qualification=qualification,
                                           configuration={
@@ -657,14 +786,29 @@ def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession)
 @router.post("/instance-chain", deprecated=True)
 @router.post("/next-instance-plan")
 def next_instance_plan(body: InstanceChainRequest, settings: SettingsDep, db: DBSession):
-    raw = deployment.load_deployment_catalog(body.catalog)
+    if body.variant_id:
+        from shine.comfyops.variant_binding import resolve_registration_target
+
+        raw = resolve_registration_target(
+            variant_id=body.variant_id,
+            catalog_id=body.catalog if body.catalog != "h3-ref2va-windows-x64" else None,
+        ).catalog
+    else:
+        raw = deployment.load_deployment_catalog(body.catalog)
+    port, port_state = _resolve_service_port(db, body.port)
     plan, action = deployment.next_instance_plan(db, settings, raw, body.project_id,
-                                                 instance_name=body.instance_name, port=body.port,
+                                                 instance_name=body.instance_name, port=port,
                                                  mode=body.mode)
+    header = {
+        "requested_port": body.port,
+        "port": port,
+        "port_identity": port_state.get("identity"),
+        "port_selected_by_server": port != body.port,
+    }
     if plan is None:
-        return {"complete": True, "action": None, "next_step": "GENERATE_CONFIGURATION"}
+        return {"complete": True, "action": None, "next_step": "GENERATE_CONFIGURATION", **header}
     return {"complete": False, "action": action, "plan_id": plan.id, "sha256": plan.sha256,
-            "tier": plan.payload["tier"], "status": plan.status}
+            "tier": plan.payload["tier"], "status": plan.status, **header}
 
 
 @router.post("/configuration")
@@ -676,11 +820,15 @@ def configuration(body: ConfigurationRequest, actor: Operator, settings: Setting
     require_project(db, body.project_id)
     require_idle_configuration(db)
     db.rollback()  # Wheel verification and extraction do not hold a SQLite transaction.
+    port, port_state = _resolve_service_port(db, body.port)
     runtime = prepare_review_runtime(settings, deployment.load_default_catalog())
     result = deployment.generate_configuration(db, settings, body.project_id,
-                                               instance_name=body.instance_name, port=body.port,
+                                               instance_name=body.instance_name, port=port,
                                                variant_id=body.variant_id)
-    return {**result, "review_runtime_preparation": runtime}
+    return {**result, "review_runtime_preparation": runtime,
+            "requested_port": body.port, "port": port,
+            "port_identity": port_state.get("identity"),
+            "port_selected_by_server": port != body.port}
 
 
 @router.get("/variant-startup-contract")

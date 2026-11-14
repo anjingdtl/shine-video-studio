@@ -19,16 +19,31 @@ import type { InstallationAttemptView } from '../setupExecution';
  * 但没有真机证据之前不进入自动下载。
  */
 
+type EnvFinding = {
+  code: string;
+  repairability: 'AUTO_REPAIRABLE' | 'USER_ACTION_REQUIRED' | 'HARDWARE_INCOMPATIBLE'
+    | 'DETECTION_UNKNOWN' | 'ALREADY_AVAILABLE';
+  scopes?: string[]; scope?: string[];
+  message?: string; package_id?: string; tools?: string[];
+};
+
+type ToolRepairPlan = {
+  plan_id: string; status: string; download_bytes: number;
+  packages: Array<{ package_id: string; label: string }>;
+};
+
 type EnvReport = {
   platform: Record<string, string>;
   tools: Record<string, { present: boolean; version: string; at_floor: boolean }>;
   gpu: Record<string, unknown>;
-  ram: { status: string; ram_mb?: number };
+  ram: { status: string; ram_mb?: number; installed_mb?: number | null; note?: string };
   disk: { status: string; free_gb: number };
-  port: { status: string; port: number };
+  port: { status: string; port: number; selected?: number; identity?: string };
   data_dir: { path: string; writable: boolean };
   deployment_dir?: { path: string; writable: boolean };
   blockers: Array<{ code: string; tool?: string }>;
+  findings?: EnvFinding[];
+  repair_plan?: ToolRepairPlan;
 };
 
 type Storage = { root: string; free_bytes: number; free_gb: number; requires_selection: boolean };
@@ -312,7 +327,17 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   const vlmReady = vlmPresence.found >= vlmTotal;
   const asrReady = asrPresence.found >= asrTotal;
 
-  const envBlocked = (env?.blockers.length ?? 0) > 0;
+  // Only conditions that really block resource preparation count here.  A
+  // repairable missing tool, a low-end GPU or an occupied port must not stop
+  // the automatic preparation entry.
+  const blockingEnv = (env?.findings ?? []).filter((finding) =>
+    finding.repairability !== 'AUTO_REPAIRABLE'
+    && finding.repairability !== 'ALREADY_AVAILABLE'
+    && (finding.scopes ?? finding.scope ?? []).includes('RESOURCE_PREPARATION'));
+  const envBlocked = env?.findings ? blockingEnv.length > 0 : (env?.blockers.length ?? 0) > 0;
+  const pendingRepair = env?.repair_plan?.status === 'COMPLETE' && (env.repair_plan.packages.length ?? 0) > 0;
+  const servicePort = env?.port?.selected ?? env?.port?.port ?? null;
+  const portAdjusted = !!env?.port?.identity && env.port.identity !== 'FREE';
   const imageBytes = image?.upstream?.required_bytes || IMAGE_BYTES;
   // 出图权重可能已经由受管运行时装好（文件已核验），不能因为「已有 ComfyUI 里没找到」就再下载一遍。
   const imagePresent = (!!image?.configured && image.layer !== 'NOT_CONFIGURED')
@@ -340,7 +365,17 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       const ensure = () => { if (!mounted.current) throw new Error('页面已切换，自动准备已停止；已执行的记录都保留。'); };
       const environment = await api<EnvReport>('/setup/environment');
       ensure();
-      if (environment.blockers.length) throw new Error('本机还有阻断项，先处理上面的提示。');
+      const freshBlocking = (environment.findings ?? []).filter((finding) =>
+        finding.repairability !== 'AUTO_REPAIRABLE'
+        && finding.repairability !== 'ALREADY_AVAILABLE'
+        && (finding.scopes ?? finding.scope ?? []).includes('RESOURCE_PREPARATION'));
+      if (environment.findings ? freshBlocking.length > 0 : environment.blockers.length > 0) {
+        throw new Error(environment.findings
+          ? `本机还有需要先处理的条件：${freshBlocking.map((finding) => finding.message ?? finding.code).join('；')}`
+          : '本机还有阻断项，先处理上面的提示。');
+      }
+      const port = environment.port?.selected ?? environment.port?.port;
+      if (!port) throw new Error('服务端口状态读取不到，不能安全地准备 ComfyUI。');
       if (downloadBytes > 0) {
         setRunning({ label: '检查下载网络…', note: '' });
         const network = await api<{ blocked: string[] }>('/setup/connectivity');
@@ -369,7 +404,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
               setRunning({ label: '登记这套已有安装…', note: '不复制、不覆盖' });
               await api('/setup/existing-installations/adopt', json('POST', {
                 project_id: projectId, path: scan.root, snapshot: scan.snapshot,
-                instance_name: 'shine-h3', port: 8188,
+                instance_name: 'shine-h3', port,
               }));
               ensure();
               reused = true;
@@ -429,9 +464,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         setRunning({ label: '准备受管运行环境…', note: '' });
         let complete = false;
         for (let step = 0; step < 8; step += 1) {
-          const plan = await api<{ complete: boolean; plan_id?: string; sha256?: string; status?: string; action?: string }>(
+          const plan = await api<{ complete: boolean; plan_id?: string; sha256?: string; status?: string; action?: string; port?: number }>(
             '/setup/next-instance-plan', json('POST', {
-              project_id: projectId, instance_name: 'shine-h3', port: 8188, mode: 'local',
+              project_id: projectId, instance_name: 'shine-h3', port, mode: 'local',
+              ...(selectedVariant ? { catalog: selectedVariant.catalog_id, variant_id: selectedVariant.variant_id } : {}),
             }),
           );
           ensure();
@@ -474,6 +510,33 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       await onRefresh();
       await detect();
       setResult('制作环境已就绪：生成方案已自动登记、服务已核验、配置已激活。可以回到制作流程继续。');
+    } catch (error) {
+      setProblem(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (mounted.current) setRunning(null);
+    }
+  }
+
+  /** 只读检测出的补装计划在这里一次确认；不做任意命令、不装驱动。 */
+  async function repairTools() {
+    const plan = env?.repair_plan;
+    if (!plan) return;
+    setProblem(''); setResult('');
+    setRunning({ label: '正在补装基础工具…', note: '固定清单 + SHA-256；已下载的部分会保留，Node/npm/uv 不会重复安装' });
+    try {
+      const result = await api<{ status: string; message?: string; unsatisfied_packages?: string[] }>(
+        '/setup/tool-repair/execute', {
+          ...json('POST', { plan_id: plan.plan_id }),
+          signal: timeoutSignal(3_600_000),
+        });
+      if (result.status !== 'SUCCEEDED') {
+        throw new Error(`补装未完成：${result.status}`
+          + (result.message ? `（${result.message}）` : '')
+          + (result.unsatisfied_packages?.length ? `，仍需处理：${result.unsatisfied_packages.join('、')}` : '')
+          + '。已下载的数据会保留，可以重试。');
+      }
+      setResult('基础工具已补装并通过复查。');
+      await detect();
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error));
     } finally {
@@ -551,10 +614,22 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       <div className="setup-facts">
         <span>显卡 {variants?.host.gpu ?? '未识别'}</span>
         <span>显存 {mbAsGib(variants?.host.vram_mb)}</span>
-        <span>内存 {mbAsGib(variants?.host.ram_mb)}</span>
+        <span>内存 {mbAsGib(variants?.host.ram_mb)}
+          {env?.ram?.note === 'HARDWARE_RESERVED_MEMORY' ? `（实装 ${mbAsGib(env.ram.installed_mb)}）` : ''}</span>
         <span>档位 {TIER_LABELS[variants?.tier ?? 'unknown'] ?? variants?.tier}</span>
+        <span>服务端口 {servicePort ?? '未识别'}{portAdjusted ? `（${env?.port.port} 被占用，已避开）` : ''}</span>
         <span>安装盘 {storage ? `${storage.root}（可用 ${storage.free_gb} GB）` : '读取中'}</span>
       </div>
+
+      {pendingRepair && <div className="setup-repair" role="group" aria-label="基础工具补装">
+        <div>
+          <b>缺少 {(env?.repair_plan?.packages ?? []).map((pkg) => pkg.label).join('、')}</b>
+          <span>已固定下载源与哈希，约 {gib(env?.repair_plan?.download_bytes ?? 0)}；使用 Windows 自带 PowerShell 5.1 补装，完成后自动复查。</span>
+        </div>
+        <button type="button" className="btn-secondary" disabled={!!running} onClick={() => void repairTools()}>
+          自动补装
+        </button>
+      </div>}
 
       <div className="setup-model-chips" role="list" aria-label="本机已有的模型">
         {modelChips.map((chip) => <span role="listitem" key={chip.id}

@@ -13,7 +13,7 @@ use url::Url;
 
 use crate::installation_registry::default_registry_path;
 use crate::path_safety::{
-    regular_file_without_reparse, reject_reparse_components, validate_local_absolute_path,
+    regular_file_without_reparse, reject_reparse_components_in_state, validate_local_absolute_path,
 };
 
 const MAX_RESPONSE_BYTES: u64 = 4 * 1024 * 1024;
@@ -515,7 +515,9 @@ fn is_safe_etag(value: &str) -> bool {
 
 fn load_cache(path: &Path) -> Result<ReleaseCache, ReleaseScanError> {
     validate_local_absolute_path(path).map_err(|_| ReleaseScanError::CacheUnavailable)?;
-    reject_reparse_components(path).map_err(|_| ReleaseScanError::CacheUnavailable)?;
+    let state_directory = path.parent().unwrap_or(path);
+    reject_reparse_components_in_state(state_directory, path)
+        .map_err(|_| ReleaseScanError::CacheUnavailable)?;
     if !regular_file_without_reparse(path).map_err(|_| ReleaseScanError::CacheUnavailable)? {
         return Err(ReleaseScanError::CacheUnavailable);
     }
@@ -537,11 +539,8 @@ fn save_cache_atomic(path: &Path, cache: &ReleaseCache) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("cache path has no parent"))?;
-    reject_reparse_components(parent)?;
-    reject_reparse_components(path)?;
     fs::create_dir_all(parent)?;
-    reject_reparse_components(parent)?;
-    reject_reparse_components(path)?;
+    reject_reparse_components_in_state(parent, path)?;
     let bytes = serde_json::to_vec(cache).map_err(io::Error::other)?;
     if bytes.len() as u64 > MAX_CACHE_BYTES {
         return Err(io::Error::other("cache size limit exceeded"));

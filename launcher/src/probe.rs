@@ -1,14 +1,95 @@
-use std::path::Path;
+//! Read-only host probing.
+//!
+//! The probe runs before anything is installed and must therefore work on a
+//! machine that has no Python, no Node, no ComfyUI and no GPU driver. It
+//! never writes, and it never blocks the interface for long.
+//!
+//! The report distinguishes four things that are easy to confuse and that a
+//! user must never be shown as the same:
+//!
+//! * *installed* — a file is on disk;
+//! * *verified* — the file is there and its digest matches;
+//! * *compatible* — the versions line up with what the studio needs;
+//! * *unverified* — everything is in place, but nobody has actually run a
+//!   real generation on this machine.
+
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use sysinfo::{Disks, System};
 
-const COMMAND_TIMEOUT: Duration = Duration::from_millis(900);
+const COMMAND_TIMEOUT: Duration = Duration::from_millis(1500);
 const POLL_INTERVAL: Duration = Duration::from_millis(30);
 
-#[derive(Debug)]
+/// How far a probed item has actually been proven.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbeStatus {
+    /// Everything is in place and nothing is known to be missing.
+    Ready,
+    /// The item was checked and matched what was expected.
+    Verified,
+    /// The item is present and compatible, but was not verified in depth.
+    Compatible,
+    /// Something is present but wrong, and the user has to repair it.
+    NeedsRepair,
+    /// The item is in place, but no real run has proved it works.
+    Unverified,
+    /// The item is not installed.
+    Missing,
+    /// The probe could not tell.
+    Unknown,
+}
+
+impl ProbeStatus {
+    /// The wording shown to a non technical user.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ready => "已就绪",
+            Self::Verified => "已验证",
+            Self::Compatible => "兼容可用",
+            Self::NeedsRepair => "需要修复",
+            Self::Unverified => "已就位，尚未做真实验证",
+            Self::Missing => "未安装",
+            Self::Unknown => "无法确认",
+        }
+    }
+}
+
+/// One probed item.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProbeItem {
+    pub name: String,
+    pub value: String,
+    pub status: ProbeStatus,
+}
+
+impl ProbeItem {
+    fn new(name: &str, value: String, status: ProbeStatus) -> Self {
+        Self {
+            name: name.to_owned(),
+            value,
+            status,
+        }
+    }
+
+    /// The one line form shown in the interface.
+    pub fn line(&self) -> String {
+        format!("{}：{}（{}）", self.name, self.value, self.status.label())
+    }
+}
+
+/// What was found for one GPU.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GpuInfo {
+    pub name: String,
+    pub vram_mb: Option<u64>,
+    pub driver_version: Option<String>,
+}
+
+/// The complete read-only report.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProbeReport {
     pub os_summary: String,
     pub cpu_summary: String,
@@ -20,8 +101,44 @@ pub struct ProbeReport {
     pub uv: String,
     pub ffmpeg: String,
     pub gpu: String,
+    /// The structured items, used by the new interface.
+    pub items: Vec<ProbeItem>,
+    /// The GPUs that were found.
+    pub gpus: Vec<GpuInfo>,
+    /// The ComfyUI instances that were found.
+    pub comfyui_instances: Vec<PathBuf>,
+    /// The custom node directories that were found.
+    pub node_directories: Vec<PathBuf>,
+    /// The model files that were found.
+    pub model_files: Vec<PathBuf>,
+    /// The workflow files that were found.
+    pub workflow_files: Vec<PathBuf>,
 }
 
+impl Default for ProbeReport {
+    fn default() -> Self {
+        Self {
+            os_summary: "未知".to_owned(),
+            cpu_summary: "未知".to_owned(),
+            memory_summary: "未知".to_owned(),
+            disk_summary: "未知".to_owned(),
+            node: "未检测到".to_owned(),
+            npm: "未检测到".to_owned(),
+            python: "未检测到".to_owned(),
+            uv: "未检测到".to_owned(),
+            ffmpeg: "未检测到".to_owned(),
+            gpu: "未检测到".to_owned(),
+            items: Vec::new(),
+            gpus: Vec::new(),
+            comfyui_instances: Vec::new(),
+            node_directories: Vec::new(),
+            model_files: Vec::new(),
+            workflow_files: Vec::new(),
+        }
+    }
+}
+
+/// Collect the full read-only report.
 pub fn collect() -> ProbeReport {
     let mut system = System::new();
     system.refresh_memory();
@@ -39,7 +156,69 @@ pub fn collect() -> ProbeReport {
     let python = check_python();
     let uv = check_command("uv", &["--version"], "uv");
     let ffmpeg = check_ffmpeg();
-    let gpu = check_nvidia_smi();
+    let (gpu, gpus) = check_nvidia();
+
+    let mut items = vec![
+        ProbeItem::new(
+            "操作系统",
+            format!("{os_name} {os_version}"),
+            ProbeStatus::Ready,
+        ),
+        ProbeItem::new(
+            "处理器",
+            format!("{cpu_count} 个逻辑处理器"),
+            ProbeStatus::Ready,
+        ),
+        ProbeItem::new(
+            "内存",
+            if total_memory == 0 {
+                "内存信息不可用".to_owned()
+            } else {
+                format!("{} RAM", format_bytes(total_memory))
+            },
+            if total_memory == 0 {
+                ProbeStatus::Unknown
+            } else {
+                ProbeStatus::Ready
+            },
+        ),
+        ProbeItem::new("磁盘空间", disk_summary.clone(), ProbeStatus::Ready),
+        ProbeItem::new("Node.js", node.clone(), tool_status(&node)),
+        ProbeItem::new("npm", npm.clone(), tool_status(&npm)),
+        ProbeItem::new("Python", python.clone(), tool_status(&python)),
+        ProbeItem::new("uv", uv.clone(), tool_status(&uv)),
+        ProbeItem::new("FFmpeg", ffmpeg.clone(), tool_status(&ffmpeg)),
+    ];
+
+    for (index, gpu_info) in gpus.iter().enumerate() {
+        let vram = gpu_info
+            .vram_mb
+            .map(|value| format!("{value} MB 显存"))
+            .unwrap_or_else(|| "显存未知".to_owned());
+        let driver = gpu_info
+            .driver_version
+            .as_ref()
+            .map(|value| format!("驱动 {value}"))
+            .unwrap_or_else(|| "驱动未知".to_owned());
+        items.push(ProbeItem::new(
+            if index == 0 {
+                "显卡"
+            } else {
+                "显卡（附加）"
+            },
+            format!("{} · {vram} · {driver}", gpu_info.name),
+            // A GPU that reports its name and memory is present; whether it
+            // can actually run a model is a separate, later question.
+            ProbeStatus::Unverified,
+        ));
+    }
+    if gpus.is_empty() {
+        items.push(ProbeItem::new(
+            "显卡",
+            "未检测到 NVIDIA 显卡（不影响启动器打开）".to_owned(),
+            ProbeStatus::Missing,
+        ));
+    }
 
     ProbeReport {
         os_summary: format!("{os_name} {os_version}"),
@@ -56,6 +235,92 @@ pub fn collect() -> ProbeReport {
         uv,
         ffmpeg,
         gpu,
+        items,
+        gpus,
+        comfyui_instances: Vec::new(),
+        node_directories: Vec::new(),
+        model_files: Vec::new(),
+        workflow_files: Vec::new(),
+    }
+}
+
+/// The status of a tool that was probed by running it.
+fn tool_status(value: &str) -> ProbeStatus {
+    if value.contains("未检测到") || value.contains("缺少") {
+        ProbeStatus::Missing
+    } else if value.contains("超时") || value.contains("检查失败") || value.contains("无法")
+    {
+        ProbeStatus::Unknown
+    } else {
+        // The tool runs. Whether it is the *right* version is decided by the
+        // deployment plan, not here.
+        ProbeStatus::Unverified
+    }
+}
+
+/// Inventory an installation's ComfyUI, models, nodes and workflows.
+///
+/// This is strictly read-only: it lists what exists and never verifies a
+/// model by loading it.
+pub fn inspect_installation(install_root: &Path) -> ProbeInventory {
+    let mut inventory = ProbeInventory::default();
+
+    let managed = install_root.join("managed");
+    let candidates = [
+        install_root.join("ComfyUI"),
+        install_root.join("comfyui"),
+        managed.join("ComfyUI"),
+        install_root.join("runtime").join("ComfyUI"),
+    ];
+    for candidate in candidates {
+        if candidate.join("main.py").is_file() {
+            inventory.comfyui_instances.push(candidate);
+        }
+    }
+
+    for instance in &inventory.comfyui_instances {
+        let custom_nodes = instance.join("custom_nodes");
+        if custom_nodes.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&custom_nodes) {
+                for entry in entries.flatten() {
+                    if entry.path().is_dir() {
+                        inventory.node_directories.push(entry.path());
+                    }
+                }
+            }
+        }
+        let models = instance.join("models");
+        collect_files(&models, &mut inventory.model_files, 4);
+    }
+
+    let workflows = install_root.join("config").join("workflows");
+    collect_files(&workflows, &mut inventory.workflow_files, 3);
+    inventory
+}
+
+/// What an installation contains.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProbeInventory {
+    pub comfyui_instances: Vec<PathBuf>,
+    pub node_directories: Vec<PathBuf>,
+    pub model_files: Vec<PathBuf>,
+    pub workflow_files: Vec<PathBuf>,
+}
+
+fn collect_files(root: &Path, into: &mut Vec<PathBuf>, depth: usize) {
+    if depth == 0 || !root.is_dir() {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(&path, into, depth - 1);
+        } else if path.is_file() {
+            into.push(path);
+        }
     }
 }
 
@@ -139,19 +404,70 @@ fn check_ffmpeg() -> String {
     run_version_command("ffmpeg", &["-version"])
 }
 
-fn check_nvidia_smi() -> String {
-    let status = run_version_command("nvidia-smi", &["--query-gpu=name", "--format=csv,noheader"]);
-    if status == "未检测到" {
-        "未检测到 NVIDIA 工具（不影响 Launcher 启动）".to_owned()
-    } else if status.starts_with("检测超时") {
-        "NVIDIA 检查超时（不影响 Launcher 启动）".to_owned()
-    } else {
-        status
-            .lines()
-            .next()
-            .unwrap_or("检测到 NVIDIA GPU")
-            .to_owned()
+/// Read the GPU name, memory and driver version in one query.
+fn check_nvidia() -> (String, Vec<GpuInfo>) {
+    let output = run_version_command(
+        "nvidia-smi",
+        &[
+            "--query-gpu=name,memory.total,driver_version",
+            "--format=csv,noheader,nounits",
+        ],
+    );
+    if output == "未检测到" {
+        return (
+            "未检测到 NVIDIA 工具（不影响 Launcher 启动）".to_owned(),
+            Vec::new(),
+        );
     }
+    if output.starts_with("检测超时") {
+        return (
+            "NVIDIA 检查超时（不影响 Launcher 启动）".to_owned(),
+            Vec::new(),
+        );
+    }
+    if output.starts_with("已找到") {
+        return (
+            "已找到 NVIDIA 工具，但无法读取显卡信息".to_owned(),
+            Vec::new(),
+        );
+    }
+
+    let mut gpus = Vec::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split(',').map(str::trim).collect();
+        if parts.is_empty() {
+            continue;
+        }
+        let name = parts[0].to_owned();
+        let vram_mb = parts.get(1).and_then(|value| value.parse::<u64>().ok());
+        let driver_version = parts.get(2).map(|value| (*value).to_owned());
+        if name.is_empty() {
+            continue;
+        }
+        gpus.push(GpuInfo {
+            name,
+            vram_mb,
+            driver_version,
+        });
+    }
+    if gpus.is_empty() {
+        return (
+            "已找到 NVIDIA 工具，但无法读取显卡信息".to_owned(),
+            Vec::new(),
+        );
+    }
+    let summary = gpus
+        .iter()
+        .map(|gpu| {
+            let vram = gpu
+                .vram_mb
+                .map(|value| format!("{value}MB"))
+                .unwrap_or_else(|| "显存未知".to_owned());
+            format!("{}（{vram}）", gpu.name)
+        })
+        .collect::<Vec<_>>()
+        .join("、");
+    (summary, gpus)
 }
 
 fn check_command(command: &str, args: &[&str], name: &str) -> String {
@@ -244,7 +560,18 @@ fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::format_bytes;
+    use std::fs;
+    use std::path::Path;
+
+    use tempfile::{TempDir, tempdir_in};
+
+    use super::{ProbeStatus, collect, format_bytes, inspect_installation, tool_status};
+
+    fn isolated_tempdir() -> TempDir {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp");
+        fs::create_dir_all(&root).unwrap();
+        tempdir_in(root).unwrap()
+    }
 
     #[test]
     fn formats_memory_and_disk_sizes() {
@@ -254,11 +581,67 @@ mod tests {
     }
 
     #[test]
-    fn host_probe_produces_required_offline_status() {
-        let report = super::collect();
+    fn the_host_probe_produces_the_required_offline_status() {
+        let report = collect();
         assert!(!report.os_summary.trim().is_empty());
         assert!(!report.cpu_summary.trim().is_empty());
         assert!(!report.memory_summary.trim().is_empty());
         assert!(!report.disk_summary.trim().is_empty());
+        assert!(!report.items.is_empty());
+    }
+
+    #[test]
+    fn a_missing_tool_is_distinguished_from_a_broken_one() {
+        assert_eq!(tool_status("未检测到"), ProbeStatus::Missing);
+        assert_eq!(tool_status("Node.js：v22.0.0"), ProbeStatus::Unverified);
+        assert_eq!(tool_status("检测超时"), ProbeStatus::Unknown);
+    }
+
+    #[test]
+    fn every_probe_status_has_a_distinct_user_facing_meaning() {
+        let statuses = [
+            ProbeStatus::Ready,
+            ProbeStatus::Verified,
+            ProbeStatus::Compatible,
+            ProbeStatus::NeedsRepair,
+            ProbeStatus::Unverified,
+            ProbeStatus::Missing,
+            ProbeStatus::Unknown,
+        ];
+        let labels: Vec<&str> = statuses.iter().map(|status| status.label()).collect();
+        let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len());
+    }
+
+    #[test]
+    fn an_installation_without_comfyui_reports_nothing_found() {
+        let temp = isolated_tempdir();
+        let inventory = inspect_installation(temp.path());
+        assert!(inventory.comfyui_instances.is_empty());
+        assert!(inventory.node_directories.is_empty());
+        assert!(inventory.model_files.is_empty());
+    }
+
+    #[test]
+    fn a_managed_comfyui_with_nodes_and_models_is_inventoried() {
+        let temp = isolated_tempdir();
+        let root = temp.path();
+        let instance = root.join("managed/ComfyUI");
+        fs::create_dir_all(instance.join("custom_nodes/KJNodes")).unwrap();
+        fs::write(instance.join("main.py"), "# comfy\n").unwrap();
+        fs::create_dir_all(instance.join("models/diffusion_models")).unwrap();
+        fs::write(
+            instance.join("models/diffusion_models/h3.safetensors"),
+            b"x",
+        )
+        .unwrap();
+        fs::create_dir_all(root.join("config/workflows")).unwrap();
+        fs::write(root.join("config/workflows/h3.json"), "{}").unwrap();
+
+        let inventory = inspect_installation(root);
+        assert_eq!(inventory.comfyui_instances.len(), 1);
+        assert_eq!(inventory.node_directories.len(), 1);
+        assert_eq!(inventory.model_files.len(), 1);
+        assert_eq!(inventory.workflow_files.len(), 1);
     }
 }

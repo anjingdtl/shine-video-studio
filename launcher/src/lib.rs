@@ -1,6 +1,16 @@
+pub mod archive;
+pub mod bridge;
+pub mod capability;
+pub mod download;
+pub mod identity;
 pub mod installation_registry;
+pub mod journal;
 pub mod legacy_scan;
 mod path_safety;
 pub mod probe;
 pub mod protocol;
+pub mod runner;
+pub mod self_update;
+pub mod studio;
 pub mod update_channels;
+pub mod upgrade;

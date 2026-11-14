@@ -68,6 +68,52 @@ pub(crate) fn reject_reparse_components(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Reject links inside a directory the launcher owns, without touching the
+/// directories above it.
+///
+/// A user's own profile directory may legitimately be a link: a relocated
+/// Windows profile, a junction, a symlinked home directory. Refusing to work
+/// there would lock a real user out of the launcher for no security gain.
+///
+/// `state_directory` is the launcher's own directory (for example
+/// `%LOCALAPPDATA%\ShineLauncher`). That directory and everything below it
+/// must be real: if an attacker replaced it, or the registry file inside it,
+/// with a link, the launcher's writes would land somewhere else. The user's
+/// own directories above it are the user's choice and are not inspected.
+pub(crate) fn reject_reparse_components_in_state(
+    state_directory: &Path,
+    path: &Path,
+) -> io::Result<()> {
+    check_not_a_link(state_directory)?;
+    let relative = path.strip_prefix(state_directory).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "path is not inside the launcher state directory",
+        )
+    })?;
+    let mut current = state_directory.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        check_not_a_link(&current)?;
+    }
+    Ok(())
+}
+
+fn check_not_a_link(path: &Path) -> io::Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if is_reparse_or_symlink(&metadata) => Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "reparse point or symbolic link is not allowed: {}",
+                path.display()
+            ),
+        )),
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(crate) fn canonical_existing_directory(path: &Path) -> Result<PathBuf, String> {
     validate_local_absolute_path(path)?;
     reject_reparse_components(path).map_err(|_| "目录路径经过符号链接或无法安全读取".to_owned())?;
