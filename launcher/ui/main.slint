@@ -1,340 +1,605 @@
 import { AboutSlint } from "std-widgets.slint";
 
 export component MainWindow inherits Window {
-    title: "Shine Launcher";
-    width: 1000px;
-    height: 680px;
-    background: #f1f4f8;
+    title: "Shine 视频工作台";
+    width: 1080px;
+    height: 760px;
+    background: #eef2f7;
 
-    in-out property <string> app_version: "0.1.0";
-    in-out property <string> os_summary: "正在读取…";
-    in-out property <string> cpu_summary: "正在读取…";
-    in-out property <string> memory_summary: "正在读取…";
-    in-out property <string> disk_summary: "正在读取…";
-    in-out property <string> node_summary: "正在检查…";
-    in-out property <string> npm_summary: "正在检查…";
-    in-out property <string> python_summary: "正在检查…";
-    in-out property <string> uv_summary: "正在检查…";
-    in-out property <string> ffmpeg_summary: "正在检查…";
-    in-out property <string> gpu_summary: "正在检查…";
-    in-out property <string> registry_summary: "正在读取注册记录…";
-    in-out property <string> release_summary: "尚未扫描 GitHub 版本；扫描只读取发布元数据。";
-    in-out property <string> legacy_scan_summary: "可选择旧版目录进行只读识别。扫描不会启动程序或修改目录。";
-    in-out property <string> status_message: "正在启动独立环境检查…";
-    in-out property <bool> is_checking: false;
-    in-out property <bool> is_scanning_legacy: false;
-    in-out property <bool> is_scanning_versions: false;
-    in-out property <bool> can_register_installation: false;
-    in-out property <bool> show_about: false;
+    in-out property <int> active-tab: 0;
+    in-out property <string> app-version: "1.0.0";
+    in-out property <string> status-message: "正在启动独立的本机检查…";
+    in-out property <bool> is-busy: false;
+    in-out property <bool> is-checking: false;
 
-    callback refresh_requested();
-    callback about_requested();
-    callback close_about_requested();
-    callback choose_legacy_requested();
-    callback register_legacy_requested();
-    callback scan_versions_requested();
+    // 总览
+    in-out property <string> installation-name: "尚未选择安装目录";
+    in-out property <string> stack-state: "工作台当前没有运行。";
+    in-out property <string> web-url: "";
+    in-out property <string> readiness: "尚未检查";
 
-    VerticalLayout {
-        padding: 18px;
-        spacing: 12px;
+    // 环境检测
+    in-out property <string> environment-text: "正在读取本机信息…";
+    in-out property <string> gpu-text: "";
 
-        Rectangle {
-            height: 84px;
-            border-radius: 18px;
-            background: #111827;
+    // 安装目录
+    in-out property <string> directory-text: "可以选择新目录开始安装，也可以选择原有目录进行识别与升级。";
+    in-out property <bool> can-register: false;
 
-            HorizontalLayout {
-                padding-left: 24px;
-                padding-right: 24px;
-                spacing: 16px;
+    // 版本更新
+    in-out property <string> version-text: "尚未扫描版本。";
+    in-out property <string> update-text: "尚未检查更新。";
 
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 5px;
-                    Text {
-                        text: "Shine 视频工作台";
-                        font-size: 25px;
-                        font-weight: 700;
-                        color: #f9fafb;
-                    }
-                    Text {
-                        text: "原生启动与管理中心 · 离线可打开";
-                        font-size: 14px;
-                        color: #cbd5e1;
-                    }
+    // AI 能力
+    in-out property <string> capability-text: "尚未读取能力清单。";
+
+    // 诊断
+    in-out property <string> diagnostic-text: "暂无诊断信息。";
+
+    in-out property <bool> show-about: false;
+
+    callback refresh-requested();
+    callback start-requested();
+    callback stop-requested();
+    callback install-requested();
+    callback choose-directory-requested();
+    callback register-requested();
+    callback scan-versions-requested();
+    callback check-update-requested();
+    callback deploy-capability-requested();
+    callback refresh-diagnostics-requested();
+    callback about-requested();
+    callback close-about-requested();
+
+    // ---------------------------------------------------------------- 顶栏
+    Rectangle {
+        height: 92px;
+        background: #14213d;
+
+        HorizontalLayout {
+            padding-left: 26px;
+            padding-right: 26px;
+            spacing: 18px;
+
+            VerticalLayout {
+                alignment: center;
+                spacing: 6px;
+                Text {
+                    text: "Shine 视频工作台";
+                    color: #f8fafc;
+                    font-size: 27px;
+                    font-weight: 700;
                 }
-
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-
-                Rectangle {
-                    width: 132px;
-                    height: 34px;
-                    border-radius: 17px;
-                    background: #164e63;
-                    Text {
-                        text: "工程预览版";
-                        color: #cffafe;
-                        font-size: 13px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-
-                Rectangle {
-                    width: 78px;
-                    height: 34px;
-                    border-radius: 17px;
-                    background: #334155;
-                    Text {
-                        text: "关于";
-                        color: #f8fafc;
-                        font-size: 13px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    TouchArea { clicked => { root.about_requested(); } }
+                Text {
+                    text: "独立启动器 · 无需安装 Python、Node 或 ComfyUI";
+                    color: #a8b6cf;
+                    font-size: 13px;
                 }
             }
-        }
 
-        Rectangle {
-            height: 66px;
-            border-radius: 14px;
-            background: #e0f2fe;
-            border-width: 1px;
-            border-color: #bae6fd;
-            HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                spacing: 14px;
-                Text { text: "●"; color: #0284c7; font-size: 24px; vertical-alignment: center; }
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 3px;
-                    Text {
-                        text: "独立运行状态";
-                        color: #0c4a6e;
-                        font-size: 15px;
-                        font-weight: 700;
-                    }
-                    Text {
-                        text: "启动器不依赖 Studio 的 Python、Node、API、Worker 或 GPU 服务";
-                        color: #075985;
-                        font-size: 13px;
-                    }
-                }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
+            Rectangle { horizontal-stretch: 1; background: transparent; }
+
+            Rectangle {
+                width: 104px;
+                height: 34px;
+                border-radius: 17px;
+                background: #1d4ed8;
                 Text {
-                    text: "离线核心：可用";
-                    color: #0369a1;
+                    text: "版本 " + root.app-version;
+                    color: #dbeafe;
                     font-size: 13px;
+                    horizontal-alignment: center;
                     vertical-alignment: center;
                 }
             }
-        }
-
-        HorizontalLayout {
-            spacing: 16px;
-            Rectangle {
-                height: 176px;
-                border-radius: 16px;
-                background: #ffffff;
-                border-width: 1px;
-                border-color: #e2e8f0;
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 8px;
-                    Text { text: "本机系统"; color: #64748b; font-size: 13px; }
-                    Text { text: root.os_summary; color: #0f172a; font-size: 19px; font-weight: 700; wrap: word-wrap; }
-                    Text { text: root.cpu_summary; color: #334155; font-size: 14px; }
-                    Text { text: root.memory_summary; color: #334155; font-size: 14px; }
-                    Text { text: root.disk_summary; color: #334155; font-size: 14px; }
-                }
-            }
 
             Rectangle {
-                height: 176px;
-                border-radius: 16px;
-                background: #ffffff;
-                border-width: 1px;
-                border-color: #e2e8f0;
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 8px;
-                    Text { text: "运行环境（只读）"; color: #64748b; font-size: 13px; }
-                    HorizontalLayout { spacing: 10px; Text { text: "Node.js"; color: #334155; font-size: 14px; width: 82px; } Text { text: root.node_summary; color: #0f172a; font-size: 14px; wrap: word-wrap; } }
-                    HorizontalLayout { spacing: 10px; Text { text: "npm"; color: #334155; font-size: 14px; width: 82px; } Text { text: root.npm_summary; color: #0f172a; font-size: 14px; wrap: word-wrap; } }
-                    HorizontalLayout { spacing: 10px; Text { text: "Python"; color: #334155; font-size: 14px; width: 82px; } Text { text: root.python_summary; color: #0f172a; font-size: 14px; wrap: word-wrap; } }
-                    HorizontalLayout { spacing: 10px; Text { text: "uv"; color: #334155; font-size: 14px; width: 82px; } Text { text: root.uv_summary; color: #0f172a; font-size: 14px; wrap: word-wrap; } }
-                    HorizontalLayout { spacing: 10px; Text { text: "FFmpeg"; color: #334155; font-size: 14px; width: 82px; } Text { text: root.ffmpeg_summary; color: #0f172a; font-size: 14px; wrap: word-wrap; } }
-                }
-            }
-
-            Rectangle {
-                height: 176px;
-                border-radius: 16px;
-                background: #ffffff;
-                border-width: 1px;
-                border-color: #e2e8f0;
-                VerticalLayout {
-                    padding: 16px;
-                    spacing: 8px;
-                    Text { text: "AI 运行能力"; color: #64748b; font-size: 13px; }
-                    Text { text: root.gpu_summary; color: #0f172a; font-size: 15px; wrap: word-wrap; }
-                    Text { text: "模型能力未进行真实推理验证"; color: #b45309; font-size: 13px; wrap: word-wrap; }
-                    Rectangle { vertical-stretch: 1; background: transparent; }
-                    Text { text: "GPU 缺失不会阻止启动器打开"; color: #475569; font-size: 12px; wrap: word-wrap; }
-                }
-            }
-        }
-
-        Rectangle {
-            height: 120px;
-            border-radius: 16px;
-            background: #ffffff;
-            border-width: 1px;
-            border-color: #e2e8f0;
-            VerticalLayout {
-                padding: 18px;
-                spacing: 10px;
-                HorizontalLayout {
-                    spacing: 10px;
-                    Text { text: "旧版目录识别"; color: #0f172a; font-size: 15px; font-weight: 700; vertical-alignment: center; }
-                    Rectangle { horizontal-stretch: 1; background: transparent; }
-                    Rectangle {
-                        width: 148px;
-                        height: 38px;
-                        border-radius: 9px;
-                        background: root.is_scanning_legacy ? #94a3b8 : #334155;
-                        Text { text: root.is_scanning_legacy ? "正在识别…" : "选择目录并扫描"; color: #ffffff; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
-                        TouchArea { enabled: !root.is_scanning_legacy; clicked => { root.choose_legacy_requested(); } }
-                    }
-                    Rectangle {
-                        width: 138px;
-                        height: 38px;
-                        border-radius: 9px;
-                        background: root.can_register_installation ? #0f766e : #94a3b8;
-                        Text { text: "登记识别结果"; color: #ffffff; font-size: 13px; horizontal-alignment: center; vertical-alignment: center; }
-                        TouchArea { enabled: root.can_register_installation; clicked => { root.register_legacy_requested(); } }
-                    }
-                }
+                width: 78px;
+                height: 34px;
+                border-radius: 17px;
+                background: #334155;
                 Text {
-                    text: root.legacy_scan_summary;
-                    color: #475569;
-                    font-size: 12px;
-                    wrap: word-wrap;
-                    vertical-stretch: 1;
+                    text: "关于";
+                    color: #f1f5f9;
+                    font-size: 13px;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
                 }
+                TouchArea { clicked => { root.about-requested(); } }
             }
-        }
-
-        Rectangle {
-            height: 86px;
-            border-radius: 14px;
-            background: #ffffff;
-            border-width: 1px;
-            border-color: #e2e8f0;
-            HorizontalLayout {
-                padding-left: 20px;
-                padding-right: 20px;
-                spacing: 12px;
-                VerticalLayout {
-                    alignment: center;
-                    spacing: 3px;
-                    Text { text: root.registry_summary; color: #0f172a; font-size: 14px; font-weight: 700; }
-                    Text {
-                        text: "登记只保存路径；未验证运行能力不会标为 READY。";
-                        color: #64748b;
-                        font-size: 11px;
-                    }
-                    Text {
-                        text: root.release_summary;
-                        color: #64748b;
-                        font-size: 12px;
-                        wrap: word-wrap;
-                    }
-                }
-                Rectangle { horizontal-stretch: 1; background: transparent; }
-                Rectangle {
-                    width: 126px;
-                    height: 38px;
-                    border-radius: 10px;
-                    background: root.is_scanning_versions ? #94a3b8 : #334155;
-                    TouchArea {
-                        enabled: !root.is_scanning_versions;
-                        clicked => { root.scan_versions_requested(); }
-                    }
-                    Text {
-                        text: root.is_scanning_versions ? "正在扫描…" : "扫描版本";
-                        color: #ffffff;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                Rectangle {
-                    width: 138px;
-                    height: 38px;
-                    border-radius: 10px;
-                    background: root.is_checking ? #94a3b8 : #0f766e;
-                    TouchArea {
-                        enabled: !root.is_checking;
-                        clicked => { root.refresh_requested(); }
-                    }
-                    Text {
-                        text: root.is_checking ? "正在检查…" : "刷新本机环境";
-                        color: #ffffff;
-                        font-size: 14px;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-            }
-        }
-
-        Rectangle { vertical-stretch: 1; background: transparent; }
-
-        HorizontalLayout {
-            height: 24px;
-            spacing: 12px;
-            Text { text: root.status_message; color: #64748b; font-size: 12px; vertical-alignment: center; }
-            Rectangle { horizontal-stretch: 1; background: transparent; }
-            Text { text: "Shine Launcher · v" + root.app_version; color: #475569; font-size: 12px; vertical-alignment: center; }
         }
     }
 
-    if root.show_about: Rectangle {
-        x: 0px;
-        y: 0px;
-        width: parent.width;
-        height: parent.height;
+    // ------------------------------------------------------------ 导航条
+    Rectangle {
+        height: 52px;
+        background: #ffffff;
+
+        HorizontalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            spacing: 8px;
+
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 0 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "启动工作台"; color: root.active-tab == 0 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 0; } }
+            }
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 1 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "环境检测"; color: root.active-tab == 1 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 1; } }
+            }
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 2 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "安装目录"; color: root.active-tab == 2 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 2; } }
+            }
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 3 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "版本与依赖"; color: root.active-tab == 3 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 3; } }
+            }
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 4 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "AI 能力部署"; color: root.active-tab == 4 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 4; } }
+            }
+            Rectangle {
+                width: 150px; height: 36px; border-radius: 8px;
+                background: root.active-tab == 5 ? #1d4ed8 : #e2e8f0;
+                Text {
+                    text: "运行与诊断"; color: root.active-tab == 5 ? #ffffff : #334155;
+                    font-size: 14px; horizontal-alignment: center; vertical-alignment: center;
+                }
+                TouchArea { clicked => { root.active-tab = 5; } }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- 内容区
+    Rectangle {
+        vertical-stretch: 1;
+        background: transparent;
+
+        // ============ 1. 启动工作台 ============
+        if root.active-tab == 0: VerticalLayout {
+            padding: 22px;
+            spacing: 16px;
+
+            Rectangle {
+                height: 132px; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 22px; spacing: 10px;
+                    Text {
+                        text: "准备好后，一键打开工作台";
+                        color: #0f172a; font-size: 22px; font-weight: 700;
+                    }
+                    Text {
+                        text: root.stack-state; color: #475569; font-size: 15px; wrap: word-wrap;
+                    }
+                    Text {
+                        text: root.web-url; color: #1d4ed8; font-size: 14px; wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 96px; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 18px; spacing: 6px;
+                    Text {
+                        text: "当前安装：" + root.installation-name;
+                        color: #0f172a; font-size: 15px; font-weight: 700; wrap: word-wrap;
+                    }
+                    Text {
+                        text: "准备状态：" + root.readiness;
+                        color: #475569; font-size: 13px; wrap: word-wrap;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+
+                Rectangle {
+                    width: 200px; height: 52px; border-radius: 12px;
+                    background: root.is-busy ? #93c5fd : #1d4ed8;
+                    Text {
+                        text: root.is-busy ? "正在处理…" : "启动工作台";
+                        color: #ffffff; font-size: 16px; font-weight: 700;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.start-requested(); }
+                    }
+                }
+
+                Rectangle {
+                    width: 180px; height: 52px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #334155;
+                    Text {
+                        text: "停止工作台"; color: #ffffff; font-size: 16px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.stop-requested(); }
+                    }
+                }
+
+                Rectangle {
+                    width: 210px; height: 52px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #0f766e;
+                    Text {
+                        text: "一键安装与修复"; color: #ffffff; font-size: 16px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.install-requested(); }
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+
+            Rectangle { vertical-stretch: 1; background: transparent; }
+        }
+
+        // ============ 2. 环境检测 ============
+        if root.active-tab == 1: VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            Rectangle {
+                height: 60px; border-radius: 14px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                HorizontalLayout {
+                    padding-left: 20px; padding-right: 20px; spacing: 14px;
+                    Text {
+                        text: "已安装、已验证、兼容、待修复与尚未真实验证会分别标注。";
+                        color: #475569; font-size: 14px; vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    Rectangle {
+                        width: 130px; height: 36px; border-radius: 9px;
+                        background: root.is-checking ? #cbd5e1 : #334155;
+                        Text {
+                            text: root.is-checking ? "正在检查…" : "重新检测";
+                            color: #ffffff; font-size: 14px;
+                            horizontal-alignment: center; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            enabled: !root.is-checking;
+                            clicked => { root.refresh-requested(); }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 20px; spacing: 10px;
+                    Text {
+                        text: root.environment-text; color: #0f172a; font-size: 14px;
+                        wrap: word-wrap; vertical-stretch: 1;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 76px; border-radius: 14px; background: #eff6ff;
+                border-width: 1px; border-color: #bfdbfe;
+                VerticalLayout {
+                    padding: 16px; spacing: 4px;
+                    Text {
+                        text: "AI 运行条件"; color: #1e3a8a; font-size: 14px; font-weight: 700;
+                    }
+                    Text {
+                        text: root.gpu-text; color: #1e40af; font-size: 13px; wrap: word-wrap;
+                    }
+                }
+            }
+        }
+
+        // ============ 3. 安装目录 ============
+        if root.active-tab == 2: VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            Rectangle {
+                height: 74px; border-radius: 14px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 16px; spacing: 5px;
+                    Text {
+                        text: "首次使用请选择安装目录；已有旧版请直接选择原目录，"
+                            + "启动器会识别原有项目、数据库、模型与素材，并保留历史作品。";
+                        color: #475569; font-size: 13px; wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 20px; spacing: 10px;
+                    Text {
+                        text: root.directory-text; color: #0f172a; font-size: 14px;
+                        wrap: word-wrap; vertical-stretch: 1;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 200px; height: 50px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #1d4ed8;
+                    Text {
+                        text: "选择目录并识别"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.choose-directory-requested(); }
+                    }
+                }
+                Rectangle {
+                    width: 190px; height: 50px; border-radius: 12px;
+                    background: root.can-register ? #0f766e : #cbd5e1;
+                    Text {
+                        text: "登记并保留历史"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: root.can-register && !root.is-busy;
+                        clicked => { root.register-requested(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+        }
+
+        // ============ 4. 版本与依赖 ============
+        if root.active-tab == 3: VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            Rectangle {
+                height: 116px; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 18px; spacing: 7px;
+                    Text {
+                        text: "版本信息"; color: #0f172a; font-size: 16px; font-weight: 700;
+                    }
+                    Text {
+                        text: root.version-text; color: #475569; font-size: 13px; wrap: word-wrap;
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 116px; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 18px; spacing: 7px;
+                    Text {
+                        text: "更新"; color: #0f172a; font-size: 16px; font-weight: 700;
+                    }
+                    Text {
+                        text: root.update-text; color: #475569; font-size: 13px; wrap: word-wrap;
+                        vertical-stretch: 1;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 170px; height: 50px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #334155;
+                    Text {
+                        text: "扫描可用版本"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.scan-versions-requested(); }
+                    }
+                }
+                Rectangle {
+                    width: 190px; height: 50px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #0f766e;
+                    Text {
+                        text: "检查启动器更新"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.check-update-requested(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+        }
+
+        // ============ 5. AI 能力部署 ============
+        if root.active-tab == 4: VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            Rectangle {
+                height: 74px; border-radius: 14px; background: #fffbeb;
+                border-width: 1px; border-color: #fde68a;
+                VerticalLayout {
+                    padding: 16px; spacing: 5px;
+                    Text {
+                        text: "只安装项目已正式支持的能力。未通过真实生成验证的能力会明确标注为待验证，"
+                            + "不会显示为已就绪。";
+                        color: #92400e; font-size: 13px; wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 20px; spacing: 10px;
+                    Text {
+                        text: root.capability-text; color: #0f172a; font-size: 14px;
+                        wrap: word-wrap; vertical-stretch: 1;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 210px; height: 50px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #1d4ed8;
+                    Text {
+                        text: "检查并部署能力"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.deploy-capability-requested(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+        }
+
+        // ============ 6. 运行与诊断 ============
+        if root.active-tab == 5: VerticalLayout {
+            padding: 22px; spacing: 14px;
+
+            Rectangle {
+                height: 74px; border-radius: 14px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 16px; spacing: 5px;
+                    Text {
+                        text: "这里显示受管服务的端口、进程身份与安装日志。高级信息默认折叠。";
+                        color: #475569; font-size: 13px; wrap: word-wrap;
+                    }
+                }
+            }
+
+            Rectangle {
+                vertical-stretch: 1; border-radius: 16px; background: #ffffff;
+                border-width: 1px; border-color: #dbe3ee;
+                VerticalLayout {
+                    padding: 20px; spacing: 10px;
+                    Text {
+                        text: root.diagnostic-text; color: #0f172a; font-size: 13px;
+                        wrap: word-wrap; vertical-stretch: 1;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 14px;
+                Rectangle {
+                    width: 190px; height: 50px; border-radius: 12px;
+                    background: root.is-busy ? #cbd5e1 : #334155;
+                    Text {
+                        text: "刷新诊断信息"; color: #ffffff; font-size: 15px;
+                        horizontal-alignment: center; vertical-alignment: center;
+                    }
+                    TouchArea {
+                        enabled: !root.is-busy;
+                        clicked => { root.refresh-diagnostics-requested(); }
+                    }
+                }
+                Rectangle { horizontal-stretch: 1; background: transparent; }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- 状态栏
+    Rectangle {
+        height: 40px;
+        background: #ffffff;
+
+        HorizontalLayout {
+            padding-left: 20px;
+            padding-right: 20px;
+            spacing: 12px;
+            Text {
+                text: root.status-message; color: #64748b; font-size: 12px;
+                vertical-alignment: center; horizontal-stretch: 1; wrap: word-wrap;
+            }
+            Text {
+                text: "Shine Launcher · v" + root.app-version;
+                color: #94a3b8; font-size: 12px; vertical-alignment: center;
+            }
+        }
+    }
+
+    // ------------------------------------------------------------- 关于
+    if root.show-about: Rectangle {
+        x: 0px; y: 0px;
+        width: parent.width; height: parent.height;
         background: #0f172a99;
         TouchArea { clicked => { } }
+
         Rectangle {
-            x: (parent.width - 520px) / 2;
-            y: (parent.height - 310px) / 2;
-            width: 520px;
-            height: 310px;
-            border-radius: 18px;
-            background: #ffffff;
+            x: (parent.width - 540px) / 2;
+            y: (parent.height - 330px) / 2;
+            width: 540px; height: 330px;
+            border-radius: 18px; background: #ffffff;
             VerticalLayout {
-                padding: 24px;
-                spacing: 14px;
-                Text { text: "关于 Shine Launcher"; color: #0f172a; font-size: 21px; font-weight: 700; }
-                Text { text: "原生启动与管理中心 · 版本 " + root.app_version; color: #475569; font-size: 14px; }
-                Text { text: "本技术验证版仅进行本机只读环境检查。"; color: #475569; font-size: 13px; }
+                padding: 26px; spacing: 14px;
+                Text {
+                    text: "关于 Shine 启动器"; color: #0f172a; font-size: 21px; font-weight: 700;
+                }
+                Text {
+                    text: "版本 " + root.app-version + " · 独立的 Windows 桌面启动与管理中心";
+                    color: #475569; font-size: 14px; wrap: word-wrap;
+                }
+                Text {
+                    text: "启动器不依赖工作台的 Python、Node、ComfyUI 或网络即可打开，"
+                        + "并会在工作台无法启动时提供诊断与修复入口。";
+                    color: #475569; font-size: 13px; wrap: word-wrap;
+                }
                 AboutSlint { }
                 Rectangle { vertical-stretch: 1; background: transparent; }
                 Rectangle {
-                    width: 100px;
-                    height: 38px;
-                    border-radius: 9px;
-                    background: #0f766e;
-                    HorizontalLayout {
-                        alignment: center;
-                        Text { text: "关闭"; color: white; font-size: 14px; }
+                    width: 110px; height: 40px; border-radius: 10px; background: #1d4ed8;
+                    Text {
+                        text: "关闭"; color: #ffffff; font-size: 14px;
+                        horizontal-alignment: center; vertical-alignment: center;
                     }
-                    TouchArea { clicked => { root.close_about_requested(); } }
+                    TouchArea { clicked => { root.close-about-requested(); } }
                 }
             }
         }
