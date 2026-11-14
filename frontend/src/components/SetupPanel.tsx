@@ -2,6 +2,7 @@ import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api, timeoutSignal } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
 import { ApiError } from '../api';
 import { WorkerValidationGate } from './WorkerValidationGate';
@@ -550,13 +551,8 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
       await loadRuntime();
       await onRefresh();
       const recipe = String((result as { recipe?: string }).recipe ?? '');
-      const missingPacks = ((result as { node_pack_notes?: Array<{ missing?: string[] }> }).node_pack_notes ?? [])
-        .flatMap((note) => note.missing ?? []);
-      if (missingPacks.length) {
-        return `受管配置已生成：${recipe}。注意：${missingPacks.length} 个节点包没有装（${missingPacks.join('、')}）；`
-          + '本次运行会把它们禁用，请到「安装与下载」补装后再重新生成运行配置。';
-      }
-      return `受管配置已生成：${recipe}`;
+      const warning = nodePackWarning((result as { node_pack_notes?: NodePackNote[] }).node_pack_notes);
+      return warning ? `受管配置已生成：${recipe}。${warning}` : `受管配置已生成：${recipe}`;
     });
   }
 

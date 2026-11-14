@@ -2,6 +2,7 @@ import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from
 import { useEffect, useRef, useState } from 'react';
 import { api as request, json, timeoutSignal, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
+import { nodePackWarning } from './nodePackNotes';
 import { ApiError } from '../api';
 import { WorkerValidationGate } from './WorkerValidationGate';
 import {
@@ -594,15 +595,11 @@ export function RealProductionWizard({
             ...(servicePort.current ? { port: servicePort.current } : {}),
           }));
         if (!alive()) return;
-        const missingPacks = (configuration.node_pack_notes ?? []).flatMap((note) => note.missing ?? []);
-        if (missingPacks.length) {
+        const warning = nodePackWarning(configuration.node_pack_notes);
+        if (warning) {
           // The gate was lowered for this environment: say so instead of letting
           // the run look complete while those nodes stay disabled.
-          setStage('workflows', {
-            status: 'warn',
-            note: `运行配置已生成，但 ${missingPacks.length} 个节点包没有装（${missingPacks.join('、')}）；`
-              + '本次运行会把它们禁用，请到「安装与下载」补装后再重新生成运行配置。',
-          });
+          setStage('workflows', { status: 'warn', note: `运行配置已生成，但${warning}` });
         }
       } catch (error) {
         stopWith('workflows', `生成方案登记失败：${(error as Error).message}。已完成的步骤不会丢失，重新打开向导可继续。`);
