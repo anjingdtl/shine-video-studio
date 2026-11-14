@@ -1557,8 +1557,14 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `or not candidate_ack`。本轮**恢复**该条件（未改测试预期、未放宽任何资格检查）。
 - **回归**：新增 `backend/tests/test_setup_capability_gates.py`（21 例，CASE-01/02/03/04/05/07/08/10）
   与 `frontend/src/test/setupCapabilityGates.test.tsx`（10 例，CASE-01/06/07/09）；
-  既有 3 个前端文件只更新按钮文案契约断言。证据
+  既有 3 个前端文件只更新按钮文案契约断言。PR #23
+  （https://github.com/anjingdtl/shine-video-studio/pull/23），PR 必要状态
+  L1/L2/Frontend build 全绿，合并 commit `afb596940f07ed71c82fc7cfb1ec9baf73df8cb0`。证据
   `docs/ACCEPTANCE_20261114_P1_CAPABILITY_DECOUPLING.md`。
+- **既有失败（未由本轮引入）**：`test_deployment_recommendation`（2 例 RAM 门槛）与
+  `simpleAssets.test.tsx`（2 例素材锁定按钮）在未改动的 `main` 上同样失败（后者来自 PR #21）；
+  `test_sdk_role_process`/`test_v13_instances`/`test_runtime_activation`（5 例）是 2 核上并行跑时的
+  计时抖动，三个模块在本分支单独跑全过。本轮未动这些模块，也未用改测试预期的方式制造 PASS。
 - **真机边界**：云端无 RTX 4070，本轮全部是**注入硬件事实 + 端到端请求**验证，
   **不构成任何真机生产通过结论**；Windows 真实安装（FFmpeg/PowerShell 补装、断点续传）
   亦未执行。Qwen Image 清单自身要求 15GB 显存 / 32GB 内存，4070 **下载得到但跑不动**，

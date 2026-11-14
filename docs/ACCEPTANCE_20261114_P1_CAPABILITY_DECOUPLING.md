@@ -161,7 +161,42 @@ Qwen Image 清单没有 `variant_id` → 图片计划**在结构上**不可能�
 
 ## 4. 验收证据
 
-见文末"回归执行结果"一节（命令、分片、结果）。
+- PR：https://github.com/anjingdtl/shine-video-studio/pull/23
+- 合并 commit：`afb596940f07ed71c82fc7cfb1ec9baf73df8cb0`（`main`，2026-11-14T09:13:34Z）
+- PR 必要状态：L1 backend quick ✅ / L2 backend integration ✅ / Frontend build ✅
+  （L3 backend full 与 L3 browser E2E 只在 `main` push 时跑，本次 PR 上是 skipped）
+
+### 4.1 本地回归
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| 后端全量（8 分片并行，仓库既有规则） | `CODEBUDDY_SAFE_DELETE_ENABLED=0 env -u NO_PROXY -u no_proxy python -m pytest <8 分片> -q -p no:cacheprovider` | 6/8 分片 exit 0；另 2 个分片的问题全部是**与本轮无关的既有失败**，见 4.2 |
+| 新增后端用例 | `pytest tests/test_setup_capability_gates.py` | 21 例全过 |
+| 前端全量 | `npx vitest run --no-file-parallelism` | 56/57 文件、335/337 用例通过；失败的 2 例见 4.2 |
+| 新增前端用例 | `npx vitest run --no-file-parallelism src/test/setupCapabilityGates.test.tsx` | 10 例全过 |
+| 类型检查 | `npx tsc -b` | exit 0 |
+| 生产构建 | `npx vite build` | 成功 |
+| 后端静态检查 | `ruff check backend/` | 全绿 |
+
+### 4.2 既有失败（**未由本轮引入**，已在未改动的 `main` 上复现）
+
+1. `backend/tests/test_deployment_recommendation.py`（2 例，RAM 门槛）：
+   `variants.qualify` 现在要求**实测** `installed_mb` 才能判 RAM 不足（读不到就是 UNKNOWN，
+   不把机器误判为不兼容），而该用例的 fixture 没有这个字段，于落到 UNKNOWN 分支。
+   - 在**未改动的 `6fbf498`** 上单跑同样失败；
+   - `main`（`21f3e728`）自己的 CI `L3 backend full (Linux)` job 已经是 failure：
+     https://github.com/anjingdtl/shine-video-studio/actions/runs/43572396583
+   - 本轮**没有**动这块：它属于推荐路径、不在本轮范围内，且任务明确禁止用改测试预期的方式制造 PASS。
+2. `frontend/src/test/simpleAssets.test.tsx`（2 例，素材锁定按钮）：
+   把本轮前端改动**全部还原**后仍失败 —— `main` 的 PR #21（Glass UI 主题）带来的既有问题。
+3. `test_sdk_role_process` / `test_v13_instances` / `test_runtime_activation`（5 例）：
+   2 核机器上 8 个后端分片与前端全量并跑时的**计时型抖动**；这三个模块在本分支上**单独跑全部通过**。
+
+### 4.3 本轮顺带修复的既有红用例
+
+`backend/tests/test_install_plan_qualification.py::test_an_unqualified_host_is_refused_even_when_the_call_bypasses_the_ui`
+在 `main`（`6fbf498`）上本来就是红的（`89dbfd2` 误删了生产门禁的 `or not candidate_ack`）。
+本轮按 `cc618a2` 的已裁定语义**恢复**实现，使该用例转绿 —— **未改测试预期、未移除任何资格检查**。
 
 ---
 
