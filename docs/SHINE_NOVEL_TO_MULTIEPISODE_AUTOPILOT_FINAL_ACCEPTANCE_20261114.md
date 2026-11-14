@@ -145,3 +145,10 @@
 - 根据本轮用户授权，真实人物素材生成已入队。复用「老周」主素材，生成「女人」候选。验证小样 `042e2d2e-8ef4-471d-bed8-dade119f04a5`，正式候选批次 `9819ce44-f6ae-4e30-8818-a08d6cf3e97a`。此记录写入时常驻 Worker 仍在处理第 4 单元，出图及 H3 双集验收尚未签署。
 - `npx.cmd vitest run --no-file-parallelism` 57 文件 / 337 项通过。`npm.cmd run build`、`ruff check backend`、隔离新库 `alembic upgrade head` + `alembic check` 通过（head `f180d0010001`，无 drift）。后端 8 分片基线日志位于 `.local-data/wp7-baseline/`，退出码依次为 0 / 0 / 0 / 1 / 0 / 0 / 0 / 0，剩两例已知的 `test_deployment_recommendation.py` RAM 基线失败，原第三例已由 main 上 PR #23 修复。首轮 WP7 全量定位出三处 `test_story_continuity.py` mock 合同迁移遗漏，迁移后该模块与 film crew、prompt contract、decomposition、offline E2E 的定向 60 项通过。完整复跑日志位于 `.local-data/wp7-final/`。
 - RTX 4070 为 EXEMPT_HARDWARE_UNAVAILABLE，VLM 正负校准未做，本轮没有更改 `worker.py` / `preproduction.py`。
+
+- 本轮用户将时延验收收窄到文学拆镜。A/B 计时覆盖结构与逐项生成，记录墙钟、reasoning tokens、调用次数和合同校验结果。素材队列继续保留在隔离栈，H3 拍摄不作为本轮计时或验收动作。PR #22 仍按原合并门禁保持开放。
+- 全量定位还发现 `test_story_section_run.py` 的三处旧 mock 合同，迁移后 3 项通过。后端 RAM 用例补上实测 `installed_mb`，保留低 RAM 预期，另测低于门槛且无实测容量的 `RAM_UNVERIFIED`。这两处只改测试，部署门槛保持现行语义。最终源码 `594541b` 的完整分片日志位于 `.local-data/wp7-head-594541b/`。
+
+### 11.1 同输入编剧实测
+
+同一已确认小说单元、同一 MiniMax-M3.1-flash 路由，在两个 SQLite 快照中串行比较。整单 1 次调用，438.42 秒，10,512 reasoning tokens，6 个 beat 通过合同校验。逐 beat 到第一条填充返回时，结构 377.981 秒 / 8,013 reasoning tokens，首 beat 364.865 秒 / 3,142 reasoning tokens，已完成调用累计 **742.846 秒 / 11,155 reasoning tokens**，至少比整单耗时多 **69.4%**，仍有后续 beat。两次长时等待均计入真实墙钟。该样本已证伪本次串行细分能降低总时延，不能把单次输出更小或从截断恢复写作提速通过。导演同输入 A/B 尚未完成。
