@@ -23,7 +23,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
-use crate::path_safety::{regular_file_without_reparse, reject_reparse_components};
+use crate::path_safety::{regular_file_without_reparse, reject_reparse_components_in_state};
 
 /// Location of the per-installation identity file, relative to the install root.
 pub const IDENTITY_RELATIVE_PATH: &str = ".shine/installation.json";
@@ -164,7 +164,7 @@ pub fn read_identity_file(
     install_root: &Path,
 ) -> Result<Option<InstallationIdentity>, IdentityError> {
     let path = identity_file_path(install_root);
-    reject_reparse_components(&path)
+    reject_reparse_components_in_state(install_root, &path)
         .map_err(|_| IdentityError::Invalid("安装身份文件经过符号链接或重解析点".to_owned()))?;
     if !regular_file_without_reparse(&path)
         .map_err(|error| IdentityError::Invalid(format!("无法安全读取安装身份文件：{error}")))?
@@ -197,10 +197,10 @@ pub fn write_identity_file(
     let parent = path
         .parent()
         .ok_or_else(|| IdentityError::Invalid("安装身份文件缺少父目录".to_owned()))?;
-    reject_reparse_components(parent)
+    reject_reparse_components_in_state(install_root, parent)
         .map_err(|_| IdentityError::Invalid("安装身份目录经过符号链接或重解析点".to_owned()))?;
     fs::create_dir_all(parent)?;
-    reject_reparse_components(&path)
+    reject_reparse_components_in_state(install_root, &path)
         .map_err(|_| IdentityError::Invalid("安装身份文件经过符号链接或重解析点".to_owned()))?;
 
     let bytes = serde_json::to_vec_pretty(identity)?;

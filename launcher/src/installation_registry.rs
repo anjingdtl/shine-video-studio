@@ -11,7 +11,7 @@ use crate::identity::{
     self, IdentityResolution, is_legacy_path_derived_id, is_stable_installation_id,
     legacy_path_derived_id,
 };
-use crate::path_safety::{reject_reparse_components, validate_local_absolute_path};
+use crate::path_safety::{reject_reparse_components_in_state, validate_local_absolute_path};
 
 const REGISTRY_SCHEMA_VERSION: u32 = 2;
 const LEGACY_REGISTRY_SCHEMA_VERSION: u32 = 1;
@@ -349,16 +349,16 @@ impl InstallationRegistry {
         let parent = path
             .parent()
             .ok_or_else(|| RegistryError::InvalidPath("注册表文件必须有父目录".to_owned()))?;
-        reject_reparse_components(parent).map_err(|_| {
+        reject_reparse_components_in_state(parent, path).map_err(|_| {
             RegistryError::InvalidPath("注册表目录经过符号链接或重解析点".to_owned())
         })?;
         fs::create_dir_all(parent)?;
-        reject_reparse_components(parent).map_err(|_| {
+        reject_reparse_components_in_state(parent, path).map_err(|_| {
             RegistryError::InvalidPath("注册表目录经过符号链接或重解析点".to_owned())
         })?;
 
         let lock_path = path.with_extension("lock");
-        reject_reparse_components(&lock_path).map_err(|_| {
+        reject_reparse_components_in_state(parent, &lock_path).map_err(|_| {
             RegistryError::InvalidPath("注册表锁文件经过符号链接或重解析点".to_owned())
         })?;
         let lock = OpenOptions::new()
@@ -416,12 +416,12 @@ impl InstallationRegistry {
             .ok_or_else(|| RegistryError::InvalidPath("注册表文件必须有父目录".to_owned()))?;
         validate_registry_path(path)?;
         fs::create_dir_all(parent)?;
-        reject_reparse_components(parent).map_err(|_| {
+        reject_reparse_components_in_state(parent, path).map_err(|_| {
             RegistryError::InvalidPath("注册表目录经过符号链接或重解析点".to_owned())
         })?;
 
         let lock_path = path.with_extension("lock");
-        reject_reparse_components(&lock_path).map_err(|_| {
+        reject_reparse_components_in_state(parent, &lock_path).map_err(|_| {
             RegistryError::InvalidPath("注册表锁文件经过符号链接或重解析点".to_owned())
         })?;
         let lock = OpenOptions::new()
@@ -461,16 +461,16 @@ impl InstallationRegistry {
         let parent = path
             .parent()
             .ok_or_else(|| RegistryError::InvalidPath("注册表文件必须有父目录".to_owned()))?;
-        reject_reparse_components(parent).map_err(|_| {
+        reject_reparse_components_in_state(parent, path).map_err(|_| {
             RegistryError::InvalidPath("注册表目录经过符号链接或重解析点".to_owned())
         })?;
         fs::create_dir_all(parent)?;
-        reject_reparse_components(parent).map_err(|_| {
+        reject_reparse_components_in_state(parent, path).map_err(|_| {
             RegistryError::InvalidPath("注册表目录经过符号链接或重解析点".to_owned())
         })?;
 
         let lock_path = path.with_extension("lock");
-        reject_reparse_components(&lock_path).map_err(|_| {
+        reject_reparse_components_in_state(parent, &lock_path).map_err(|_| {
             RegistryError::InvalidPath("注册表锁文件经过符号链接或重解析点".to_owned())
         })?;
         let lock = OpenOptions::new()
@@ -566,7 +566,10 @@ fn validate_registry_path(path: &Path) -> Result<(), RegistryError> {
             "注册表路径不能包含 ..".to_owned(),
         ));
     }
-    reject_reparse_components(path)
+    // The launcher's own directory and the registry file inside it must be
+    // real. The user's directories above them are the user's own business.
+    let state_directory = path.parent().unwrap_or(path);
+    reject_reparse_components_in_state(state_directory, path)
         .map_err(|_| RegistryError::InvalidPath("注册表路径经过符号链接或重解析点".to_owned()))
 }
 
@@ -948,6 +951,55 @@ mod tests {
         }
         let loaded = InstallationRegistry::load(&registry_path).unwrap();
         assert_eq!(loaded.installations.len(), 4);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_under_a_relocated_profile_still_works() {
+        // A user's own directory may legitimately be a link: a relocated
+        // Windows profile, a junction, a symlinked home directory. The
+        // launcher has to work there.
+        let temp = isolated_tempdir();
+        let real = temp.path().join("real-profile");
+        fs::create_dir_all(&real).unwrap();
+        let linked = temp.path().join("linked-profile");
+        std::os::unix::fs::symlink(&real, &linked).unwrap();
+
+        let state_directory = linked.join("ShineLauncher");
+        let registry_path = state_directory.join("installations-v2.json");
+        let root = temp.path().join("studio");
+        make_fixture(&root);
+
+        let mut registry = InstallationRegistry::empty();
+        registry
+            .register_install_root(
+                &root,
+                None,
+                None,
+                UpdateChannel::Stable,
+                DiscoverySource::UserSelected,
+            )
+            .unwrap();
+        InstallationRegistry::save_atomic(&registry_path, &registry).unwrap();
+
+        let loaded = InstallationRegistry::load(&registry_path).unwrap();
+        assert_eq!(loaded.installations.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_registry_file_that_is_itself_a_link_is_refused() {
+        // The launcher's own file must never be a link: that is the case the
+        // path safety check exists for.
+        let temp = isolated_tempdir();
+        let state_directory = temp.path().join("ShineLauncher");
+        fs::create_dir_all(&state_directory).unwrap();
+        let elsewhere = temp.path().join("elsewhere.json");
+        fs::write(&elsewhere, b"{}").unwrap();
+        let registry_path = state_directory.join("installations-v2.json");
+        std::os::unix::fs::symlink(&elsewhere, &registry_path).unwrap();
+
+        assert!(InstallationRegistry::load(&registry_path).is_err());
     }
 
     #[test]

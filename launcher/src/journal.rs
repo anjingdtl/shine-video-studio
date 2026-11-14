@@ -19,7 +19,7 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::path_safety::{reject_reparse_components, validate_local_absolute_path};
+use crate::path_safety::{reject_reparse_components_in_state, validate_local_absolute_path};
 
 const MAX_JOURNAL_BYTES: u64 = 32 * 1024 * 1024;
 const JOURNAL_FILE_NAME: &str = "launcher-journal.jsonl";
@@ -100,10 +100,8 @@ impl Journal {
             .path
             .parent()
             .ok_or_else(|| JournalError::InvalidPath("日志目录无效".to_owned()))?;
-        reject_reparse_components(parent)
-            .map_err(|_| JournalError::InvalidPath("日志目录经过符号链接或重解析点".to_owned()))?;
         fs::create_dir_all(parent)?;
-        reject_reparse_components(&self.path)
+        reject_reparse_components_in_state(parent, &self.path)
             .map_err(|_| JournalError::InvalidPath("日志文件经过符号链接或重解析点".to_owned()))?;
 
         let record = JournalRecord {
@@ -132,7 +130,11 @@ impl Journal {
         if !self.path.is_file() {
             return Ok(Vec::new());
         }
-        reject_reparse_components(&self.path)
+        let state_directory = self
+            .path
+            .parent()
+            .ok_or_else(|| JournalError::InvalidPath("日志目录无效".to_owned()))?;
+        reject_reparse_components_in_state(state_directory, &self.path)
             .map_err(|_| JournalError::InvalidPath("日志文件经过符号链接或重解析点".to_owned()))?;
         let metadata = fs::metadata(&self.path)?;
         if metadata.len() > MAX_JOURNAL_BYTES {
@@ -215,7 +217,7 @@ impl TransactionLock {
         validate_local_absolute_path(state_directory).map_err(JournalError::InvalidPath)?;
         fs::create_dir_all(state_directory)?;
         let path = state_directory.join(format!("{TRANSACTION_LOCK_NAME}-{installation_id}"));
-        reject_reparse_components(&path).map_err(|_| {
+        reject_reparse_components_in_state(state_directory, &path).map_err(|_| {
             JournalError::InvalidPath("事务锁文件经过符号链接或重解析点".to_owned())
         })?;
         let file = OpenOptions::new()
