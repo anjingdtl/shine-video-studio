@@ -162,7 +162,7 @@ describe('顶部模式入口（唯一权威状态）', () => {
   it('检测到已有 ComfyUI 时先复用，验证与激活走完整链路', async () => {
     const calls: string[] = [];
     const record = (mark: string) => () => { calls.push(mark); return jsonResponse({}); };
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations$/, respond: () => jsonResponse({ installations: ['D:/ComfyUI'] }) });
+    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({ installations: ['D:/ComfyUI'] }) });
     stub.add({
       method: 'POST', pattern: /setup\/existing-installations\/inspect$/,
       respond: () => jsonResponse({ root: 'D:/ComfyUI', snapshot: 'snap', candidate_bytes: 4096,
