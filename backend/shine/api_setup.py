@@ -636,6 +636,23 @@ _INSPECT_CACHE: dict[tuple[str, str], tuple[float, set[str]]] = {}
 _INSPECT_CACHE_TTL = 120.0
 _INSPECT_CACHE_LOCK = threading.Lock()
 
+#: Short-lived cache of the whole per-project availability projection. The
+#: projection resolves the managed runtime identity (which revalidates the
+#: adopted installation) once per variant, so computing it cold takes seconds;
+#: switching pages must not repeat that every time. The key includes the
+#: identity of the weight-evidence callable: if the computation itself changes
+#: (a refreshed ledger reads differently, or a test substitutes it), the cached
+#: projection is no longer trusted and is recomputed.
+_VA_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
+_VA_CACHE_TTL = 30.0
+_VA_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_variant_availability_cache() -> None:
+    """Drop cached availability projections after the ledger changes."""
+    with _VA_CACHE_LOCK:
+        _VA_CACHE.clear()
+
 
 def _cached_present_components(root: str, catalog: dict) -> set[str]:
     import time
@@ -671,6 +688,7 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     """
     from sqlalchemy import select as _select
 
+    from shine.comfyops import variant_readiness as _vr_module
     from shine.comfyops.models import ComfyInstance
     from shine.comfyops.variant_binding import load_binding
     from shine.comfyops.variant_readiness import readiness as variant_readiness
@@ -679,6 +697,14 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     from shine.services import require_project
 
     require_project(db, project_id)
+    import time
+
+    now = time.monotonic()
+    cache_key = (project_id, id(_vr_module.weight_evidence))
+    with _VA_CACHE_LOCK:
+        hit = _VA_CACHE.get(cache_key)
+        if hit and now - hit[0] < _VA_CACHE_TTL:
+            return hit[1]
     adopted_root = None
     for row in db.scalars(_select(ComfyInstance)):
         payload = row.payload if isinstance(row.payload, dict) else {}
@@ -820,6 +846,8 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         entry["blocking_reasons"] = blocking
         rows.append(entry)
     result = {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
+    with _VA_CACHE_LOCK:
+        _VA_CACHE[cache_key] = (now, result)
     return result
 
 

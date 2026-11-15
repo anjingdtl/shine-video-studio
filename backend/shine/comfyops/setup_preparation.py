@@ -262,6 +262,14 @@ def _save(factory, value: dict[str, Any]) -> None:
         value["lease_expires_at"] = None
         value["updated_at"] = utcnow().isoformat()
         row.value = value
+    # 整备每一步都可能改变权重核验/方案登记台账：让变体可用性投影立即重算，
+    # 不在缓存窗口里继续报旧结论（核验完成后页面仍说「本机没有」）。
+    try:
+        from shine.api_setup import invalidate_variant_availability_cache
+
+        invalidate_variant_availability_cache()
+    except Exception:  # noqa: BLE001 - 缓存失效失败不影响整备本身
+        pass
 
 
 def advance(factory, settings, worker_id: str) -> str | None:
