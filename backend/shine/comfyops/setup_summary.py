@@ -491,7 +491,40 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
+        "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
+                                         missing_files=presence["missing"], advisories=advisories),
     }
+
+
+def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
+                         missing_files: list, advisories: list) -> dict[str, Any]:
+    """The user-facing model: two questions, not a dozen engineering steps.
+
+    ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
+    调整）。内部的核验/绑定/登记/核对仍是必要的工程事实，但用户只需读这两行。
+    """
+    if facts.get("FILES_VERIFIED"):
+        files = {"state": "READY", "label": "文件已就绪并核验"}
+    elif facts.get("FILES_FOUND"):
+        files = {"state": "UNVERIFIED", "label": "文件已找到，待核验"}
+    else:
+        files = {
+            "state": "MISSING",
+            "label": f"缺 {len(missing_files)} 个文件（约 {missing_bytes / 1024 ** 3:.1f} GiB）",
+            "missing_count": len(missing_files), "missing_bytes": missing_bytes,
+        }
+    reason = next((str(a.get("message") or a.get("detail")) for a in advisories
+                   if a.get("message") or a.get("detail")), None)
+    if facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY"):
+        run = {"state": "READY", "label": "已验证可运行"}
+    elif facts.get("WORKFLOW_VALIDATED"):
+        run = {"state": "UNVERIFIED", "label": "运行合同已核对，待真实试镜"}
+    else:
+        if files["state"] == "MISSING":
+            reason = "文件未就绪，先补齐文件"
+        run = {"state": "BLOCKED", "label": "跑不通",
+               "reason": reason or "资源尚未绑定到本机渲染器或运行合同未核对"}
+    return {"files": files, "run": run}
 
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
