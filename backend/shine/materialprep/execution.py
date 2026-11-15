@@ -36,6 +36,7 @@ from fastapi import HTTPException
 from sqlalchemy import or_, select, update
 
 from shine.comfy.client import (
+    ComfyError,
     ComfyPromptRejected,
     ComfySubmissionUncertain,
     ComfyUIClient,
@@ -345,6 +346,26 @@ def _renderer_answers(base_url: str) -> bool:
     except Exception:  # noqa: BLE001 - an unreachable renderer holds no model
         return False
     return True
+
+
+def _renderer_gone(factory, settings, renderer) -> bool:
+    """Whether the renderer that acknowledged this prompt is provably gone.
+
+    A renderer that crashed inside its own native stack leaves no traceback;
+    the only fact is that the recorded process is not there any more.  That
+    fact is what names the failure; uncertainty stays uncertainty.
+    """
+    instance_id = str((renderer or {}).get("renderer_instance_id") or "")
+    if not instance_id:
+        return False
+    try:
+        from shine.comfyops.image_renderer import image_renderer_state
+
+        with factory() as db:
+            state = image_renderer_state(db, settings, instance_id)
+    except Exception:  # noqa: BLE001 - uncertainty is never a crash report
+        return False
+    return state.get("state") == "GONE"
 
 
 def _ensure_renderer(factory, settings, family: str) -> dict[str, Any]:
@@ -754,6 +775,26 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
                {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": exc.code})
         return {"item_id": item_id, "status": ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED,
                 "code": exc.code, "prompt_id": prompt_id, "attempt_id": attempt_id}
+    except ComfyError as exc:
+        # The renderer stopped answering after it had already acknowledged the
+        # prompt.  The bytes may or may not exist, so the outcome stays
+        # unknown and is never resubmitted - but the attempt has to reach a
+        # terminal state.  A row that stays "submitted" for ever is what
+        # blocks every later render of this item and what leaves the ledger
+        # claiming that work is still running.
+        gone = _renderer_gone(factory, settings, renderer)
+        code = "IMAGE_RENDERER_GONE" if gone else "IMAGE_OUTCOME_RECONCILIATION_REQUIRED"
+        _close_attempt(factory, attempt_id, status=ATTEMPT_UNKNOWN, outcome=OUTCOME_UNKNOWN,
+                       error_code=code,
+                       details={"error_type": type(exc).__name__, "renderer_gone": gone,
+                                "comfy_code": getattr(exc, "code", None)},
+                       release_intent=False)
+        touch_item(factory, item_id, version, status=ITEM_NEEDS_REVIEW, error_code=code)
+        _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN",
+               {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": code,
+                "renderer_gone": gone})
+        return {"item_id": item_id, "status": ITEM_NEEDS_REVIEW, "code": code,
+                "prompt_id": prompt_id, "attempt_id": attempt_id}
 
     candidate_id, content_sha = _register_candidate(factory, settings, context, attempt_id, content, family)
     _close_attempt(factory, attempt_id, status=ATTEMPT_QC_PENDING, outcome=OUTCOME_SUCCEEDED,

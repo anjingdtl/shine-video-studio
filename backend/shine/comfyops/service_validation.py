@@ -52,6 +52,8 @@ REVIEW_ROLES = {
     "VLM": "vlm_reviewer",
     "ASR": "asr_reviewer",
 }
+#: How much of the renderer's own log is read when the tail is needed.
+RENDERER_LOG_TAIL_BYTES = 128 * 1024
 
 
 def _port_free(port: int) -> bool:
@@ -415,16 +417,27 @@ def renderer_log_evidence(log_file) -> dict:
     The owned process group discards inherited std handles, so the bootstrap
     writes its own log; a workflow contract failure must point at the reason
     (a node pack that failed to import) instead of leaving it to guesswork.
+
+    Only the tail of the file is read: a renderer that has been running for
+    days leaves a log that must not be pulled into memory on every status
+    poll.
     """
     if not log_file:
         return {}
     path = Path(str(log_file))
-    evidence: dict = {"renderer_log": str(path), "import_errors": []}
+    evidence: dict = {"renderer_log": str(path), "import_errors": [], "tail": []}
     if not path.is_file():
         return evidence
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - RENDERER_LOG_TAIL_BYTES))
+            chunk = stream.read()
     except OSError:
+        return evidence
+    lines = chunk.decode("utf-8", errors="replace").splitlines()[-400:]
+    if not lines:
         return evidence
     markers = ("Cannot import", "Failed to load", "ImportError",
                "ModuleNotFoundError", "Traceback")
@@ -433,6 +446,7 @@ def renderer_log_evidence(log_file) -> dict:
         if any(marker in line for marker in markers):
             excerpt.extend(lines[index:index + 6])
     evidence["import_errors"] = excerpt[-60:]
+    evidence["tail"] = lines[-60:]
     return evidence
 
 
