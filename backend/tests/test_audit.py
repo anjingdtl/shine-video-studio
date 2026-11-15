@@ -80,6 +80,39 @@ def test_audit_rows_name_the_thing_they_are_about(studio):
         f"/api/v1/projects/{project_id}/events?entity_type=job"
     ).json()["items"]
     assert all(item["entity_label"] is None for item in job_items)
+
+
+def test_terminology_and_subtitle_audit_rows_show_their_revision(studio):
+    """术语表与字幕没有名字字段，但版本号就是它们的可读身份。
+
+    冒烟实测发现：保存人名对照表后，审计实体列仍是 8 位 id 片段。
+    「人名对照表 · 版本 1」才回答得了「对什么做了什么」。
+    """
+    client, _factory, _root, _settings = studio
+    project_id = create_project(client, "版本可读")
+
+    saved = client.post(f"/api/v1/projects/{project_id}/terminology", json={
+        "terms": [{"canonical": "周砚"}], "created_by": "operator",
+    })
+    assert saved.status_code == 200, saved.text
+    term_items = client.get(
+        f"/api/v1/projects/{project_id}/events?entity_type=project_terminology"
+    ).json()["items"]
+    assert term_items, "保存术语应留下审计记录"
+    assert "版本 1" in {item["entity_label"] for item in term_items}
+
+    subtitle = client.post(f"/api/v1/projects/{project_id}/subtitles", json={
+        "cues": [{"index": 1, "start_s": 0, "end_s": 2, "text": "你好"}],
+        "created_by": "operator",
+    })
+    assert subtitle.status_code == 201, subtitle.text
+    sub_items = client.get(
+        f"/api/v1/projects/{project_id}/events?entity_type=subtitle_track"
+    ).json()["items"]
+    assert sub_items, "保存字幕应留下审计记录"
+    assert "版本 1" in {item["entity_label"] for item in sub_items}
+
+
 def test_audit_payloads_never_store_absolute_paths_or_credentials(studio):
     client, _factory, _root, _settings = studio
     project_id = create_project(client)
