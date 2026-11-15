@@ -31,6 +31,8 @@ def _rebuild_nullable(bind, nullable: bool) -> None:
     bind.commit()  # end SQLAlchemy's autobegin transaction before switching mode
     bind.execution_options(isolation_level="AUTOCOMMIT")
     bind.exec_driver_sql("PRAGMA foreign_keys=OFF")
+    # A previously interrupted rebuild may have left its temp table behind.
+    bind.exec_driver_sql("DROP TABLE IF EXISTS _alembic_tmp_installation_plans")
     try:
         with op.batch_alter_table("installation_plans") as batch:
             batch.alter_column(
