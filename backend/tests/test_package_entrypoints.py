@@ -211,6 +211,21 @@ def test_install_once_reports_a_machine_readable_verdict_for_each_gate():
     assert "不会盲杀进程" in text
 
 
+def test_install_once_delegates_the_liveness_verdict_to_the_launcher():
+    """「已在运行」只有一个判定：启动器的三证 + 半死栈收尾。
+
+    安装器曾用 API-only 探针把半死栈当成活着，把用户送到一个已死的 Web 页。
+    现在早期路径委托 start_shine.ps1，判定与收尾都只有那一套实现。
+    """
+    text = INSTALL_ONCE.read_text(encoding="utf-8-sig")
+    assert "Test-ShineApiAlive" not in text, "API-only 存活探针不得回归"
+    assert "启动器未能确认或恢复已有工作栈" in text, "early path must delegate to start_shine"
+    launcher = (SCRIPTS / "start_shine.ps1").read_text(encoding="utf-8-sig")
+    assert "Test-RecordedApiAlive" in launcher
+    assert "Test-RecordedWebAlive" in launcher
+    assert "Test-RecordedWorkerAlive" in launcher
+
+
 def test_package_documents_are_rendered_from_templates():
     for name in ["START_HERE.md", "TESTER_CHECKLIST.md"]:
         text = (PACKAGING / name).read_text(encoding="utf-8")

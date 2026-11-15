@@ -136,16 +136,6 @@ function Get-ShineFreePort([int]$Start) {
     throw "No free local port between $Start and $($Start + 59)."
 }
 
-function Test-ShineApiAlive([int]$Port) {
-    if (-not $Port) { return $false }
-    try {
-        $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 3
-        return [bool]$health
-    } catch {
-        return $false
-    }
-}
-
 function Show-ToolReport {
     $raw = ''
     $previous = $ErrorActionPreference
@@ -216,45 +206,66 @@ if ($CheckOnly) {
     exit 0
 }
 
-# Already-running stack: never start a second one, just reopen the workbench.
+# Existing process record: the launcher owns the ONE liveness verdict
+# (API health + Web page + recorded listener identity) and the half-dead
+# reconciliation. Delegate to it instead of re-deciding here with an API-only
+# probe, which used to treat a half-dead stack as running and open a dead page.
 if ($recordedData) {
     $manifest = Join-Path $recordedData 'run/processes.json'
     if (Test-Path -LiteralPath $manifest) {
-        $record = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
-        if (Test-ShineApiAlive ([int]$record.api_port)) {
-            $url = "http://127.0.0.1:$($record.web_port)/#setup"
-            Write-Ok "工作台已在运行（数据目录 $recordedData）。"
-            Write-Host "  正在打开：$url" -ForegroundColor Green
-            Start-Process $url
-            exit 0
+        $record = $null
+        try { $record = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
+        $pwshEarly = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
+        if (-not $pwshEarly) {
+            $earlyRoot = Split-Path $recordedData -Parent
+            $shimEarly = Join-Path $earlyRoot 'bin/pwsh.cmd'
+            if (Test-Path -LiteralPath $shimEarly) { $pwshEarly = $shimEarly }
         }
-        # The launcher refuses to start while a manifest exists, so a crashed
-        # run would otherwise deadlock the tester. Reconciliation only ends
-        # processes whose OS identity still matches the record.
-        Write-Warn '发现上次运行的进程记录，但服务已不在运行；正在安全收尾。'
-        $backendEnv = Get-ShineEnvValue $envFile 'SHINE_BACKEND_ENV'
-        if (-not $backendEnv) { $backendEnv = Join-Path $recordedData '..\app\backend-env' }
-        $reconcilePython = Join-Path ([IO.Path]::GetFullPath($backendEnv)) 'Scripts/python.exe'
-        if (-not (Test-Path -LiteralPath $reconcilePython)) {
-            $reconcilePython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
-        }
-        if (Test-Path -LiteralPath $reconcilePython) {
+        if ($record -and $pwshEarly) {
+            $earlyArgs = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startScript,
+                '-DataDir', $recordedData, '-ApiPort', "$([int]$record.api_port)",
+                '-WebPort', "$([int]$record.web_port)", '-OpenBrowser'
+            )
             $previous = $ErrorActionPreference
             $ErrorActionPreference = 'Continue'
-            try { & $reconcilePython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $recordedData }
+            try { & $pwshEarly @earlyArgs; $earlyCode = $LASTEXITCODE }
+            catch { $earlyCode = 1 }
             finally { $ErrorActionPreference = $previous }
-            if ($LASTEXITCODE -ne 0) {
-                Write-Fail '上次运行的进程身份无法自动收尾，安装器不会盲杀进程。'
-                Write-Host '  请双击 STOP_APP.cmd，按提示处理后再双击安装入口。' -ForegroundColor Yellow
-                Write-Host "  进程记录：$manifest" -ForegroundColor Gray
+            if ($earlyCode -eq 0) {
+                New-DesktopShortcut
+                exit 0
+            }
+            Write-Warn '启动器未能确认或恢复已有工作栈；继续走安装/修复流程。'
+        } else {
+            # No PowerShell 7 yet: this is stale-record cleanup, not a liveness
+            # verdict. Reconciliation only ends processes whose OS identity
+            # still matches the record; the install flow below re-checks everything.
+            Write-Warn '发现上次运行的进程记录；正在安全收尾。'
+            $backendEnv = Get-ShineEnvValue $envFile 'SHINE_BACKEND_ENV'
+            if (-not $backendEnv) { $backendEnv = Join-Path $recordedData '..\app\backend-env' }
+            $reconcilePython = Join-Path ([IO.Path]::GetFullPath($backendEnv)) 'Scripts/python.exe'
+            if (-not (Test-Path -LiteralPath $reconcilePython)) {
+                $reconcilePython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+            }
+            if (Test-Path -LiteralPath $reconcilePython) {
+                $previous = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                try { & $reconcilePython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $recordedData }
+                finally { $ErrorActionPreference = $previous }
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Fail '上次运行的进程身份无法自动收尾，安装器不会盲杀进程。'
+                    Write-Host '  请双击 STOP_APP.cmd，按提示处理后再双击安装入口。' -ForegroundColor Yellow
+                    Write-Host "  进程记录：$manifest" -ForegroundColor Gray
+                    exit 14
+                }
+                Write-Ok '陈旧记录已清理，继续安装/启动。'
+            } else {
+                Write-Fail '本机缺少后端环境，无法安全收尾上次运行的进程。'
+                Write-Host '  确认没有 Shine 进程在运行后，删除下面这个文件再重试：' -ForegroundColor Yellow
+                Write-Host "    $manifest" -ForegroundColor Gray
                 exit 14
             }
-            Write-Ok '陈旧记录已清理，继续安装/启动。'
-        } else {
-            Write-Fail '本机缺少后端环境，无法安全收尾上次运行的进程。'
-            Write-Host '  确认没有 Shine 进程在运行后，删除下面这个文件再重试：' -ForegroundColor Yellow
-            Write-Host "    $manifest" -ForegroundColor Gray
-            exit 14
         }
     }
 }
