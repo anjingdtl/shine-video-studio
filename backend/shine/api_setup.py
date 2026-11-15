@@ -194,37 +194,53 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
 
 
 @router.get('/existing-installations')
-def existing_installations(settings: SettingsDep, db: DBSession, root: str | None = None):
-    """Bounded discovery inside declared roots, fixed drives and an optional root.
+def existing_installations(settings: SettingsDep, db: DBSession, root: str | None = None,
+                           rescan: bool = False):
+    """Installations this machine can use, from the durable index by default.
 
-    ``root`` is the directory the person already chose (for example the
-    deployment storage root).  It is searched several levels deep so a nested
-    download is not invisible just because it is not at a fixed depth.  The
-    durable deep-scan index is merged in, so installations found by an earlier
-    batch stay visible without re-walking the disk.
+    Switching to the setup page must not re-walk the disk: once resources are
+    indexed (or an installation registered), the persisted facts are returned.
+    A bounded fresh discovery only runs on an explicit ``rescan=true`` (the
+    person pressed refresh) or on a truly empty machine that has nothing
+    indexed yet.  ``root`` adds a person-chosen directory to a fresh scan.
     """
     from pathlib import Path
 
     from shine.comfyops.existing_installation import discover
     from shine.comfyops.resource_discovery import read_state
+    from shine.comfyops.setup_summary import candidate_installations
 
-    roots = [*settings.comfy_probe_roots]
-    # A stale/network path chosen earlier must not make the whole scan fail.
-    if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
-        roots.append(root)
-    result = discover(roots)
-    indexed = read_state(db)["resources"]["comfy_roots"]
-    known = set(result["installations"])
+    state = read_state(db)
+    indexed = state["resources"]["comfy_roots"]
+    known = {str(row["root"]) for row in candidate_installations(db, settings)
+             if row.get("root")}
     for row in indexed:
-        if row["root"] not in known and Path(row["root"]).is_dir():
-            result["installations"].append(row["root"])
-            known.add(row["root"])
-    result["installations"].sort()
-    result["deep_scan"] = {
-        "status": read_state(db)["scan"].get("status"),
-        "indexed_comfy_roots": len(indexed),
+        if Path(row["root"]).is_dir():
+            known.add(str(row["root"]))
+    coverage = "PERSISTED_INDEX"
+    scan_info: dict = {}
+    unreadable: list = []
+    if rescan or not known:
+        roots = [*settings.comfy_probe_roots]
+        # A stale/network path chosen earlier must not make the whole scan fail.
+        if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
+            roots.append(root)
+        result = discover(roots)
+        known.update(result["installations"])
+        coverage = result.get("coverage", "BOUNDED_RECURSIVE_SCAN")
+        scan_info = result.get("scan", {})
+        unreadable = result.get("unreadable", [])
+    return {
+        "installations": sorted(known),
+        "unreadable": unreadable,
+        "coverage": coverage,
+        "scan": scan_info,
+        "runtime_verified": False,
+        "deep_scan": {
+            "status": state["scan"].get("status"),
+            "indexed_comfy_roots": len(indexed),
+        },
     }
-    return result
 
 
 class SearchDirectoryRequest(BaseModel):

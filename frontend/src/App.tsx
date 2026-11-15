@@ -1,4 +1,3 @@
-import { SetupPanel } from './components/SetupPanel';
 import DirectorSetupPanel from './components/DirectorSetupPanel';
 import { PreproductionPanel } from './components/PreproductionPanel';
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -677,7 +676,8 @@ function App() {
               </button>,
             )}
             <SettingsPanel
-              includeLlm
+              includeLlm={false}
+              compact
               onRefresh={refreshAll}
               project={project}
               profiles={profiles}
@@ -698,9 +698,13 @@ function App() {
               onBindStandardParameters={bindStandardParameters}
             />
             <PreferencesPanel onNavigate={goTo} />
-            <StageDock id="setup-diagnostics" title="环境单步诊断与受管后台(高级)">
-              <SetupPanel projectId={projectId} onRefresh={refreshAll} refreshEpoch={dataEpoch} />
-            </StageDock>
+            <div className="notice">
+              <Settings2 size={13} />
+              <div>
+                <p><b>环境整备不在这里。</b>检测、下载、登记、绑定与核验都在「基础配置」一键完成；本页只保留模型路由、工作流映射、项目策略与后台诊断，避免两处配置互相冲突。</p>
+                <button type="button" className="btn-text" onClick={() => goToDirectorSetup('env')}>去基础配置整备环境</button>
+              </div>
+            </div>
             {project && <StageDock id="production-series" title="多镜头连续生产与单镜排产(高级)">
               <div className="queue-provider-card card">
                 <div className="section-kicker">生成方式</div>

@@ -6,6 +6,7 @@ import {
 import { api, json, timeoutSignal, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
+import { Meter } from './Meter';
 import { ResourceScanCard } from './ResourceScanCard';
 import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
 import type { CapabilityKey as EnvironmentKey, SetupSummary } from './SetupEnvironmentStatus';
@@ -268,7 +269,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     try { setImage(await api<ImageReadiness>('/setup/image-readiness')); } catch { /* 保持上次结果 */ }
   }, []);
 
-  const detect = useCallback(async () => {
+  const detect = useCallback(async (rescan = false) => {
     setPhase('detecting');
     setProblem('');
     setResult('');
@@ -278,7 +279,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
         api<Storage>('/setup/storage'),
         api<RuntimeState>('/setup/runtime'),
         api<Readiness>('/setup/readiness'),
-        api<{ installations: string[] }>('/setup/existing-installations'),
+        api<{ installations: string[] }>(`/setup/existing-installations${rescan ? '?rescan=true' : ''}`),
         api<ImageReadiness>('/setup/image-readiness').catch(() => null),
         api<VariantRecommendation>('/setup/variant-recommendations'),
         api<CatalogSummary>('/setup/catalog').catch(() => null),
@@ -339,7 +340,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   useEffect(() => {
     if (epochRef.current === refreshEpoch) return;
     epochRef.current = refreshEpoch;
-    void detect();
+    // 「刷新全部状态」是用户主动动作：才重新检索磁盘；平时切页只读持久化事实。
+    void detect(true);
   }, [refreshEpoch, detect]);
 
   // 作品 id 异步到达或切换时，只补一个轻量的「已采用安装 / 方案事实」读取，
@@ -787,9 +789,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       </div>}
 
       {running && <p className="run-hint" role="status">{running.label}{running.note ? ` · ${running.note}` : ''}</p>}
-      {preparing && <p className="run-hint" role="status" data-testid="setup-background">
-        后台正在准备（{preparation?.current ?? '排队中'}）：{preparation?.message ?? '关闭页面也会继续'}
-      </p>}
+      {preparing && <div className="setup-progress" role="status" data-testid="setup-background">
+        <Meter value={preparation?.done ?? 0} max={preparation?.total || 1}
+          label={`后台整备：${preparation?.current ?? '排队中'}`}
+          count={`${preparation?.done ?? 0}/${preparation?.total ?? 0} 步`} tone="busy" />
+        <p className="run-hint">{preparation?.message ?? '关闭页面也会继续'}（与顶部工作栈状态同源）</p>
+      </div>}
       {result && <p className="ok-line" role="status">{result}</p>}
       {outcomes.length > 0 && <ul className="setup-outcomes" aria-label="各项能力的准备结论">
         {outcomes.map((row) => <li key={row.key} className={`setup-outcome-${row.status.toLowerCase()}`}>

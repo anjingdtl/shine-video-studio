@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { FolderSearch, Loader2, RefreshCw, Trash2 } from 'lucide-react';
 import { api, json } from '../api';
+import { Meter } from './Meter';
 
 type Coverage = Record<string, { status: string; directories_visited: number; unreadable: string[] }>;
 
@@ -106,6 +107,8 @@ export function ResourceScanCard() {
       {report.resources.node_dirs.length > 0 && ` · ${report.resources.node_dirs.length} 个节点包`}
       {report.resources.workflows.length > 0 && ` · ${report.resources.workflows.length} 个工作流`}
     </p>}
+    {scanning && <Meter value={doneRoots} max={coverageRows.length || 1}
+      label="本机资源深搜" count={`${doneRoots}/${coverageRows.length || 0} 区域`} tone="busy" />}
     {unreadable.length > 0 && <details className="inline-manual-path">
       <summary>有 {unreadable.length} 个区域读不到（不影响其他区域）</summary>
       <ul>{unreadable.slice(0, 20).map((path) => <li key={path}>{path}</li>)}</ul>

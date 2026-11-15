@@ -174,14 +174,13 @@ describe('空数据库与两层界面入口', () => {
     expect(screen.queryByText('本机工作区暂时不可用')).not.toBeInTheDocument();
   });
 
-  it('全局刷新会重新读取设置页启动时失败的本机存储状态', async () => {
+  it('全局刷新会重新读取基础配置启动时失败的本机存储状态', async () => {
     let attempts = 0;
-    // 高级设置页挂载时有多处读同一份存储事实(存储卡 + 环境诊断块),
-    // 且数据纪元到达时诊断块会再读一次。「启动时读失败」要覆盖挂载期
-    // 的全部读取,而不是只失败一次。
+    // 基础配置挂载即检测；存储读取首次失败时整轮检测报错。全局刷新是用户
+    // 主动动作，会重新检测（并重扫磁盘），这次存储成功，错误随之消失。
     stub.add({
       method: 'GET', pattern: /\/api\/v1\/setup\/storage$/,
-      respond: () => attempts++ < 4
+      respond: () => attempts++ < 1
         ? jsonResponse({ detail: 'API is starting' }, 500)
         : jsonResponse({ root: 'D:\\Shine', configured: true, system_drive: false,
           requires_selection: false, free_bytes: 1, free_gb: 100, paths: {}, drives: [] }),
@@ -189,12 +188,11 @@ describe('空数据库与两层界面入口', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findAllByText('雾港夜账');
-    await user.click(screen.getByRole('button', { name: /高级设置/ }));
-    await user.click(await screen.findByText('环境单步诊断与受管后台(高级)'));
-    expect(await screen.findByText(/本机存储信息暂时不可用/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /基础配置/ }));
+    expect(await screen.findByText(/检测没有完成/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '刷新全部数据' }));
-    await waitFor(() => expect(screen.queryByText(/本机存储信息暂时不可用/)).not.toBeInTheDocument());
-    expect(attempts).toBeGreaterThanOrEqual(4);
+    await waitFor(() => expect(screen.queryByText(/检测没有完成/)).not.toBeInTheDocument());
+    expect(attempts).toBeGreaterThanOrEqual(2);
   });
 });
