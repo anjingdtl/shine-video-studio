@@ -126,7 +126,11 @@ def list_workflow_profiles(db: DBSession, project_id: str | None = Query(default
 
 
 @router.post("/workflow-profiles", response_model=WorkflowProfilePublic, status_code=201)
-def create_workflow_profile(body: WorkflowProfileCreate, settings: SettingsDep = None, db: DBSession = None) -> WorkflowProfilePublic:
+def create_workflow_profile(
+    body: WorkflowProfileCreate,
+    settings: SettingsDep = None,
+    db: DBSession = None,
+) -> WorkflowProfilePublic:
     if body.project_id:
         require_project(db, body.project_id)
     # Same visibility rule as the list endpoint: a name is unique within one
