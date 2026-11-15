@@ -30,7 +30,15 @@ from fastapi import HTTPException, Request
 _CHUNK_BYTES = 1024 * 1024
 _CACHE_LIMIT = 512
 _lock = threading.Lock()
-_verified: dict[tuple[str, int, int], str] = {}
+_verified: dict[tuple[str, int, int], dict] = {}
+
+#: Windows file timestamps derive from the system clock (~15.6ms ticks): two
+#: writes within one tick can share an mtime, so a same-length rewrite right
+#: after a verification could fake an "unchanged stat".  A head/tail content
+#: witness closes that hole: for files up to 128 KiB the witness IS the whole
+#: content; for larger files it detects any change outside the untouched
+#: middle.  Critical one-shot decisions still hash the full file.
+_SAMPLE_BYTES = 64 * 1024
 
 
 def file_sha256(path: Path) -> str:
@@ -43,6 +51,39 @@ def file_sha256(path: Path) -> str:
                 break
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def content_sample(path: Path, size: int) -> dict | None:
+    """Head/tail witness digests of a file, read without loading it whole."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(_SAMPLE_BYTES)
+            if size > _SAMPLE_BYTES:
+                handle.seek(max(0, size - _SAMPLE_BYTES))
+                tail = handle.read(_SAMPLE_BYTES)
+            else:
+                tail = b""
+    except OSError:
+        return None
+    return {
+        "head_sha256": hashlib.sha256(head).hexdigest(),
+        "tail_sha256": hashlib.sha256(tail).hexdigest(),
+    }
+
+
+def sample_matches(path: Path, size: int, recorded: dict) -> bool:
+    """Whether the file still shows the recorded content witness.
+
+    A record without a witness (older caches/receipts) never matches: the
+    caller falls back to a full hash instead of guessing.
+    """
+    if not recorded.get("head_sha256"):
+        return False
+    sample = content_sample(path, size)
+    if sample is None:
+        return False
+    return (sample["head_sha256"] == recorded.get("head_sha256")
+            and sample["tail_sha256"] == recorded.get("tail_sha256"))
 
 
 def verify_media_file(
@@ -74,7 +115,7 @@ def verify_media_file(
     with _lock:
         cached = _verified.get(key)
     if cached is not None:
-        if cached != expected_sha256:
+        if cached.get("sha256") != expected_sha256 or not sample_matches(path, stat.st_size, cached):
             raise HTTPException(status_code=409, detail=mismatch_code)
         return
     actual = file_sha256(path)
@@ -83,7 +124,7 @@ def verify_media_file(
     with _lock:
         if len(_verified) >= _CACHE_LIMIT:
             _verified.clear()
-        _verified[key] = actual
+        _verified[key] = {"sha256": actual, **(content_sample(path, stat.st_size) or {})}
 
 
 def media_etag(sha256: str) -> str:

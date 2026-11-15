@@ -96,6 +96,26 @@ def test_same_size_tampering_is_still_refused(studio):
     assert response.json()["detail"] == "ARTIFACT_FILE_HASH_MISMATCH"
 
 
+def test_same_stat_tampering_is_caught_by_the_content_witness(studio):
+    """Windows 同一时钟 tick 内的同长改写可能不改变 mtime：内容见证必须兜底。"""
+    client, factory, _, settings = studio
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job_id, content, relative = _seed_produced_job(factory, settings, project, shot["id"], style["id"])
+    assert client.get(f"/api/v1/jobs/{job_id}/media").status_code == 200
+
+    path = settings.data_dir / relative
+    original = path.stat()
+    path.write_bytes(b"y" * len(content))
+    # 把 stat 恢复成「没动过」的样子：stat 捷径失效，只有内容见证能发现。
+    os.utime(path, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+    response = client.get(f"/api/v1/jobs/{job_id}/media")
+    assert response.status_code == 409
+    assert response.json()["detail"] == "ARTIFACT_FILE_HASH_MISMATCH"
+
+
 def _seed_delivery(factory, settings, project_id):
     content = make_test_video_bytes(duration_s=1.0, width=160, height=120, with_audio=False)
     digest = hashlib.sha256(content).hexdigest()

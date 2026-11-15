@@ -19,6 +19,8 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from shine.media.integrity import content_sample, sample_matches
+
 RECEIPT_SCHEMA = 1
 #: AppSetting.key is String(80); the digest keeps the key bounded and scoped.
 _KEY_PREFIX = "verify-receipt:"
@@ -70,7 +72,10 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
     The sidecar stores the size and the modification time of the reading, not
     the file contents: a file that changed - even to the same length - gets a
     new stat and is hashed again.  A file whose stat is unchanged is not read
-    twice; that is what makes "existing verification reuse" cost zero copies.
+    in full twice; a head/tail content witness is re-checked instead, because
+    two writes within one Windows clock tick can share an mtime.  That is what
+    makes "existing verification reuse" cost zero copies without trusting a
+    same-tick rewrite.
     """
     try:
         stat = path.stat()
@@ -93,7 +98,8 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
                 and cached.get("path") == str(path.resolve())
                 and int(cached.get("size") or -1) == stat.st_size
                 and int(cached.get("mtime_ns") or -1) == stat.st_mtime_ns
-                and cached.get("sha256") == expected_sha256):
+                and cached.get("sha256") == expected_sha256
+                and sample_matches(path, stat.st_size, cached)):
             return {"present": True, "verified": True, "size": stat.st_size,
                     "reused": True}
     digest = hashlib.sha256()
@@ -116,6 +122,7 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
                 "mtime_ns": stat.st_mtime_ns,
                 "sha256": expected_sha256,
                 "verified_at": datetime.now(UTC).isoformat(),
+                **(content_sample(path, stat.st_size) or {}),
             }, ensure_ascii=False), encoding="utf-8")
         except OSError:
             pass
@@ -150,7 +157,8 @@ def directory_files(directory: Path | None, component: dict,
             stat = None
         if (stat is not None and pinned.get("size") == stat.st_size
                 and pinned.get("mtime_ns") == stat.st_mtime_ns
-                and pinned.get("sha256") == str(entry.get("sha256") or "").lower()):
+                and pinned.get("sha256") == str(entry.get("sha256") or "").lower()
+                and sample_matches(target, stat.st_size, pinned)):
             rows.append({"relative_path": relative, "present": True, "verified": True,
                          "size": stat.st_size, "reused": True})
             continue
@@ -174,6 +182,9 @@ def _recorded_file(directory: Path | None, entry: dict, absolute: Path | None = 
         try:
             stat = target.stat()
             record["mtime_ns"] = stat.st_mtime_ns
+            # 内容见证：同一时钟 tick 内的同长改写不会改变 stat，
+            # 只有头尾采样能区分「没动过」与「换过字节」。
+            record.update(content_sample(target, stat.st_size) or {})
         except OSError:
             record["mtime_ns"] = None
         if absolute is not None:
@@ -314,7 +325,8 @@ def _verify_recorded_paths(receipt: dict, component: dict) -> dict | None:
             continue
         if (pinned.get("size") == stat.st_size
                 and pinned.get("mtime_ns") == stat.st_mtime_ns
-                and pinned.get("sha256") == str(entry.get("sha256") or "").lower()):
+                and pinned.get("sha256") == str(entry.get("sha256") or "").lower()
+                and sample_matches(resolved, stat.st_size, pinned)):
             rows.append({"relative_path": relative, "present": True, "verified": True,
                          "size": stat.st_size, "reused": True, "path": str(resolved)})
             continue
