@@ -95,6 +95,8 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   IMAGE_RENDERER_MEMORY_INSUFFICIENT: '本机显存或内存不够运行出图渲染器，请先释放其它占显存的进程。',
   IMAGE_RENDERER_OWNERSHIP_UNVERIFIED: '记录里的渲染器进程身份无法证明属于本工作台，因此没有停止它。',
   IMAGE_RENDERER_UNAVAILABLE: '本机出图渲染器没有起来，无法出图。请先在基础配置里启动它。',
+  IMAGE_RENDERER_GONE: '本机出图渲染器已经退出，端口不再监听。到「设置 → 制作环境」查看渲染器崩溃证据（启动参数、退出码与启动日志），核对渲染器的解释器与原生库后重新启动。',
+  IMAGE_RENDERER_EXITED_DURING_STARTUP: '出图渲染器在启动过程中自己退出了，没有开始监听端口。到「设置 → 制作环境」查看渲染器启动日志与退出码，修复后重新启动。',
   CREATIVE_BRIEF_INVALID: '创意简报还缺内容或有字段超出范围，请按提示修改后再保存。',
   CREATIVE_BRIEF_NOT_CONFIRMED: '先确认这一版创意简报，才能据此生成剧本。',
   CREATIVE_BRIEF_CHANGED: '创意简报在你确认前又改过，请看最新一版后再确认。',
