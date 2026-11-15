@@ -1668,3 +1668,38 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   VLM 重校准义务；历史校准仍未完成，不得声称已校准。12GB 显卡真机路径与 W6A8
   候选激活仍 BLOCKED/NOT_RUN（本轮只做诚实指引）。证据
   `docs/ACCEPTANCE_20261115_FULL_CHAIN_ADVERSARIAL_FIX.md`。
+
+## 2026-11-15 出图渲染器崩溃取证与不再无限等待轮（用户报障：图片工坊被阻滞）
+
+- **阻滞事实**：受管出图渲染器启动后进程消失（`torch_cpu.dll` / `c10.dll`
+  `0xc0000005` 原生崩溃），8188 空，图片工坊停在「等待本机能力验证」，
+  《诊断日志》里的三条 `SUBMITTED` attempt 无终态。原生崩溃本身发生在
+  用户机的 torch/自定义节点组合里，**本轮不声称已修复该原生崩溃**。
+- **启动不再空等十分钟**：`image_renderer._wait_for_owned_listener` 改为轮询
+  受管进程组的退出状态；整组退出即以具名码 `IMAGE_RENDERER_EXITED_DURING_STARTUP`
+  + 内核退出码失败，不再用监听超时掩盖崩溃。运行中的进程组永不被判为崩溃。
+- **崩溃可取证**：每次启动把**启动参数**（解释器、argv、工作目录、端口、
+  `PYTHONPATH`/`PYTHONHOME`/`VIRTUAL_ENV` 等解释器环境、recipe/adapter 摘要、
+  固定的 torch wheel）随启动记录落盘；失败与消失时记录内核退出码。
+  新增只读 `GET /setup/renderer-evidence` 与
+  `image_renderer.renderer_crash_evidence`（含渲染器日志尾部与 import 失败摘录）。
+  交接令牌等环境**值**不落盘，只留变量名。
+- **阻塞具名**：渲染器可证明消失时，出图就绪度报 `IMAGE_RENDERER_GONE`
+  （附退出码、日志路径与启动参数），不再折叠成 `IMAGE_GRAPH_NOT_VERIFIED`；
+  启动期退出保留自己的具名码。`/setup/image-readiness` 与前端三处码表
+  （`AssetsWorkspace` / `api.ts` / `ImageCapabilityCard`）同步登记。
+- **attempt 必须有终态**：渲染器在 `/prompt` 之后消失时，
+  `materialprep` 与 `asset_center` 两条出图路径都把 attempt 落到
+  `UNKNOWN`（`RECONCILE_REQUIRED`）并把条目置 `NEEDS_REVIEW`，
+  错误码为 `IMAGE_RENDERER_GONE`；原始异常类名留在 attempt payload 里。
+  未证明消失时保持 `IMAGE_OUTCOME_RECONCILIATION_REQUIRED`。**不自动重投**，
+  对账仍由人发起（`reconcile_run` / 资产中心对账动作）。
+- 本轮**未改** torch/triton/自定义节点的安装与版本策略，**未改**显存门槛与
+  变体契约（`min_free_vram_mb` 仍为 8000），**未改** H3 受管渲染器生命周期、
+  `owned_process` 的 Job Object 与钉住文件机制，**未改**任何验收/准入门禁。
+  回归：新增 `test_image_renderer_crash_evidence`（9 例）+ 前端
+  `imageWorkshopBlockers` 两例；后端 8 分片全量 + 前端全量 vitest/tsc/build；
+  Ruff 干净。**真机边界**：原生崩溃的最终定位与修复仍需在用户机执行——
+  用 `GET /setup/renderer-evidence` 取到的启动参数、退出码与日志尾部，
+  与最后一次成功启动逐项比对（解释器归属、torch wheel、自定义节点版本）。
+  证据 `docs/ACCEPTANCE_20261115_IMAGE_RENDERER_CRASH_EVIDENCE.md`。
