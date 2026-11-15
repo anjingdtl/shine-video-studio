@@ -194,22 +194,93 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
 
 
 @router.get('/existing-installations')
-def existing_installations(settings: SettingsDep, root: str | None = None):
+def existing_installations(settings: SettingsDep, db: DBSession, root: str | None = None):
     """Bounded discovery inside declared roots, fixed drives and an optional root.
 
     ``root`` is the directory the person already chose (for example the
     deployment storage root).  It is searched several levels deep so a nested
-    download is not invisible just because it is not at a fixed depth.
+    download is not invisible just because it is not at a fixed depth.  The
+    durable deep-scan index is merged in, so installations found by an earlier
+    batch stay visible without re-walking the disk.
     """
     from pathlib import Path
 
     from shine.comfyops.existing_installation import discover
+    from shine.comfyops.resource_discovery import read_state
 
     roots = [*settings.comfy_probe_roots]
     # A stale/network path chosen earlier must not make the whole scan fail.
     if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
         roots.append(root)
-    return discover(roots)
+    result = discover(roots)
+    indexed = read_state(db)["resources"]["comfy_roots"]
+    known = set(result["installations"])
+    for row in indexed:
+        if row["root"] not in known and Path(row["root"]).is_dir():
+            result["installations"].append(row["root"])
+            known.add(row["root"])
+    result["installations"].sort()
+    result["deep_scan"] = {
+        "status": read_state(db)["scan"].get("status"),
+        "indexed_comfy_roots": len(indexed),
+    }
+    return result
+
+
+class SearchDirectoryRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    path: str = Field(min_length=1, max_length=1024)
+
+
+@router.get('/search-directories')
+def search_directories(db: DBSession):
+    from shine.comfyops.resource_discovery import list_directories
+
+    return {"directories": list_directories(db)}
+
+
+@router.post('/search-directories')
+def add_search_directory(body: SearchDirectoryRequest, actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import add_directory
+
+    return add_directory(db, body.path, actor=actor)
+
+
+@router.post('/search-directories/select')
+def select_search_directory(actor: Operator):
+    """Open the OS folder dialog; the choice is returned, never saved."""
+    from shine.media.directory_picker import pick_directory
+
+    return pick_directory(None)
+
+
+@router.delete('/search-directories/{directory_id}')
+def remove_search_directory(directory_id: str, actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import remove_directory
+
+    return remove_directory(db, directory_id, actor=actor)
+
+
+@router.get('/resource-scan')
+def resource_scan_report(db: DBSession):
+    from shine.comfyops.resource_discovery import report
+
+    return report(db)
+
+
+@router.post('/resource-scan/start')
+def resource_scan_start(actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import start_scan
+
+    return start_scan(db, actor=actor)
+
+
+@router.post('/resource-scan/advance')
+def resource_scan_advance(actor: Operator, db: DBSession):
+    """One bounded batch, for immediate feedback; the Worker also advances it."""
+    from shine.comfyops.resource_discovery import advance_scan
+
+    return advance_scan(db)
 
 
 @router.post('/existing-installations/inspect')
@@ -1096,8 +1167,8 @@ def setup_verdict(settings: SettingsDep, db: DBSession):
     """
     from shine.comfyops.runtime_configuration import resolve_runtime, runtime_report
     from shine.comfyops.service_validation import _worker_online
-    from shine.production_mode import summarize_production_mode
     from shine.models import AppSetting
+    from shine.production_mode import summarize_production_mode
 
     try:
         effective = resolve_runtime(db, settings)

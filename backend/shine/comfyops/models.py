@@ -42,6 +42,10 @@ class ProjectRecordMixin(RecordMixin):
 
 class InstallationPlan(ProjectRecordMixin, Base):
     __tablename__ = "installation_plans"
+    # A NULL project is a machine-level plan: resource preparation can run on
+    # an empty database, before any work exists to bind it to.
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id"), index=True, nullable=True)
 
 
 class InstallationAttempt(RecordMixin, Base):
