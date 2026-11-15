@@ -75,6 +75,8 @@ const BLOCKER_LABELS: Record<string, string> = {
   IMAGE_MODEL_SIZE_MISMATCH: '权重文件大小与固定清单不一致，请重新下载这一份。',
   IMAGE_MODEL_HASH_MISMATCH: '权重文件校验不通过，出图不能开始。',
   IMAGE_GRAPH_NOT_VERIFIED: '还没有对活体渲染器核对节点与参数图。',
+  IMAGE_RENDERER_GONE: '本机出图渲染器已经退出，端口不再监听；崩溃证据在出图配置里可查。',
+  IMAGE_RENDERER_EXITED_DURING_STARTUP: '出图渲染器在启动过程中自己退出了，没有开始监听端口。',
 };
 
 export function ImageCapabilityCard({ projectId, busy }: { projectId: string; busy: boolean }) {

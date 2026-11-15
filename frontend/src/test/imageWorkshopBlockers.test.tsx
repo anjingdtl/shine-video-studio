@@ -90,6 +90,26 @@ it('图生图缺参考图与本机能力缺失分开说明，编辑图节点差�
   expect(screen.getByText('IMAGE_RUNTIME_NOT_BOUND')).toBeInTheDocument();
 });
 
+it('渲染器崩溃有自己的具名码，不折叠成「工作流未验证」', async () => {
+  capabilitiesMock.current = report([
+    { code: 'IMAGE_RENDERER_GONE', layer: 'GRAPH_VERIFIED', exit_code: 3221225477 },
+  ]);
+  renderWorkshop();
+  expect(await screen.findByText('IMAGE_RENDERER_GONE')).toBeInTheDocument();
+  expect(screen.getByText(/本机出图渲染器已经退出/)).toBeInTheDocument();
+  expect(screen.getByText(/下一步：打开本机出图配置/)).toBeInTheDocument();
+  expect(screen.queryByText('IMAGE_GRAPH_NOT_VERIFIED')).not.toBeInTheDocument();
+});
+
+it('渲染器在启动中退出时也是具名码与下一步', async () => {
+  capabilitiesMock.current = report([
+    { code: 'IMAGE_RENDERER_EXITED_DURING_STARTUP', layer: 'GRAPH_VERIFIED' },
+  ]);
+  renderWorkshop();
+  expect(await screen.findByText('IMAGE_RENDERER_EXITED_DURING_STARTUP')).toBeInTheDocument();
+  expect(screen.getByText(/渲染器在启动过程中自己退出了/)).toBeInTheDocument();
+});
+
 it('能力已就绪时不再显示阻塞清单', async () => {
   const base = report([]);
   base.image_capabilities.QWEN_IMAGE_T2I = {
