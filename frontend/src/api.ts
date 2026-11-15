@@ -40,6 +40,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   RESOURCE_PLAN_REVALIDATION_FAILED: '资源计划或安装实例已变化，请重新检测后核对。',
   RESOURCE_DOWNLOAD_CHANGED: '已确认计划中的缓存文件发生变化，请重新检测并确认下载量。',
   INPAINT_TOTAL_INPUT_LIMIT: '局部修订还需要一个遮罩输入槽，请移除一张参考图后重试。',
+  CHARACTER_NAME_ALREADY_IN_USE: '这个名字已经是另一张人物素材的名字。一个名字只能对应一张人物素材，请改一个不重复的名字，或先核对同名素材再确认。',
   EXISTING_H3_MODEL_FILES_INCOMPLETE: 'ComfyUI 已确认安装，但部分 H3 文件没有通过固定清单核验。本次没有复制或下载；请到专业设置查看文件差异，确认兼容性后再单独处理缺项。',
   EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH: '本机 ComfyUI 的连接组件与当前工作台不一致。原安装没有修改；请到专业设置查看兼容处理办法。',
   EXISTING_MODEL_HASH_REJECTIONS_PRESENT: '本机有模型文件未通过完整性校验。为保护原文件，本次没有复用或下载替代文件；请到专业设置查看失败项。',
@@ -195,6 +196,13 @@ export function describeDetail(detail: unknown): string {
       return '这一场没有通过终校'
         + (reasons.length ? '：' + reasons.join('；') : '')
         + '。正文已保存，可以编辑修改后重新确认。';
+    }
+    if (detail.startsWith('CHARACTER_NAME_ALREADY_IN_USE:')) {
+      const name = detail.slice('CHARACTER_NAME_ALREADY_IN_USE:'.length).trim();
+      return `名字「${name || '该人物'}」已经是另一张人物素材的名字，人物对照因此被拒绝：`
+        + '一个名字只能对应一张人物素材，否则镜头分不清谁是谁。'
+        + '请给这一位改一个不重复的名字，或先核对已有同名素材是不是同一个人，再重新确认。'
+        + '（CHARACTER_NAME_ALREADY_IN_USE）';
     }
     if (detail === 'STYLE_APPROVAL_CONTENT_CHANGED') return '风格草稿已在其他页面修改，请检查后重新确认（STYLE_APPROVAL_CONTENT_CHANGED）。';
     if (detail === 'STYLE_APPROVAL_CONTENT_REQUIRED') return '本次批准缺少确认的风格内容，请刷新工作台后重试（STYLE_APPROVAL_CONTENT_REQUIRED）。';
