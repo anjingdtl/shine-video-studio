@@ -25,9 +25,19 @@ export type LibraryTask = {
   capability: { state: string; can_generate?: boolean; reason?: string } | null; candidate_index: number | null;
   attempts: Array<Record<string, any>>; created_at: string; updated_at: string;
 };
+export type ImageGraphReport = {
+  complete?: boolean;
+  missing_nodes?: string[];
+  missing_inputs?: string[];
+  error_code?: string;
+};
+
 export type CapabilityReport = {
   workspaces: string[];
-  image_capabilities: Record<string, { state: string; can_generate?: boolean; can_validate?: boolean; reason: string; max_total_images?: number }>;
+  image_capabilities: Record<string, {
+    state: string; can_generate?: boolean; can_validate?: boolean; reason: string; max_total_images?: number;
+    graph_report?: ImageGraphReport | null; verified_families?: string[]; inherits?: string;
+  }>;
   voice_capabilities: Record<string, { state: string; reason: string; can_generate?: boolean; can_queue?: boolean }>;
   t2i_runtime: Record<string, any>;
 };
