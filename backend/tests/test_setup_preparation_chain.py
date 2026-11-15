@@ -192,14 +192,20 @@ def test_validate_delegates_to_supervisor_and_resumes(env, monkeypatch):
     assert detail["status"] == "PENDING"
     assert calls == [1]
     # After the supervisor validated and activated, the resumed step sees the
-    # active contract and finishes without delegating again.
+    # active contract AND a validated project profile, so it finishes without
+    # delegating again.
     monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report",
                         lambda db, settings: {"status": "ACTIVE", "services_verified": True,
                                               "candidate": {"project_id": "proj-1",
                                                             "recipe_sha256": "r" * 64}})
+    from shine.models import Project, WorkflowProfile
+    with factory.begin() as db:
+        db.add(Project(id="proj-1", title="核验测试"))
+        db.add(WorkflowProfile(project_id="proj-1", name="p", mode="Ref2VA", graph={},
+                               graph_sha256="g" * 64, validated_against={"complete": True}))
     resumed = setup_preparation._step_validate(factory, settings, task)
     assert resumed["status"] == "DONE"
-    assert calls == [1], "已激活的合同不应再次委托核验"
+    assert calls == [1], "合同与方案均已核验时不应再次委托"
 
 
 def test_validate_without_candidate_recipe_is_named(env, monkeypatch):

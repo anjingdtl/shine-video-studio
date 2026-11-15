@@ -817,22 +817,29 @@ def _step_profiles(factory, settings, task) -> dict[str, Any]:
 
 
 def _step_validate(factory, settings, task) -> dict[str, Any]:
+    from sqlalchemy import select
+
     from shine.comfyops.runtime_configuration import runtime_report
+    from shine.models import WorkflowProfile
 
     if not task.get("project_id"):
         return {"status": "SKIPPED",
                 "detail": "机器级整备：运行合同核验在作品绑定后执行。"}
     with factory() as db:
         report = runtime_report(db, settings)
-    if report.get("status") == "ACTIVE" and report.get("services_verified"):
-        return {"status": "DONE", "detail": "本机运行合同此前已核验并激活，无需重复启动。"}
+        profiles = db.scalars(select(WorkflowProfile).where(
+            WorkflowProfile.project_id == str(task.get("project_id")))).all()
+    profiles_validated = bool(profiles) and all(row.validated_against for row in profiles)
+    if report.get("status") == "ACTIVE" and report.get("services_verified") and profiles_validated:
+        return {"status": "DONE", "detail": "本机运行合同与生成方案节点均已核验，无需重复启动。"}
     candidate = report.get("candidate") or {}
     if not candidate.get("recipe_sha256"):
         return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST",
                 "detail": "还没有生成这部作品的运行配置。"}
     # Service validation needs the Worker offline, but this task runs *inside*
     # the Worker. Delegate to the supervisor: it stops the Worker, validates and
-    # activates, records this step, then restarts the Worker, which resumes here.
+    # activates, checks this project's profile nodes, records this step, then
+    # restarts the Worker, which resumes here.
     delegated = _delegate_supervisor_validation(settings)
     if delegated.get("status") == "VALIDATING":
         return {"status": "PENDING",
