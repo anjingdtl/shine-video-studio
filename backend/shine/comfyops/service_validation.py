@@ -411,23 +411,16 @@ def _advisory_review_status(blockers: list[dict]) -> dict:
     }
 
 
-def renderer_log_evidence(log_file) -> dict:
-    """Read-only tail of the managed renderer log with import failures named.
-
-    The owned process group discards inherited std handles, so the bootstrap
-    writes its own log; a workflow contract failure must point at the reason
-    (a node pack that failed to import) instead of leaving it to guesswork.
+def _renderer_log_lines(log_file) -> list[str]:
+    """The last lines of the renderer's own log, read without loading it all.
 
     Only the tail of the file is read: a renderer that has been running for
     days leaves a log that must not be pulled into memory on every status
     poll.
     """
-    if not log_file:
-        return {}
     path = Path(str(log_file))
-    evidence: dict = {"renderer_log": str(path), "import_errors": [], "tail": []}
     if not path.is_file():
-        return evidence
+        return []
     try:
         with path.open("rb") as stream:
             stream.seek(0, os.SEEK_END)
@@ -435,8 +428,33 @@ def renderer_log_evidence(log_file) -> dict:
             stream.seek(max(0, size - RENDERER_LOG_TAIL_BYTES))
             chunk = stream.read()
     except OSError:
-        return evidence
-    lines = chunk.decode("utf-8", errors="replace").splitlines()[-400:]
+        return []
+    return chunk.decode("utf-8", errors="replace").splitlines()[-400:]
+
+
+def renderer_log_tail(log_file, *, lines: int = 60) -> list[str]:
+    """The plain tail of the renderer's log, for a crash diagnosis.
+
+    A native crash writes no traceback, so the last thing the renderer did say
+    is the only context the exit code has.
+    """
+    if not log_file:
+        return []
+    return _renderer_log_lines(log_file)[-lines:]
+
+
+def renderer_log_evidence(log_file) -> dict:
+    """Read-only tail of the managed renderer log with import failures named.
+
+    The owned process group discards inherited std handles, so the bootstrap
+    writes its own log; a workflow contract failure must point at the reason
+    (a node pack that failed to import) instead of leaving it to guesswork.
+    """
+    if not log_file:
+        return {}
+    path = Path(str(log_file))
+    evidence: dict = {"renderer_log": str(path), "import_errors": []}
+    lines = _renderer_log_lines(log_file)
     if not lines:
         return evidence
     markers = ("Cannot import", "Failed to load", "ImportError",
@@ -446,7 +464,6 @@ def renderer_log_evidence(log_file) -> dict:
         if any(marker in line for marker in markers):
             excerpt.extend(lines[index:index + 6])
     evidence["import_errors"] = excerpt[-60:]
-    evidence["tail"] = lines[-60:]
     return evidence
 
 

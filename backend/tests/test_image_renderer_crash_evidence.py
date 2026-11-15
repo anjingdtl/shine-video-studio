@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import pathlib
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -147,6 +148,22 @@ def test_a_failed_start_keeps_its_own_named_reason(api, monkeypatch):
     assert evidence["crashed"] is True
     assert evidence["code"] == "IMAGE_RENDERER_EXITED_DURING_STARTUP"
     assert evidence["exit_code"] == ACCESS_VIOLATION
+
+
+def test_the_crash_evidence_carries_the_tail_of_the_renderers_own_log(api, monkeypatch):
+    """A native crash writes no traceback, so the log tail is the context."""
+    _, factory, settings = api
+    _record_dead_renderer(factory)
+    monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "GONE")
+    log = pathlib.Path(image_renderer.renderer_log_path(settings, "fake-instance"))
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("Starting server\nTo see the GUI go to http://127.0.0.1:8188\n",
+                   encoding="utf-8")
+    with factory() as db:
+        evidence = image_renderer.renderer_crash_evidence(db, settings, instance_id="fake-instance")
+    assert evidence["renderer_log"].endswith("renderer-fake-instance.log")
+    assert "Starting server" in evidence["tail"]
+    assert evidence["import_errors"] == []
 
 
 def test_a_renderer_that_never_started_has_no_crash_to_report(api):

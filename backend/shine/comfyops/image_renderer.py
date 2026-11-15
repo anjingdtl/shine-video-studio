@@ -241,10 +241,11 @@ def renderer_crash_evidence(db, settings, *, instance_id: str, state: str | None
         evidence["crashed"] = True
         evidence["code"] = str(error_code)
     log_file = renderer_log_path(settings, instance_id)
-    from shine.comfyops.service_validation import renderer_log_evidence
+    from shine.comfyops.service_validation import renderer_log_evidence, renderer_log_tail
 
     try:
         evidence.update(renderer_log_evidence(log_file))
+        evidence["tail"] = renderer_log_tail(log_file)
     except Exception:  # noqa: BLE001 - the log is evidence, never a gate
         evidence["renderer_log"] = log_file
         evidence["import_errors"] = []
