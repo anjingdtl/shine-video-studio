@@ -352,7 +352,8 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
 
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,
-                      project_id: str | None, variant_id: str | None = None) -> dict[str, Any]:
+                      project_id: str | None, variant_id: str | None = None,
+                      runtime_verified: bool = False) -> dict[str, Any]:
     """One capability, as a ladder of facts that never impersonate each other.
 
     ``variant_id`` names the H3 stack the person actually chose.  Without it
@@ -412,13 +413,17 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             from shine.comfyops.variant_readiness import readiness as variant_readiness
             from shine.comfyops.variants import list_variant_manifests
 
+            h3_acceptance: str | None = None
             if binding is None:
                 manifest = next((row for row in list_variant_manifests()
                                  if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
-                if manifest and project_id:
-                    binding = load_binding(str(manifest["variant_id"]), fresh=False)
+                if manifest:
+                    h3_acceptance = str(manifest.get("acceptance_status"))
+                    if project_id:
+                        binding = load_binding(str(manifest["variant_id"]), fresh=False)
             if binding is not None and project_id:
                 report = variant_readiness(db, settings, binding, project_id)
+                h3_acceptance = str(report.get("acceptance_status"))
                 weights = report.get("weights") or []
                 # ``FILES_FOUND`` is never taken from the ledger: its "prepared"
                 # bit also requires a package row, so borrowing it made the same
@@ -433,6 +438,10 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                     "PRODUCTION_READY": bool(report.get("production_ready")),
                 })
                 advisories.extend(report.get("blocking_reasons") or [])
+            # 唯一检验链路：机器级运行合同已核对（与顶部裁决同一个 runtime_report）
+            # 就是「② 运行」的权威答案，无论是否已绑定到具体作品。只对已验收基线
+            # 生效——候选变体不是当前激活的运行配置，绝不能借基线核验冒充就绪。
+            facts["RUNTIME_SERVICES_VERIFIED"] = bool(runtime_verified and h3_acceptance == "SUPPORTED")
         elif capability == "image":
             binding = _image_binding_state(settings)
             from shine.materialprep import runtime
@@ -441,9 +450,16 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             facts["BINDING_STATE"] = binding["binding_state"]
             facts["RECIPE_READY"] = binding["recipe"]["state"] == "READY"
             facts["INSTANCE_BOUND"] = binding["binding_state"] == "READY"
-            facts["WORKFLOW_VALIDATED"] = bool(report.get("graph_report") or {}) and bool(
+            graph_complete = bool(report.get("graph_report") or {}) and bool(
                 (report.get("graph_report") or {}).get("complete"))
-            facts["RENDER_VERIFIED"] = report.get("layer") == "RENDER_VERIFIED"
+            # 唯一检验链路：读整备任务落库的真实小样证据（与出图门禁同一份
+            # render_verified_families，按指纹键控）。指纹不依赖活体 object_info，
+            # 所以空闲渲染器下也能读到已验证事实——一次真实成功出图本身就证明
+            # 运行合同在该指纹下跑通过，不必每次切页都重新活体探测一遍。
+            persisted_verified = bool(runtime.render_verified_families(
+                db, str(report.get("fingerprint") or "")))
+            facts["WORKFLOW_VALIDATED"] = graph_complete or persisted_verified
+            facts["RENDER_VERIFIED"] = report.get("layer") == "RENDER_VERIFIED" or persisted_verified
             facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and facts["INSTANCE_BOUND"]
                                              and facts["WORKFLOW_VALIDATED"])
             advisories.extend(report.get("blockers") or [])
@@ -515,7 +531,7 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
         }
     reason = next((str(a.get("message") or a.get("detail")) for a in advisories
                    if a.get("message") or a.get("detail")), None)
-    if facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY"):
+    if facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY") or facts.get("RUNTIME_SERVICES_VERIFIED"):
         run = {"state": "READY", "label": "已验证可运行"}
     elif facts.get("WORKFLOW_VALIDATED"):
         run = {"state": "UNVERIFIED", "label": "运行合同已核对，待真实试镜"}
@@ -559,7 +575,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "code": "FILES_NOT_VERIFIED", "label": "核验已有文件",
             "reason": "文件已在本机，还没有逐字节核验。", "action": "RECONCILE",
         }
-    if not facts.get("INSTANCE_BOUND"):
+    if not (facts.get("INSTANCE_BOUND") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         if capability == "image":
             return "VERIFIED", "已经找到出图资源，正在完善本机运行配置。", {
                 "code": "PENDING_RECIPE", "label": "完善本机运行配置",
@@ -569,7 +585,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "code": "INSTANCE_NOT_BOUND", "label": "绑定已核验的资源",
             "reason": "当前实例的模型目录里读不到已核验的文件。", "action": "RECONCILE",
         }
-    if not facts.get("WORKFLOW_VALIDATED"):
+    if not (facts.get("WORKFLOW_VALIDATED") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         return "BOUND", "资源与实例都已就位，还没核对运行合同。", {
             "code": "WORKFLOW_NOT_VALIDATED", "label": "核对运行合同",
             "reason": "还没有在本机真实服务上核对节点与输入。", "action": "PREPARE_ENVIRONMENT",
@@ -597,7 +613,8 @@ def _progress(capabilities: dict[str, dict]) -> list[dict[str, str]]:
     any_found = any(row.get("FILES_FOUND") for row in facts)
     all_verified = bool(facts) and all(row.get("FILES_VERIFIED") for row in facts)
     all_bound = bool(facts) and all(row.get("INSTANCE_BOUND") for row in facts)
-    all_validated = bool(facts) and all(row.get("WORKFLOW_VALIDATED") for row in facts)
+    all_validated = bool(facts) and all(
+        row.get("WORKFLOW_VALIDATED") or row.get("RUNTIME_SERVICES_VERIFIED") for row in facts)
     any_render = any(row.get("RENDER_VERIFIED") for row in facts)
     phases = [
         ("DETECT", "检测本机", any_found),
@@ -630,9 +647,19 @@ def summary(db, settings, *, project_id: str | None = None,
 
     installation = resolve_installation(db, settings, discovered=discovered)
     selected = installation["selected"]
+    # 唯一检验链路：顶部裁决、基础配置与高级设置都读同一个 runtime_report。
+    # 这里算一次机器级运行核验，喂给 h3 的「② 运行」投影，避免各卡片各自推导
+    # 出互相矛盾的结论（裁决说已就绪、卡片却说跑不通）。
+    from shine.comfyops.runtime_configuration import runtime_report
+
+    try:
+        runtime_verified = bool(runtime_report(db, settings).get("services_verified"))
+    except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
+        runtime_verified = False
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
-                               variant_id=variant_id if key == "h3" else None)
+                               variant_id=variant_id if key == "h3" else None,
+                               runtime_verified=runtime_verified if key == "h3" else False)
         for key in CAPABILITIES
     }
     progress = _progress(capabilities)

@@ -7,7 +7,11 @@
 from __future__ import annotations
 
 from shine.comfyops.image_edit_validation import _mask_png, _solid_png
-from shine.comfyops.setup_summary import _two_step_projection, capability_report
+from shine.comfyops.setup_summary import (
+    _capability_verdict,
+    _two_step_projection,
+    capability_report,
+)
 from shine.security import probe_upload
 
 
@@ -45,6 +49,38 @@ def test_two_step_found_but_unverified():
     facts = {"FILES_FOUND": True, "FILES_VERIFIED": False}
     proj = _two_step_projection("h3", facts, missing_bytes=0, missing_files=[], advisories=[])
     assert proj["files"]["state"] == "UNVERIFIED"
+
+
+def test_two_step_run_mounts_the_authoritative_runtime_verification():
+    # 唯一检验链路：机器级运行合同已核对（顶部裁决同一个 runtime_report）时，
+    # 「② 运行」必须报已验证可运行，即使本变体的项目方案逐节点核对尚未落库。
+    # 修复前这里会报「跑不通」，与顶部「真实制作已就绪」自相矛盾。
+    facts = {"FILES_FOUND": True, "FILES_VERIFIED": True, "INSTANCE_BOUND": True,
+             "WORKFLOW_VALIDATED": False, "RUNTIME_SERVICES_VERIFIED": True}
+    proj = _two_step_projection("h3", facts, missing_bytes=0, missing_files=[], advisories=[])
+    assert proj["run"]["state"] == "READY"
+    assert proj["run"]["label"] == "已验证可运行"
+
+
+def test_two_step_candidate_does_not_borrow_baseline_verification():
+    # 候选变体不是当前激活的运行配置：RUNTIME_SERVICES_VERIFIED 只在已验收基线
+    # 上为真。候选自身方案未核对时仍须如实报跑不通，不能借基线核验冒充就绪。
+    facts = {"FILES_FOUND": True, "FILES_VERIFIED": True, "INSTANCE_BOUND": True,
+             "WORKFLOW_VALIDATED": False, "RUNTIME_SERVICES_VERIFIED": False}
+    proj = _two_step_projection("h3", facts, missing_bytes=0, missing_files=[], advisories=[])
+    assert proj["run"]["state"] == "BLOCKED"
+
+
+def test_capability_verdict_advances_past_node_check_when_runtime_verified():
+    # 同一权威信号也驱动「一句话结论 + 唯一下一步」：运行合同已核对时不再停在
+    # 「核对运行合同」，而是前进到「真实试镜一次」，与两步投影保持一致。
+    facts = {"FILES_FOUND": True, "FILES_VERIFIED": True, "INSTANCE_BOUND": True,
+             "WORKFLOW_VALIDATED": False, "RUNTIME_SERVICES_VERIFIED": True,
+             "RENDER_VERIFIED": False}
+    state, _summary, step = _capability_verdict(
+        "h3", facts, missing_bytes=0, has_installation=True, missing_files=[])
+    assert state == "READY"
+    assert step is not None and step["code"] == "TRIAL_NOT_RUN"
 
 
 def test_capability_report_carries_two_step(studio):
