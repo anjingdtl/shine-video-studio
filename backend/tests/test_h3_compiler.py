@@ -98,13 +98,16 @@ def test_t2va_uses_the_three_official_fields_in_order():
 
 
 def test_the_prompt_states_the_spoken_language_contract():
-    """The prompt limits speech to the exact scripted lines and specifies silence.
+    """The prompt anchors every voice to the project language and describes a
+    non-vocal soundtrack for a silent shot.
 
     The whole prompt is written in English.  Without an explicit instruction the
     model invents English speech, and it invents speech at all in a silent shot.
+    The contract is a positive sound description: enumerating forbidden vocal
+    acts primed the model to render them (unscripted foreign-language narration).
     """
     silent = compile_prompt([])
-    assert "There is no spoken dialogue in this shot" in silent.sections["overall_soundscape"]
+    assert "This shot has no dialogue: the soundtrack is entirely non-vocal" in silent.sections["overall_soundscape"]
 
     spoken = spec(
         characters=["R01 杜万山"],
@@ -118,11 +121,11 @@ def test_the_prompt_states_the_spoken_language_contract():
     ]
     compiled = compile_prompt(manifest, shot=spoken)
     soundscape = compiled.sections["overall_soundscape"]
-    assert "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese" in soundscape
+    assert "Every voice in this shot speaks Chinese" in soundscape
     assert "<d>[Chinese] 你来了。</d>" in compiled.prompt
     # The spoken-language instruction is English prose: the H3 rulebook only
     # forbids CJK outside the dialogue itself.
-    assert "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese" in compiled.prompt
+    assert "Every voice in this shot speaks Chinese" in compiled.prompt
 
 
 def test_ref2va_references_and_music_cannot_instruct_speech_carryover():
@@ -132,10 +135,10 @@ def test_ref2va_references_and_music_cannot_instruct_speech_carryover():
         item("<Audio 1>", ReferenceUse.AUDIO, asset_id="source-audio", duration_s=4, role="continuity_derivative"),
     ]
     compiled = compile_prompt(manifest, shot=shot)
-    assert "no speaking or mouthing words" in compiled.sections["detailed_description"]
+    assert "Performers act with closed mouths" in compiled.sections["detailed_description"]
     assert "Use <Audio 1> for non-vocal ambience only" in compiled.sections["detailed_description"]
     assert "Use the visual track only" in compiled.sections["retention_analysis"]
-    assert "never carry over any words or vocals" in compiled.sections["retention_analysis"]
+    assert "referenced only for non-vocal ambience" in compiled.sections["retention_analysis"]
     assert "Instrumental only" in compiled.sections["non_diegetic_music"]
     assert "below the dialogue" not in compiled.sections["non_diegetic_music"]
 
@@ -158,11 +161,17 @@ def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
         locked_story_facts=[continuity], prompt_story_facts=[continuity],
     ))
     assert "frozen sound rule" not in silent.sections["overall_soundscape"]
-    assert "no spoken dialogue" in silent.sections["overall_soundscape"]
-    assert "Performance and sound: no spoken dialogue in this shot." in silent.prompt
-    assert "Story continuity facts below are background context only" in silent.prompt
-    assert "they are not dialogue and must never be spoken, narrated or performed as voice-over" in silent.prompt
-    assert "mentioned in story facts or visual descriptions is context only, not an audio instruction" in silent.prompt
+    assert "the soundtrack is entirely non-vocal" in silent.sections["overall_soundscape"]
+    assert (
+        "Performance and sound: this shot is performed without dialogue; "
+        "its soundtrack is entirely non-vocal." in silent.prompt
+    )
+    assert "Story continuity facts below are silent background context for the picture only" in silent.prompt
+    assert "they inform the visuals and are never heard as audio" in silent.prompt
+    assert (
+        "Words quoted in the story facts or visual description stay silent context and are never heard"
+        in silent.prompt
+    )
     assert "普通话自然语速" not in silent.prompt
 
     spoken = spec(
@@ -204,10 +213,10 @@ def test_a_language_written_in_another_script_never_reaches_the_english_prompt()
     compiled = compile_prompt(manifest, shot=spoken, project_language="中文")
     soundscape = compiled.sections["overall_soundscape"]
     contract = (
-        "Only the explicitly tagged dialogue lines in this shot may be spoken in Chinese, matching "
-        "the original line text exactly; no other language, unscripted speech, narration, voice-over, "
-        "background chatter, whispering or extra words may appear. Any voice or reading described in "
-        "the story facts or visual description refers only to these exact lines."
+        "Every voice in this shot speaks Chinese. The only words heard are the explicitly tagged "
+        "dialogue lines of this shot, delivered exactly as written at their timed positions; all "
+        "other sound stays non-vocal. Any voice or reading described in the story facts "
+        "or visual description refers only to these exact lines."
     )
     assert contract in soundscape
     # The contract itself is English prose, and the raw project value never
@@ -228,7 +237,7 @@ def test_chinese_locked_facts_require_and_use_explicit_english_prompt_translatio
     original = ["怀表停在十二点"]
     shot = spec(locked_story_facts=original, prompt_story_facts=["The watch is stopped at twelve."])
     compiled = compile_prompt([], shot=shot)
-    assert "Story continuity facts below are background context only" in compiled.prompt
+    assert "Story continuity facts below are silent background context" in compiled.prompt
     assert "The watch is stopped at twelve." in compiled.prompt
     assert original == shot.locked_story_facts
     with pytest.raises(PromptCompilationError) as error:
@@ -498,3 +507,156 @@ def test_a_manual_shot_inherits_the_projects_english_style_prompt(api):
     assert client.post(f"/api/v1/projects/{project_id}/shots", json=template).status_code == 201
     manual = create_shot(client, project_id, style["id"], title="手写干净镜头")
     assert manual["spec"]["prompt_style"] == english
+
+
+# --- 1.3.0 positive audio contract -------------------------------------------
+#
+# The pre-1.3.0 fixed sentences enumerated forbidden vocal acts ("narration,
+# voice-over, whispering, mumbling, singing, humming...").  A video model reads
+# that enumeration as concepts to render, and real runs produced unscripted
+# foreign-language narration from it.  The contract now describes what the
+# soundtrack contains and anchors every voice to the project language.
+
+#: Vocal-act vocabulary that must never appear in the fixed sentences of a
+#: non-narrated shot.  A narrated shot legitimately names its narrator.
+_PRIMING_VOCABULARY = (
+    "voice-over", "whispering", "mumbling", "singing", "humming",
+    "background chatter", "vocals", "lyrics", "speech",
+)
+
+
+def test_the_fixed_sentences_never_enumerate_vocal_acts():
+    silent = compile_prompt([], shot=spec(sound={}))
+    assert (
+        "Natural room ambience continues throughout the video; the soundtrack stays entirely non-vocal."
+        in silent.sections["overall_soundscape"]
+    )
+    for token in (*_PRIMING_VOCABULARY, "narration"):
+        assert token not in silent.prompt.lower(), token
+
+    spoken = spec(
+        characters=["R01 杜万山"],
+        dialogue=[{"speaker_id": "R01 杜万山", "text": "你来了。", "start_s": 1.0, "end_s": 2.4}],
+        sound={},
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山", role="character"),
+        item("<Audio 1>", ReferenceUse.AUDIO, asset_id="voice-1", duration_s=4),
+    ]
+    voiced = compile_prompt(manifest, shot=spoken)
+    for token in (*_PRIMING_VOCABULARY, "narration"):
+        assert token not in voiced.prompt.lower(), token
+    # The positive anchors are present instead.
+    assert "Every voice in this shot speaks Chinese" in voiced.sections["overall_soundscape"]
+    assert "the scripted lines' voice timbre" in voiced.sections["subject_definitions"]
+    assert "the approved timbre voices only the scripted dialogue lines" in voiced.sections["retention_analysis"]
+
+
+def test_a_narrated_shot_keeps_its_narrator_and_gains_the_language_anchor():
+    shot = spec(
+        characters=["旁白"],
+        dialogue=[{"speaker_id": "旁白", "text": "夜幕降临。", "start_s": 0.5, "end_s": 2.5}],
+        sound={},
+    )
+    manifest = [item("<Picture 1>", ReferenceUse.PICTURE, asset_id="asset-2", frame_role=FrameRole.KEYFRAME)]
+    compiled = compile_prompt(manifest, shot=shot)
+    assert "off-screen narrator" in compiled.prompt
+    assert "Every voice in this shot speaks Chinese" in compiled.sections["overall_soundscape"]
+    assert "<d>[Chinese] 夜幕降临。</d>" in compiled.prompt
+    for token in _PRIMING_VOCABULARY:
+        assert token not in compiled.prompt.lower(), token
+
+
+def test_the_music_section_is_instrumental_without_naming_vocals():
+    compiled = compile_prompt([])
+    music = compiled.sections["non_diegetic_music"]
+    assert music.endswith("Instrumental only.")
+    assert "vocals" not in music and "lyrics" not in music
+
+
+#: Prompt hashes captured from the pre-1.3.0 compiler on the fixtures below.
+#: Stored requests pin their compiler version; recompiling them must reproduce
+#: exactly these bytes or their provenance verification would fail.
+_LEGACY_PROMPT_HASHES = {
+    "silent_t2va_with_facts": {
+        "shine-h3-compiler/1.2.1": "c57e82e84ff9a7167376d0d5cbeaa22e6b631e17aadbc3598e31ce672fea7775",
+        "shine-h3-compiler/1.2.2": "37a11b34133832c65f08c25ce355950c549e4bc56bd8ee776f006c16bcd2aea2",
+        "shine-h3-compiler/1.2.3": "37a11b34133832c65f08c25ce355950c549e4bc56bd8ee776f006c16bcd2aea2",
+    },
+    "dialogue_ref2va_voice_master": {
+        "shine-h3-compiler/1.2.1": "3cdd5ccae00c0216ac092723db2fc9879694dc98a17e708480b02b6265e22ada",
+        "shine-h3-compiler/1.2.2": "bcc60aa8d4f8f4a9d5777e9e1178d7035b225ed30f11428fbf9a5529bfaf36f5",
+        "shine-h3-compiler/1.2.3": "bcc60aa8d4f8f4a9d5777e9e1178d7035b225ed30f11428fbf9a5529bfaf36f5",
+    },
+    "silent_ref2va_continuity_audio": {
+        "shine-h3-compiler/1.2.1": "91553d4ea864c4d26189c26ed60df1d27e25eabdde441fa3812de8c8cac218b9",
+        "shine-h3-compiler/1.2.2": "c530df41cd3d40ecf2ecceb690ecc7c7aee89c69ae9e157af4583c4482dfe7ff",
+        "shine-h3-compiler/1.2.3": "c530df41cd3d40ecf2ecceb690ecc7c7aee89c69ae9e157af4583c4482dfe7ff",
+    },
+    "narrated_ref2va": {
+        "shine-h3-compiler/1.2.1": "5fe1339c3e1236b35cd82a401f2d4ab1042b1a1b74631037b4a34cadc37ce5dc",
+        "shine-h3-compiler/1.2.2": "03c0cf1fe7130980a314a59b79ba30aa0c286f46fa8e048969b112789502d825",
+        "shine-h3-compiler/1.2.3": "03c0cf1fe7130980a314a59b79ba30aa0c286f46fa8e048969b112789502d825",
+    },
+    "silent_ref2va_no_sound_fields": {
+        "shine-h3-compiler/1.2.1": "d6c2c0308451c00beb92a022ad2b41a3818daa2042d8001e3be7dbee1644e386",
+        "shine-h3-compiler/1.2.2": "1fbcb8d5d3bd656e5af7a33a9e600d19454d6c495309f67aaa522b0ba0d0868c",
+        "shine-h3-compiler/1.2.3": "1fbcb8d5d3bd656e5af7a33a9e600d19454d6c495309f67aaa522b0ba0d0868c",
+    },
+}
+
+
+def _legacy_hash_fixtures():
+    fact = "When Shen Yan says 'time will stop tonight', the night finally ends."
+    return {
+        "silent_t2va_with_facts": (
+            spec(locked_story_facts=[fact], prompt_story_facts=[fact]), [],
+        ),
+        "dialogue_ref2va_voice_master": (
+            spec(
+                characters=["R01 杜万山"],
+                dialogue=[{"speaker_id": "R01 杜万山", "text": "你来了。", "start_s": 1.0, "end_s": 2.4}],
+            ),
+            [
+                item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="R01 杜万山", role="character"),
+                item("<Picture 2>", ReferenceUse.PICTURE, asset_id="asset-2"),
+                item("<Audio 1>", ReferenceUse.AUDIO, asset_id="voice-1", duration_s=4),
+            ],
+        ),
+        "silent_ref2va_continuity_audio": (
+            spec(continuity={"mode": "audio_reference", "previous_shot_id": "source"}),
+            [
+                item("<Video 1>", ReferenceUse.VIDEO, duration_s=4),
+                item("<Audio 1>", ReferenceUse.AUDIO, asset_id="source-audio", duration_s=4,
+                     role="continuity_derivative"),
+            ],
+        ),
+        "narrated_ref2va": (
+            spec(
+                characters=["旁白"],
+                dialogue=[{"speaker_id": "旁白", "text": "夜幕降临。", "start_s": 0.5, "end_s": 2.5}],
+            ),
+            [item("<Picture 1>", ReferenceUse.PICTURE, asset_id="asset-2", frame_role=FrameRole.KEYFRAME)],
+        ),
+        "silent_ref2va_no_sound_fields": (
+            spec(sound={}),
+            [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character")],
+        ),
+    }
+
+
+def test_historical_compiler_versions_keep_their_exact_prompt_bytes():
+    from shine.h3.compiler import COMPILER_VERSION
+
+    compiler = H3PromptCompiler()
+    for name, (shot, manifest) in _legacy_hash_fixtures().items():
+        for version, expected in _LEGACY_PROMPT_HASHES[name].items():
+            compiled = compiler.compile(
+                spec=shot, style=STYLE, manifest=manifest,
+                project_language="Chinese", compiler_version=version,
+            )
+            assert compiled.prompt_sha256 == expected, (name, version)
+            assert compiled.compiler_version == version, (name, version)
+        current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, project_language="Chinese")
+        assert current.compiler_version == COMPILER_VERSION
+        assert current.prompt_sha256 != expected, name
