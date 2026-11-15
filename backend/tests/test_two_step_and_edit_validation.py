@@ -78,11 +78,11 @@ def test_validation_pngs_are_valid_and_aligned():
                 idat += data[pos + 8:pos + 8 + length]
             pos += 12 + length
         raw = zlib.decompress(idat)
-        stride = 64 * 3 + 1
+        stride = 64 * 4 + 1
         return [raw[y * stride + 1:(y + 1) * stride] for y in range(64)]
 
     rows = _rows(mask)
-    center = rows[32][32 * 3:32 * 3 + 3]
-    corner = rows[0][0:3]
-    assert center == b"\xff\xff\xff"
-    assert corner == b"\x00\x00\x00"
+    center = rows[32][32 * 4:32 * 4 + 4]
+    corner = rows[0][0:4]
+    assert center == b"\xff\xff\xff\xff"
+    assert corner == b"\x00\x00\x00\xff"
