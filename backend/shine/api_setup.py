@@ -636,14 +636,6 @@ _INSPECT_CACHE: dict[tuple[str, str], tuple[float, set[str]]] = {}
 _INSPECT_CACHE_TTL = 120.0
 _INSPECT_CACHE_LOCK = threading.Lock()
 
-#: Short-lived cache of the whole per-project availability projection. Computing
-#: it walks every variant's weight evidence and is far too slow to repeat on each
-#: page switch; the preparation task refreshes the underlying ledger, and a stale
-#: projection older than the TTL is recomputed on the next read.
-_VA_CACHE: dict[str, tuple[float, dict]] = {}
-_VA_CACHE_TTL = 60.0
-_VA_CACHE_LOCK = threading.Lock()
-
 
 def _cached_present_components(root: str, catalog: dict) -> set[str]:
     import time
@@ -687,13 +679,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     from shine.services import require_project
 
     require_project(db, project_id)
-    import time
-
-    now = time.monotonic()
-    with _VA_CACHE_LOCK:
-        hit = _VA_CACHE.get(project_id)
-        if hit and now - hit[0] < _VA_CACHE_TTL:
-            return hit[1]
     adopted_root = None
     for row in db.scalars(_select(ComfyInstance)):
         payload = row.payload if isinstance(row.payload, dict) else {}
@@ -835,8 +820,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         entry["blocking_reasons"] = blocking
         rows.append(entry)
     result = {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
-    with _VA_CACHE_LOCK:
-        _VA_CACHE[project_id] = (now, result)
     return result
 
 
