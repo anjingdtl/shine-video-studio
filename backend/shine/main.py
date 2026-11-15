@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse
 from sqlalchemy import func, literal_column, select
@@ -1320,21 +1320,29 @@ def create_app(
         return artifact
 
     @app.get("/api/v1/jobs/{job_id}/media")
-    def job_media(job_id: str, db: DBSession) -> FileResponse:
+    def job_media(job_id: str, request: Request, db: DBSession):
         """Serve one produced shot so the workbench can preview it.
 
         The segments grid needs the real bytes of a produced shot.  The operator
         route only answers an operator request, so the workbench had no way to
         play a shot at all.  The bytes are this job's own artifact and are
-        checked against the registered digest before they are served.
+        checked against the registered digest before they are served.  The
+        check is cached by file identity and the digest is an ETag, so a player's
+        many Range requests neither re-read the whole file nor re-download it.
         """
+        from shine.media.integrity import media_etag, not_modified, verify_media_file
+
         artifact = _produced_artifact(job_id, db)
         path = safe_asset_path(_asset_root(db), artifact.storage_path)
-        if not path.is_file():
-            raise HTTPException(status_code=404, detail="Artifact file is missing on disk")
-        if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
-            raise HTTPException(status_code=409, detail="ARTIFACT_FILE_HASH_MISMATCH")
-        return FileResponse(path, media_type=artifact.content_type, headers={"Cache-Control": "no-store"})
+        verify_media_file(path, artifact.sha256, artifact.byte_size,
+                          missing_detail="Artifact file is missing on disk")
+        etag = media_etag(artifact.sha256)
+        # A retake adoption can swap the file behind this URL, so the browser
+        # must revalidate (cheap 304) instead of caching immutably.
+        headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+        if not_modified(request, etag):
+            return Response(status_code=304, headers=headers)
+        return FileResponse(path, media_type=artifact.content_type, headers=headers)
 
     @app.get("/api/v1/jobs/{job_id}/thumbnail")
     def job_thumbnail(job_id: str, request: Request, db: DBSession):

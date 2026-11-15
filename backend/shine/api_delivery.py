@@ -25,7 +25,6 @@ from shine.config import Settings
 from shine.media.artifacts import safe_asset_path
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
 from shine.models import MediaArtifact, Project, SubtitleTrack
-from shine.security import sha256_bytes
 from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["delivery"])
@@ -249,7 +248,9 @@ def assemble_completed_series(project_id: str, series_id: str, actor: Operator, 
 
 
 @router.get("/deliveries/{artifact_id}/media")
-def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileResponse:
+def delivery_media(artifact_id: str, request: Request, db: DBSession):
+    from shine.media.integrity import media_etag, not_modified, verify_media_file
+
     artifact = db.get(MediaArtifact, artifact_id)
     if not artifact or artifact.artifact_kind != "delivery":
         raise HTTPException(status_code=404, detail="Delivery artifact not found")
@@ -258,14 +259,18 @@ def delivery_media(artifact_id: str, request: Request, db: DBSession) -> FileRes
     from shine.media.output_layout import output_root_for_request
 
     path: Path = safe_asset_path(output_root_for_request(request, db), artifact.storage_path)
-    if not path.is_file():
-        raise HTTPException(status_code=404, detail="Delivery file is missing on disk")
-    if path.stat().st_size != artifact.byte_size or sha256_bytes(path.read_bytes()) != artifact.sha256:
-        raise HTTPException(status_code=409, detail="DELIVERY_FILE_HASH_MISMATCH")
+    verify_media_file(path, artifact.sha256, artifact.byte_size,
+                      mismatch_code="DELIVERY_FILE_HASH_MISMATCH",
+                      missing_detail="Delivery file is missing on disk")
+    etag = media_etag(artifact.sha256)
+    headers = {"Cache-Control": "private, no-cache", "ETag": etag}
+    if not_modified(request, etag):
+        return Response(status_code=304, headers=headers)
     return FileResponse(
         path,
         media_type=artifact.content_type,
         filename=_delivery_download_filename(db, artifact),
+        headers=headers,
     )
 
 
