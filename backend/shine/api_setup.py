@@ -628,6 +628,36 @@ def variant_recommendations(settings: SettingsDep):
     return recommend_variants(env)
 
 
+#: Short-lived cache of the (slow) models-directory scan, keyed by root+catalog.
+#: Switching pages must not re-walk the whole models tree every time; the durable
+#: verification ledger is the authority and this scan is only a fallback for
+#: variants the ledger has not proven yet.
+_INSPECT_CACHE: dict[tuple[str, str], tuple[float, set[str]]] = {}
+_INSPECT_CACHE_TTL = 120.0
+_INSPECT_CACHE_LOCK = threading.Lock()
+
+
+def _cached_present_components(root: str, catalog: dict) -> set[str]:
+    import time
+
+    from shine.comfyops.existing_installation import inspect as inspect_installation
+
+    key = (root, str(catalog.get("catalog_id") or ""))
+    now = time.monotonic()
+    with _INSPECT_CACHE_LOCK:
+        hit = _INSPECT_CACHE.get(key)
+        if hit and now - hit[0] < _INSPECT_CACHE_TTL:
+            return hit[1]
+    try:
+        report = inspect_installation(root, catalog)
+        present = {row["component_id"] for row in report.get("matches") or []}
+    except Exception:  # noqa: BLE001 - an unreadable directory is a fact
+        present = set()
+    with _INSPECT_CACHE_LOCK:
+        _INSPECT_CACHE[key] = (now, present)
+    return present
+
+
 @router.get("/variant-availability")
 def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     """本机实际准备好的 H3 方案清单：有就是有，没有就是没有。
@@ -641,7 +671,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     """
     from sqlalchemy import select as _select
 
-    from shine.comfyops.existing_installation import inspect as inspect_installation
     from shine.comfyops.models import ComfyInstance
     from shine.comfyops.variant_binding import load_binding
     from shine.comfyops.variant_readiness import readiness as variant_readiness
@@ -697,13 +726,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             rows.append(entry)
             continue
         required = set(manifest.get("required_component_ids") or [])
-        present: set[str] = set()
-        if adopted_root:
-            try:
-                report = inspect_installation(adopted_root, binding.catalog)
-                present = {row["component_id"] for row in report.get("matches") or []}
-            except Exception:  # noqa: BLE001 - an unreadable directory is a fact
-                present = set()
         try:
             readiness_report = variant_readiness(db, settings, binding, project_id)
         except Exception:  # noqa: BLE001 - the ledger may be unreadable
@@ -716,8 +738,16 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         # ``installed`` permanently false for such variants.
         weight_ids = {str(row.get("component_id")) for row in weights}
         required_ids = required or weight_ids
-        installed_by_scan = bool(required_ids) and required_ids <= present
         installed_by_evidence = bool(weights) and all(row.get("prepared") for row in weights)
+        # The durable verification ledger is the authority. Only fall back to a
+        # directory scan when the ledger does not already prove the weights are
+        # present: inspect_installation walks the whole models tree and is far
+        # too slow to run on every page switch (it timed out and made the page
+        # falsely report "本机没有"). A verified ledger skips the scan entirely.
+        present: set[str] = set()
+        if adopted_root and not installed_by_evidence:
+            present = _cached_present_components(adopted_root, binding.catalog)
+        installed_by_scan = bool(required_ids) and required_ids <= present
         entry["installed"] = installed_by_scan or installed_by_evidence
         entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
         # "Bound" is a separate fact from "verified": the bytes were checked,
