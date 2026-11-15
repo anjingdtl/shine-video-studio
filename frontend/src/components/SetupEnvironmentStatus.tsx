@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ChevronRight, Copy, FolderOpen, Loader2, RefreshCw, X,
+  AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, MonitorCheck, RefreshCw, X,
 } from 'lucide-react';
 import { api, json } from '../api';
 
@@ -313,6 +313,27 @@ export function SetupEnvironmentStatus({
                 {chip.ok ? <Check size={10} /> : <X size={10} />}{chip.label}
               </span>)}
             </div>}
+            {cap.two_step && !readOnly && (() => {
+              const filesReady = cap.two_step.files.state !== 'MISSING';
+              const run = cap.two_step.run.state;
+              if (run === 'READY') return null;
+              if (!filesReady) {
+                return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                  <Download size={12} /> 下载安装缺文件
+                </button>;
+              }
+              if (run === 'UNVERIFIED') {
+                return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onTrial?.(key)}>
+                  <MonitorCheck size={12} /> 真实试镜一次
+                </button>;
+              }
+              return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
+                onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                <Check size={12} /> 一键绑定渲染器并核对运行合同
+              </button>;
+            })()}
             {cap.missing_files.length > 0 && <button type="button" className="btn-text"
               onClick={() => setOpenFiles(openFiles === key ? null : key)}>
               <ChevronRight size={11} />

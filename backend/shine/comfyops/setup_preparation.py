@@ -708,12 +708,21 @@ def _step_target(factory, settings, task) -> dict[str, Any]:
 def _step_recipe(factory, settings, task) -> dict[str, Any]:
     """Write the recipe for exactly the capabilities that were authorized."""
     from shine.comfyops import deployment
+    from shine.comfyops.runtime_configuration import runtime_report
 
     target = task.get("target") or {}
     request = task.get("request") or {}
     capabilities = request.get("capabilities") or []
     if not target.get("instance_id"):
         return {"status": "FAILED", "code": "TARGET_NOT_RESOLVED", "detail": "还没有确认本机安装。"}
+    # Idempotent re-run: an already active and verified contract needs no new
+    # recipe. Regenerating would be refused while the owned renderer is running
+    # (STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION), turning a ready machine into a
+    # false failure. Keep the valid recipe and move on.
+    with factory() as db:
+        report = runtime_report(db, settings)
+    if report.get("status") == "ACTIVE" and report.get("services_verified"):
+        return {"status": "DONE", "detail": "运行合同已激活并核验，沿用现有配置，无需重新生成。"}
     results: dict[str, dict] = {}
     with factory() as db:
         for capability in capabilities:
