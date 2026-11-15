@@ -62,6 +62,16 @@ describe('空数据库与两层界面入口', () => {
 
   it('无任何项目：首启卡片出现，基础配置在导演模式内即可进入', async () => {
     emptyDatabase();
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/storage$/, respond: () => jsonResponse({
+      root: 'D:\\Shine', free_bytes: 100 * 1024 ** 3, free_gb: 100, requires_selection: false,
+    }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-recommendations$/, respond: () => jsonResponse({
+      tier: 'standard', host: { gpu: 'NVIDIA GeForce RTX 5080', vram_mb: 16303, ram_mb: 32768 },
+      recommended: [{ variant_id: 'h3-ref2va-int8-convrot', title: 'H3 INT8', acceptance_status: 'SUPPORTED',
+        status: 'SUPPORTED', usable_in_production: true, auto_download_allowed: true,
+        catalog_id: 'h3-ref2va-windows-x64', total_bytes: 1024 }],
+      candidates: [], blocked: [],
+    }) });
     const user = userEvent.setup();
     render(<App />);
     // 首次使用体验：明确的第一步，而不是一堆面板。
@@ -71,23 +81,22 @@ describe('空数据库与两层界面入口', () => {
     await user.click(screen.getByRole('button', { name: '打开基础配置' }));
     expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
-    // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
-    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    // 完整整备收进导演页：没有作品时确认按钮禁用，并明确要求先建作品。
+    // 空库也能整备机器：作品是可选的,不再挡住确认按钮。
+    expect(screen.getByText('没有作品也可以先整备机器')).toBeInTheDocument();
     expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
     const confirms = screen.getAllByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
     expect(confirms.length).toBeGreaterThan(0);
-    for (const button of confirms) expect(button).toBeDisabled();
+    for (const button of confirms) expect(button).toBeEnabled();
   });
 
-  it('无项目时依赖项目的操作有明确说明', async () => {
+  it('无项目时整备仍可开始,作品绑定稍后自动完成', async () => {
     emptyDatabase();
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole('button', { name: '打开基础配置' }));
     await screen.findByRole('heading', { name: '制作环境' });
-    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    expect(screen.getByText(/安装、生成方案和素材都要绑定到一个作品/)).toBeInTheDocument();
+    expect(screen.getByText('没有作品也可以先整备机器')).toBeInTheDocument();
+    expect(screen.getByText(/建好作品后，已准备的能力会自动绑定到它/)).toBeInTheDocument();
   });
 
   it('建立第一个项目后导演流程完整出现', async () => {

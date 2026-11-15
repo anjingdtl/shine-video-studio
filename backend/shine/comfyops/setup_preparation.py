@@ -43,6 +43,9 @@ TASK_KEY = "setup-preparation-task"
 LEASE_SECONDS = 300
 
 STEP_LABELS = {
+    "SCAN": "深搜本机已有资源",
+    "RECONCILE": "核验并登记已有字节",
+    "DOWNLOAD": "下载并安装缺失文件",
     "INSTANCE": "创建/补全本机 ComfyUI 实例",
     "TARGET": "确认本机安装与端口",
     "RECIPE": "生成受管运行配置",
@@ -50,11 +53,16 @@ STEP_LABELS = {
     "PROFILES": "登记生成方案",
     "VALIDATE": "核对运行合同",
     "IMAGE_VERIFY": "核对出图节点",
+    "IMAGE_SAMPLES": "生成三类真实出图小样",
 }
 
 
-def _steps_for(capabilities: list[str], *, verify_runtime: bool) -> list[str]:
-    steps = ["INSTANCE", "TARGET", "RECIPE"]
+def _steps_for(capabilities: list[str], *, verify_runtime: bool,
+               deep_scan: bool = False) -> list[str]:
+    steps = []
+    if deep_scan:
+        steps.append("SCAN")
+    steps.extend(["RECONCILE", "DOWNLOAD", "INSTANCE", "TARGET", "RECIPE"])
     if "image" in capabilities:
         steps.append("IMAGE_BIND")
     if "h3" in capabilities:
@@ -63,17 +71,21 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool) -> list[str]:
             steps.append("VALIDATE")
     if "image" in capabilities:
         steps.append("IMAGE_VERIFY")
+        if verify_runtime:
+            steps.append("IMAGE_SAMPLES")
     return steps
 
 
-def enqueue(db, *, project_id: str, capabilities: list[str], installation_path: str | None = None,
+def enqueue(db, *, project_id: str | None, capabilities: list[str], installation_path: str | None = None,
             port: int | None = None, variant_id: str | None = None,
             verify_runtime: bool = True, actor: str = "local-user",
-            settings=None) -> dict[str, Any]:
+            settings=None, deep_scan: bool = False) -> dict[str, Any]:
     """Freeze one authorization into a resumable task.
 
     Enqueuing the same request twice returns the running task instead of
     creating a second one: the physical work is the same, so the identity is.
+    ``project_id`` may be None: the machine can be prepared before any work
+    exists; project-scoped steps then skip themselves by name.
     """
     from shine.services import add_audit
 
@@ -82,13 +94,15 @@ def enqueue(db, *, project_id: str, capabilities: list[str], installation_path: 
     current = dict(existing.value) if existing is not None and isinstance(existing.value, dict) else {}
     if current.get("status") in {"QUEUED", "RUNNING"}:
         if (current.get("project_id") == project_id
-                and sorted(current.get("request", {}).get("capabilities") or []) == capabilities):
+                and sorted(current.get("request", {}).get("capabilities") or []) == capabilities
+                and current.get("request", {}).get("variant_id") == variant_id
+                and current.get("request", {}).get("port") == port):
             return current
         # A different request supersedes the old one: the previous task is
         # cancelled by name so nothing later claims to be "in progress".
         current["status"] = "SUPERSEDED"
         current["message"] = "已被新的准备请求取代"
-    steps = _steps_for(capabilities, verify_runtime=verify_runtime)
+    steps = _steps_for(capabilities, verify_runtime=verify_runtime, deep_scan=deep_scan)
     if settings is not None:
         # The instance ladder only belongs in the chain when the machine has no
         # usable installation yet; an existing (possibly adopted) installation
@@ -115,8 +129,10 @@ def enqueue(db, *, project_id: str, capabilities: list[str], installation_path: 
             "port": port,
             "variant_id": variant_id,
             "verify_runtime": verify_runtime,
+            "deep_scan": deep_scan,
         },
         "target": {},
+        "downloads": {},
         "steps": [{"id": step, "label": STEP_LABELS[step], "status": "PENDING", "detail": None}
                   for step in steps],
         "result": {},
@@ -258,7 +274,7 @@ def advance(factory, settings, worker_id: str) -> str | None:
     step_id = str(pending["id"])
     task["current"] = step_id
     try:
-        if step_id != "TARGET":
+        if step_id not in {"TARGET", "SCAN", "RECONCILE", "DOWNLOAD"}:
             with factory() as db:
                 live = _live_installation_work(db, str(task.get("project_id") or ""))
             if live:
@@ -321,6 +337,9 @@ def _message_of(exc: Exception) -> str:
 
 def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str, Any]:
     handler = {
+        "SCAN": _step_scan,
+        "RECONCILE": _step_reconcile,
+        "DOWNLOAD": _step_download,
         "INSTANCE": _step_instance,
         "TARGET": _step_target,
         "RECIPE": _step_recipe,
@@ -328,8 +347,210 @@ def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str
         "PROFILES": _step_profiles,
         "VALIDATE": _step_validate,
         "IMAGE_VERIFY": _step_image_verify,
+        "IMAGE_SAMPLES": _step_image_samples,
     }[step_id]
     return handler(factory, settings, task)
+
+
+def _step_scan(factory, settings, task) -> dict[str, Any]:
+    """Advance the bounded deep scan; the page closing never stops it."""
+    from shine.comfyops import resource_discovery
+
+    with factory() as db:
+        status = resource_discovery.read_state(db)["scan"].get("status")
+        if status not in {"QUEUED", "RUNNING"}:
+            resource_discovery.start_scan(db, actor="worker:setup")
+    with factory() as db:
+        result = resource_discovery.advance_scan(db, budget_s=2.0)
+    if result.get("status") in {"QUEUED", "RUNNING"}:
+        return {"status": "PENDING",
+                "detail": f"正在深搜本机资源（剩余 {result.get('remaining', 0)} 批，关闭页面也会继续）。"}
+    return {"status": "DONE", "detail": "本机资源深搜完成，已有文件进入候选台账。"}
+
+
+def _step_reconcile(factory, settings, task) -> dict[str, Any]:
+    """Hash-verify and register the bytes this machine already has.
+
+    Read-only against the person's own installation; adoption is the single
+    authorization this preparation already carries.  A capability whose
+    reconcile fails is named, but the download step may still fetch its bytes.
+    """
+    from shine.comfyops.setup_reconcile import reconcile_installation
+    from shine.comfyops.setup_summary import resolve_installation
+
+    request = task.get("request") or {}
+    capabilities = [row for row in request.get("capabilities") or [] if row in {"h3", "image"}]
+    if not capabilities:
+        return {"status": "SKIPPED", "detail": "这次没有需要核验已有字节的能力。"}
+    with factory() as db:
+        resolved = resolve_installation(db, settings, path=request.get("installation_path"))
+        selected = resolved.get("selected") or {}
+    root = selected.get("root")
+    if not root:
+        return {"status": "DONE", "detail": "还没有已发现的安装，跳过核验，交给实例阶梯。"}
+    notes: list[str] = []
+    failures = 0
+    for capability in capabilities:
+        with factory() as db:
+            db.rollback()  # hashing and adoption own their transaction boundaries
+            try:
+                result = reconcile_installation(
+                    db, settings, path=root, project_id=task.get("project_id"),
+                    capability=capability, adopt=True, port=request.get("port"),
+                    actor="worker:setup",
+                    variant_id=request.get("variant_id") if capability == "h3" else None)
+                notes.append(f"{capability}:{result.get('status')}")
+            except Exception as exc:  # noqa: BLE001 - the named refusal is evidence
+                failures += 1
+                notes.append(f"{capability}:{_code_of(exc)}")
+    if failures == len(capabilities):
+        return {"status": "FAILED", "code": "RECONCILE_FAILED", "detail": "；".join(notes)}
+    return {"status": "DONE", "detail": "已有字节核验登记：" + "；".join(notes)}
+
+
+_DOWNLOAD_ACTIVE = {"QUEUED", "SUBMIT_INTENT", "INSTALLING", "DOWNLOADING", "VERIFYING",
+                    "WAITING_FOR_TARGET", "RETRY_WAIT", "VALIDATING_RUNTIME_CONTRACT", "PAUSED"}
+_DOWNLOAD_SUCCESS = {"FILES_VERIFIED_PENDING_RUNTIME", "RUNTIME_CONTRACT_READY"}
+
+
+def _step_download(factory, settings, task) -> dict[str, Any]:
+    """Fetch exactly the missing pinned files, through the existing installer.
+
+    The plan is created by the same admission endpoint the UI uses, approved
+    with this task as evidence, and executed by the resident installation
+    worker.  Each tick re-reads the attempt's real stage; a finished download
+    is never re-queued and a failed one is named, not silently retried forever.
+    """
+    from shine.comfyops.models import InstallationAttempt
+    from shine.comfyops.setup_summary import capability_report, resolve_installation
+
+    request = task.get("request") or {}
+    capabilities = request.get("capabilities") or []
+    downloads = task.setdefault("downloads", {})
+
+    pending: list[str] = []
+    for capability, info in list(downloads.items()):
+        with factory() as db:
+            attempt = db.get(InstallationAttempt, info.get("attempt_id"))
+        if attempt is None:
+            return {"status": "FAILED", "code": "DOWNLOAD_ATTEMPT_MISSING",
+                    "detail": f"{capability} 的安装尝试记录不在了，请重新发起整备。"}
+        stage = attempt.stage or attempt.status
+        if attempt.status in {"FAILED", "FAILED_RECONCILE_REQUIRED"} or stage in {
+                "NEEDS_REVIEW", "CANCELLED", "FAILED_RETRYABLE"}:
+            return {"status": "FAILED", "code": attempt.error_code or "DOWNLOAD_FAILED",
+                    "detail": f"{capability} 下载未完成：{attempt.error_message or stage}。"
+                              "已下载的字节会保留，核对后可继续。"}
+        if stage in _DOWNLOAD_SUCCESS:
+            info["done"] = True
+            continue
+        if stage in _DOWNLOAD_ACTIVE or attempt.status in _DOWNLOAD_ACTIVE:
+            pending.append(capability)
+        else:
+            return {"status": "FAILED", "code": "DOWNLOAD_STATE_UNKNOWN",
+                    "detail": f"{capability} 的安装停在未知状态 {stage}，需要核对。"}
+    if pending:
+        return {"status": "PENDING",
+                "detail": f"正在下载并安装：{'、'.join(pending)}（关闭页面也会继续）。"}
+
+    with factory() as db:
+        resolved = resolve_installation(db, settings, path=request.get("installation_path"))
+        selected = resolved.get("selected") or {}
+    plans_needed: list[tuple[str, list[str], str]] = []
+    for capability in capabilities:
+        if downloads.get(capability, {}).get("done"):
+            continue  # this authorization already fetched and verified the bytes
+        with factory() as db:
+            report = capability_report(db, settings, capability, installation=selected,
+                                       project_id=task.get("project_id"),
+                                       variant_id=request.get("variant_id") if capability == "h3" else None)
+        missing = report.get("missing_files") or []
+        components = sorted({row["component_id"] for row in missing})
+        if capability == "h3":
+            from shine.comfyops.setup_summary import runtime_closure_gap
+            with factory() as db:
+                gap = runtime_closure_gap(db, settings, selected)
+            components = sorted(set(components) | set(gap["missing_components"]))
+        if components:
+            plans_needed.append((capability, components, report.get("catalog") or ""))
+    if not plans_needed:
+        return {"status": "DONE", "detail": "固定清单的文件都已在本机，无需下载。"}
+
+    from shine.api_setup import InstallPlanRequest, install_plan
+    from shine.comfyops.instances import approve_lifecycle_plan
+    from shine.comfyops.local import queue_install_attempt
+    from shine.comfyops.models import InstallationPlan
+    from shine.comfyops.storage import disk_info
+    from shine.services import add_audit
+
+    for capability, components, catalog_id in plans_needed:
+        with factory() as db:
+            free = disk_info(settings.data_dir).get("free_bytes", 0)
+            body = InstallPlanRequest(
+                catalog=catalog_id or ("qwen-image-2.1-windows-x64" if capability == "image"
+                                       else "h3-ref2va-windows-x64"),
+                components=components[:14], project_id=task.get("project_id"),
+                disk_free=int(free),
+                variant_id=request.get("variant_id") if capability == "h3" else None,
+                candidate_download_acknowledged=capability == "h3",
+            )
+            try:
+                plan_view = install_plan(body=body, settings=settings, db=db)
+            except Exception as exc:  # noqa: BLE001 - admission refusal is the answer
+                db.rollback()
+                return {"status": "FAILED", "code": _code_of(exc),
+                        "detail": f"{capability} 的安装计划被拒绝：{_message_of(exc)}"}
+            plan_id = plan_view["plan_id"]
+            row = db.get(InstallationPlan, plan_id)
+            approve_lifecycle_plan(db, row, actor="worker:setup",
+                                   evidence=f"setup-preparation:{task.get('task_id')}")
+            add_audit(db, "worker:setup", "SETUP_PREPARATION_DOWNLOAD_APPROVED",
+                      "installation_plan", plan_id,
+                      {"task_id": task.get("task_id"), "capability": capability},
+                      project_id=task.get("project_id"))
+            digest = row.sha256
+        attempt_id, _reused = queue_install_attempt(
+            factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED")
+        downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id}
+    return {"status": "PENDING",
+            "detail": f"已排队下载：{'、'.join(row[0] for row in plans_needed)}（关闭页面也会继续）。"}
+
+
+def _step_image_samples(factory, settings, task) -> dict[str, Any]:
+    """Queue the three real sample families once, then wait for their result.
+
+    The samples are rendered by the ordinary image queue under the same GPU
+    lease rules as production; this step only holds the run id and reports the
+    outcome.  Without a project there is nothing to attach the samples to, so
+    the step skips itself by name instead of inventing evidence.
+    """
+    from shine.materialprep import service
+    from shine.materialprep.models import MaterialRun
+
+    project_id = task.get("project_id")
+    if not project_id:
+        return {"status": "SKIPPED",
+                "detail": "机器级整备：创建作品后会自动补三类真实小样。"}
+    result = task.get("result") or {}
+    run_id = result.get("image_sample_run_id")
+    if not run_id:
+        with factory.begin() as db:
+            batch = service.create_validation_batch(
+                db, str(project_id), families=["character", "scene", "prop"],
+                idempotency_key=f"setup-samples-{task.get('task_id')}", rights_id=None)
+            run_id = batch.get("run_id")
+            result["image_sample_run_id"] = run_id
+            task["result"] = result
+        return {"status": "PENDING", "detail": f"三类真实小样已排队（批次 {str(run_id)[:8]}…）。"}
+    with factory() as db:
+        run = db.get(MaterialRun, run_id)
+        status = run.status if run is not None else None
+    if status in {"COMPLETED", "NEEDS_REVIEW"}:
+        return {"status": "DONE", "detail": "三类真实小样已生成，等待人工评审。"}
+    if status in {"FAILED", "CANCELLED"}:
+        return {"status": "FAILED", "code": "IMAGE_SAMPLES_FAILED",
+                "detail": f"出图小样未完成：{status}。"}
+    return {"status": "PENDING", "detail": f"出图小样进行中：{status or '排队中'}。"}
 
 
 def _step_instance(factory, settings, task) -> dict[str, Any]:
@@ -510,6 +731,9 @@ def _step_image_bind(factory, settings, task) -> dict[str, Any]:
 def _step_profiles(factory, settings, task) -> dict[str, Any]:
     from shine.api_setup import _register_project_profiles
 
+    if not task.get("project_id"):
+        return {"status": "SKIPPED",
+                "detail": "机器级整备：创建作品后会幂等绑定标准生成方案。"}
     request = task.get("request") or {}
     with factory() as db:
         registered = _register_project_profiles(db, str(task.get("project_id")),
@@ -522,6 +746,9 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
     from shine.comfyops.runtime_configuration import activate_runtime, runtime_report
     from shine.comfyops.service_validation import validate_services
 
+    if not task.get("project_id"):
+        return {"status": "SKIPPED",
+                "detail": "机器级整备：运行合同核验在作品绑定后执行。"}
     with factory() as db:
         report = runtime_report(db, settings)
     if report.get("status") == "ACTIVE" and report.get("services_verified"):

@@ -183,14 +183,14 @@ export default function DirectorSetupPanel({
 
     {!projectId && <section className="setup-needs-project card">
       <div>
-        <b>还差一个作品</b>
-        <p>安装、生成方案和素材都要绑定到一个作品。先起个名字即可，之后可以改。</p>
+        <b>没有作品也可以先整备机器</b>
+        <p>检索、下载、登记和验证都是机器级的，现在就能开始。建好作品后，已准备的能力会自动绑定到它。</p>
       </div>
       <div className="create-project">
         <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)}
           placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-        <button className="btn-secondary" title="创建作品后即可继续配置" disabled={!projectTitle.trim()} onClick={createProject}>创建并继续</button>
-        <GuideTip>建好作品后，这一页的按钮就会亮起来</GuideTip>
+        <button className="btn-secondary" title="也可以稍后再建" disabled={!projectTitle.trim()} onClick={createProject}>创建作品</button>
+        <GuideTip>也可以先点下面的「开始准备」，作品稍后再建</GuideTip>
       </div>
     </section>}
 

@@ -241,7 +241,7 @@ def test_prepare_execute_is_idempotent_and_survives_the_browser(prep):
     summary = client.get(f"/api/v1/setup/summary?project_id={project}").json()
     assert summary["preparation"]["status"] == "QUEUED"
     assert summary["preparation"]["task_id"] == task_id
-    assert summary["preparation"]["current"] == "TARGET"
+    assert summary["preparation"]["current"] == "RECONCILE"
 
 
 def test_prepare_plan_never_promises_a_change_it_will_not_make(prep):

@@ -28,7 +28,8 @@ def _plan_row(db, project_id, status="AWAITING_APPROVAL", files=None):
 
 def test_steps_include_instance_first():
     steps = setup_preparation._steps_for(["h3"], verify_runtime=True)
-    assert steps[0] == "INSTANCE"
+    # 一次授权从核验已有字节开始,下载缺项,然后才创建实例。
+    assert steps[:3] == ["RECONCILE", "DOWNLOAD", "INSTANCE"]
     assert "TARGET" in steps and "VALIDATE" in steps
 
 
@@ -112,14 +113,15 @@ def test_enqueue_includes_instance_only_on_bare_machine(studio, monkeypatch):
     with factory() as db:
         bare = setup_preparation.enqueue(db, project_id=project_id,
                                          capabilities=["h3"], settings=settings)
-    assert bare["steps"][0]["id"] == "INSTANCE"
+    assert [row["id"] for row in bare["steps"]][:3] == ["RECONCILE", "DOWNLOAD", "INSTANCE"]
     monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
                         lambda db, settings, path=None: {"selected": {"instance_id": "i-1"}})
     project2 = create_project(client, title="已有安装")
     with factory() as db:
         existing = setup_preparation.enqueue(db, project_id=project2,
                                              capabilities=["h3"], settings=settings)
-    assert existing["steps"][0]["id"] == "TARGET"
+    assert existing["steps"][0]["id"] == "RECONCILE"
+    assert "INSTANCE" not in [row["id"] for row in existing["steps"]]
 
 
 def test_runtime_closure_gap_bare_machine(studio):

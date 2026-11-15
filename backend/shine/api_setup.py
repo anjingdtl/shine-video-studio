@@ -30,7 +30,7 @@ class InstallPlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     catalog: str = "h3-ref2va-windows-x64"
     components: list[str] = Field(min_length=1, max_length=14)
-    project_id: str
+    project_id: str | None = None
     disk_free: int = Field(ge=0)
     #: The variant this plan installs.  It is normally derived from the
     #: requested components; naming it makes the binding explicit.
@@ -1725,7 +1725,7 @@ class InstallationChoiceRequest(BaseModel):
 
 class PrepareRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    project_id: str
+    project_id: str | None = None
     capabilities: list[Literal["h3", "image", "vlm", "asr"]] = Field(min_length=1, max_length=4)
     installation_path: str | None = Field(default=None, max_length=1024)
     port: int | None = Field(default=None, ge=1024, le=65535)
@@ -1733,6 +1733,9 @@ class PrepareRequest(BaseModel):
     #: Runtime contract validation starts services for a moment.  It is part of
     #: the same authorization, but a person may decline it explicitly.
     verify_runtime: bool = True
+    #: Run the bounded deep scan before reconciling, so scattered resources on
+    #: other drives are part of the same preparation.
+    deep_scan: bool = False
 
 
 class PreparePlanRequest(PrepareRequest):
@@ -1877,7 +1880,8 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     from shine.comfyops.setup_summary import capability_report, resolve_installation, runtime_closure_gap
     from shine.services import require_project
 
-    require_project(db, body.project_id)
+    if body.project_id:
+        require_project(db, body.project_id)
     resolved = resolve_installation(db, settings, path=body.installation_path,
                                     discovered=_discovered_roots(settings, db))
     selected = resolved.get("selected") or {}
@@ -1937,11 +1941,12 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     from shine.comfyops.setup_preparation import enqueue
     from shine.services import require_project
 
-    require_project(db, body.project_id)
+    if body.project_id:
+        require_project(db, body.project_id)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
                     installation_path=body.installation_path, port=body.port,
                     variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,
-                    settings=settings)
+                    settings=settings, deep_scan=body.deep_scan)
     db.commit()
     return {"status": value.get("status"), "task_id": value.get("task_id"),
             "steps": [row["id"] for row in value.get("steps") or []],
