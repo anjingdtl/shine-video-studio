@@ -128,6 +128,8 @@ const IMAGE_BLOCKER_LABELS: Record<string, { text: string; next: string }> = {
   IMAGE_MODEL_SIZE_MISMATCH: { text: '模型权重文件大小与固定清单不一致。', next: '重新下载或导入该权重；核验通过前不会使用它。' },
   IMAGE_MODEL_HASH_MISMATCH: { text: '模型权重文件没有通过逐字节哈希核验。', next: '重新下载或导入该权重；核验通过前不会使用它。' },
   IMAGE_GRAPH_NOT_VERIFIED: { text: '出图工作流还没有在本机渲染器上验证。', next: '打开本机出图配置，运行一次工作流验证。' },
+  IMAGE_RENDERER_GONE: { text: '本机出图渲染器已经退出，端口不再监听；崩溃证据（启动参数与退出码）在出图配置里可查。', next: '打开本机出图配置，按崩溃证据核对渲染器的解释器与原生库，再重新启动渲染器。' },
+  IMAGE_RENDERER_EXITED_DURING_STARTUP: { text: '出图渲染器在启动过程中自己退出了，没有开始监听端口。', next: '打开本机出图配置查看渲染器启动日志与退出码，修复后重新启动渲染器。' },
 };
 
 type ImageBlockerRow = { code: string; text: string; next: string };

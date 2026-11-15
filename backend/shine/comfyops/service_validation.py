@@ -52,6 +52,8 @@ REVIEW_ROLES = {
     "VLM": "vlm_reviewer",
     "ASR": "asr_reviewer",
 }
+#: How much of the renderer's own log is read when the tail is needed.
+RENDERER_LOG_TAIL_BYTES = 128 * 1024
 
 
 def _port_free(port: int) -> bool:
@@ -409,6 +411,38 @@ def _advisory_review_status(blockers: list[dict]) -> dict:
     }
 
 
+def _renderer_log_lines(log_file) -> list[str]:
+    """The last lines of the renderer's own log, read without loading it all.
+
+    Only the tail of the file is read: a renderer that has been running for
+    days leaves a log that must not be pulled into memory on every status
+    poll.
+    """
+    path = Path(str(log_file))
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - RENDERER_LOG_TAIL_BYTES))
+            chunk = stream.read()
+    except OSError:
+        return []
+    return chunk.decode("utf-8", errors="replace").splitlines()[-400:]
+
+
+def renderer_log_tail(log_file, *, lines: int = 60) -> list[str]:
+    """The plain tail of the renderer's log, for a crash diagnosis.
+
+    A native crash writes no traceback, so the last thing the renderer did say
+    is the only context the exit code has.
+    """
+    if not log_file:
+        return []
+    return _renderer_log_lines(log_file)[-lines:]
+
+
 def renderer_log_evidence(log_file) -> dict:
     """Read-only tail of the managed renderer log with import failures named.
 
@@ -420,11 +454,8 @@ def renderer_log_evidence(log_file) -> dict:
         return {}
     path = Path(str(log_file))
     evidence: dict = {"renderer_log": str(path), "import_errors": []}
-    if not path.is_file():
-        return evidence
-    try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()[-400:]
-    except OSError:
+    lines = _renderer_log_lines(log_file)
+    if not lines:
         return evidence
     markers = ("Cannot import", "Failed to load", "ImportError",
                "ModuleNotFoundError", "Traceback")

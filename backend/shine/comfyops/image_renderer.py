@@ -47,6 +47,17 @@ __all__ = ["IMAGE_STARTUP_PREFIX"]
 RECIPE_RELATIVE_PATH = ("setup", "managed_recipe.json")
 """The recipe ``generate_configuration`` wrote for this installation."""
 
+#: The named reason a renderer that is no longer running is reported with.
+RENDERER_GONE_CODE = "IMAGE_RENDERER_GONE"
+#: The named reason a renderer that exited while it was starting is reported with.
+RENDERER_EXITED_CODE = "IMAGE_RENDERER_EXITED_DURING_STARTUP"
+#: The environment variables that decide which interpreter and which native
+#: libraries a child process actually loads.  They are recorded with the start
+#: because a renderer that crashes inside its own torch build is almost always
+#: a renderer that loaded a foreign torch.
+RENDERER_ENV_EVIDENCE = ("PYTHONPATH", "PYTHONHOME", "PYTHONNOUSERSITE",
+                         "PYTHONSTARTUP", "VIRTUAL_ENV", "CONDA_PREFIX")
+
 
 def image_startup_key(instance_id: str) -> str:
     if not isinstance(instance_id, str) or not instance_id or len(instance_id) > 96:
@@ -111,11 +122,30 @@ def _record(factory, key: str, value: dict[str, Any]) -> None:
             row.value = value
 
 
+def _owned_group_exit_code(group) -> int | None:
+    """The exit code of an owned group that has already exited, when provable.
+
+    ``None`` means the group is still running or its exit cannot be proven;
+    uncertainty never becomes a crash report.
+    """
+    if group is None:
+        return None
+    try:
+        return group.exit_code_if_stopped()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _wait_for_owned_listener(group, port: int, *, timeout: float = 600.0) -> dict[str, Any]:
     """Wait until the only loopback listener belongs to the owned group.
 
     A real renderer loads thousands of node types before it answers, so the
-    wait is generous: the startup intent is already durable.
+    wait is generous: the startup intent is already durable.  A renderer that
+    dies while it starts (a native crash inside its own torch build, for
+    example) never binds the port, so waiting for the full timeout would hide
+    the crash behind a timeout.  The owned group is polled instead: once the
+    whole group has exited, the exit code is reported and the start fails
+    with a named reason.
     """
     deadline = time.monotonic() + timeout
     while True:
@@ -128,6 +158,13 @@ def _wait_for_owned_listener(group, port: int, *, timeout: float = 600.0) -> dic
             if not birth or not group.owns(pid, birth):
                 raise HTTPException(409, "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED")
             return {"pid": pid, "birth": birth}
+        exit_code = _owned_group_exit_code(group)
+        if exit_code is not None:
+            raise HTTPException(409, {
+                "code": RENDERER_EXITED_CODE,
+                "detail": "渲染器进程在启动过程中自己退出了，没有开始监听端口。",
+                "exit_code": exit_code,
+            })
         if time.monotonic() >= deadline:
             raise HTTPException(409, "IMAGE_RENDERER_LISTENER_TIMEOUT")
         time.sleep(0.05)
@@ -151,6 +188,111 @@ def image_renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
         "stage": record.get("stage"),
         "recorded_at": record.get("recorded_at"),
         "recipe_path": str(recipe_path(settings)),
+    }
+
+
+def renderer_log_path(settings, instance_id: str) -> str:
+    """Where the managed renderer writes its own stdout/stderr."""
+    return str(Path(settings.comfyops_dir) / "logs" / f"renderer-{instance_id}.log")
+
+
+def renderer_crash_evidence(db, settings, *, instance_id: str, state: str | None = None) -> dict[str, Any]:
+    """What is known about a renderer that is not serving the image runtime.
+
+    A native crash inside the renderer's own torch build leaves no traceback
+    and no log line: the process is simply gone.  This bundle is the evidence
+    a later diagnosis needs - the parameters of the last start, the exit code
+    the kernel reported and the tail of the renderer's own log - so the cause
+    can be compared with the last working start instead of guessed.  It starts
+    nothing, stops nothing and never invents a cause it cannot prove.
+
+    ``state`` may be passed by a caller that already probed the process, so
+    the physical facts are read once per request and not twice.
+    """
+    if not instance_id:
+        return {"instance_id": "", "state": "NOT_BOUND", "crashed": False, "code": None,
+                "launch": {}, "exit_code": None, "error_code": None}
+    row = db.get(AppSetting, image_startup_key(instance_id))
+    record = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
+    state = state or (managed_process_state(record) if record else "NOT_STARTED")
+    error_code = record.get("error_code")
+    evidence: dict[str, Any] = {
+        "instance_id": instance_id,
+        "state": state,
+        "stage": record.get("stage"),
+        "crashed": False,
+        "code": None,
+        "error_code": error_code,
+        "exit_code": record.get("exit_code"),
+        "recorded_at": record.get("recorded_at"),
+        "stopped_reason": record.get("stopped_reason"),
+        "launch": record.get("launch") if isinstance(record.get("launch"), dict) else {},
+    }
+    if state == "GONE":
+        # The recorded renderer was launched and is provably not there any more.
+        evidence["crashed"] = True
+        evidence["code"] = RENDERER_GONE_CODE
+    elif record.get("stopped_reason") == "renderer_gone":
+        # The record was normalized after the renderer died; the reason stays.
+        evidence["crashed"] = True
+        evidence["code"] = RENDERER_GONE_CODE
+    elif error_code:
+        # A start that failed with a named reason keeps that reason.
+        evidence["crashed"] = True
+        evidence["code"] = str(error_code)
+    log_file = renderer_log_path(settings, instance_id)
+    from shine.comfyops.service_validation import renderer_log_evidence, renderer_log_tail
+
+    try:
+        evidence.update(renderer_log_evidence(log_file))
+        evidence["tail"] = renderer_log_tail(log_file)
+    except Exception:  # noqa: BLE001 - the log is evidence, never a gate
+        evidence["renderer_log"] = log_file
+        evidence["import_errors"] = []
+        evidence["tail"] = []
+    return evidence
+
+
+def renderer_blocker(db, settings, *, instance_id: str, state: str | None = None) -> dict[str, Any] | None:
+    """The named blocker when the renderer cannot serve the image runtime.
+
+    ``None`` means there is nothing to report: the renderer was never
+    started, it is running, or its state cannot be proven.  Uncertainty is
+    never reported as a crash.
+    """
+    evidence = renderer_crash_evidence(db, settings, instance_id=instance_id, state=state)
+    if not evidence.get("crashed"):
+        return None
+    return {
+        "code": evidence.get("code") or RENDERER_GONE_CODE,
+        "exit_code": evidence.get("exit_code"),
+        "renderer_log": evidence.get("renderer_log"),
+        "launch": evidence.get("launch") or {},
+    }
+
+
+def _launch_evidence(argv, cwd, env, port, recipe_sha256, renderer) -> dict[str, Any]:
+    """The parameters of one start, recorded with the start itself.
+
+    The handoff token and every other environment *value* stays out of this
+    record: only the variables that decide which interpreter and which native
+    libraries the child process loads are kept, because those are the facts a
+    later diagnosis compares against the last working start.
+    """
+    from shine.comfyops.host_env import PINNED_TORCH_WHEEL
+
+    environment = env if isinstance(env, dict) else {}
+    interpreter = str(Path(argv[0]).resolve()) if argv else ""
+    return {
+        "interpreter": interpreter,
+        "argv": [str(item) for item in argv],
+        "cwd": str(cwd),
+        "port": port,
+        "interpreter_env": {key: str(environment.get(key, "")) for key in RENDERER_ENV_EVIDENCE},
+        "recipe_sha256": recipe_sha256,
+        "adapter_sha256": renderer.get("adapter_sha256"),
+        "pinned_torch": PINNED_TORCH_WHEEL,
+        "recorded_at": utcnow().isoformat(),
     }
 
 
@@ -275,7 +417,9 @@ def _normalize_provably_dead_record(factory, instance_id: str, *, actor: str) ->
         return False
     if not _provably_gone(record):
         return False
-    _mark_stopped(factory, instance_id, record, actor=actor)
+    # The renderer died on its own: the reason is kept so the crash stays
+    # visible after the record is normalized into a stopped one.
+    _mark_stopped(factory, instance_id, record, actor=actor, reason="renderer_gone")
     _clear_image_marks(factory, instance_id, (record.get("process") or {}).get("job_name"))
     return True
 
@@ -377,8 +521,10 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                 run.status = "STOPPED"
     group = None
     process = None
+    launch: dict[str, Any] = {}
     try:
         argv, cwd, env, pins, token, port = build_renderer_launch(renderer)
+        launch = _launch_evidence(argv, cwd, env, port, recipe_sha256, renderer)
         group = OwnedProcessGroup.launch(
             argv, cwd=cwd, env=env, pinned_files=pins,
             job_name="Local\\ShineHandoff-" + uuid4().hex,
@@ -387,7 +533,7 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         process = {"pid": group.pid, "birth": birth, "job_name": group.job_name}
         if not birth or not group.owns(group.pid, birth):
             raise HTTPException(409, "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED")
-        _record(factory, key, {**intent, "stage": "LAUNCHED", "process": process})
+        _record(factory, key, {**intent, "stage": "LAUNCHED", "process": process, "launch": launch})
         listener = _wait_for_owned_listener(group, port)
         base_url = f"http://127.0.0.1:{port}"
         supervisor = RendererSupervisor(group, base_url, token, renderer["adapter_sha256"])
@@ -460,8 +606,16 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
                   else (detail or {}).get("code") if isinstance(detail, dict) else None)
         failed = {**intent, "stage": "FAILED", "error": type(exc).__name__,
                   "failed_at": utcnow().isoformat()}
+        if launch:
+            failed["launch"] = launch
         if isinstance(reason, str) and reason:
             failed["error_code"] = reason
+        exit_code = _owned_group_exit_code(group)
+        if exit_code is not None:
+            # The kernel reported how the renderer ended.  A native crash shows
+            # up here as an access violation code; the number is the only
+            # evidence such a crash leaves behind.
+            failed["exit_code"] = exit_code
         if group is not None:
             try:
                 group.terminate(timeout=15)
@@ -559,7 +713,7 @@ def _stop_image_renderer_locked(factory, settings, *, instance_id: str, actor: s
                 row.status = "STOPPED"
         return {"status": "STOPPED", "instance_id": instance_id, "outcome": "already_stopped"}
     if state == "GONE":
-        _mark_stopped(factory, instance_id, record)
+        _mark_stopped(factory, instance_id, record, reason="renderer_gone")
         _clear_image_marks(factory, instance_id, job_name)
         return {"status": "STOPPED", "instance_id": instance_id, "outcome": "recorded_stopped"}
     if state != "RUNNING":
@@ -642,7 +796,8 @@ def _without_image_marks(payload: dict[str, Any]) -> dict[str, Any]:
     return cleaned
 
 
-def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str = "worker") -> None:
+def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str = "worker",
+                  reason: str = "operator_release") -> None:
     job_name = (record.get("process") or {}).get("job_name")
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
@@ -657,7 +812,7 @@ def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str 
         if row is not None:
             value = dict(row.value) if isinstance(row.value, dict) else {}
             value.update({"stage": "STOPPED", "stopped_at": utcnow().isoformat(),
-                          "stopped_reason": "operator_release"})
+                          "stopped_reason": reason})
             row.value = value
         add_audit(db, actor, "IMAGE_RENDERER_STOPPED", "comfy_instance", instance_id,
                   {"job_name": job_name})

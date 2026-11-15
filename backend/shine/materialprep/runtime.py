@@ -310,6 +310,19 @@ def _renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
     return image_renderer_state(db, settings, instance_id)
 
 
+def _renderer_blocker(db, settings, instance_id: str, *, state: str | None = None) -> dict[str, Any] | None:
+    """The named blocker of a renderer that cannot serve this runtime.
+
+    ``None`` when the renderer was never started, is running, or cannot be
+    proven either way: an unproven state is a refusal to guess, not a crash.
+    """
+    if not instance_id:
+        return None
+    from shine.comfyops.image_renderer import renderer_blocker
+
+    return renderer_blocker(db, settings, instance_id=instance_id, state=state)
+
+
 def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dict[str, Any]:
     """The four-layer report the setup card and the generate gate both read.
 
@@ -343,6 +356,8 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         persist_verification(settings, config, files)
     graph_report = verify_graph_against_object_info(object_info) if object_info else None
     fingerprint = current_fingerprint(config, graph_report=graph_report)
+    renderer = _renderer_state(db, settings, config.instance_id)
+    renderer_blocker = _renderer_blocker(db, settings, config.instance_id, state=renderer.get("state"))
 
     layer = LAYER_NOT_CONFIGURED
     blockers: list[dict[str, Any]] = []
@@ -356,7 +371,13 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         blockers.extend(files["problems"])
     else:
         layer = LAYER_FILES_VERIFIED
-        if graph_report is None:
+        if renderer_blocker is not None:
+            # A renderer that is gone has its own cause.  Reporting it as an
+            # unverified graph would hide the reason the picture cannot be
+            # rendered and send the person to the wrong place.
+            blockers.append({"code": renderer_blocker["code"], "layer": LAYER_GRAPH_VERIFIED,
+                             **{key: value for key, value in renderer_blocker.items() if key != "code"}})
+        elif graph_report is None:
             blockers.append({"code": "IMAGE_GRAPH_NOT_VERIFIED", "layer": LAYER_GRAPH_VERIFIED})
         elif not graph_report["complete"]:
             blockers.append({"code": "IMAGE_GRAPH_NOT_VERIFIED", **graph_report})
@@ -364,7 +385,6 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
             layer = LAYER_GRAPH_VERIFIED
 
     verified = render_verified_families(db, fingerprint) if layer == LAYER_GRAPH_VERIFIED else {}
-    renderer = _renderer_state(db, settings, config.instance_id)
     families = {
         family: {
             "layer": LAYER_RENDER_VERIFIED if family in verified else layer,
