@@ -130,7 +130,7 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
 
 
 def directory_files(directory: Path | None, component: dict,
-                    recorded: dict | None = None) -> dict:
+                    recorded: dict | None = None, cache_dir: Path | None = None) -> dict:
     """Check every pinned file below one installed package directory.
 
     ``recorded`` is the receipt's own per-file stat (relative path -> size and
@@ -163,7 +163,7 @@ def directory_files(directory: Path | None, component: dict,
                          "size": stat.st_size, "reused": True})
             continue
         result = file_digest(target, str(entry.get("sha256") or ""),
-                             int(entry.get("size") or 0))
+                             int(entry.get("size") or 0), cache_dir=cache_dir)
         rows.append({"relative_path": relative, **result})
     present = all(row.get("present") for row in rows) if rows else False
     verified = bool(rows) and all(row.get("verified") for row in rows)
@@ -274,7 +274,8 @@ def find_any_receipt(db, component_id: str) -> dict | None:
     return matches[-1].value
 
 
-def _verify_recorded_paths(receipt: dict, component: dict) -> dict | None:
+def _verify_recorded_paths(receipt: dict, component: dict,
+                           cache_dir: Path | None = None) -> dict | None:
     """Re-check a receipt whose files were verified at absolute paths.
 
     Returns ``None`` when the receipt is not path-based (older schema).  Every
@@ -331,7 +332,7 @@ def _verify_recorded_paths(receipt: dict, component: dict) -> dict | None:
                          "size": stat.st_size, "reused": True, "path": str(resolved)})
             continue
         check = file_digest(resolved, str(entry.get("sha256") or ""),
-                            int(entry.get("size") or 0))
+                            int(entry.get("size") or 0), cache_dir=cache_dir)
         rows.append({"relative_path": relative, **check, "path": str(resolved)})
     present = all(row.get("present") for row in rows) if rows else False
     verified = bool(rows) and all(row.get("verified") for row in rows)
@@ -368,7 +369,7 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
     if catalog_id and receipt.get("catalog_id") not in {None, catalog_id}:
         return {"verified": False, "present": False, "reason": "RECEIPT_CATALOG_CHANGED",
                 "identity": expected, "receipt": receipt}
-    check = _verify_recorded_paths(receipt, component)
+    check = _verify_recorded_paths(receipt, component, cache_dir=cache_dir)
     if check is None:
         directory = receipt.get("directory")
         recorded = {
@@ -377,7 +378,7 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
             if isinstance(row, dict)
         }
         check = directory_files(Path(directory) if directory else None, component,
-                                recorded=recorded)
+                                recorded=recorded, cache_dir=cache_dir)
     return {
         "verified": check["verified"],
         "present": check["present"],
