@@ -234,6 +234,15 @@ def _latest_delivery(db: Session, project_id: str, episode_id: str, cache: dict[
     return row
 
 
+def _delivery_acceptance(db: Session, artifact_id: str | None) -> dict[str, Any] | None:
+    """The person's current watched-and-decided answer about this reel."""
+    if not artifact_id:
+        return None
+    from shine.media.delivery_acceptance import acceptance_public, latest_acceptance
+
+    return acceptance_public(latest_acceptance(db, artifact_id))
+
+
 def _latest_run_episode(db: Session, project_id: str, episode_id: str, cache: dict[str, Any]):
     """The newest run that ever covered one episode, plus that run.
 
@@ -427,6 +436,7 @@ def _episode_node(
             "status": delivery_row.status,
             "post_contract": delivery_row.post_contract,
             "run_id": delivery_row.run_id,
+            "acceptance": _delivery_acceptance(db, delivery_row.delivered_artifact_id),
         } if delivery_row is not None and delivered else None),
         "next_action": action,
     }

@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     ForeignKey,
     Index,
@@ -81,3 +82,31 @@ class DeliveryOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class DeliveryAcceptance(Base):
+    """One explicit human decision about one delivered reel.
+
+    Technical delivery and artistic acceptance are different facts.  Assembly
+    freezes what was true when the reel was built; this ledger records what the
+    person decided *after watching it*, so "待你确认" has a real action behind
+    it.  Decisions are append-only: the newest row for an artifact is the
+    current answer, earlier rows stay as history, and nothing here rewrites a
+    job, a gate or the frozen assembly provenance.
+    """
+
+    __tablename__ = "delivery_acceptances"
+    __table_args__ = (
+        Index("ix_delivery_acceptances_artifact", "artifact_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"), index=True)
+    artifact_id: Mapped[str] = mapped_column(ForeignKey("media_artifacts.id", ondelete="CASCADE"), nullable=False)
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)  # accepted | rejected
+    watched: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    evidence: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_id: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)

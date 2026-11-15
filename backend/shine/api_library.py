@@ -284,6 +284,14 @@ def _delivery_entry(db, artifact, project, asset_root, *, current_ids) -> dict[s
     review_state = "mock" if artifact.is_mock else (
         "passed" if lineage.get("review_state") == "all_passed" else "pending_review"
     )
+    # The assembly froze what was true when the reel was built; the person's
+    # later watched-and-decided answer is the current acceptance.  Both facts
+    # stay visible: the frozen state is history, the decision is the overlay.
+    from shine.media.delivery_acceptance import acceptance_public, latest_acceptance
+
+    acceptance = acceptance_public(latest_acceptance(db, artifact.id))
+    if acceptance is not None and not artifact.is_mock:
+        review_state = acceptance["decision"]
     entry = _entry_base(artifact, project, asset_root)
     entry.update({
         "kind": "delivery",
@@ -298,6 +306,10 @@ def _delivery_entry(db, artifact, project, asset_root, *, current_ids) -> dict[s
         "take": version,
         "version_label": f"v{version}",
         "review_state": review_state,
+        "assembly_review_state": "mock" if artifact.is_mock else (
+            "all_passed" if lineage.get("review_state") == "all_passed" else "pending_review"
+        ),
+        "acceptance": acceptance,
         "duration_s": lineage.get("duration_s"),
         "width": lineage.get("width"),
         "height": lineage.get("height"),

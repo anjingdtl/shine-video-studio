@@ -11,11 +11,11 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, Response
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 
 from shine.agents.film_contracts import EditDecisionList
@@ -287,6 +287,52 @@ def delivery_thumbnail(artifact_id: str, request: Request, db: DBSession):
     return thumbnail(safe_asset_path(output_root_for_request(request, db), artifact.storage_path), artifact.sha256,
                      request.app.state.settings.ffmpeg_path, request.headers.get("if-none-match"),
                      seek_s=1.0)
+
+
+class AcceptanceDecision(BaseModel):
+    """The person's watched-and-decided answer about one delivered reel."""
+
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["accepted", "rejected"]
+    watched: bool = False
+    evidence: str = Field(default="", max_length=2000)
+    request_id: str = Field(min_length=16, max_length=64, pattern=r"^[a-zA-Z0-9-]+$")
+    expected_sha256: str = Field(min_length=64, max_length=64)
+
+
+@router.get("/deliveries/{artifact_id}/acceptance")
+def get_delivery_acceptance(artifact_id: str, db: DBSession):
+    from shine.media.delivery_acceptance import acceptance_public, latest_acceptance
+
+    artifact = db.get(MediaArtifact, artifact_id)
+    if not artifact or artifact.artifact_kind != "delivery":
+        raise HTTPException(status_code=404, detail="DELIVERY_NOT_FOUND")
+    return {
+        "artifact_id": artifact.id,
+        "artifact_sha256": artifact.sha256,
+        "acceptance": acceptance_public(latest_acceptance(db, artifact_id)),
+    }
+
+
+@router.post("/deliveries/{artifact_id}/acceptance")
+def post_delivery_acceptance(artifact_id: str, body: AcceptanceDecision, actor: Operator,
+                             settings: SettingsDep, db: DBSession):
+    """Record the explicit human acceptance (or rejection) of a delivered reel.
+
+    This is the action behind 「待你确认」: it never re-renders, never rewrites
+    a gate or the assembly provenance, and never accepts a mock or a file whose
+    bytes no longer match the version the person saw.
+    """
+    from shine.api_preparation import locked
+    from shine.media.delivery_acceptance import record_acceptance
+
+    locked(db)
+    return record_acceptance(
+        db, settings, artifact_id,
+        actor=actor, decision=body.decision, watched=body.watched,
+        evidence=body.evidence, request_id=body.request_id,
+        expected_sha256=body.expected_sha256,
+    )
 
 
 @router.post("/video-artifacts/{artifact_id}/open-folder", status_code=204, response_class=Response)

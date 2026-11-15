@@ -753,6 +753,7 @@ export type Journey = {
   run: {
     id: string; status: string; required_episode_count: number;
     delivered_episode_count: number;
+    accepted_episode_count?: number;
     blockers: Array<{ code: string; message: string }>;
     control_reason: string | null; last_progress_at: string | null;
   } | null;
@@ -802,6 +803,16 @@ export type PackageReadiness = {
   episode_count: number; shot_count: number; checked_at: string;
 };
 
+export type DeliveryAcceptance = {
+  id: string;
+  decision: 'accepted' | 'rejected';
+  watched: boolean;
+  evidence: string;
+  actor: string;
+  artifact_sha256: string;
+  created_at: string;
+};
+
 export type RunEpisode = {
   id: string; episode_id: string; position: number; title: string; status: string;
   shot_count: number; passed_shot_count: number; planned_seconds: number;
@@ -810,6 +821,7 @@ export type RunEpisode = {
     subtitle_revision?: number | null; subtitle_sha256?: string } | null;
   actual_seconds: number | null; delivery_order_id: string | null;
   delivered_artifact_id: string | null; delivered_sha256: string | null;
+  acceptance?: DeliveryAcceptance | null;
   blocker_code: string | null; delivered_at: string | null;
   batches: Array<{
     batch_key: string; status: string; series_id: string | null; shot_count: number;
@@ -888,6 +900,19 @@ export const createProductionRun = (projectId: string, body: { package_id: strin
 
 export const getProductionRun = (runId: string) =>
   api<ProductionRun>(`/production-runs/${runId}`);
+
+export const getDeliveryAcceptance = (artifactId: string) =>
+  api<{ artifact_id: string; artifact_sha256: string; acceptance: DeliveryAcceptance | null }>(
+    `/deliveries/${artifactId}/acceptance`);
+
+/** 「待你确认」的真实动作：人看过之后明确接受或拒绝这一版成片。 */
+export const decideDeliveryAcceptance = (
+  artifactId: string,
+  body: { decision: 'accepted' | 'rejected'; watched: boolean; evidence: string; expected_sha256: string },
+) =>
+  api<{ acceptance: DeliveryAcceptance; artifact_id: string }>(
+    `/deliveries/${artifactId}/acceptance`,
+    json('POST', { ...body, request_id: crypto.randomUUID() }));
 
 export const getRunEvents = (runId: string, afterId = 0) =>
   api<RunEvent[]>(`/production-runs/${runId}/events?after_id=${afterId}&limit=40`);
@@ -1805,6 +1830,7 @@ export type DirectorEpisodeOverview = {
     actual_seconds: number | null; status: string;
     post_contract: Record<string, unknown> | null;
     run_id: string | null;
+    acceptance?: DeliveryAcceptance | null;
   } | null;
   next_action: DirectorNextAction | null;
 };

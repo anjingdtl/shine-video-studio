@@ -7,10 +7,11 @@ import {
   API, ApiError, api, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
   json, listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
-  type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness, type ProductionRun,
-  type RunEvent, type WorkflowProfile,
+  type DeliveryAcceptance, type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness,
+  type ProductionRun, type RunEvent, type WorkflowProfile,
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
+import { EpisodeAcceptance } from './EpisodeAcceptance';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
@@ -54,6 +55,14 @@ function tone(status: string): string {
   if (['FAILED', 'BLOCKED', 'NEEDS_REVIEW', 'CANCELLED'].includes(status)) return 'bad';
   if (['RUNNING', 'PRODUCING', 'DELIVERING', 'QUEUED', 'RECONCILING', 'PAUSE_REQUESTED'].includes(status)) return 'busy';
   return 'idle';
+}
+
+/** 技术交付之外的第二个事实：人看过之后怎么决定。没有决定就是「待你确认」。 */
+function acceptanceLabel(acceptance: DeliveryAcceptance | null | undefined): { text: string; tone: string } {
+  if (!acceptance) return { text: '待你确认', tone: 'idle' };
+  return acceptance.decision === 'accepted'
+    ? { text: '已确认接受', tone: 'ok' }
+    : { text: '已标记问题', tone: 'bad' };
 }
 
 function seconds(value: number | null | undefined): string {
@@ -127,6 +136,10 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const [scopeIds, setScopeIds] = useState<string[] | null>(null);
   /** 进展日志只渲染最近几条：记录可以一直增长，页面高度不能跟着长。 */
   const [eventLimit, setEventLimit] = useState(8);
+  /** 「观看并确认」对话框的目标：技术交付之后，艺术验收由人决定。 */
+  const [acceptTarget, setAcceptTarget] = useState<{
+    artifactId: string; sha256: string; title: string; acceptance: DeliveryAcceptance | null;
+  } | null>(null);
   const mounted = useRef(true);
   /** 快切包、作品或整片运行时，只有最后一次读取的结果算数。 */
   const loadEpoch = useRef(0);
@@ -729,7 +742,19 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             </div>}
             {episode.delivered_artifact_id && <div className="run-ep-media">
               <video src={`${API}/deliveries/${episode.delivered_artifact_id}/media`} controls preload="none" />
-              <OpenVideoFolderButton artifactId={episode.delivered_artifact_id} />
+              <div className="row run-ep-acceptance">
+                <OpenVideoFolderButton artifactId={episode.delivered_artifact_id} />
+                <span className={`run-badge ${acceptanceLabel(episode.acceptance).tone}`}>
+                  {acceptanceLabel(episode.acceptance).text}
+                </span>
+                {episode.delivered_sha256 && <button type="button" className="btn-secondary"
+                  onClick={() => setAcceptTarget({
+                    artifactId: episode.delivered_artifact_id!,
+                    sha256: episode.delivered_sha256!,
+                    title: episode.title || episode.episode_id,
+                    acceptance: episode.acceptance ?? null,
+                  })}>观看并确认</button>}
+              </div>
             </div>}
           </li>)}
         </ol>}
@@ -771,7 +796,17 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
           {overviewEpisodes.filter((row) => row.delivery?.artifact_id).map((episode) => <li key={episode.episode_id}
             title={episode.delivery?.sha256 ?? undefined}>
             <Video size={12} />
-            <span>{episode.title || episode.episode_id} · {seconds(episode.delivery?.actual_seconds)} · 待你确认</span>
+            <span>{episode.title || episode.episode_id} · {seconds(episode.delivery?.actual_seconds)}</span>
+            <span className={`run-badge ${acceptanceLabel(episode.delivery?.acceptance).tone}`}>
+              {acceptanceLabel(episode.delivery?.acceptance).text}
+            </span>
+            {episode.delivery?.artifact_id && episode.delivery.sha256 && <button type="button" className="btn-secondary"
+              onClick={() => setAcceptTarget({
+                artifactId: episode.delivery!.artifact_id,
+                sha256: episode.delivery!.sha256!,
+                title: episode.title || episode.episode_id,
+                acceptance: episode.delivery?.acceptance ?? null,
+              })}>观看并确认</button>}
             <em className="run-ep-sub">剪辑/字幕修订在下方「成片文件与导出」；单镜返修在「生成分段」。</em>
           </li>)}
         </ul>
@@ -780,6 +815,24 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     {busy && <div className="run-busy"><Loader2 size={12} className="spin" /> 正在处理…</div>}
     {error && <div className="blocked-callout"><AlertTriangle size={13} />{error}</div>}
     {!journey && <div className="run-busy"><Loader2 size={12} className="spin" /> 正在读取作品状态…</div>}
+    {acceptTarget && <EpisodeAcceptance
+      artifactId={acceptTarget.artifactId}
+      sha256={acceptTarget.sha256}
+      title={acceptTarget.title}
+      acceptance={acceptTarget.acceptance}
+      onClose={() => setAcceptTarget(null)}
+      onDecided={(acceptance) => {
+        // 立即更新本页的分集徽标，再让服务端状态刷新覆盖（含总览投影）。
+        setRun((current) => current ? {
+          ...current,
+          episodes: (current.episodes ?? []).map((episode) =>
+            episode.delivered_artifact_id === acceptTarget.artifactId ? { ...episode, acceptance } : episode),
+        } : current);
+        setAcceptTarget(null);
+        void load();
+        onRefresh?.();
+      }}
+    />}
   </div>;
 }
 

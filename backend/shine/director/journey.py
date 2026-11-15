@@ -613,6 +613,8 @@ def compute_journey(
         "done": bool(post_done),
         "summary": (
             f"{summary['delivered_episode_count']} / {summary['required_episode_count']} 集已交付"
+            + (f" · {summary.get('accepted_episode_count', 0)} 集已确认"
+               if summary.get("delivered_episode_count") else "")
             if summary else ("等待这个导演包开拍" if package is not None else "还没有整部作品运行")
         ),
         "blockers": (summary or {}).get("blockers", []),
@@ -620,6 +622,7 @@ def compute_journey(
             "run_id": (summary or {}).get("id"),
             "run_status": (summary or {}).get("status"),
             "scope_package_id": package.id if package else None,
+            "accepted_episode_count": (summary or {}).get("accepted_episode_count", 0),
         },
     })
 

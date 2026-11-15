@@ -1759,8 +1759,11 @@ def episode_public(
     db: Session, run: ProductionRun, episodes: list[ProductionRunEpisode]
 ) -> list[dict[str, Any]]:
     """Public shape of a bounded set of episodes, with their batches."""
+    from shine.media.delivery_acceptance import acceptances_for
+
     batches = _batch_rows(db, run.id) if episodes else []
     passed = run_owned_passed_jobs(db, run.id, episodes)
+    acceptances = acceptances_for(db, [episode.delivered_artifact_id for episode in episodes])
     return [
         {
             "id": episode.id,
@@ -1777,6 +1780,7 @@ def episode_public(
             "delivery_order_id": episode.delivery_order_id,
             "delivered_artifact_id": episode.delivered_artifact_id,
             "delivered_sha256": episode.delivered_sha256,
+            "acceptance": acceptances.get(episode.delivered_artifact_id),
             "blocker_code": episode.blocker_code,
             "delivered_at": episode.delivered_at.isoformat() + "Z" if episode.delivered_at else None,
             "batches": [
@@ -1867,6 +1871,13 @@ def run_summary(db: Session, project_id: str, *, run_id: str | None = None) -> d
         return None
     episodes = _episode_rows(db, run.id)
     delivered = [episode for episode in episodes if episode.status == "DELIVERED"]
+    from shine.media.delivery_acceptance import acceptances_for
+
+    acceptances = acceptances_for(db, [episode.delivered_artifact_id for episode in delivered])
+    accepted_count = sum(
+        1 for episode in delivered
+        if (acceptances.get(episode.delivered_artifact_id) or {}).get("decision") == "accepted"
+    )
     blocked = [
         {"code": episode.blocker_code or "EPISODE_BLOCKED",
          "message": f"{episode.title or episode.episode_id} 未交付"}
@@ -1877,6 +1888,7 @@ def run_summary(db: Session, project_id: str, *, run_id: str | None = None) -> d
         "status": run.status,
         "required_episode_count": len(episodes),
         "delivered_episode_count": len(delivered),
+        "accepted_episode_count": accepted_count,
         "blockers": blocked,
         "control_reason": run.control_reason,
         "last_progress_at": run.last_progress_at.isoformat() + "Z" if run.last_progress_at else None,

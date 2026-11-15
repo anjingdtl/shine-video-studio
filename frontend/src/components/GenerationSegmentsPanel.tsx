@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { API, api, json } from '../api';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
+import OperatorReview from './OperatorReview';
 
 type Segment = {
   shot_id: string; position: number; story_beat: string; duration_s: number;
@@ -79,6 +80,8 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
   const [page, setPage] = useState(0);
   /** 多集拍摄后分段会很长：先按集筛选，再分页。 */
   const [episodeFilter, setEpisodeFilter] = useState<string>('');
+  /** 单镜分项审片：导演层也能做人工验收，不必切去专家层。 */
+  const [reviewJobId, setReviewJobId] = useState<string | null>(null);
   const reload = useCallback(async () => {
     const result = await api<SegmentState>(`/projects/${projectId}/generation-segments`);
     setState(result);
@@ -183,6 +186,9 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
         <div className="segment-card-actions">
           <button type="button" disabled={busy || !segment.can_regenerate} onClick={() => act(segment, false)}>重新生成此段</button>
           {segment.replacement_job_id && <button type="button" disabled={busy || !segment.can_select_replacement} onClick={() => act(segment, true)}>选为当前装配版本</button>}
+          {segment.job_id && segment.status === 'PASSED' && <button type="button" disabled={busy}
+            title="逐项人工审片：身份、服装、场景、运镜、风格、对白、声音、口型、连续性"
+            onClick={() => setReviewJobId(segment.job_id)}>分项审片</button>}
         </div>
         {segment.replacement_job_id && <small className="segment-note">新版本 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}</small>}
         {segment.blocker && <small className="segment-note">当前不能重复排拍：{segment.replacement_job_id ? '新版本等待完成或选用' : '当前版本未通过、仍在执行或需要核对，请先查看制作进度'}（{segment.blocker}）</small>}
@@ -195,5 +201,9 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
       </article>)}
     </div>
     {message && <p role="status">{message}</p>}
+    {reviewJobId && <dialog className="media-preview-dialog operator-review-dialog" open aria-label="单镜分项审片">
+      <button type="button" className="btn-secondary" onClick={() => setReviewJobId(null)}>关闭审片</button>
+      <OperatorReview key={reviewJobId} jobId={reviewJobId} />
+    </dialog>}
   </section>;
 }

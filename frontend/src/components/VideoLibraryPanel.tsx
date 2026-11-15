@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, Film, FolderOpen, RefreshCw, Trash2 } from 'lucide-react';
-import { api, json } from '../api';
+import { api, json, type DeliveryAcceptance } from '../api';
+import { EpisodeAcceptance } from './EpisodeAcceptance';
 import { VideoPreview } from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 
 type Blocker = { code: string; message: string };
 type LibraryEntry = {
   artifact_id: string;
+  sha256: string;
   kind: 'shot' | 'delivery';
   project_id: string;
   project_title: string;
@@ -20,6 +22,8 @@ type LibraryEntry = {
   take: number;
   version_label: string;
   review_state: string;
+  assembly_review_state?: string;
+  acceptance?: DeliveryAcceptance | null;
   adopted: boolean;
   file_state: 'ok' | 'missing' | 'changed' | 'path_invalid';
   deletable: boolean;
@@ -66,6 +70,8 @@ const REVIEW_LABELS: Record<string, string> = {
   running: '制作中',
   needs_attention: '需处理',
   mock: '演示样本',
+  accepted: '已确认接受',
+  rejected: '已标记问题',
 };
 
 function timeLabel(value: string | null): string | null {
@@ -84,15 +90,17 @@ function rangeLabel(entry: LibraryEntry): string {
   return entry.shot_range_label === '镜号未登记' ? entry.shot_range_label : `${entry.shot_range_label} 镜`;
 }
 
-function entryState(entry: LibraryEntry): { text: string; tone: string; review?: string } {
+function entryState(entry: LibraryEntry): { text: string; tone: string; review?: string; reviewTone?: string } {
   if (entry.file_state !== 'ok') return { text: FILE_STATE_LABELS[entry.file_state] ?? '文件异常', tone: 'broken' };
   if (entry.is_mock) return { text: entry.adopted ? '当前采用 · 演示' : '历史 · 演示', tone: 'mock' };
   const review = entry.review_state !== 'passed'
     ? (REVIEW_LABELS[entry.review_state] ?? entry.review_state)
     : undefined;
+  const reviewTone = entry.review_state === 'accepted' ? 'current'
+    : entry.review_state === 'rejected' ? 'broken' : 'pending';
   return entry.adopted
-    ? { text: '当前采用', tone: 'current', review }
-    : { text: '历史', tone: 'history', review };
+    ? { text: '当前采用', tone: 'current', review, reviewTone }
+    : { text: '历史', tone: 'history', review, reviewTone };
 }
 
 type Props = {
@@ -112,6 +120,9 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
   const [loadError, setLoadError] = useState('');
   const [confirming, setConfirming] = useState(false);
   const [result, setResult] = useState<DeleteResult | null>(null);
+  const [acceptTarget, setAcceptTarget] = useState<{
+    artifactId: string; sha256: string; title: string; acceptance: DeliveryAcceptance | null;
+  } | null>(null);
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
 
@@ -281,7 +292,7 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
               <b>{entry.episode_label} · {rangeLabel(entry)}</b>
               <span className="library-states">
                 <span className={`library-state ${state.tone}`}>{state.text}</span>
-                {state.review && <span className="library-state pending">{state.review}</span>}
+                {state.review && <span className={`library-state ${state.reviewTone ?? 'pending'}`}>{state.review}</span>}
               </span>
             </div>
             <p className="library-shot-name">{entry.kind === 'delivery'
@@ -300,6 +311,14 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
             </small>
             <div className="library-actions">
               <OpenVideoFolderButton artifactId={entry.artifact_id} />
+              {entry.kind === 'delivery' && !entry.is_mock && entry.file_state === 'ok' && <button type="button"
+                className="btn-secondary"
+                onClick={() => setAcceptTarget({
+                  artifactId: entry.artifact_id,
+                  sha256: entry.sha256,
+                  title: `${entry.episode_label} ${rangeLabel(entry)} ${entry.version_label}`,
+                  acceptance: entry.acceptance ?? null,
+                })}>观看并确认</button>}
             </div>
             {!entry.deletable && entry.delete_blockers.length > 0 && <p className="library-blocked">
               <AlertTriangle size={12} aria-hidden="true" />
@@ -361,5 +380,13 @@ export default function VideoLibraryPanel({ projectId, projectTitle, active, ref
         </button>
       </div>
     </dialog>}
+    {acceptTarget && <EpisodeAcceptance
+      artifactId={acceptTarget.artifactId}
+      sha256={acceptTarget.sha256}
+      title={acceptTarget.title}
+      acceptance={acceptTarget.acceptance}
+      onClose={() => setAcceptTarget(null)}
+      onDecided={() => { setAcceptTarget(null); void reload(); }}
+    />}
   </div>;
 }
