@@ -23,14 +23,10 @@ describe('待确认素材批量选择', () => {
     ]) });
     const user = userEvent.setup();
     render(<App />);
-    // 素材文件的批量确认是专业模式的能力；导演④只保留按镜头的需求与决策。
-  const toggle = await waitFor(() => {
-    const node = document.querySelector('.ui-toggle');
-    expect(node).not.toBeNull();
-    return node as HTMLElement;
-  });
-  await user.click(toggle);
-  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull(), { timeout: 5000 });
+    // 素材文件的批量确认收在导演④「上传与确认项目素材」折叠区里。
+    window.location.hash = '#d/materials';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await user.click(await screen.findByText('上传与确认项目素材'));
 
     const selectAll = await screen.findByRole('checkbox', { name: '全选待确认素材' });
     await user.click(selectAll);

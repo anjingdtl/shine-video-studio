@@ -65,8 +65,9 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
       }),
     });
 
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     const textarea = await screen.findByLabelText('摄影语言（自定义）', undefined, { timeout: 9000 });
     await waitFor(() => {
       expect(textarea).toHaveValue('手持近景，缓慢推近。（未保存的新修改）');
@@ -101,8 +102,9 @@ describe('风格冻结：批准内容必须等于冻结快照', () => {
 describe('影片类型', () => {
   it('选择动画后保存的草稿带上 film_type，并展示固定英文范例', async () => {
     const user = userEvent.setup();
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ }));
     expect(screen.getAllByText(/2D cel-shaded animation/).length).toBeGreaterThan(0);
@@ -115,8 +117,9 @@ describe('影片类型', () => {
 
   it('刷新工作台不丢弃未保存的影片类型选择', async () => {
     const user = userEvent.setup();
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     const animation = await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ });
     await user.click(animation);
@@ -142,8 +145,9 @@ describe('风格冻结（下拉交互）', () => {
       respond: () => jsonResponse({ detail: 'PLAN_HASH_CHANGED' }, 409),
     });
 
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
 
@@ -172,8 +176,9 @@ describe('风格冻结（下拉交互）', () => {
       }),
     });
 
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => {
@@ -195,8 +200,9 @@ describe('风格冻结（下拉交互）', () => {
       respond: () => { throw new Error('网络中断'); },
     });
 
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await waitFor(() => {
@@ -211,8 +217,9 @@ describe('风格冻结（下拉交互）', () => {
       respond: () => jsonResponse({ grant_id: 'grant-for-other-tab', snapshot: 'other-tab-snapshot' }) });
     stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
       respond: () => jsonResponse({ detail: 'STYLE_APPROVAL_CONTENT_CHANGED' }, 409) });
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await screen.findByText(/风格草稿已在其他页面修改/);
@@ -234,8 +241,9 @@ describe('风格冻结（下拉交互）', () => {
     const user = userEvent.setup();
     stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
       respond: () => jsonResponse(FROZEN_STYLE) });
-    window.location.hash = '#v/production';
+    window.location.hash = '#d/assets';
     render(<App />);
+    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
     await fillSevenOptions(user);
     await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
     await screen.findByText(/冻结结果与本次确认的风格内容不一致/);

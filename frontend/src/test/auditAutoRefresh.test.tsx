@@ -18,15 +18,14 @@ afterEach(() => {
   window.localStorage.clear();
 });
 
-it('切到审计追踪时自动再读一次操作记录', async () => {
+it('切到高级设置(审计追踪)时自动再读一次操作记录', async () => {
   const user = userEvent.setup();
   render(<App />);
   await screen.findAllByText('雾港夜账');
   await waitFor(() => expect(stub.callsOf('GET', /\/projects\/proj-1\/events/).length).toBeGreaterThan(0));
   const before = stub.callsOf('GET', /\/projects\/proj-1\/events/).length;
 
-  await user.click(screen.getByRole('button', { name: /专业模式/ }));
-  await user.click(screen.getAllByRole('button', { name: /交付板块/ })[0]);
+  await user.click(screen.getByRole('button', { name: /高级设置/ }));
 
   await waitFor(() => expect(stub.callsOf('GET', /\/projects\/proj-1\/events/).length).toBeGreaterThan(before));
 });

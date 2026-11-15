@@ -1,17 +1,15 @@
-/** 演示 ↔ 真实制作的唯一状态链（P0 契约）：
- *  1. 演示徽章 + 启用入口常驻；点击进入单一路径向导；
- *  2. 向导优先识别并复用已有 ComfyUI，不默认重新下载；
- *  3. 环境不完整时给出中文阻断原因，而不是英文异常码；
- *  4. 向导走完验证与激活后，提示真实制作已准备好；
- *  5. READY 状态下单镜头提交 provider=comfyui；演示状态仍为 mock；
- *  6. 无 LLM 配置时不假装 AI 分镜可用。 */
+/** 导演工作台唯一入口后的状态链契约：
+ *  1. 顶部制作状态只展示与跳转:环境缺项落到基础配置,不再打开第二套向导;
+ *  2. 旧专业深链(#setup、#v/…)按用途映射到导演页,高级设置可达;
+ *  3. READY 状态下单镜头提交 provider=comfyui;演示状态仍为 mock;
+ *  4. 无 LLM 配置时不假装 AI 分镜可用,手工入口就在同一页。 */
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
 import {
-  PRODUCTION_MODE_READY, READINESS, RUNTIME, SYSTEM_STATUS, StudioStub,
+  PRODUCTION_MODE_READY, SYSTEM_STATUS, StudioStub,
   baseProject, baseRoutes, jsonResponse, productionMode,
 } from './studioStub';
 
@@ -33,7 +31,7 @@ const WORKFLOW = {
 
 /** 冻结风格 + 一个镜头 + 一个方案：单镜头提交的前置条件。 */
 function realReadyProject() {
-  stub.add({ method: 'GET', pattern: /projects\/proj-1$/, respond: (_u, _i) => jsonResponse(baseProject({ frozen_style_version_id: 'style-1' })) });
+  stub.add({ method: 'GET', pattern: /projects\/proj-1$/, respond: () => jsonResponse(baseProject({ frozen_style_version_id: 'style-1' })) });
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/styles$/, respond: () => jsonResponse([FROZEN]) });
   stub.add({ method: 'GET', pattern: /projects\/proj-1\/shots$/, respond: () => jsonResponse([SHOT]) });
   stub.add({ method: 'GET', pattern: /workflow-profiles\?project_id=proj-1$/, respond: () => jsonResponse([WORKFLOW]) });
@@ -50,59 +48,19 @@ async function topbarModeEntry(): Promise<HTMLElement> {
   return entry;
 }
 
-async function openSingleShotTools(user: ReturnType<typeof userEvent.setup>) {
-  // 单镜提交是专业能力：导演模式只保留一个开拍入口（V2 §8）。
-  await switchToExpert(user);
-  await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
-  await waitFor(() => {
-    expect(document.querySelector('.advanced-fold')).not.toBeNull();
-  }, { timeout: 4000 });
-}
-
-function singleShotCard(): HTMLElement {
-  return document.querySelector('.queue-provider-card') as HTMLElement;
-}
-
-function advancedFold(): HTMLElement {
-  // 单镜表单已移入专业模式的生产板块；导演页只保留一个开拍入口。
-  // 专业模式下导演页不渲染，因此页面唯一的 advanced-fold 就是它。
-  return document.querySelector('.advanced-fold') as HTMLElement;
-}
-
 beforeEach(() => {
   stub = new StudioStub(baseRoutes());
+  window.location.hash = '';
 });
 
 afterEach(() => {
   stub.restore();
   vi.restoreAllMocks();
   window.localStorage.clear();
+  window.location.hash = '';
 });
 
-async function switchToDirector(user: ReturnType<typeof userEvent.setup>) {
-  if (document.querySelector('.app-shell.ui-director')) return;
-  const toggle = await waitFor(() => {
-    const node = document.querySelector('.ui-toggle');
-    expect(node).not.toBeNull();
-    return node as HTMLElement;
-  });
-  await user.click(toggle);
-  await waitFor(() => expect(document.querySelector('.app-shell.ui-director')).not.toBeNull(), { timeout: 5000 });
-}
-
-async function switchToExpert(user: ReturnType<typeof userEvent.setup>) {
-  // 界面会记住上次的模式（localStorage）：已经在专业模式时再点一次是“回到导演模式”。
-  if (document.querySelector('.app-shell.ui-expert')) return;
-  const toggle = await waitFor(() => {
-    const node = document.querySelector('.ui-toggle');
-    expect(node).not.toBeNull();
-    return node as HTMLElement;
-  });
-  await user.click(toggle);
-  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull(), { timeout: 5000 });
-}
-
-describe('顶部模式入口（唯一权威状态）', () => {
+describe('顶部模式入口（唯一权威状态，只做跳转）', () => {
   it('后端失联时显示重连入口，点击后按实际响应恢复在线灯', async () => {
     let online = false;
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => online
@@ -122,174 +80,27 @@ describe('顶部模式入口（唯一权威状态）', () => {
       ? jsonResponse([baseProject()]) : jsonResponse({ detail: 'offline' }, 503) });
     stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({ detail: 'slow probe' }, 504) });
     render(<App />);
-    // 失联态出现说明初始加载已经失败；此时后端恢复，不点任何按钮。
     expect(await screen.findByText('工作台后端失联')).toBeInTheDocument();
     online = true;
-    // 3 秒连接轮询发现恢复且列表未加载过，应自动补拉并渲染作品
-    // （顶栏项目芯片与首页作品表格都会出现这个名字）。
     expect((await screen.findAllByText('雾港夜账', undefined, { timeout: 9000 })).length).toBeGreaterThan(0);
-    // 恢复后重连入口应当消失（轮询与渲染有先后，等到它真的消失）。
     await waitFor(() => expect(screen.queryByRole('button', { name: '重连工作台' })).toBeNull(),
       { timeout: 9000 });
   }, 15000);
-  it('演示徽章常驻且提供启用入口；点击打开向导', async () => {
+
+  it('演示徽章常驻;点击落到基础配置而不是第二套向导', async () => {
     const user = userEvent.setup();
     render(<App />);
     const entry = await topbarModeEntry();
     expect(entry.textContent).toContain('演示体验');
     expect(entry.textContent).toContain('启用真实制作');
     await user.click(entry);
-    // 单一路径向导打开，并显示分阶段检查。
-    expect(await screen.findByRole('dialog', { name: '启用真实制作' })).toBeInTheDocument();
-    expect((await screen.findByTestId('wizard-stages')).textContent).toContain('检查本机硬件与基础程序');
+    await waitFor(() => expect(window.location.hash).toBe('#d/setup'));
+    expect(screen.queryByRole('dialog', { name: '启用真实制作' })).toBeNull();
+    expect(document.querySelector('.app-shell.ui-expert')).toBeNull();
+    expect(document.querySelector('.ui-toggle')).toBeNull();
   });
 
-  it('环境不完整时给出中文阻断原因，不暴露英文异常码', async () => {
-    stub.add({
-      method: 'GET', pattern: /\/api\/v1\/setup\/environment$/,
-      respond: () => jsonResponse({ blockers: [{ code: 'GPU_VRAM_BELOW_FLOOR' }] }),
-    });
-    const user = userEvent.setup();
-    render(<App />);
-    await user.click(await topbarModeEntry());
-    const result = await screen.findByTestId('wizard-result');
-    await waitFor(() => {
-      expect(result.textContent).toContain('显卡可用显存不足');
-    });
-    expect(result.textContent).not.toMatch(/GPU_VRAM_BELOW_FLOOR/);
-  });
-
-  it('检测到已有 ComfyUI 时先复用，验证与激活走完整链路', async () => {
-    const calls: string[] = [];
-    const record = (mark: string) => () => { calls.push(mark); return jsonResponse({}); };
-    stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({ installations: ['D:/ComfyUI'] }) });
-    stub.add({
-      method: 'POST', pattern: /setup\/existing-installations\/inspect$/,
-      respond: () => jsonResponse({ root: 'D:/ComfyUI', snapshot: 'snap', candidate_bytes: 4096,
-        matches: [{ component_id: 'h3', size: 4096 }], missing: [], skipped: [] }),
-    });
-    stub.add({
-      method: 'POST', pattern: /setup\/existing-installations\/import-models$/,
-      respond: () => { calls.push('import'); return jsonResponse({ reused_bytes: 4096, rejected: [] }); },
-    });
-    stub.add({ method: 'GET', pattern: /setup\/readiness$/, respond: () => jsonResponse({
-      ...READINESS, layers: [{ layer: 'L2_files_verified', status: 'READY' }] }) });
-    stub.add({
-      method: 'GET', pattern: /setup\/runtime$/,
-      respond: () => jsonResponse({ ...RUNTIME, status: 'NOT_ACTIVATED',
-        candidate: { project_id: 'proj-1', recipe_sha256: 'r'.repeat(64) } }),
-    });
-    stub.add({
-      method: 'POST', pattern: /setup\/next-instance-plan$/,
-      respond: () => jsonResponse({ complete: true }),
-    });
-    stub.add({ method: 'POST', pattern: /setup\/profiles$/, respond: record('profiles') });
-    stub.add({ method: 'POST', pattern: /setup\/configuration$/, respond: record('configuration') });
-    stub.add({
-      method: 'POST', pattern: /setup\/services\/validate$/,
-      respond: () => { calls.push('validate'); return jsonResponse({ status: 'READY' }); },
-    });
-    stub.add({
-      method: 'POST', pattern: /setup\/runtime\/activate$/,
-      respond: (_url, init) => {
-        calls.push('activate');
-        stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({
-          ...SYSTEM_STATUS, production_mode: productionMode({ mode: 'READY' }),
-        }) });
-        const body = JSON.parse(String(init?.body));
-        expect(body.recipe_sha256).toBe('r'.repeat(64));
-        return jsonResponse({ status: 'ACTIVE' });
-      },
-    });
-
-    const user = userEvent.setup();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    render(<App />);
-    await user.click(await topbarModeEntry());
-    // 复用邀请出现：已有模型优先，不默认重新下载。
-    const reuse = await screen.findByTestId('wizard-reuse');
-    expect(reuse.textContent).toContain('可复用的已有模型');
-    await user.click(within(reuse).getByRole('button', { name: '校验并复用模型' }));
-    const result = await screen.findByTestId('wizard-result');
-    await waitFor(() => {
-      expect(result.textContent).toContain('真实制作已准备好');
-    }, { timeout: 4000 });
-    // 顺序契约：先复用已有模型，再登记方案，最后验证并激活。
-    expect(calls).toEqual(['import', 'profiles', 'configuration', 'validate', 'activate']);
-    // 成功后的返回入口直接指回制作。
-    expect(result.textContent).toContain('返回作品，开始制作');
-  });
-
-  it('向导无项目时明确要求先创建作品', async () => {
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([]) });
-    const user = userEvent.setup();
-    render(<App />);
-    expect(await screen.findByText('创建我的第一部AI短剧')).toBeInTheDocument();
-    // 首启卡片的模式入口同样存在（顶部）。
-    await user.click(await topbarModeEntry());
-    const result = await screen.findByTestId('wizard-result');
-    expect(result.textContent).toContain('先创建作品');
-  });
-});
-
-describe('任务提交与模式一致', () => {
-  it('READY 状态下单镜头真实提交 provider=comfyui', async () => {
-    stub.add({
-      method: 'GET', pattern: /system\/status$/,
-      respond: () => jsonResponse({ ...SYSTEM_STATUS, render_mode: 'comfyui', production_mode: PRODUCTION_MODE_READY }),
-    });
-    realReadyProject();
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
-    const user = userEvent.setup();
-    render(<App />);
-    await openSingleShotTools(user);
-    await user.selectOptions(await within(singleShotCard()).findByLabelText(/生成模板|生成方案/), 'wf-1');
-    await user.selectOptions(await within(singleShotCard()).findByLabelText(/审片建议/), 'full');
-    const queue = await within(advancedFold()).findByRole('button', { name: /加入队列/ });
-    await waitFor(() => { expect(queue).toBeEnabled(); });
-    await user.click(queue);
-    // 真实生成是二次确认：第一下展开，第二下才提交。
-    await user.click(await within(advancedFold()).findByRole('button', { name: /确认真实生成/ }));
-    await waitFor(() => {
-      const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string; workflow_profile_id: string };
-      expect(body.provider).toBe('comfyui');
-      expect(body.workflow_profile_id).toBe('wf-1');
-    });
-  });
-
-  it('演示状态下任务只能是 mock，真实选项被锁', async () => {
-    realReadyProject();
-    const user = userEvent.setup();
-    render(<App />);
-    await openSingleShotTools(user);
-    const provider = await within(singleShotCard()).findByLabelText(/生成方式/);
-    expect((provider as HTMLSelectElement).disabled).toBe(true);
-    await user.click(within(advancedFold()).getByRole('button', { name: /加入队列/ }));
-    await user.click(await within(advancedFold()).findByRole('button', { name: /确认真实生成/ }));
-    await waitFor(() => {
-      const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string };
-      expect(body.provider).toBe('mock');
-    });
-  });
-
-  it('无 LLM 配置时明确提示 AI 分镜未就绪，保留手工入口', async () => {
-    realReadyProject();
-    const user = userEvent.setup();
-    render(<App />);
-    await switchToDirector(user);
-    await user.click(await screen.findByRole('button', { name: /镜头拆解/ }));
-    expect(await screen.findByText(/AI 分镜能力未就绪/)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /去配置模型服务/ })).toBeInTheDocument();
-    // 手工分镜入口不再占用导演页，改由专业模式提供。
-    expect(screen.queryByText('单镜头制作与任务明细（高级）')).toBeNull();
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
-    await waitFor(() => {
-      expect(within(advancedFold()).getByText(/时长（4–15 秒）/)).toBeInTheDocument();
-    });
-  });
-
-  it('BLOCKED 状态提供检查并修复入口而不是退回演示', async () => {
+  it('BLOCKED 状态的检查并修复同样落到基础配置', async () => {
     stub.add({
       method: 'GET', pattern: /system\/status$/,
       respond: () => jsonResponse({
@@ -306,6 +117,100 @@ describe('任务提交与模式一致', () => {
     expect(entry.textContent).toContain('真实制作暂不可用');
     expect(entry.textContent).toContain('检查并修复');
     await user.click(entry);
-    expect(await screen.findByRole('dialog', { name: '检查真实制作环境' })).toBeInTheDocument();
+    await waitFor(() => expect(window.location.hash).toBe('#d/setup'));
+    expect(screen.queryByRole('dialog', { name: '检查真实制作环境' })).toBeNull();
+  });
+});
+
+describe('旧深链映射到统一工作台', () => {
+  it('#setup(安装器落地)打开导演基础配置', async () => {
+    window.location.hash = '#setup';
+    render(<App />);
+    expect(await screen.findByText('先把机器调好，')).toBeInTheDocument();
+    expect(document.querySelector('.app-shell.ui-director')).not.toBeNull();
+  });
+
+  it('旧 #v/setup/settings 落到高级设置,模型细调可达', async () => {
+    window.location.hash = '#v/setup/settings';
+    render(<App />);
+    await waitFor(() => expect(document.querySelector('#advanced')).not.toBeNull());
+    expect(screen.getByText('回到基础配置')).toBeInTheDocument();
+  });
+
+  it('旧 #v/production/assets 落到拍摄素材准备', async () => {
+    window.location.hash = '#v/production/assets';
+    realReadyProject();
+    render(<App />);
+    await waitFor(() => expect(window.location.hash).toBe('#d/materials'));
+  });
+
+  it('旧素材中心 #a/images 仍打开图片工坊,返回链接指向导演工作台', async () => {
+    window.location.hash = '#a/images';
+    render(<App />);
+    expect(await screen.findByRole('heading', { name: '图片工坊' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /导演工作台/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /高级设置/ })).toBeInTheDocument();
+  });
+});
+
+describe('任务提交与模式一致', () => {
+  it('READY 状态下单镜头真实提交 provider=comfyui', async () => {
+    stub.add({
+      method: 'GET', pattern: /system\/status$/,
+      respond: () => jsonResponse({ ...SYSTEM_STATUS, render_mode: 'comfyui', production_mode: PRODUCTION_MODE_READY }),
+    });
+    realReadyProject();
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    window.location.hash = '#d/produce';
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByText('手工分镜草稿与单镜任务(高级)'));
+    const dock = document.querySelector('#manual-storyboard') as HTMLElement;
+    const queue = await within(dock).findByRole('button', { name: /加入队列/ });
+    await waitFor(() => { expect(queue).toBeEnabled(); });
+    await user.click(queue);
+    // 真实生成是二次确认：第一下展开，第二下才提交。
+    await user.click(await within(dock).findByRole('button', { name: /确认真实生成/ }));
+    await waitFor(() => {
+      const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string; workflow_profile_id: string };
+      expect(body.provider).toBe('comfyui');
+      expect(body.workflow_profile_id).toBe('wf-1');
+    });
+  });
+
+  it('演示状态下任务只能是 mock，真实选项被锁', async () => {
+    realReadyProject();
+    window.location.hash = '#d/advanced';
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
+    const card = document.querySelector('.queue-provider-card') as HTMLElement;
+    const provider = await within(card).findByLabelText(/生成方式/);
+    expect((provider as HTMLSelectElement).disabled).toBe(true);
+    // 单镜提交入口在镜头拆解页,演示状态下同样只能提交 mock。
+    window.location.hash = '#d/produce';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await user.click(await screen.findByText('手工分镜草稿与单镜任务(高级)'));
+    const dock = document.querySelector('#manual-storyboard') as HTMLElement;
+    await user.click(within(dock).getByRole('button', { name: /加入队列/ }));
+    await user.click(await within(dock).findByRole('button', { name: /确认真实生成/ }));
+    await waitFor(() => {
+      const body = stub.callsOf('POST', /projects\/proj-1\/jobs$/)[0].body as { provider: string };
+      expect(body.provider).toBe('mock');
+    });
+  });
+
+  it('无 LLM 配置时明确提示 AI 分镜未就绪，手工入口就在同一页', async () => {
+    realReadyProject();
+    window.location.hash = '#d/produce';
+    const user = userEvent.setup();
+    render(<App />);
+    expect(await screen.findByText(/AI 分镜能力未就绪/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /去配置模型服务/ })).toBeInTheDocument();
+    await user.click(await screen.findByText('手工分镜草稿与单镜任务(高级)'));
+    const dock = document.querySelector('#manual-storyboard') as HTMLElement;
+    await waitFor(() => {
+      expect(within(dock).getByText(/时长（4–15 秒）/)).toBeInTheDocument();
+    });
   });
 });

@@ -56,9 +56,6 @@ type Props = {
   onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
   onBindStandardParameters: (profileId: string) => void;
-  onOpenExpert: () => void;
-  /** The complete preparation lives in 设置 → 制作环境; this only navigates. */
-  onOpenSettings: () => void;
 };
 
 function gib(bytes?: number | null): string {

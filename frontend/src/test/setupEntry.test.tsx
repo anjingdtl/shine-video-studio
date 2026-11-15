@@ -135,20 +135,19 @@ describe('空数据库与两层界面入口', () => {
     expect(await screen.findByText(/这三项都不影响出片/)).toBeInTheDocument();
   });
 
-  it('已有项目时默认导演模式；专业模式保留完整四板块', async () => {
+  it('已有项目时默认导演工作台;专业切换已下线,高级设置可达', async () => {
     const user = userEvent.setup();
     render(<App />);
     // 默认进入导演模式（普通用户层）。
     await waitFor(() => {
       expect(screen.getAllByText('雾港夜账').length).toBeGreaterThan(0);
     });
-    expect(screen.queryByTitle('打开设置板块')).not.toBeInTheDocument();
-    // 切到专业模式：完整四板块布局仍在。
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    expect(await screen.findByTitle('打开设置板块')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(document.querySelector('.date-chip')?.textContent).toContain('1 个');
-    });
+    expect(document.querySelector('.ui-toggle')).toBeNull();
+    expect(document.querySelector('.app-shell.ui-expert')).toBeNull();
+    // 细调与诊断收进左栏「高级设置」,不再是第二套界面。
+    await user.click(screen.getByRole('button', { name: /高级设置/ }));
+    await waitFor(() => expect(document.querySelector('#advanced')).not.toBeNull());
+    expect(screen.getByText('回到基础配置')).toBeInTheDocument();
   });
 
   it('首次读取作品遇到短暂 API 启动延迟时自动恢复已有作品', async () => {
@@ -168,11 +167,12 @@ describe('空数据库与两层界面入口', () => {
 
   it('全局刷新会重新读取设置页启动时失败的本机存储状态', async () => {
     let attempts = 0;
-    // 设置页现在有两处读同一份存储事实（制作环境卡 + 专业排查块），
-    // 所以「启动时读失败」要覆盖这一轮的两次读取，而不是只失败一次。
+    // 高级设置页挂载时有多处读同一份存储事实(存储卡 + 环境诊断块),
+    // 且数据纪元到达时诊断块会再读一次。「启动时读失败」要覆盖挂载期
+    // 的全部读取,而不是只失败一次。
     stub.add({
       method: 'GET', pattern: /\/api\/v1\/setup\/storage$/,
-      respond: () => attempts++ < 2
+      respond: () => attempts++ < 4
         ? jsonResponse({ detail: 'API is starting' }, 500)
         : jsonResponse({ root: 'D:\\Shine', configured: true, system_drive: false,
           requires_selection: false, free_bytes: 1, free_gb: 100, paths: {}, drives: [] }),
@@ -180,12 +180,12 @@ describe('空数据库与两层界面入口', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findAllByText('雾港夜账');
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    await user.click(await screen.findByTitle('打开设置板块'));
+    await user.click(screen.getByRole('button', { name: /高级设置/ }));
+    await user.click(await screen.findByText('环境单步诊断与受管后台(高级)'));
     expect(await screen.findByText(/本机存储信息暂时不可用/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '刷新全部数据' }));
     await waitFor(() => expect(screen.queryByText(/本机存储信息暂时不可用/)).not.toBeInTheDocument());
-    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(attempts).toBeGreaterThanOrEqual(4);
   });
 });
