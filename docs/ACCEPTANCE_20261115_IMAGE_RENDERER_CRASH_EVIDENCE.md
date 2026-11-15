@@ -68,12 +68,39 @@
 
 ### 3.2 回归
 
-- 后端全量：`backend/tests` 按文件均分分片并行（见 §4 口径），全绿，无
-  `FAILED` / `ERROR` 行。
-- 定向复跑：`test_image_managed_renderer` / `test_material_render_e2e` /
+- **后端全量**：`backend/tests`（247 个测试文件）按文件均分分片并行，两个分片
+  退出码均为 0，日志里没有 `FAILED` / `ERROR` 行（判定口径见 §4）。
+  > 口径说明：项目固定规则是 8 分片（开发机并行）。本次执行环境只有 2 核 3GB，
+  > 按核数下调为 2 分片并行，**判定口径不变**（全部分片退出码 0 且无
+  > `FAILED`/`ERROR` 行才算通过）。命令：
+  > ```bash
+  > ls backend/tests/test_*.py > /tmp/all-tests.txt
+  > split -n r/2 /tmp/all-tests.txt /tmp/shard-
+  > for f in /tmp/shard-*; do
+  >   (CODEBUDDY_SAFE_DELETE_ENABLED=0 /workspace/backend-venv/bin/python -m pytest \
+  >      $(tr '\n' ' ' < "$f") -q -p no:cacheprovider > "$f.log" 2>&1) &
+  > done; wait
+  > grep -H "^FAILED\|^ERROR" /tmp/shard-*.log   # 无输出
+  > ```
+  > 全量跑完后，`renderer_log_evidence` 又做了一次收敛（只读日志尾部、
+  > 新增独立 `renderer_log_tail`），受影响的 5 个模块单独复跑：
+  > `test_service_validation` / `test_mode_capabilities` /
+  > `test_review_runtime_preparation` / `test_node_pack_whitelist` /
+  > `test_image_renderer_crash_evidence`，全绿。
+- **定向复跑**：`test_image_managed_renderer` / `test_material_render_e2e` /
   `test_material_image_jobs` / `test_asset_center` /
-  `test_runtime_control_hardening` / `test_setup_capability_gates` 全绿。
-- 前端全量 `npx vitest run --no-file-parallelism`、`tsc -b`、`vite build` 通过。
+  `test_runtime_control_hardening` / `test_setup_capability_gates` /
+  `test_managed_process_release` 全绿。
+- **前端**：`npx vitest run --no-file-parallelism` 78 个文件 / 429 例，77 文件
+  通过、**2 例失败**；`tsc -b` 通过；`vite build` 通过。
+  - 失败用例：`src/test/simpleAssets.test.tsx`
+    「锁定失败会保留已批准状态；再次确认只补锁定，不重复批准」与
+    「项目锁定素材直接进入全局候选，不自动晋升」，
+    失败原因是找不到按钮「确认使用」/「收藏到素材中心」。
+  - **与本轮无关**：把本轮的前端改动 `git stash` 后在 main 上复跑，同样这 2 例
+    失败 —— 属 main 上的**既有失败**，本轮既未引入也未修复，不在本次范围内
+    悄悄改动。
+  - 本轮新增的 `imageWorkshopBlockers` 2 例通过。
 - `ruff check backend/shine backend/tests` 干净。
 
 ## 4. 真机边界（本轮未验证、必须在用户机执行的部分）
