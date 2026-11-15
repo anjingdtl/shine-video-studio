@@ -294,8 +294,15 @@ foreach ($name in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
 }
 # A success receipt for the toolchain.  The next start reads it instead
 # of assuming that an existing directory means a complete installation.
-if ($StorageRoot) {
-    $receiptDir = Join-Path $StorageRoot 'run'
+# The receipt always lands next to the install root ({盘符}\ShineVideoStudio\run);
+# the Web 修复路径不带 -StorageRoot，但带着 -DataDir（= 安装根\data），
+# 因此从 DataDir 反推同一个接收目录，保证 install_once 不会重复下载工具链。
+$receiptRoot = $StorageRoot
+if (-not $receiptRoot -and $DataDir) {
+    $receiptRoot = Split-Path -Parent ([IO.Path]::GetFullPath($DataDir))
+}
+if ($receiptRoot) {
+    $receiptDir = Join-Path $receiptRoot 'run'
     New-Item -ItemType Directory -Force -Path $receiptDir | Out-Null
     [ordered]@{
         recorded_at = (Get-Date).ToString('o')
@@ -308,17 +315,11 @@ if ($StorageRoot) {
 }
 $report | ConvertTo-Json -Depth 5
 if ($report.blockers.Count -gt 0) { exit 1 }
-if ($defaultManifest -and -not $CheckOnly) {
-    # Personal desktop installs need no operator password. Preserve explicit
-    # legacy provisioning for scripts that already pass a credential file.
-    if (-not $NoLaunch -and $OperatorPasswordFile) {
-        . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
-        $operatorCredentialPath = [IO.Path]::GetFullPath($OperatorPasswordFile)
-        $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
-        Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
-    }
-    # Persist the installer opt-in for later installed -> start launches.
-    # Preserve an administrator's explicit opt-out; the UI explains how to enable it.
+# Persist the installer opt-in for later installed -> start launches.
+# Applies to BOTH the one-click installer (default manifest) and the Web
+# 修复路径（显式 tools manifest）：否则 Web 补装成功后 /tool-repair 仍因
+# 标志缺失而 409，用户无解。保留管理员的显式 opt-out；UI 说明如何启用。
+if (-not $CheckOnly) {
     $executionEnvFile = Join-Path $repoRoot '.env'
     $executionEnvText = if (Test-Path -LiteralPath $executionEnvFile) {
         Get-Content -LiteralPath $executionEnvFile -Raw -Encoding UTF8
@@ -330,6 +331,16 @@ if ($defaultManifest -and -not $CheckOnly) {
         $env:SHINE_ENABLE_LOCAL_EXECUTION = '1'
         $executionEnvText += "`nSHINE_ENABLE_LOCAL_EXECUTION=1`n"
         [IO.File]::WriteAllText($executionEnvFile, $executionEnvText, (New-Object Text.UTF8Encoding($false)))
+    }
+}
+if ($defaultManifest -and -not $CheckOnly) {
+    # Personal desktop installs need no operator password. Preserve explicit
+    # legacy provisioning for scripts that already pass a credential file.
+    if (-not $NoLaunch -and $OperatorPasswordFile) {
+        . (Join-Path $PSScriptRoot 'bootstrap_identity.ps1')
+        $operatorCredentialPath = [IO.Path]::GetFullPath($OperatorPasswordFile)
+        $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
+        Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
     }
     if (-not $DataDir) {
         if ($env:SHINE_DATA_DIR) { $DataDir = $env:SHINE_DATA_DIR }
@@ -389,7 +400,7 @@ if ($defaultManifest -and -not $CheckOnly) {
     # no port lets start_shine fall back to 8000/5173, which may belong to an
     # unrelated local service on the same machine.
     $startArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-        (Join-Path $PSScriptRoot 'start_shine.ps1'), '-Install', '-OpenBrowser')
+        (Join-Path $PSScriptRoot 'start_shine.ps1'), '-Install', '-OpenBrowser', '-AutoPorts')
     if ($explicitDataDir) { $startArgs += @('-DataDir', $DataDir) }
     if ($ApiPort -gt 0) { $startArgs += @('-ApiPort', "$ApiPort") }
     if ($WebPort -gt 0) { $startArgs += @('-WebPort', "$WebPort") }

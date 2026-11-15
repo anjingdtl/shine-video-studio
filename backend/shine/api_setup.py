@@ -1233,7 +1233,7 @@ def _register_project_profiles(db, project_id: str, *, variant_id: str | None = 
             media_transfers=raw.get("media_transfers"), required_nodes=raw["required_nodes"],
             checkpoint_id=raw.get("checkpoint_id"),
         )
-        profile = create_workflow_profile(request, db)
+        profile = create_workflow_profile(request, None, db)
         registered.append({"name": name, "profile_id": profile.id, "status": "REGISTERED"})
     db.commit()
     return registered
@@ -1597,7 +1597,9 @@ class PrepareRequest(BaseModel):
 
 
 class PreparePlanRequest(PrepareRequest):
-    disk_free: int = Field(default=0, ge=0)
+    #: None = 客户端探测未知；由服务端 disk_info 做权威判定，避免「探测竞态传 0
+    #: → INSUFFICIENT_DISK 假失败」把新机卡死。
+    disk_free: int | None = Field(default=None, ge=0)
     include_candidate_ack: bool = False
 
 

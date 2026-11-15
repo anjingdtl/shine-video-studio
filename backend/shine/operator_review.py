@@ -64,6 +64,10 @@ class OperatorDecision(BaseModel):
     items: dict[str, ReviewItem]
     watched: bool = False
     listened: bool = False
+    #: A human may explicitly accept an attempt whose technical QC could not be
+    #: verified (FFmpeg/FFprobe missing or a tool failure). A genuinely failed
+    #: technical QC stays hard-blocked: this flag only bridges ``needs_review``.
+    accept_unverified_technical: bool = False
 
 
 def authenticate(settings, token: str) -> str:
@@ -345,12 +349,12 @@ def submit_review(db, settings, job_id, actor, decision: OperatorDecision, *, cl
             duration_s=request.expected_duration_s, expect_audio=bool(request.shot_spec.dialogue)
         ),
     )
-    if (
-        technical.result != "passed"
-        or technical.artifact_sha256 != artifact.sha256
-        or technical.byte_size != artifact.byte_size
-    ):
-        raise HTTPException(409, "Fresh technical QC failed or unavailable; approval blocked")
+    if technical.artifact_sha256 != artifact.sha256 or technical.byte_size != artifact.byte_size:
+        raise HTTPException(409, "Review snapshot media identity mismatch; approval blocked")
+    if technical.result == "failed":
+        raise HTTPException(409, "Fresh technical QC failed; approval blocked")
+    if technical.result != "passed" and not decision.accept_unverified_technical:
+        raise HTTPException(409, "TECHNICAL_QC_UNVERIFIED_REQUIRES_ACCEPTANCE")
     db.rollback()
     db.execute(text("BEGIN IMMEDIATE"))
     db.expire_all()

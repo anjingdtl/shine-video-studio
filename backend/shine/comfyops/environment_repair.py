@@ -173,12 +173,15 @@ def build_repair_plan(settings, report: dict, *, manifest_path: Path | None = No
     }
 
 
-def _bootstrap_argv(plan: dict) -> list[str]:
+def _bootstrap_argv(plan: dict, data_dir: str) -> list[str]:
     """The one argument vector this service may run.
 
-    None of these values comes from a request body.  The manifest, the roots
-    and the script are fixed server-side; ``-NoLaunch`` keeps the installer
-    from starting the workbench while an API request is being served.
+    None of these values comes from a request body.  The manifest, the roots,
+    the data directory and the script are fixed server-side; ``-NoLaunch``
+    keeps the installer from starting the workbench while an API request is
+    being served.  ``-DataDir`` lets the installer write the toolchain receipt
+    next to the install root (安装根\\run\\toolchain.json), so a later
+    ``install_once`` does not re-download the whole toolchain.
     """
     return [
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
@@ -186,6 +189,7 @@ def _bootstrap_argv(plan: dict) -> list[str]:
         "-ToolsManifest", str(DEFAULT_TOOLS_MANIFEST),
         "-InstallRoot", plan["install_root"],
         "-ToolsRoot", plan["tools_root"],
+        "-DataDir", data_dir,
         "-NoLaunch",
     ]
 
@@ -252,7 +256,9 @@ def execute_repair(db, settings, actor, plan_id: str, *, report: dict | None = N
     _validate_roots(plan, settings)
     runner = runner or _default_runner
     started = datetime.now(UTC).isoformat().replace("+00:00", "Z")
-    returncode, stdout, stderr = runner(_bootstrap_argv(plan), cwd=str(REPO_ROOT), timeout=timeout)
+    returncode, stdout, stderr = runner(
+        _bootstrap_argv(plan, str(Path(settings.data_dir).resolve())), cwd=str(REPO_ROOT), timeout=timeout
+    )
     installer_report = _parse_report(stdout)
     tools_probe = probe or (lambda: probe_host_environment(
         Path(settings.data_dir), deployment_dir=Path(settings.comfyops_dir),
@@ -268,6 +274,9 @@ def execute_repair(db, settings, actor, plan_id: str, *, report: dict | None = N
     unsatisfied = sorted(required - set(satisfied))
     if not unsatisfied:
         status = "SUCCEEDED"
+        # 让运行中的后端立刻认可本机执行：否则刚补装完，/tool-repair 仍会因
+        # 进程启动时的旧环境而 409，形成「装好了却仍被拦」的自我矛盾。
+        os.environ["SHINE_ENABLE_LOCAL_EXECUTION"] = "1"
     elif satisfied:
         status = "PARTIAL"
     else:

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import socket
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -391,12 +392,13 @@ def test_http_200_without_comfy_signature_is_never_comfyui():
 def test_executor_uses_stock_powershell_and_a_fixed_argument_vector(tmp_path):
     settings = settings_for(tmp_path)
     plan = environment_repair.build_repair_plan(settings, report_4070())
-    argv = environment_repair._bootstrap_argv(plan)
+    argv = environment_repair._bootstrap_argv(plan, str(Path(settings.data_dir).resolve()))
     assert argv[0] == "powershell.exe", "PowerShell 7 must not be its own prerequisite"
     assert argv[1:4] == ["-NoProfile", "-ExecutionPolicy", "Bypass"]
     assert argv[argv.index("-File") + 1].endswith("bootstrap.ps1")
     assert argv[argv.index("-InstallRoot") + 1] == plan["install_root"]
     assert argv[argv.index("-ToolsRoot") + 1] == plan["tools_root"]
+    assert argv[argv.index("-DataDir") + 1] == str(Path(settings.data_dir).resolve())
     assert plan["bootstrap"]["requires_administrator"] is False
     assert plan["bootstrap"]["downloads_only_pinned_packages"] is True
 

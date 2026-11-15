@@ -198,6 +198,14 @@ def test_mirror_url_only_rewrites_pinned_huggingface_files():
     assert mirror_url(url + "?download=1") is None
 
 
+def test_mirror_url_covers_codeload_and_pypi_wheels():
+    codeload = "https://codeload.github.com/Comfy-Org/nodes/zip/refs/heads/main"
+    assert mirror_url(codeload) == f"https://gh-proxy.com/{codeload}"
+    wheel = "https://files.pythonhosted.org/packages/ab/cd/ffmpeg-1.0-py3-none-win_amd64.whl"
+    assert mirror_url(wheel) == "https://pypi.tuna.tsinghua.edu.cn/packages/ab/cd/ffmpeg-1.0-py3-none-win_amd64.whl"
+    assert mirror_url("https://files.pythonhosted.org/packages/x?download=1") is None
+
+
 def test_unreachable_primary_falls_back_to_the_mirror(monkeypatch, tmp_path):
     file = spec()
     calls = []

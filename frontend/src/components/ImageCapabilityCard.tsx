@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, CircleDashed, Image as ImageIcon, Loader2 } from 'lucide-react';
-import { api } from '../api';
+import { api, knownFreeBytes } from '../api';
 
 export type ImageFamilyReadiness = {
   layer: string;
@@ -108,7 +108,7 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
           catalog: IMAGE_CATALOG,
           components: IMAGE_COMPONENTS,
           project_id: projectId,
-          disk_free: storage.free_bytes,
+          disk_free: knownFreeBytes(storage.free_bytes),
         },
       );
       setPlan({ ...created, root: storage.root });

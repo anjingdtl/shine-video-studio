@@ -438,6 +438,25 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
                 # installing or already needs review.
                 plan_row.status = "NEEDS_REVIEW"
         return NEEDS_REVIEW
+    except Exception as exc:  # noqa: BLE001 - 意外异常（盘满 ENOSPC、权限、I/O 损坏等）绝不能击穿 worker 主循环
+        # 与「非重试 ValueError」同样的终态：FAILED_RECONCILE_REQUIRED + NEEDS_REVIEW，
+        # 由界面整理入口安全收尾，而不是无限重放或把 worker 打挂。
+        error_message = f"{type(exc).__name__}: {str(exc)[:500]}"
+        _finish(
+            factory, attempt_id, worker_id,
+            stage=NEEDS_REVIEW, status="FAILED_RECONCILE_REQUIRED",
+            error_code=type(exc).__name__, error_message=error_message,
+        )
+        with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            current_attempt = db.get(InstallationAttempt, attempt_id)
+            plan_row = db.get(InstallationPlan, plan.id)
+            if (plan_row is not None and current_attempt is not None
+                    and current_attempt.stage == NEEDS_REVIEW and current_attempt.error_code == type(exc).__name__
+                    and current_attempt.lease_owner is None):
+                plan_row.status = "NEEDS_REVIEW"
+        logger.exception("installation_unexpected_error attempt_id=%s", attempt_id)
+        return NEEDS_REVIEW
     # Every file of every package is on disk and hash-verified.  That is a
     # proven fact about the files, not a runtime claim.
     with factory.begin() as db:

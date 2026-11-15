@@ -832,7 +832,12 @@ def qc_library_version(version_id: str, settings: SettingsDep, db: DBSession):
         "dialogue": dialogue_qc,
     }
     row.qc = qc
-    row.status = "READY_FOR_REVIEW" if decoded.status == "pass" and not hard_dialogue_errors else "QC_FAILED"
+    if hard_dialogue_errors or decoded.status == "fail":
+        row.status = "QC_FAILED"
+    else:
+        # ``unavailable``（工具缺失，无法判定）与 ``pass`` 都进入人工审片：
+        # 审查模块以辅助为定位，不作为项目硬阻滞设置；只有真实技术失败或对白硬错误才标 QC_FAILED。
+        row.status = "READY_FOR_REVIEW"
     add_audit(db, "local-user", "LIBRARY_VERSION_TECHNICAL_QC", "library_version", row.id, qc)
     db.commit()
     return service.version_data(db, row)

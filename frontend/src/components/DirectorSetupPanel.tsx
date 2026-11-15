@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
-import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
+import { api, json, knownFreeBytes, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupCenter } from './SetupCenter';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
@@ -123,7 +123,7 @@ export default function DirectorSetupPanel({
           catalog: 'h3-ref2va-windows-x64',
           components: [model],
           project_id: projectId,
-          disk_free: storage.free_bytes,
+          disk_free: knownFreeBytes(storage.free_bytes),
         }),
       );
       const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, () => undefined, { wait: false });

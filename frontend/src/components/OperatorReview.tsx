@@ -15,6 +15,7 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
   const [items, setItems] = useState<Record<string, { status: string; evidence: string }>>({});
   const [watched, setWatched] = useState(false);
   const [listened, setListened] = useState(false);
+  const [acceptTechnical, setAcceptTechnical] = useState(false);
   const [media, setMedia] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
@@ -27,7 +28,7 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
       const response = await fetch(`/api/v1/operator/jobs/${jobId}/media`, { headers });
       if (!response.ok) throw new Error('媒体完整性或授权检查失败');
       setMedia(URL.createObjectURL(await response.blob()));
-      setContext(value); setWatched(false); setListened(false);
+      setContext(value); setWatched(false); setListened(false); setAcceptTechnical(false);
       setItems(Object.fromEntries(Object.keys(labels).map(k => [k, { status: 'NOT_REVIEWED', evidence: '' }])));
     } catch (error) { setMessage(String(error)); } finally { setBusy(false); }
   }
@@ -36,7 +37,7 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
     setBusy(true);
     try {
       const result = await api<{ status: string; result: string }>(`/operator/jobs/${jobId}/review`, {
-        ...json('POST', { snapshot: context.snapshot, request_id: crypto.randomUUID(), items, watched, listened }),
+        ...json('POST', { snapshot: context.snapshot, request_id: crypto.randomUUID(), items, watched, listened, accept_unverified_technical: acceptTechnical }),
       });
       setMessage(`已记录人工审片：${label(qcResultLabels, result.result)} · 任务状态 ${label(statusLabels, result.status)}。回到任务列表可看到更新。`);
       setContext(null);
@@ -55,6 +56,8 @@ export default function OperatorReview({ jobId }: { jobId: string }) {
       <video controls src={media} style={{ width: '100%', maxHeight: 480 }} />
       <label><input type="checkbox" checked={watched} onChange={e => setWatched(e.target.checked)} />我已完整观看当前视频</label>
       <label><input type="checkbox" checked={listened} onChange={e => setListened(e.target.checked)} />我已人工试听对白、音色及声画同步</label>
+      <label><input type="checkbox" checked={acceptTechnical} onChange={e => setAcceptTechnical(e.target.checked)} />技术质检未执行（如本机缺 FFmpeg），我确认观看通过</label>
+      <small>技术质检真实失败时此勾选不会放行；它只用于「工具缺失、无法判定」的出路。</small>
       {Object.entries(labels).map(([key, text]) => <div key={key}>
         <label>{text}<select value={items[key]?.status} onChange={e => setItems({ ...items, [key]: { ...items[key], status: e.target.value } })}>
           {reviewOptions.map(s => <option key={s} value={s}>{label(reviewOptionLabels, s)}</option>)}
