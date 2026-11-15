@@ -1,6 +1,6 @@
 import { CheckCircle2, CircleDashed, Loader2, RefreshCw, TriangleAlert, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { api as request, json, timeoutSignal, type SystemStatus } from '../api';
+import { api as request, json, timeoutSignal, knownFreeBytes, type SystemStatus } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { nodePackWarning } from './nodePackNotes';
 import { ApiError } from '../api';
@@ -103,7 +103,7 @@ type RuntimeState = {
   service_validation?: { status: string; blockers?: string[]; advisory_reviews?: Record<string, { status: string }> } | null;
 };
 type Readiness = { layers: Array<{ layer?: string; status?: string }> };
-type StorageState = { root: string; requires_selection: boolean; free_bytes: number };
+type StorageState = { root: string; requires_selection: boolean; free_bytes: number; drives: Array<{ path: string; system_drive: boolean; free_gb: number }> };
 type Catalog = { total_bytes: number; components: Array<{ component_id: string; files: number; role?: string | null }> };
 
 const HARDWARE_BLOCKER_ZH: Record<string, string> = {
@@ -450,8 +450,19 @@ export function RealProductionWizard({
     const storage = await api<StorageState>('/setup/storage');
     if (!alive()) return;
     if (storage.requires_selection) {
-      stopWith('existing', '还没有选择安装目录。请到专业设置的「制作环境」选择一个空间足够的非系统盘目录后重试。');
-      return;
+      const systemOnly = storage.drives.length > 0 && storage.drives.every(d => d.system_drive);
+      if (systemOnly && window.confirm('这台电脑只有系统盘可用。是否明确选择使用系统盘继续？（容量门槛不降低，可在专业设置随时调整）')) {
+        const system = storage.drives[0];
+        await api<StorageState>('/setup/storage', {
+          method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ path: `${system.path}ShineVideoStudio\\Runtime`, allow_system_drive: true }),
+        });
+        window.dispatchEvent(new Event('shine-storage-changed'));
+        storage.root = (await api<StorageState>('/setup/storage')).root;
+      } else {
+        stopWith('existing', '还没有选择安装目录。只有系统盘时，请到专业设置的「制作环境」勾选「明确选择使用系统盘」后重试。');
+        return;
+      }
     }
     // Search the person's chosen storage root as well as the declared probe
     // roots: a ComfyUI download nested inside it must not be invisible.
@@ -529,7 +540,7 @@ export function RealProductionWizard({
       const plan = pending.length ? { plan_id: pending[0].id, sha256: pending[0].sha256, status: pending[0].status }
         : await api<SetupPlan & { download_bytes: number }>('/setup/install-plan', json('POST', {
           components: catalog.components.filter(c => !['VLM', 'ASR'].includes(c.role ?? '')).map(c => c.component_id),
-          project_id: projectId, disk_free: storage.free_bytes,
+          project_id: projectId, disk_free: knownFreeBytes(storage.free_bytes),
           ...(variant ? {
             variant_id: variant.variant_id,
             catalog: variant.catalog_id,

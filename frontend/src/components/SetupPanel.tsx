@@ -1,6 +1,6 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, timeoutSignal } from '../api';
+import { api, timeoutSignal, knownFreeBytes } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
@@ -498,7 +498,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
     void run(async () => {
       const core = productionCatalogComponents(catalog?.components ?? []).map((component) => component.component_id);
       const result = await api<{ plan_id: string; sha256: string; download_bytes: number; disk_required: number }>(
-        '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: storage?.free_bytes ?? 0 }));
+        '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: knownFreeBytes(storage?.free_bytes) }));
       setPlans(previous => [...previous, { ...result, kind: 'INSTALL', status: 'AWAITING_APPROVAL' }]);
       return `安装计划 ${result.plan_id} 已创建（下载 ${fmtBytes(result.download_bytes)}，预留 ${fmtBytes(result.disk_required)}）`;
     });

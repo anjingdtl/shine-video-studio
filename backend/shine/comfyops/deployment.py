@@ -453,7 +453,7 @@ def h3_catalog_closure_requested(package_ids: list[str]) -> bool:
 
 
 def create_install_plan(db, settings: Settings, catalog: dict, requested: list[str],
-                        project_id: str, disk_free: int, *,
+                        project_id: str, disk_free: int | None, *,
                         variant: dict | None = None,
                         qualification: dict | None = None,
                         configuration: dict | None = None,
@@ -499,7 +499,9 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
     if WHEEL_COMPONENT_ID not in ordered:
         reserve = 0
     disk_required = size * 2 + reserve
-    if disk_required > disk_free:
+    # 客户端探测未知（None）时跳过客户报告值，由下面这行服务端 disk_info 做权威判定；
+    # 否则探测竞态传 0 会把新机误拦成 INSUFFICIENT_DISK。
+    if disk_free is not None and disk_required > disk_free:
         raise HTTPException(409, "INSUFFICIENT_DISK")
     if disk_info(storage_root)['free_bytes'] < disk_required:
         raise HTTPException(409, "INSUFFICIENT_DISK_ON_HOST")

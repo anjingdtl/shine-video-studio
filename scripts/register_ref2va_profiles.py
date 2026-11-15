@@ -21,6 +21,7 @@ WORKFLOWS = [
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img-1aud.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-2img-1aud-portrait.json",
+    Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-6img.json",
     Path(__file__).resolve().parents[1] / "config" / "workflows" / "ref2va-pdd8-upscale-2img.json",
 ]
 
@@ -61,13 +62,17 @@ def main() -> int:
         status, validated = request("POST", f"/api/v1/workflow-profiles/{profile['id']}/validate")
         print(f"[validate] {name}: HTTP {status} {json.dumps(validated.get('validated_against', validated), ensure_ascii=False)[:400]}")
         if status != 200:
-            # The live check needs a running renderer.  The managed renderer
-            # starts lazily and repeats this node-completeness check itself, so
-            # an unreachable ComfyUI here is not a registration failure.
+            # The live check needs a running renderer.  A profile that is
+            # registered but never validated must not look "done": the worker
+            # now fails closed on STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE /
+            # missing nodes instead of submitting an unverifiable graph, so a
+            # non-zero exit is the honest signal that this run did not finish.
             validation_failed = True
     if validation_failed:
-        print("[note] Some live validations could not run; the managed renderer repeats the "
-              "node-completeness check when it starts.")
+        print("[error] 部分工作流已登记，但节点完整性校验未完成（渲染器不可达或缺失节点）。")
+        print("  这些 profile 处于「已登记、未验证」状态：生产提交会被 worker 以明确错误码拒绝，")
+        print("  直到受管渲染器确认运行后再重新执行本脚本验证。")
+        return 2 if not registration_failed else 1
     return 1 if registration_failed else 0
 
 

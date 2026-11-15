@@ -196,6 +196,48 @@ def test_completed_production_can_be_manually_accepted_without_rewriting_the_ren
         assert db.scalars(select(AuditEvent).where(AuditEvent.event_type == "OPERATOR_REVIEW_RECORDED")).all()
 
 
+def test_unverified_technical_requires_explicit_human_acceptance(reviewable, monkeypatch):
+    """FFmpeg 缺失（unavailable→needs_review）不再永久死锁：人工可显式接受，真实失败仍拒绝。"""
+    _, factory, settings, job_id, fake, path = reviewable
+    content = path.read_bytes()
+    needs_review = TechnicalQCResult(
+        result="needs_review",
+        checks=[],
+        tool="fake-test-only",
+        artifact_sha256=hashlib.sha256(content).hexdigest(),
+        byte_size=len(content),
+    )
+    monkeypatch.setattr("shine.operator_review.TechnicalQC.check", lambda *a, **k: needs_review)
+    with factory() as db:
+        body = decision(db, settings, job_id)
+        with pytest.raises(HTTPException) as exc:
+            submit_review(db, settings, job_id, "test-human", body, client=fake)
+        assert exc.value.status_code == 409
+    with factory() as db:
+        body = decision(db, settings, job_id, accept_unverified_technical=True)
+        result = submit_review(db, settings, job_id, "test-human", body, client=fake)
+        assert result["status"] == "PASSED"
+
+
+def test_failed_technical_never_allowed_by_acceptance_flag(reviewable, monkeypatch):
+    """技术质检真实失败时，accept_unverified_technical 不能放行。"""
+    _, factory, settings, job_id, fake, path = reviewable
+    content = path.read_bytes()
+    failed = TechnicalQCResult(
+        result="failed",
+        checks=[],
+        tool="fake-test-only",
+        artifact_sha256=hashlib.sha256(content).hexdigest(),
+        byte_size=len(content),
+    )
+    monkeypatch.setattr("shine.operator_review.TechnicalQC.check", lambda *a, **k: failed)
+    with factory() as db:
+        body = decision(db, settings, job_id, accept_unverified_technical=True)
+        with pytest.raises(HTTPException) as exc:
+            submit_review(db, settings, job_id, "test-human", body, client=fake)
+        assert exc.value.status_code == 409
+
+
 def test_failed_manual_review_does_not_rewrite_a_completed_render(reviewable):
     _, factory, settings, job_id, fake, _ = reviewable
     with factory.begin() as db:

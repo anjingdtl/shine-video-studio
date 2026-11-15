@@ -303,7 +303,7 @@ $startButton.Add_Click({
     if ($script:process -and -not $script:process.HasExited) { return }
     $root = Get-SelectedStorageRoot
     $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $installScript)
-    if ($root) { $arguments += @('-StorageRoot', $root) }
+    if ($root) { $arguments += @('-StorageRoot', (Join-Path $root 'ShineVideoStudio')) }
     if ($NoLaunch) { $arguments += '-NoLaunch' }
     if ($CheckOnly) { $arguments += '-CheckOnly' }
     $script:logFile = Join-Path $env:TEMP ('shine-setup-' + [Guid]::NewGuid().ToString('N') + '.log')

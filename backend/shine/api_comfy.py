@@ -126,7 +126,11 @@ def list_workflow_profiles(db: DBSession, project_id: str | None = Query(default
 
 
 @router.post("/workflow-profiles", response_model=WorkflowProfilePublic, status_code=201)
-def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> WorkflowProfilePublic:
+def create_workflow_profile(
+    body: WorkflowProfileCreate,
+    settings: SettingsDep = None,
+    db: DBSession = None,
+) -> WorkflowProfilePublic:
     if body.project_id:
         require_project(db, body.project_id)
     # Same visibility rule as the list endpoint: a name is unique within one
@@ -216,7 +220,29 @@ def create_workflow_profile(body: WorkflowProfileCreate, db: DBSession) -> Workf
         project_id=profile.project_id,
     )
     db.commit()
-    db.refresh(profile)
+    # 尽力而为的即时节点校验（渲染器可达时）：登记即校验并持久化 validated_against，
+    # 避免「已登记、未验证」的假象。渲染器不可达或内部登记（无 settings）时保持
+    # None（未验证），worker 在提交时对未验证的图 fail-closed，缺节点不会拖到出片才爆。
+    if settings is not None:
+        try:
+            from shine.comfyops.runtime_configuration import resolve_runtime
+
+            try:
+                resolved = resolve_runtime(db, settings)
+            except HTTPException:
+                resolved = settings  # 未激活运行时：回退默认端口
+            client = ComfyUIClient(resolved.comfyui_base_url, timeout_s=10)
+            object_info = client.object_info()
+            validation = validate_against_object_info(profile.graph, profile.parameter_map, object_info)
+            profile.validated_against = {
+                **validation, "validated_at": datetime.now(UTC).isoformat(),
+                "source": "live_object_info", "generation_verified": False,
+            }
+            db.commit()
+            db.refresh(profile)
+        except (ComfyError, OSError, ValueError, HTTPException):
+            db.rollback()
+            db.refresh(profile)
     return WorkflowProfilePublic.model_validate(_profile_data(profile))
 
 
@@ -226,7 +252,15 @@ def validate_workflow_profile(profile_id: str, settings: SettingsDep, db: DBSess
     profile = db.get(WorkflowProfile, profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Workflow profile not found")
-    client = ComfyUIClient(settings.comfyui_base_url, timeout_s=30)
+    # 端口一致性：已激活的受管运行时可能通过 probe_port 落在非默认端口（如 8189），
+    # 校验必须连实际端口，而不是固定 settings.comfyui_base_url 的默认 8188。
+    from shine.comfyops.runtime_configuration import resolve_runtime
+
+    try:
+        resolved = resolve_runtime(db, settings)
+    except HTTPException:
+        resolved = settings  # 未激活或运行配置变化：回退默认端口，保持手动校验可用
+    client = ComfyUIClient(resolved.comfyui_base_url, timeout_s=30)
     try:
         object_info = client.object_info()
     except ComfyError as exc:

@@ -2754,8 +2754,25 @@ def _run_comfy_job(
             return job_id
         try:
             live_object_info = client.object_info()
-        except Exception:  # noqa: BLE001 - the graph still validates at submit
-            live_object_info = None
+        except Exception as exc:  # noqa: BLE001 - an unreachable renderer must not silently compile an unverifiable graph
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db, job_id=job_id, expected_state_version=expected_version,
+                    worker_id=worker_id, attempt_id=attempt_id, settings=settings)
+                if guarded is None:
+                    return job_id
+                job, attempt = guarded
+                job.failure_code = "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"
+                job.lease_owner = None
+                job.lease_expires_at = None
+                attempt.status = "FAILED"
+                attempt.failure_code = job.failure_code
+                try_transition(job, "REPAIR_PENDING")
+                add_audit(db, "comfy-worker", "STRATEGY_RENDERER_UNREACHABLE", "job", job.id, {
+                    "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+                    "hint": "渲染器不可达或未启动；确认受管实例运行后再重试。",
+                }, project_id=project_id)
+            return job_id
         image_count = sum(1 for item in manifest if item.use_as.value in ("subject", "picture"))
         audio_count = sum(1 for item in manifest if item.use_as.value == "audio")
         video_count = sum(1 for item in manifest if item.use_as.value == "video")

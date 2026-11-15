@@ -27,6 +27,8 @@ export const QA_CHECK_LABELS: Record<string, string> = {
 export const ERROR_CODE_LABELS: Record<string, string> = {
   INSTALL_TARGET_CONFLICT: '安装目录正被另一项安装使用，已自动排队等待前一项完成。',
   WAITING_FOR_TARGET: '正在等待前面的资源安装任务完成。',
+  DELIVERY_FFMPEG_UNAVAILABLE: '成片合成需要 FFmpeg，但本机没有可用的 FFmpeg。请重新运行一键安装入口补齐工具链（FFmpeg）后重试。',
+  TECHNICAL_QC_UNVERIFIED_REQUIRES_ACCEPTANCE: '这条视频的技术质检因本机缺少 FFmpeg/FFprobe 无法执行（其它检查正常）。请确认已完整观看、音画正常后，勾选「技术质检未执行，我确认观看通过」再提交；技术质检真实失败时该选项不会放行。',
   EXISTING_COMFY_VERSION_UNVERIFIED: '无法确认这台 ComfyUI 的软件身份（既没有本地版本声明，也没有正在运行的服务版本）。原安装没有被修改；可以先启动一次 ComfyUI 再检测。',
   HOST_NOT_QUALIFIED: '这台电脑没有通过这套 H3 方案的硬件准入。基础工具补装和独立图片、审片权重的下载不受影响，可以继续准备其它能力。',
   CAPABILITY_CATALOG_MISMATCH: '这次请求声明的能力和资源清单实际所属的能力不一致，已拒绝。',
@@ -417,6 +419,11 @@ export const json = (method: string, body: unknown): RequestInit => ({
   headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body),
 });
+
+/** 探测未知/失败时省略 disk_free（JSON.stringify 丢弃 undefined）：
+ *  服务端对 None 走权威 disk_info 判定，不再因 0 假失败。 */
+export const knownFreeBytes = (value: number | undefined | null): number | undefined =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : undefined;
 
 export type FilmTypeId = 'live_action' | 'animation';
 

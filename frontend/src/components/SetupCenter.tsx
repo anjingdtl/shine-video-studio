@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
   MonitorCheck, Video,
 } from 'lucide-react';
-import { api, json, timeoutSignal, ApiError } from '../api';
+import { api, json, timeoutSignal, ApiError, knownFreeBytes } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
 import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
@@ -605,7 +605,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
             : [key === 'vlm' ? REVIEW_COMPONENTS.vlm : REVIEW_COMPONENTS.asr];
         const catalog = key === 'image' ? IMAGE_CATALOG : (selectedVariant?.catalog_id ?? 'h3-ref2va-windows-x64');
         const body = {
-          catalog, components, project_id: projectId, disk_free: storage?.free_bytes ?? 0,
+          catalog, components, project_id: projectId, disk_free: knownFreeBytes(storage?.free_bytes),
           ...(key === 'h3' && selectedVariant ? {
             variant_id: selectedVariant.variant_id,
             candidate_download_acknowledged: !selectedVariant.auto_download_allowed,

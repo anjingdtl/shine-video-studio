@@ -168,7 +168,9 @@ export async function waitForInstallationAttempt(
   options?: { intervalMs?: number; maxTicks?: number },
 ): Promise<InstallationAttemptView> {
   const interval = options?.intervalMs ?? 2000;
-  const maxTicks = options?.maxTicks ?? 1800;
+  // 默认等待上限 8 小时（60.8GB 在慢网下可能需数小时）：超过后再提示重进页面查看，
+  // 避免把长下载误判为卡死。后端对「等待下载完成」的步骤本身没有超时。
+  const maxTicks = options?.maxTicks ?? 14400;
   for (let tick = 0; tick < maxTicks; tick += 1) {
     const view = await fetchInstallationAttempt(attemptId);
     onUpdate?.(view);
@@ -291,7 +293,7 @@ export async function approveAndExecuteSetupPlan(
     // local ComfyUI instance and answers with its own result.
     const result = await api<CompletedExecution>(path, {
       ...json('POST', body),
-      signal: timeoutSignal(600_000),
+      signal: timeoutSignal(1_800_000),  // 实例链含离线 venv 构建，慢盘放宽到 30 分钟
     });
     check();
     return result;

@@ -146,3 +146,22 @@ def test_worker_submits_second_pass_graph(api, fake_comfy, monkeypatch):  # noqa
                    if node["class_type"] == "MinimaxH3LatentUpscaler3DRefineHandoff")
     assert handoff["inputs"]["sigmas"] == ["61", 0]
     assert handoff["inputs"]["model"] == ["62", 0]
+
+
+def test_worker_fails_closed_when_live_object_info_is_unavailable(api, fake_comfy, monkeypatch):  # noqa: F811
+    """渲染器可达性失败不再静默编译：缺节点校验的图直接以明确错误码拒绝。"""
+    monkeypatch.setattr("shine.worker._handoff_preflight_allowed", lambda *_: True)
+    client, factory, settings = api
+    project_id = create_project(client)
+    style = freeze_style(client, project_id)
+    job_id = _seed_strategy_job(client, project_id, style["id"], DEFAULT_STRATEGY)
+
+    comfy_client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
+    monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: (_ for _ in ()).throw(ConnectionError("down")))
+
+    offline = worker_settings(settings)
+    processed = run_one(factory, worker_id="strategy-worker", settings=offline, comfy_client=comfy_client)
+    assert processed == job_id
+    assert fake_comfy.prompt_count == 0
+    result = client.get(f"/api/v1/jobs/{job_id}").json()
+    assert result["failure_code"] == "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"

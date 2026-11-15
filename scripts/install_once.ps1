@@ -139,6 +139,17 @@ function Get-ShineFreePort([int]$Start) {
     throw "No free local port between $Start and $($Start + 59)."
 }
 
+function Get-ShineRecordedPorts([string]$DataDir) {
+    # start_shine 在 -AutoPorts 下可能换用其它端口；已记录在
+    # run/processes.json，URL 以实际端口为准，避免打印打不开的地址。
+    $manifest = Join-Path $DataDir 'run/processes.json'
+    if (-not (Test-Path -LiteralPath $manifest)) { return $null }
+    try {
+        $record = Get-Content -LiteralPath $manifest -Raw -Encoding UTF8 | ConvertFrom-Json
+        return @{ api = [int]$record.api_port; web = [int]$record.web_port }
+    } catch { return $null }
+}
+
 function Show-ToolReport {
     $raw = ''
     $previous = $ErrorActionPreference
@@ -292,7 +303,13 @@ if (-not $StorageRoot) {
             Write-Warn "没有找到满足条件的非系统盘（需要 >= $(Get-GibString $requiredBytes) 空闲）。"
             Write-Host "  系统盘 $systemDrive 剩余 $(Get-GibString $systemDisk.Free)，容量达标。" -ForegroundColor Gray
             Write-Host '  安装峰值约 174 GB，会占用系统盘空间；请确认系统盘余量充足。' -ForegroundColor Yellow
-            $answer = Read-Host "  确认安装到系统盘 $systemDrive 吗？输入 YES 继续，其它任意键退出"
+            # 隐藏窗口 / stdin 重定向（GUI 向导）下 Read-Host 会永久挂起：
+            # 非交互环境直接视为未确认，拒绝而不是卡死。
+            if ([Console]::IsInputRedirected -or -not $Host.UI.RawUI) {
+                $answer = ''
+            } else {
+                $answer = Read-Host "  确认安装到系统盘 $systemDrive 吗？输入 YES 继续，其它任意键退出"
+            }
             if ($answer -eq 'YES') { $systemDriveApproved = $true }
         }
         if ($systemFits -and $systemDriveApproved) {
@@ -326,6 +343,13 @@ if (-not [IO.Path]::IsPathRooted($StorageRoot)) {
     exit 12
 }
 $StorageRoot = [IO.Path]::GetFullPath($StorageRoot)
+# 唯一性：任何入口（GUI 向导 / 控制台 / 脚本）都必须落在 {盘符}\ShineVideoStudio，
+# 不允许直接落在盘根，避免与控制台入口的落点分裂、重复下载。
+$resolvedRecorded = if ($recordedRoot) { [IO.Path]::GetFullPath($recordedRoot) } else { '' }
+if (($StorageRoot -match '^[A-Za-z]:\\$') -and $resolvedRecorded -ne $StorageRoot) {
+    $StorageRoot = [IO.Path]::GetFullPath((Join-Path $StorageRoot 'ShineVideoStudio'))
+    Write-Ok "安装目录统一为 $StorageRoot（不直接使用盘根）"
+}
 $storageDrive = [IO.Path]::GetPathRoot($StorageRoot).TrimEnd('\')
 $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
 if ($storageDrive -eq $systemDrive) {
@@ -340,7 +364,13 @@ if (-not $recordedData) { $recordedData = Join-Path $StorageRoot 'data' }
 
 if ($recordedRoot) {
     $resolvedRecorded = [IO.Path]::GetFullPath($recordedRoot)
-    if ($resolvedRecorded -ne $StorageRoot) {
+    if ($resolvedRecorded.TrimEnd('\') -eq $StorageRoot.TrimEnd('\')) {
+        # 同一安装，保持原样。
+    } elseif ($resolvedRecorded -match '^[A-Za-z]:\\$' -and $resolvedRecorded.TrimEnd('\') -eq $storageDrive) {
+        # 早期向导直接装在盘根：继续沿用该安装，不触发换盘冲突。
+        Write-Warn "检测到早期安装位于盘根 $resolvedRecorded，继续使用该安装目录。"
+        $StorageRoot = $resolvedRecorded
+    } else {
         Write-Fail "本机已经安装在 $resolvedRecorded，不能同时指向 $StorageRoot。"
         Write-Host '  如需换盘：先双击 STOP_APP.cmd，再从仓库根目录删除 .env，然后重新安装。' -ForegroundColor Yellow
         Write-Host '  已下载的模型和已产生的数据不会自动搬迁。' -ForegroundColor Yellow
@@ -410,7 +440,8 @@ if ($alreadyInstalled) {
     Write-Step "复用现有安装：$StorageRoot"
     $startArgs = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $startScript,
-        '-DataDir', $recordedData, '-ApiPort', "$apiPort", '-WebPort', "$webPort", '-OpenBrowser'
+        '-DataDir', $recordedData, '-ApiPort', "$apiPort", '-WebPort', "$webPort",
+        '-OpenBrowser', '-AutoPorts'
     )
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
@@ -426,7 +457,9 @@ if ($alreadyInstalled) {
         if ($transcript) { try { Stop-Transcript | Out-Null } catch { } }
         exit $installCode
     }
-    $webUrl = "http://127.0.0.1:$webPort/#setup"
+    $actualPorts = Get-ShineRecordedPorts $recordedData
+    $webUrlPort = if ($actualPorts -and $actualPorts.web) { $actualPorts.web } else { $webPort }
+    $webUrl = "http://127.0.0.1:$webUrlPort/#setup"
     Write-Host ''
     Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
     Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
@@ -496,12 +529,15 @@ if (-not $healthOk) {
 Write-Ok '服务健康检查通过（API 已响应）。'
 
 # ---- 6. Hand over to the wizard -----------------------------------------
-$webUrl = "http://127.0.0.1:$webPort/#setup"
+$actualPorts = Get-ShineRecordedPorts $recordedData
+$webUrlPort = if ($actualPorts -and $actualPorts.web) { $actualPorts.web } else { $webPort }
+$apiUrlPort = if ($actualPorts -and $actualPorts.api) { $actualPorts.api } else { $apiPort }
+$webUrl = "http://127.0.0.1:$webUrlPort/#setup"
 Write-Host ''
 New-DesktopShortcut
 Write-Banner '安装完成，已进入新机设置向导'
 Write-Host "  工作台地址： $webUrl" -ForegroundColor Green
-Write-Host "  API 健康页： http://127.0.0.1:$apiPort/health" -ForegroundColor Gray
+Write-Host "  API 健康页： http://127.0.0.1:$apiUrlPort/health" -ForegroundColor Gray
 Write-Host "  安装目录：   $StorageRoot" -ForegroundColor Gray
 Write-Host "  数据目录：   $(($recordedData -replace '/', '\'))" -ForegroundColor Gray
 Write-Host ''

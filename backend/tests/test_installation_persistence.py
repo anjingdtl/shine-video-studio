@@ -276,6 +276,33 @@ def test_a_dead_worker_in_an_uncertain_stage_is_never_replayed(prep):
         assert attempt.error_code == "INSTALL_OUTCOME_UNCERTAIN"
 
 
+def test_unexpected_installer_error_ends_in_review_not_worker_crash(prep, monkeypatch):
+    """盘满/权限等非 ValueError 异常必须有终态（NEEDS_REVIEW），而不是击穿 worker。"""
+    client, factory, settings = prep
+    _, _, plan = approved_plan(client, executor="local")
+    from shine.comfyops.local import queue_install_attempt
+
+    attempt_id, _reused = queue_install_attempt(
+        factory, settings, plan["id"], plan["sha256"], "v13-test-operator", "LOCAL_ISOLATED"
+    )
+    monkeypatch.setattr("shine.comfyops.installation_worker.local_execution_enabled", lambda: True)
+    from shine.comfyops.installation import claim_next_attempt
+    from shine.comfyops.installation_worker import run_attempt
+
+    class CrashingInstaller:
+        def install(self, spec):
+            raise OSError(28, "No space left on device")
+
+    assert claim_next_attempt(factory, "worker-test") == attempt_id
+    stage = run_attempt(factory, "worker-test", attempt_id, settings=settings, installer=CrashingInstaller())
+    assert stage == NEEDS_REVIEW
+    with factory() as db:
+        attempt = db.get(InstallationAttempt, attempt_id)
+        assert attempt.status == "FAILED_RECONCILE_REQUIRED"
+        assert attempt.error_code == "OSError"
+        assert attempt.lease_owner is None
+
+
 def test_a_changed_plan_hash_blocks_the_automatic_resume(prep):
     client, factory, settings = prep
     _, _, plan = approved_plan(client, executor="local")

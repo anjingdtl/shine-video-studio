@@ -166,6 +166,9 @@ def check_url(url: str, hosts: set[str], *, signed_query=False):
 # Deliberate, documented widening for the first supported new-machine deployment:
 # source archives (codeload), GitHub release assets, PyPI wheel bytes and the
 # official CUDA wheel index. Everything else stays refused.
+# ``gh-proxy.com`` (codeload 源码归档的反向代理) 与 ``pypi.tuna.tsinghua.edu.cn``
+# (清华镜像的 /packages 树，与 files.pythonhosted.org 字节一致) 只作为传输替代，
+# 大小与 sha256 仍按固定清单强校验。
 TRUSTED_DOWNLOAD_HOSTS = frozenset(
     {
         "huggingface.co",
@@ -178,6 +181,8 @@ TRUSTED_DOWNLOAD_HOSTS = frozenset(
         "download-r2.pytorch.org",  # Exact host linked by the official CUDA wheel indexes.
         "hf-mirror.com",  # Byte-identical mirror used only when huggingface.co is unreachable.
         "cas-bridge.xethub.hf.co",  # HF's signed download endpoint linked by that mirror.
+        "gh-proxy.com",  # Byte-identical proxy for codeload.github.com source archives.
+        "pypi.tuna.tsinghua.edu.cn",  # TUNA mirrors files.pythonhosted.org /packages bytes.
     }
 )
 
@@ -188,23 +193,38 @@ MIRROR_REDIRECT_HOSTS = frozenset({"hf-mirror.com", "cas-bridge.xethub.hf.co"})
 
 
 def mirror_url(url: str) -> str | None:
-    """Return the byte-identical mirror URL of a pinned HuggingFace model file.
+    """Return a byte-identical mirror URL for a pinned file, or None.
 
     This is a transport alternative only. The caller still verifies the pinned
     sha256 and byte size, so a mirror that serves different bytes fails loudly
     instead of being accepted.
+
+    Covered transports (so a mainland-China network is not dead-locked on the
+    primary origin):
+    - huggingface.co -> hf-mirror.com
+    - codeload.github.com -> gh-proxy.com (reverse proxy, same archive bytes)
+    - files.pythonhosted.org -> pypi.tuna.tsinghua.edu.cn (/packages tree)
     """
     parsed = urlsplit(url)
-    if parsed.scheme != "https" or parsed.hostname != "huggingface.co" or parsed.query or parsed.fragment:
+    if parsed.scheme != "https" or parsed.query or parsed.fragment:
         return None
-    parts = parsed.path.strip("/").split("/")
-    # huggingface.co/<owner>/<repo>/resolve/<revision>/<relative path...>
-    if len(parts) < 5 or parts[2] != "resolve":
-        return None
-    owner, repo, _, revision, *rest = parts
-    if not owner or not repo or not rest:
-        return None
-    return f"https://hf-mirror.com/{owner}/{repo}/resolve/{revision}/{'/'.join(rest)}"
+    host = parsed.hostname
+    if host == "huggingface.co":
+        parts = parsed.path.strip("/").split("/")
+        # huggingface.co/<owner>/<repo>/resolve/<revision>/<relative path...>
+        if len(parts) < 5 or parts[2] != "resolve":
+            return None
+        owner, repo, _, revision, *rest = parts
+        if not owner or not repo or not rest:
+            return None
+        return f"https://hf-mirror.com/{owner}/{repo}/resolve/{revision}/{'/'.join(rest)}"
+    if host == "codeload.github.com":
+        # gh-proxy prepends the full primary URL and proxies the archive bytes.
+        return f"https://gh-proxy.com/{url}"
+    if host == "files.pythonhosted.org":
+        # TUNA mirrors the same /packages tree that files.pythonhosted.org serves.
+        return f"https://pypi.tuna.tsinghua.edu.cn{parsed.path}"
+    return None
 
 
 class DownloadStreamInterrupted(ValueError):
