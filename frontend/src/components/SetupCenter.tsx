@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
-  MonitorCheck, Video,
+  MonitorCheck, Sparkles, Video,
 } from 'lucide-react';
 import { api, json, timeoutSignal, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
@@ -105,16 +105,17 @@ const IMAGE_COMPONENTS = ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 
 const IMAGE_BYTES = 17.3 * 1024 ** 3;
 const REVIEW_COMPONENTS = { vlm: 'qwen3-vl-8b-fp8', asr: 'qwen3-asr-0.6b' };
 const REVIEW_BYTES = { vlm: 10.6 * 1024 ** 3, asr: 1.9 * 1024 ** 3 };
+const RELAYVSR_BYTES = 5291054712;
 
 const TIER_LABELS: Record<string, string> = {
   standard: '标准档', lowend_12gb: '12GB 级档位', below_lowend: '低于 12GB 级档位', unknown: '显卡档位未知',
 };
 
-const CAP_LABELS: Record<'h3' | 'image' | 'vlm' | 'asr', string> = {
-  h3: 'H3 视频生成', image: '素材出图', vlm: '画面审片', asr: '语音核对',
+const CAP_LABELS: Record<'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr', string> = {
+  h3: 'H3 视频生成', image: '素材出图', vlm: '画面审片', asr: '语音核对', relayvsr: 'RelayVSR 2X 精修',
 };
 
-type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr';
+type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr';
 
 /**
  * What one capability ended up as.
@@ -165,7 +166,7 @@ type DetectionSnapshot = {
   scan: ExistingScan | null; imageScan: ExistingScan | null;
   variants: VariantRecommendation; image: ImageReadiness | null;
   catalog: CatalogSummary | null; adoptedRoot: string | null;
-  variantId: string; caps: { h3: boolean; image: boolean; vlm: boolean; asr: boolean };
+  variantId: string; caps: { h3: boolean; image: boolean; vlm: boolean; asr: boolean; relayvsr: boolean };
 };
 
 function readSnapshot(): DetectionSnapshot | null {
@@ -185,6 +186,7 @@ function readSnapshot(): DetectionSnapshot | null {
         image: saved.image ?? false,
         vlm: saved.vlm ?? false,
         asr: saved.asr ?? false,
+        relayvsr: saved.relayvsr ?? false,
       },
     };
   } catch { return null; }
@@ -242,10 +244,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
    */
   const [availabilityRows, setAvailabilityRows] = useState<VariantAvailability[] | null>(null);
   const [variantId, setVariantId] = useState(restored?.variantId ?? '');
-  const [caps, setCaps] = useState(restored?.caps ?? { h3: true, image: true, vlm: false, asr: false });
+  const [caps, setCaps] = useState(restored?.caps ?? { h3: true, image: true, vlm: false, asr: false, relayvsr: false });
   const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
   /** 用户确认「重复下载」的能力：已有权重也重新下载。 */
-  const [force, setForce] = useState({ h3: false, image: false, vlm: false, asr: false });
+  const [force, setForce] = useState({ h3: false, image: false, vlm: false, asr: false, relayvsr: false });
   const [redownloadPrompt, setRedownloadPrompt] = useState<null | CapabilityKey>(null);
   const [running, setRunning] = useState<{ label: string; note: string } | null>(null);
   const [result, setResult] = useState('');
@@ -410,12 +412,15 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const imageWant = caps.image && (!imagePresent || force.image);
   const vlmWant = caps.vlm && (!vlmReady || force.vlm);
   const asrWant = caps.asr && (!asrReady || force.asr);
+  const relayvsrPresent = !!summary?.capabilities?.relayvsr?.facts?.FILES_FOUND;
+  const relayvsrWant = caps.relayvsr && (!relayvsrPresent || force.relayvsr);
 
   const h3Bytes = selectedVariant?.total_bytes ?? 0;
   const downloadBytes = (h3Want ? h3Bytes : 0)
     + (imageWant ? imageBytes : 0)
     + (vlmWant ? REVIEW_BYTES.vlm : 0)
-    + (asrWant ? REVIEW_BYTES.asr : 0);
+    + (asrWant ? REVIEW_BYTES.asr : 0)
+    + (relayvsrWant ? RELAYVSR_BYTES : 0);
 
   /** 这次真正要准备的能力，按各自的分项体积列出。 */
   const capabilityRows = useMemo(() => {
@@ -424,8 +429,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     if (imageWant) rows.push({ key: 'image', label: '素材出图权重', bytes: imageBytes });
     if (vlmWant) rows.push({ key: 'vlm', label: '画面审片权重', bytes: REVIEW_BYTES.vlm });
     if (asrWant) rows.push({ key: 'asr', label: '语音核对权重', bytes: REVIEW_BYTES.asr });
+    if (relayvsrWant) rows.push({ key: 'relayvsr', label: 'RelayVSR 2X 精修权重', bytes: RELAYVSR_BYTES });
     return rows;
-  }, [h3Want, imageWant, vlmWant, asrWant, h3Bytes, imageBytes, selectedVariant]);
+  }, [h3Want, imageWant, vlmWant, asrWant, relayvsrWant, h3Bytes, imageBytes, selectedVariant]);
 
   /**
    * The button says what will actually happen.
@@ -468,7 +474,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
    */
   async function prepare(requested?: EnvironmentKey[]) {
     const wants = (key: CapabilityKey) => (requested ? requested.includes(key) : caps[key]);
-    const capabilities = (['h3', 'image', 'vlm', 'asr'] as CapabilityKey[]).filter(wants);
+    const capabilities = (['h3', 'image', 'vlm', 'asr', 'relayvsr'] as CapabilityKey[]).filter(wants);
     if (capabilities.length === 0) {
       setProblem('请至少勾选一项要准备的能力。');
       return;
@@ -714,6 +720,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
             onChange={(event) => toggleCap('asr', asrReady, event.target.checked)} />
           <Mic size={14} /><span><b>语音核对（只给建议，不卡出片）</b>
             <em className={asrReady ? 'cap-found-warn' : undefined}>{asrReady ? '本机已有' : asrPresence.found ? `只找到 ${asrPresence.found}/${asrTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.asr)}`}</em></span>
+        </label>
+        <label className="setup-cap">
+          <input type="checkbox" checked={caps.relayvsr} disabled={!!running}
+            onChange={(event) => toggleCap('relayvsr', relayvsrPresent, event.target.checked)} />
+          <Sparkles size={14} /><span><b>RelayVSR 2X 精修（后期放大，可选）</b>
+            <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>{relayvsrPresent ? '本机已找到权重' : `需要下载 ${gib(RELAYVSR_BYTES)}`}</em></span>
         </label>
       </div>
 

@@ -16,7 +16,7 @@ import { api, json } from '../api';
  * - `PENDING_RECIPE` 不是「已就绪」，页面不能给它绿灯。
  */
 
-export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr';
+export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr';
 
 export type CapabilityFacts = {
   FILES_FOUND?: boolean;
@@ -101,7 +101,7 @@ export type SetupSummary = {
   manual_download_root: string;
 };
 
-const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr'];
+const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr', 'relayvsr'];
 
 const STATE_LABEL: Record<string, string> = {
   MISSING: '未准备',

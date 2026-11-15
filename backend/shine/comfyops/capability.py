@@ -30,10 +30,12 @@ CAPABILITY_BASE_TOOLS = "base_tools"
 CAPABILITY_H3 = "h3"
 CAPABILITY_IMAGE = "image"
 CAPABILITY_REVIEW = "review"
+CAPABILITY_RELAYVSR = "relayvsr"
 
 #: Every capability a plan may carry.  A capability outside this set is
 #: refused by name instead of silently falling back to a default.
-CAPABILITIES = (CAPABILITY_BASE_TOOLS, CAPABILITY_H3, CAPABILITY_IMAGE, CAPABILITY_REVIEW)
+CAPABILITIES = (CAPABILITY_BASE_TOOLS, CAPABILITY_H3, CAPABILITY_IMAGE, CAPABILITY_REVIEW,
+                CAPABILITY_RELAYVSR)
 
 #: Catalog file name -> (capability, expected catalog id).
 #:
@@ -46,6 +48,7 @@ CATALOG_CAPABILITIES: dict[str, tuple[str, str]] = {
     "h3-ref2va-lowend-candidate-windows-x64": (CAPABILITY_H3, "shine-h3-ref2va-lowend-candidate-windows-x64"),
     "h3-ref2va-nvfp4-lowend-windows-x64": (CAPABILITY_H3, "shine-h3-ref2va-nvfp4-lowend-windows-x64"),
     "qwen-image-2.1-windows-x64": (CAPABILITY_IMAGE, "shine-qwen-image-21-windows-x64"),
+    "relayvsr-x2-windows-x64": (CAPABILITY_RELAYVSR, "shine-relayvsr-x2-windows-x64"),
 }
 
 #: The review models live in the H3 catalog but are their own capability: a
@@ -111,7 +114,7 @@ def runtime_requirements(capability: str, catalog: dict, component_ids: list[str
     on a machine that cannot run it yet; what must not happen is that the
     machine is told the capability is ready.
     """
-    if capability == CAPABILITY_IMAGE:
+    if capability in (CAPABILITY_IMAGE, CAPABILITY_RELAYVSR):
         platform = catalog.get("platform") or {}
         return {
             "min_vram_mb": platform.get("min_vram_mb"),

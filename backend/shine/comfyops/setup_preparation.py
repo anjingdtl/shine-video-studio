@@ -62,17 +62,22 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
     steps = []
     if deep_scan:
         steps.append("SCAN")
-    steps.extend(["RECONCILE", "DOWNLOAD", "INSTANCE", "TARGET", "RECIPE"])
-    if "image" in capabilities:
-        steps.append("IMAGE_BIND")
-    if "h3" in capabilities:
-        steps.append("PROFILES")
-        if verify_runtime:
-            steps.append("VALIDATE")
-    if "image" in capabilities:
-        steps.append("IMAGE_VERIFY")
-        if verify_runtime:
-            steps.append("IMAGE_SAMPLES")
+    steps.extend(["RECONCILE", "DOWNLOAD"])
+    # The instance/recipe/profile/validation chain belongs to the H3 and image
+    # runtimes. RelayVSR is post-production on the existing ComfyUI core: it
+    # only needs its weights reconciled and downloaded, not a managed recipe.
+    if "h3" in capabilities or "image" in capabilities:
+        steps.extend(["INSTANCE", "TARGET", "RECIPE"])
+        if "image" in capabilities:
+            steps.append("IMAGE_BIND")
+        if "h3" in capabilities:
+            steps.append("PROFILES")
+            if verify_runtime:
+                steps.append("VALIDATE")
+        if "image" in capabilities:
+            steps.append("IMAGE_VERIFY")
+            if verify_runtime:
+                steps.append("IMAGE_SAMPLES")
     return steps
 
 
@@ -89,7 +94,7 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
     """
     from shine.services import add_audit
 
-    capabilities = sorted({row for row in capabilities if row in {"h3", "image", "vlm", "asr"}})
+    capabilities = sorted({row for row in capabilities if row in {"h3", "image", "vlm", "asr", "relayvsr"}})
     existing = db.get(AppSetting, TASK_KEY)
     current = dict(existing.value) if existing is not None and isinstance(existing.value, dict) else {}
     if current.get("status") in {"QUEUED", "RUNNING"}:
@@ -379,7 +384,7 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
     from shine.comfyops.setup_summary import resolve_installation
 
     request = task.get("request") or {}
-    capabilities = [row for row in request.get("capabilities") or [] if row in {"h3", "image"}]
+    capabilities = [row for row in request.get("capabilities") or [] if row in {"h3", "image", "relayvsr"}]
     if not capabilities:
         return {"status": "SKIPPED", "detail": "这次没有需要核验已有字节的能力。"}
     with factory() as db:
@@ -411,6 +416,24 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
 _DOWNLOAD_ACTIVE = {"QUEUED", "SUBMIT_INTENT", "INSTALLING", "DOWNLOADING", "VERIFYING",
                     "WAITING_FOR_TARGET", "RETRY_WAIT", "VALIDATING_RUNTIME_CONTRACT", "PAUSED"}
 _DOWNLOAD_SUCCESS = {"FILES_VERIFIED_PENDING_RUNTIME", "RUNTIME_CONTRACT_READY"}
+
+
+def _catalog_file_for(capability: str, variant_id: str | None, report: dict) -> str:
+    """The catalog file stem the installer loads (not the shine-… identity)."""
+    from shine.comfyops.setup_summary import CATALOG_FILE_BY_CAPABILITY
+
+    if capability == "h3" and variant_id:
+        from shine.comfyops import variants as variant_manifests
+        try:
+            manifest = variant_manifests.load_variant_manifest(str(variant_id))
+            stem = str(manifest.get("catalog_id") or "")
+            if stem:
+                return stem
+        except (OSError, ValueError, FileNotFoundError):
+            pass
+    return (report.get("catalog_file")
+            or CATALOG_FILE_BY_CAPABILITY.get(capability)
+            or "h3-ref2va-windows-x64")
 
 
 def _step_download(factory, settings, task) -> dict[str, Any]:
@@ -472,7 +495,8 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 gap = runtime_closure_gap(db, settings, selected)
             components = sorted(set(components) | set(gap["missing_components"]))
         if components:
-            plans_needed.append((capability, components, report.get("catalog") or ""))
+            catalog_file = _catalog_file_for(capability, request.get("variant_id"), report)
+            plans_needed.append((capability, components, catalog_file))
     if not plans_needed:
         return {"status": "DONE", "detail": "固定清单的文件都已在本机，无需下载。"}
 
@@ -483,12 +507,11 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.comfyops.storage import disk_info
     from shine.services import add_audit
 
-    for capability, components, catalog_id in plans_needed:
+    for capability, components, catalog_file in plans_needed:
         with factory() as db:
             free = disk_info(settings.data_dir).get("free_bytes", 0)
             body = InstallPlanRequest(
-                catalog=catalog_id or ("qwen-image-2.1-windows-x64" if capability == "image"
-                                       else "h3-ref2va-windows-x64"),
+                catalog=catalog_file,
                 components=components[:14], project_id=task.get("project_id"),
                 disk_free=int(free),
                 variant_id=request.get("variant_id") if capability == "h3" else None,
@@ -547,9 +570,9 @@ def _step_image_samples(factory, settings, task) -> dict[str, Any]:
         status = run.status if run is not None else None
     if status in {"COMPLETED", "NEEDS_REVIEW"}:
         return {"status": "DONE", "detail": "三类真实小样已生成，等待人工评审。"}
-    if status in {"FAILED", "CANCELLED"}:
+    if status in {"FAILED", "PARTIAL_FAILED", "CANCELLED"}:
         return {"status": "FAILED", "code": "IMAGE_SAMPLES_FAILED",
-                "detail": f"出图小样未完成：{status}。"}
+                "detail": f"出图小样未完成：{status}。渲染器或节点合同需要在基础配置里核对。"}
     return {"status": "PENDING", "detail": f"出图小样进行中：{status or '排队中'}。"}
 
 

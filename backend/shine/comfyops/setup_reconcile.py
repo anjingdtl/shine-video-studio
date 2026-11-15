@@ -48,6 +48,8 @@ IMAGE_CAPABILITY_CATALOG = deployment.IMAGE_CAPABILITY_CATALOG
 def _capability_catalog(capability: str) -> dict:
     if capability == "image":
         return deployment.load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)
+    if capability == "relayvsr":
+        return deployment.load_deployment_catalog("relayvsr-x2-windows-x64")
     return deployment.load_default_catalog()
 
 

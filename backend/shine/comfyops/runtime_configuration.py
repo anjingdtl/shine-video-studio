@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe

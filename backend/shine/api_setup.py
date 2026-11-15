@@ -1726,7 +1726,7 @@ class InstallationChoiceRequest(BaseModel):
 class PrepareRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str | None = None
-    capabilities: list[Literal["h3", "image", "vlm", "asr"]] = Field(min_length=1, max_length=4)
+    capabilities: list[Literal["h3", "image", "vlm", "asr", "relayvsr"]] = Field(min_length=1, max_length=5)
     installation_path: str | None = Field(default=None, max_length=1024)
     port: int | None = Field(default=None, ge=1024, le=65535)
     variant_id: str | None = Field(default=None, max_length=80)

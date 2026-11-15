@@ -36,6 +36,11 @@ SNAPSHOT_VERSION = 1
 IMAGE_CATALOG = "qwen-image-2.1-windows-x64"
 IMAGE_COMPONENTS = ("qwen-image-2.1-unet", "qwen-image-2.1-text-encoder", "qwen-image-2.1-vae")
 REVIEW_COMPONENTS = {"vlm": "qwen3-vl-8b-fp8", "asr": "qwen3-asr-0.6b"}
+RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
+RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
+#: capability -> catalog file stem (the name load_deployment_catalog accepts).
+#: The catalog's own ``catalog_id`` (shine-…) is an identity, not a file name.
+CATALOG_FILE_BY_CAPABILITY = {"image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG}
 H3_CATALOG = "h3-ref2va-windows-x64"
 
 CAPABILITY_LABELS = {
@@ -43,9 +48,10 @@ CAPABILITY_LABELS = {
     "image": "素材出图",
     "vlm": "画面审片",
     "asr": "语音核对",
+    "relayvsr": "RelayVSR 2X 精修",
 }
 
-CAPABILITIES = ("h3", "image", "vlm", "asr")
+CAPABILITIES = ("h3", "image", "vlm", "asr", "relayvsr")
 
 
 # --- installation selection -------------------------------------------------
@@ -280,8 +286,8 @@ def resolve_installation(db, settings, *, path: str | None = None,
 
 def _catalog_for(capability: str) -> dict | None:
     try:
-        if capability == "image":
-            return deployment.load_deployment_catalog(IMAGE_CATALOG)
+        if capability in CATALOG_FILE_BY_CAPABILITY:
+            return deployment.load_deployment_catalog(CATALOG_FILE_BY_CAPABILITY[capability])
         return deployment.load_default_catalog()
     except (OSError, ValueError, FileNotFoundError):
         return None
@@ -290,6 +296,8 @@ def _catalog_for(capability: str) -> dict | None:
 def _component_ids_for(capability: str, catalog: dict) -> set[str]:
     if capability == "image":
         return set(IMAGE_COMPONENTS)
+    if capability == "relayvsr":
+        return set(RELAYVSR_COMPONENTS)
     if capability in REVIEW_COMPONENTS:
         return {REVIEW_COMPONENTS[capability]}
     components = _catalog_components(catalog)
@@ -370,7 +378,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     if catalog is None:
         return {
             "key": capability, "label": CAPABILITY_LABELS[capability], "state": "UNKNOWN",
-            "optional": capability in ("vlm", "asr"),
+            "optional": capability in ("vlm", "asr", "relayvsr"),
             "facts": {}, "summary": "这个能力的资源清单读不出来。",
             "next_step": {"code": "CATALOG_UNAVAILABLE", "label": "检查安装清单",
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
@@ -439,6 +447,17 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and facts["INSTANCE_BOUND"]
                                              and facts["WORKFLOW_VALIDATED"])
             advisories.extend(report.get("blockers") or [])
+        elif capability == "relayvsr":
+            from shine.comfyops import relayvsr
+
+            models_root = _effective_models_root(settings, capability, installation)
+            report = relayvsr.relayvsr_readiness(
+                model_root=Path(models_root) / "diffusion_models" if models_root else None,
+                vae_root=Path(models_root) / "vae" if models_root else None)
+            facts["RELAYVSR_AVAILABLE"] = report.get("available", False)
+            facts["INSTANCE_BOUND"] = report.get("available", False)
+            facts["WORKFLOW_VALIDATED"] = report.get("available", False)
+            advisories.extend(report.get("blockers") or [])
         else:
             from shine.comfyops.deployment import advisory_review_readiness
 
@@ -459,10 +478,11 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "key": capability,
         "label": CAPABILITY_LABELS[capability],
         "catalog": catalog.get("catalog_id"),
+        "catalog_file": CATALOG_FILE_BY_CAPABILITY.get(capability, "h3-ref2va-windows-x64"),
         "state": state,
         # 审片是可选增强：没有它照样能真实出片，只是语义验收留给人工。
         # 机器级「下一步」不得把可选能力报成必做。
-        "optional": capability in ("vlm", "asr"),
+        "optional": capability in ("vlm", "asr", "relayvsr"),
         "facts": facts,
         "summary": summary,
         "next_step": next_step,
@@ -623,7 +643,7 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             "reason": "环境可以现在就准备；真实试镜要绑定到一个作品。",
             "action": "SELECT_PROJECT",
         }
-    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr")]
+    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")]
     for row in ordered:
         # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
         # 没有审片模型照样能真实出片，语义验收留给人工。
@@ -708,7 +728,7 @@ def missing_files(db, settings, *, capabilities: list[str] | None = None) -> dic
     """Exactly the files that are absent, with the fixed source for each."""
     manual_root = Path(settings.comfyops_dir) / "manual-downloads"
     groups = []
-    for capability in capabilities or ["h3", "image", "vlm", "asr"]:
+    for capability in capabilities or ["h3", "image", "vlm", "asr", "relayvsr"]:
         catalog = _catalog_for(capability)
         if catalog is None:
             continue

@@ -51,6 +51,11 @@ def _redirect_output_to_log() -> None:
         os.close(handle)
     sys.stdout = os.fdopen(1, "w", buffering=1)
     sys.stderr = os.fdopen(2, "w", buffering=1)
+    # Headless rendering has no interactive terminal: ComfyUI's sampling progress
+    # bar (tqdm) flushes a stdout wrapper that the redirected log handle can
+    # close mid-run ("I/O operation on closed file"), which aborts the KSampler.
+    # Disabling tqdm keeps the log readable and the render alive.
+    os.environ["TQDM_DISABLE"] = "1"
 
 
 def main():
