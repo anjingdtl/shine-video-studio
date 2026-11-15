@@ -2387,7 +2387,7 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .setup-step-row{display:flex;align-items:center;gap:6px;font-size:.78rem;padding:5px 9px;border-radius:8px;background:var(--surface-3);color:var(--muted-2)}
 .setup-step-row .setup-step-key{font-weight:600;color:var(--ink-2);min-width:42px}
 .setup-step-row.files-ready,.setup-step-row.run-ready{color:var(--ok-ink-2);background:var(--ok-bg-2)}
-.setup-step-row.files-missing,.setup-step-row.run-blocked,.setup-step-row.files-failed,.setup-step-row.run-failed{color:var(--warn-ink-2);background:var(--warn-bg-3)}
+.setup-step-row.files-missing,.setup-step-row.run-blocked,.setup-step-row.files-failed,.setup-step-row.run-failed{color:var(--warn-ink);background:var(--warn-bg-3)}
 .setup-step-row.files-unverified,.setup-step-row.run-unverified,.setup-step-row.files-running,.setup-step-row.run-running{color:var(--ink-2);background:var(--surface-2)}
 .setup-cap-fix{margin-top:8px;width:100%;justify-content:center}
 .setup-choice{border:1px solid var(--warn-line);background:var(--warn-bg-3);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:6px}

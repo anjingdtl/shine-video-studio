@@ -39,10 +39,10 @@ describe('登记生成方案后当前页面模板即时更新', () => {
       }),
     });
     stub.add({
-      method: 'POST', pattern: /\/api\/v1\/setup\/profiles$/,
+      method: 'POST', pattern: /\/api\/v1\/workflow-profiles$/,
       respond: () => {
         registered = true;
-        return jsonResponse({ profiles: [{ name: PROFILE.name, status: 'REGISTERED', profile_id: PROFILE.id }] });
+        return jsonResponse(PROFILE, 201);
       },
     });
     stub.add({
@@ -54,14 +54,15 @@ describe('登记生成方案后当前页面模板即时更新', () => {
     // 顶部模式入口显示后端的 READY 状态，而不是前端默认的演示。
     expect((await screen.findAllByText('真实制作已就绪')).length).toBeGreaterThan(0);
 
-    // 在高级设置的环境单步诊断里登记生成方案。
+    // 在高级设置的工作流 Profile 注册里登记生成方案。
     window.location.hash = '#d/advanced';
     window.dispatchEvent(new HashChangeEvent('hashchange'));
-    await user.click(await screen.findByText('环境单步诊断与受管后台(高级)'));
-    await user.click(await screen.findByText('单步操作（高级）'));
-    await user.click(await screen.findByRole('button', { name: '登记工作流 Profile' }));
+    await user.click(await screen.findByText(/展开 工作流 Profile 注册/));
+    await user.type(screen.getByPlaceholderText('Profile 名称'), PROFILE.name);
+    await user.selectOptions(screen.getByDisplayValue('T2VA'), 'Ref2VA');
+    await user.click(await screen.findByRole('button', { name: /注册工作流/ }));
     await waitFor(() => {
-      expect(screen.getByText(/REGISTERED/)).toBeInTheDocument();
+      expect(stub.callsOf('POST', /\/api\/v1\/workflow-profiles$/).length).toBeGreaterThan(0);
     }, { timeout: 4000 });
 
     // 登记刷新了共享的工作流列表状态。
