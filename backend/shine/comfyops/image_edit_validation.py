@@ -114,11 +114,14 @@ def queue_image_edit_validation(factory, settings, *, actor: str = "worker:setup
     }
     tasks: dict[str, Any] = {}
     for mode, (references, mask_id, transparent) in specs.items():
+        prompt = ("a single red apple centered on a fully transparent background, "
+                  "PNG cutout, no backdrop" if mode == "RGBA"
+                  else "a calm portrait in soft window light, plain background")
         body = ImageJobRequest(
             idempotency_key=f"setup-edit-{mode.lower()}-{uuid4().hex[:16]}",
             title=f"基础配置 {mode} 能力验证",
             mode=mode,
-            prompt="a calm portrait in soft window light, plain background",
+            prompt=prompt,
             category="other",
             references=references,
             mask_media_id=mask_id,
@@ -133,23 +136,39 @@ def queue_image_edit_validation(factory, settings, *, actor: str = "worker:setup
     return tasks
 
 
-def edit_validation_state(db, task_ids: dict[str, Any]) -> dict[str, Any]:
-    """Read the real outcome of the queued edit validation tasks."""
+def edit_validation_state(db, settings, task_ids: dict[str, Any]) -> dict[str, Any]:
+    """Read the authoritative capability state for each queued edit mode.
+
+    Uses the same rule the asset center uses (``_capabilities``), so a mode only
+    counts as READY when its real evidence qualifies — e.g. RGBA must actually
+    output transparent pixels, not merely render an opaque candidate. A task
+    that finished but did not satisfy the mode's evidence rule stays pending.
+    """
+    from shine.api_asset_center import _capabilities
+
+    cap_key = {
+        "I2I": "QWEN_IMAGE_I2I", "INPAINT": "QWEN_IMAGE_INPAINT",
+        "MULTIREF": "QWEN_IMAGE_MULTIREF", "WARDROBE": "QWEN_IMAGE_WARDROBE",
+        "RGBA": "QWEN_IMAGE_RGBA",
+    }
+    capabilities = _capabilities(db, settings)["image_capabilities"]
+    state: dict[str, Any] = {}
+    for mode in (task_ids or {}):
+        cap = capabilities.get(cap_key.get(mode, ""), {})
+        if cap.get("can_generate"):
+            state[mode] = "READY"
+        elif cap.get("can_validate"):
+            state[mode] = "RUNNING" if _task_pending(db, task_ids[mode]) else "FAILED"
+        else:
+            state[mode] = "FAILED"
+    return state
+
+
+def _task_pending(db, ids: list) -> bool:
     from shine.asset_center.models import LibraryRenderTask
 
-    state: dict[str, Any] = {}
-    for mode, ids in (task_ids or {}).items():
-        statuses = []
-        for tid in ids or []:
-            row = db.get(LibraryRenderTask, tid)
-            if row is not None:
-                statuses.append(row.status)
-        if not statuses:
-            state[mode] = "UNKNOWN"
-        elif all(s in {"CANDIDATE_READY", "PROMOTED"} for s in statuses):
-            state[mode] = "READY"
-        elif any(s in {"FAILED", "CANCELLED", "NEEDS_REVIEW"} for s in statuses):
-            state[mode] = "FAILED"
-        else:
-            state[mode] = "RUNNING"
-    return state
+    for tid in ids or []:
+        row = db.get(LibraryRenderTask, tid)
+        if row is not None and row.status in {"QUEUED", "RUNNING", "SUBMITTED", "PENDING"}:
+            return True
+    return False

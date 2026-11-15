@@ -600,7 +600,7 @@ def _step_image_edit_samples(factory, settings, task) -> dict[str, Any]:
         task["result"] = result
         return {"status": "PENDING", "detail": "图生图/局部改图/多图合成/人物穿戴/透明背景验证样例已排队。"}
     with factory() as db:
-        state = edit_validation_state(db, edit_tasks)
+        state = edit_validation_state(db, settings, edit_tasks)
     ready = [k for k, v in state.items() if v == "READY"]
     failed = [k for k, v in state.items() if v == "FAILED"]
     running = [k for k, v in state.items() if v not in {"READY", "FAILED"}]
