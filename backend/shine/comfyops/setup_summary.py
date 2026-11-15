@@ -370,6 +370,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     if catalog is None:
         return {
             "key": capability, "label": CAPABILITY_LABELS[capability], "state": "UNKNOWN",
+            "optional": capability in ("vlm", "asr"),
             "facts": {}, "summary": "这个能力的资源清单读不出来。",
             "next_step": {"code": "CATALOG_UNAVAILABLE", "label": "检查安装清单",
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
@@ -459,6 +460,9 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "label": CAPABILITY_LABELS[capability],
         "catalog": catalog.get("catalog_id"),
         "state": state,
+        # 审片是可选增强：没有它照样能真实出片，只是语义验收留给人工。
+        # 机器级「下一步」不得把可选能力报成必做。
+        "optional": capability in ("vlm", "asr"),
         "facts": facts,
         "summary": summary,
         "next_step": next_step,
@@ -621,6 +625,10 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
         }
     ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr")]
     for row in ordered:
+        # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
+        # 没有审片模型照样能真实出片，语义验收留给人工。
+        if row.get("optional"):
+            continue
         step = row.get("next_step")
         if step:
             return {**step, "capability": row["key"]}

@@ -40,13 +40,15 @@ export type SetupCapability = {
   label: string;
   catalog?: string;
   state: string;
+  /** 审片等可选增强：不占机器级「下一步」，卡片如实标注。 */
+  optional?: boolean;
   facts: CapabilityFacts;
   summary: string;
   next_step: SetupNextStep | null;
   missing_files: MissingFile[];
   missing_bytes?: number;
   required_files?: number;
-  advisories?: Array<{ code?: string }>;
+  advisories?: Array<{ code?: string; message?: string }>;
 };
 
 export type MissingFile = {
@@ -281,9 +283,15 @@ export function SetupEnvironmentStatus({
           return <article key={key} className={`setup-cap-card setup-cap-${cap.state.toLowerCase()}`}>
             <header>
               <b>{cap.label}</b>
+              {cap.optional && <span className="setup-cap-optional">可选增强</span>}
               <span className="setup-cap-state">{STATE_LABEL[cap.state] ?? cap.state}</span>
             </header>
             <p>{cap.summary}</p>
+            {(cap.advisories ?? []).filter((row) => row.message).length > 0 && <ul className="setup-cap-advisories">
+              {(cap.advisories ?? []).filter((row) => row.message).map((row, index) => <li key={row.code ?? index}>
+                <AlertTriangle size={11} /> {row.message}
+              </li>)}
+            </ul>}
             <div className="setup-cap-facts">
               {chips.map((chip) => <span key={chip.label} className={chip.ok ? 'ok' : ''}>
                 {chip.ok ? <Check size={10} /> : <X size={10} />}{chip.label}

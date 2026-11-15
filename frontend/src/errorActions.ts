@@ -62,6 +62,26 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   },
   IMAGE_RUNTIME_NOT_READY: { reason: '本机出图环境还没就绪', action: { label: '去基础配置', target: 'setup-env' } },
   LLM_NOT_CONFIGURED: { reason: '还没配置文本模型', action: { label: '去配置文本模型', target: 'setup-models' } },
+  // 装机与门禁常见拒绝：服务端消息已说清原因，这里补上「去哪里处理」。
+  HOST_NOT_QUALIFIED: {
+    reason: '这台电脑没有通过这套方案的硬件准入',
+    why: '下载权重是存储行为，运行模型才需要算力。门槛对比在基础配置的能力卡上如实展示；可以先准备其它能力。',
+    action: { label: '查看硬件门槛', target: 'setup-env' },
+  },
+  PROFILE_WEIGHTS_NOT_AVAILABLE: { reason: '这套方案的权重还没在本机就位', action: { label: '去基础配置准备', target: 'setup-models' } },
+  PROFILE_WEIGHTS_NOT_VERIFIED: { reason: '权重在本机但还没逐字节核验', action: { label: '去核验已有文件', target: 'setup-models' } },
+  PROFILE_WEIGHTS_NOT_CONSUMABLE: { reason: '权重已核验但当前渲染器读不到那个目录', action: { label: '去绑定到实例', target: 'setup-models' } },
+  PROFILE_NOT_REGISTERED_FOR_PROJECT: { reason: '候选方案还没登记到当前作品', action: { label: '去登记方案', target: 'setup-models' } },
+  PROFILE_GRAPH_IDENTITY_CHANGED: { reason: '方案图哈希与变体清单不一致', action: { label: '去基础配置核对', target: 'setup-models' } },
+  MANAGED_INSTANCE_NOT_CONFIGURED: { reason: '本机还没有受管渲染器配置', action: { label: '去基础配置准备', target: 'setup-env' } },
+  MODEL_VARIANT_NOT_ACCEPTED: { reason: '候选模型还没通过验收，不能用于正式生产', action: { label: '查看模型状态', target: 'setup-models' } },
+  VARIANT_NOT_DOWNLOADABLE: { reason: '这个变体未进入自动下载路径', action: { label: '查看候选准备方式', target: 'setup-models' } },
+  REAL_RUNTIME_NOT_ACTIVATED: { reason: '真实制作配置还没验证激活', action: { label: '去基础配置完成', target: 'setup-env' } },
+  SERVICE_VALIDATION_REQUIRED: { reason: '本机服务或工作流变化，需要重新验证', action: { label: '去重新验证', target: 'setup-env' } },
+  ASSET_RIGHTS_NOT_APPROVED: { reason: '素材权利还没确认', action: { label: '去确认素材', target: 'assets-stage' } },
+  CHARACTER_NAME_ALREADY_IN_USE: { reason: '这个名字已绑定另一张人物素材', action: { label: '去素材页核对', target: 'assets-stage' } },
+  OUTPUT_DIRECTORY_BUSY: { reason: '有活动任务，输出目录暂不能迁移', action: { label: '查看活动任务', target: 'setup-env' } },
+  SHOT_SUBMISSION_OUTCOME_UNKNOWN: { reason: '上一次外部提交结果还没核对', why: '可能已发出的请求不会自动重发；先核对原任务，再决定是否重拍。', action: { label: '去进度页核对', target: 'run-stage' } },
 };
 
 /** 把服务端 blocker 映射为可行动条目；未知码保留原文，不编造动作。 */

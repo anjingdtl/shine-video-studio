@@ -568,6 +568,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         setRunning({ label: `${label}…`, note });
         const plan = await api<{
           plan_id: string; sha256: string; status: string; download_bytes: number;
+          runtime_advisories?: Array<{ code?: string; message?: string }>;
         }>('/setup/install-plan', json('POST', body));
         ensure();
         const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, ensure, { wait: false });
@@ -578,7 +579,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
             cancel_requested: false, pause_requested: false, terminal: false, resumable: true } as
             InstallationAttemptView);
         }
-        return plan;
+        // 硬件门槛对比是服务端实测事实：下载得到不等于跑不动，如实随计划展示。
+        const advisory = (plan.runtime_advisories ?? [])
+          .map((row) => row.message).filter(Boolean).join('；');
+        return { plan, advisory };
       };
 
       const planCapability = async (key: CapabilityKey) => {
@@ -614,10 +618,11 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           return;
         }
         try {
-          const plan = await runPlan(`准备${label}`, body, `约 ${gib(key === 'h3' ? h3Bytes
+          const { plan, advisory } = await runPlan(`准备${label}`, body, `约 ${gib(key === 'h3' ? h3Bytes
             : key === 'image' ? imageBytes : key === 'vlm' ? REVIEW_BYTES.vlm : REVIEW_BYTES.asr)}`);
           report.push({ key, label, status: 'QUEUED',
-            note: `已开始下载并安装（约 ${gib(plan.download_bytes)}）；关闭页面也会继续。` });
+            note: `已开始下载并安装（约 ${gib(plan.download_bytes)}）；关闭页面也会继续。`
+              + (advisory ? ` 注意：${advisory}` : '') });
         } catch (error) {
           report.push({
             key, label,

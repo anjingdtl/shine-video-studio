@@ -2373,6 +2373,10 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .setup-cap-card header{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .setup-cap-card header b{font-size:var(--fs-body);color:var(--ink)}
 .setup-cap-card p{margin:0;font-size:var(--fs-caption);color:var(--muted-2);line-height:1.55}
+.setup-cap-optional{font-size:var(--fs-caption);color:var(--muted-2);border:1px solid var(--line);border-radius:999px;padding:1px 8px;white-space:nowrap}
+.setup-cap-advisories{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.setup-cap-advisories li{display:flex;align-items:flex-start;gap:6px;font-size:var(--fs-caption);color:var(--warn-ink,#8a6d1a);line-height:1.5}
+.setup-cap-advisories li svg{flex-shrink:0;margin-top:2px}
 .setup-cap-state{font-size:var(--fs-caption);padding:1px 8px;border-radius:999px;border:1px solid var(--line-2);color:var(--muted)}
 .setup-cap-verified_render .setup-cap-state,.setup-cap-ready .setup-cap-state{border-color:var(--ok-line);background:var(--ok-bg-2);color:var(--ok-ink-2)}
 .setup-cap-missing .setup-cap-state{border-color:var(--warn-line);background:var(--warn-bg-3);color:var(--warn-ink)}

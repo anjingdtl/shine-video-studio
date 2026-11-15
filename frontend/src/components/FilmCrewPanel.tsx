@@ -134,10 +134,14 @@ export default function FilmCrewPanel({ projectId, profiles, shots, onRefresh }:
       <h3>Agent 运行记录</h3>
       {runs.some(needsRemoteReconciliation) &&
         <div className="settings-block">
-          <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。个人桌面部署无需口令，本机操作会记录为 local-user；如本机配置了操作员凭据可填写，留空即按本机身份操作。</p>
-          <label>远端响应对账凭据<input type="password" autoComplete="off" value={reconcileCredential}
-            onChange={e => setReconcileCredential(e.target.value)} /></label>
+          <p>远端文本响应丢失时可显式放弃接收，结果仍为未知。仅适用于已结束调用的远端文本工种；本机模型需单独对账释放。个人桌面部署无需口令，本机操作会记录为 local-user。</p>
           <label>远端响应对账说明<textarea value={reconcileEvidence} onChange={e => setReconcileEvidence(e.target.value)} /></label>
+          <details className="advanced-fold">
+            <summary>高级：旧版操作员凭据（本机通常不需要）</summary>
+            <label>远端响应对账凭据<input type="password" autoComplete="off" value={reconcileCredential}
+              onChange={e => setReconcileCredential(e.target.value)} /></label>
+            <small>仅当本机显式配置了操作员凭据时才填写；留空即按本机身份（local-user）操作。</small>
+          </details>
         </div>}
       {runs.map(r => <details key={r.id}>
         <summary>{roles.find(x => x.role === r.role_id)?.label ?? r.role_id} · {r.model_id} · {label(statusLabels, r.status)}{r.error_code ? ` · ${label(failureLabels, r.error_code)}` : ''}</summary>
