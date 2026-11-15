@@ -143,6 +143,14 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
                 "missing_nodes": missing_nodes,
                 "detail": "本机 ComfyUI 不含 RelayVSR 核心节点（需要 2f89433 或更高）。",
             })
+    # Pinning the weights is a prerequisite, not proof of a runnable backend.
+    # Without either file evidence or a live node table the backend stays
+    # unverified: a caller that passes no evidence must never read AVAILABLE.
+    if object_info is None and model_root is None:
+        blockers.append({
+            "code": "RELAYVSR_RUNTIME_UNVERIFIED",
+            "detail": "权重清单已钉住，但还没有本机文件或真实节点表证据，不能启用。",
+        })
     if blockers:
         return {
             "engine": "relayvsr",

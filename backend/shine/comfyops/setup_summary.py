@@ -643,7 +643,8 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             "reason": "环境可以现在就准备；真实试镜要绑定到一个作品。",
             "action": "SELECT_PROJECT",
         }
-    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")]
+    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")
+               if key in capabilities]
     for row in ordered:
         # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
         # 没有审片模型照样能真实出片，语义验收留给人工。

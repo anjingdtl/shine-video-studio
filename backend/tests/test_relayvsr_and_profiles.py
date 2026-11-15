@@ -63,18 +63,18 @@ def test_relayvsr_preparation_only_reconciles_and_downloads():
     assert "INSTANCE" in h3 and "VALIDATE" in h3
 
 
-def test_upscale_and_pdd8_profiles_are_registered_and_resolve():
+def test_upscale_profile_is_deferred_until_its_weight_is_pinned():
     from shine.comfyops.variant_binding import profile_files
 
     catalog = deployment.load_default_catalog()
-    names = catalog["workflow_profiles"]
-    assert "local-h3-ref2va-pdd8-upscale-2img" in names  # 二次精修
-    assert "local-h3-ref2va-pdd8-2img" in names          # PDD8 纯图
-    resolved = {p["name"] for p in profile_files(names)}
+    # 二次精修需要独立的 latent upscaler 权重，尚未钉住、节点未真机验证，
+    # 因此刻意留在 deferred：文件可解析，但不进默认自动登记/下载集合。
+    deferred = {e["name"] for e in catalog.get("deferred_workflow_profiles") or []}
+    assert "local-h3-ref2va-pdd8-upscale-2img" in deferred
+    assert "local-h3-ref2va-pdd8-upscale-2img" not in catalog["workflow_profiles"]
+    resolved = {p["name"] for p in profile_files(["local-h3-ref2va-pdd8-upscale-2img"])}
     assert "local-h3-ref2va-pdd8-upscale-2img" in resolved
-    # The refine workflow's checkpoint is the INT8 baseline already in the catalog.
-    upscale = next(p for p in profile_files(names)
-                   if p["name"] == "local-h3-ref2va-pdd8-upscale-2img")
+    upscale = next(p for p in profile_files(["local-h3-ref2va-pdd8-upscale-2img"]))
     assert "int8_convrot" in upscale["checkpoint_id"]
     assert "MinimaxH3LatentUpscaler3DRefineHandoff" in upscale["required_nodes"]
 

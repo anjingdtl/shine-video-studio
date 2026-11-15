@@ -4298,7 +4298,12 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
         logger.warning("setup_preparation_step_failed error=%s", type(exc).__name__)
         setup_step = None
     if setup_step:
-        return setup_step
+        # The IMAGE_SAMPLES step waits on sample renders that the material
+        # queue produces later in this same tick. Returning early here would
+        # deadlock: the task waits for samples the worker never gets to render.
+        # Yield the tick so the material queue can run.
+        if setup_step != "setup:IMAGE_SAMPLES":
+            return setup_step
 
     # A queued resource deep-scan is read-only directory work: advance one
     # bounded batch per tick so a closed page never stops the scan, and a slow
