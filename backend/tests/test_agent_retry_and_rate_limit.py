@@ -209,6 +209,20 @@ def test_the_correction_never_carries_provider_text():
         assert len(note) < 400
 
 
+def test_asset_refusal_note_tells_the_model_where_the_ids_may_come_from():
+    """An unapproved-asset refusal is a decided contract miss: the retry note
+    must say only listed ids are lawful and to leave asset_ids empty when no
+    approved master exists.  Without it the bounded retry repeats the same
+    invented references and buys the same refusal twice (2026-11-15 scene-2
+    journey: UNAPPROVED_ASSET_OR_UNKNOWN_BEAT with zero approved masters)."""
+    from shine.api_film import CONTRACT_REPAIR_NOTES
+
+    note = CONTRACT_REPAIR_NOTES["UNAPPROVED_ASSET_OR_UNKNOWN_BEAT"]
+    assert "asset_ids" in note
+    assert "empty" in note
+    assert "approved" in note
+
+
 def test_a_bracketed_no_proxy_entry_does_not_break_the_renderer_client(monkeypatch):
     """The renderer is on this machine: the host proxy may never touch it.
 

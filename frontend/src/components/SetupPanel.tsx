@@ -1,6 +1,6 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, timeoutSignal, knownFreeBytes } from '../api';
+import { api, timeoutSignal, knownFreeBytes, startWorker, type SetupVerdict } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
@@ -310,10 +310,12 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
   const [plans, setPlans] = useState<PlanRef[]>([]);
   const [attempt, setAttempt] = useState<InstallationAttemptView | null>(null);
   const [runtime, setRuntime] = useState<RuntimeState | null>(null);
+  /** The one verdict the badge and the director setup page also read. */
+  const [verdict, setVerdict] = useState<SetupVerdict | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
   const [managed, setManaged] = useState<ManagedProcess[]>([]);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string } | null>(null);
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'bad'; text: string; tag?: string } | null>(null);
   const projectRef = useRef(projectId);
   projectRef.current = projectId;
   const mounted = useRef(true);
@@ -323,8 +325,10 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
     return { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) };
   }, []);
 
-  const say = useCallback((text: string, kind: 'ok' | 'bad' = 'ok') => {
-    setNotice({ kind, text });
+  /** 提示语带一个来源标记：只有同一条提示自己读成功时才清掉，
+   *  否则别处的失败原因会被别人的成功顺手抹掉（人只看到「一切正常」）。 */
+  const say = useCallback((text: string, kind: 'ok' | 'bad' = 'ok', tag?: string) => {
+    setNotice({ kind, text, tag });
     window.setTimeout(() => setNotice(null), 6000);
   }, []);
 
@@ -362,8 +366,10 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
   const loadRuntime = useCallback(async () => {
     try {
       setRuntime(await api<RuntimeState>('/setup/runtime'));
-      setNotice((current) => current?.kind === 'bad' ? null : current);
-    } catch { say('本机环境状态暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad'); }
+      // The one verdict the badge and the director page also read.
+      setVerdict(await api<SetupVerdict>('/setup/verdict').catch(() => null));
+      setNotice((current) => current?.tag === 'runtime' ? null : current);
+    } catch { say('本机环境状态暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad', 'runtime'); }
   }, [say]);
   const loadVoice = useCallback(async () => {
     try { setVoice(await api<VoiceReadiness>('/setup/voice-readiness')); } catch { /* keep prior state */ }
@@ -376,8 +382,8 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
   }, []);  const loadStorage = useCallback(async () => {
     try {
       setStorage(await api<DeploymentStorage>('/setup/storage'));
-      setNotice((current) => current?.kind === 'bad' ? null : current);
-    } catch { say('本机存储信息暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad'); }
+      setNotice((current) => current?.tag === 'storage' ? null : current);
+    } catch { say('本机存储信息暂时不可用。确认工作台已启动后，点“刷新全部数据”重试。', 'bad', 'storage'); }
   }, [say]);
   const loadPlans = useCallback(async () => {
     const selected = projectId;
@@ -634,6 +640,10 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         project_id: project, recipe_sha256: candidate.recipe_sha256,
       }));
       steps.push('激活');
+      // 核验前置条件要求 Worker 停下，准备完成后必须自己把它叫回来：
+      // 否则人只看到「准备成功」，关掉页面后本机再也没有后台能出片。
+      const restored = await startWorker().catch(() => null);
+      if (restored && !restored.code) steps.push('恢复 Worker');
       await loadRuntime(); await loadReadiness(); await onRefresh();
       setProgress('');
       return `已自动完成：${steps.join(' → ')}。`;
@@ -908,7 +918,9 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           <div className="env-summary-grid">
             <div className="env-summary-item"><b>基础环境</b><span>{env?.blockers.length ? '有阻断项（见下方提示）' : '满足制作要求'}</span></div>
             <div className="env-summary-item"><b>安装空间</b><span>{storage ? `${storage.root} · 可用 ${storage.free_gb} GB` : '读取中'}</span></div>
-            <div className="env-summary-item"><b>生成服务</b><span>{runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
+            <div className="env-summary-item"><b>生成服务</b><span>{verdict
+              ? `${verdict.label}${verdict.services_verified ? '（服务已核验）' : ''}`
+              : runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
             <div className="env-summary-item"><b>文本模型</b><span>在本页上方配置；不需要先安装 H3</span></div>
             <div className="env-summary-item"><b>语音能力</b><span>{voiceSummary(voice)}</span></div>
             <div className="env-summary-item"><b>真实出片</b><span>只能由真实生产证据更新；Mock/演示不改变它</span></div>

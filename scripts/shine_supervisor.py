@@ -45,6 +45,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8790
 DEFAULT_IDLE_SHUTDOWN_MINUTES = 5
 WATCHDOG_TICK_SECONDS = 20
+RESTART_STALE_AFTER_SECONDS = 900.0
+"""A restart that has not reported back for this long is treated as dead.
+
+The page has no other way to clear a stuck restart, so an abandoned attempt
+must not keep refusing every later one.
+"""
 
 _STATE = {
     "phase": "idle",  # idle | stopping | starting | ready | failed | refused
@@ -214,38 +220,58 @@ def _watchdog(data_dir: Path, minutes: float) -> None:
 
 def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
     python = _venv_python()
+    log_dir = data_dir / "run" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     try:
         with _LOCK:
             _STATE.update(phase="stopping", detail="身份核验停止旧栈…",
                           started_at=time.time(), finished_at=None)
-        stop = subprocess.run(
-            [str(python), str(REPO_ROOT / "scripts" / "stop_shine.py"),
-             "--data-dir", str(data_dir)],
-            capture_output=True, text=True, timeout=180,
-            env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
-        )
-        if stop.returncode not in (0, 1):
-            # 1 = unresolved identities retained for reconciliation; still proceed
-            # only when nothing is left running, otherwise surface the refusal.
+        # The launcher and the stopper must never write into a pipe this
+        # process reads: the stack they start inherits the pipe handle and
+        # keeps it open for as long as it runs, so reading the pipe would wait
+        # for the whole stack - the restart then never reports a result and
+        # every later restart is refused as "already in progress".  Their
+        # output goes to files, where an inherited handle costs nothing.
+        with (log_dir / "restart.stop.log").open("w", encoding="utf-8") as stop_out, \
+                (log_dir / "restart.start.log").open("w", encoding="utf-8") as start_out:
+            stop = subprocess.run(
+                [str(python), str(REPO_ROOT / "scripts" / "stop_shine.py"),
+                 "--data-dir", str(data_dir)],
+                stdout=stop_out, stderr=subprocess.STDOUT, timeout=180,
+                env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
+            )
+            if stop.returncode not in (0, 1):
+                # 1 = unresolved identities retained for reconciliation; still
+                # proceed only when nothing is left running, otherwise surface
+                # the refusal.
+                with _LOCK:
+                    _STATE.update(phase="failed",
+                                  detail=f"停止未完全收尾（exit {stop.returncode}），"
+                                         f"详见 {log_dir / 'restart.stop.log'}")
+                return
             with _LOCK:
-                _STATE.update(phase="failed",
-                              detail=f"停止未完全收尾（exit {stop.returncode}）：{(stop.stdout or stop.stderr)[-300:]}")
-            return
-        with _LOCK:
-            _STATE.update(phase="starting", detail="幂等启动新栈…")
-        launcher = REPO_ROOT / "scripts" / "start_shine.ps1"
-        start = subprocess.run(
-            ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
-             "-ApiPort", str(api_port), "-WebPort", str(web_port)],
-            capture_output=True, text=True, timeout=600,
-            env={**os.environ, "SHINE_DATA_DIR": str(data_dir)},
-        )
+                _STATE.update(phase="starting", detail="幂等启动新栈…")
+            launcher = REPO_ROOT / "scripts" / "start_shine.ps1"
+            start = subprocess.run(
+                ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
+                 "-ApiPort", str(api_port), "-WebPort", str(web_port)],
+                stdout=start_out, stderr=subprocess.STDOUT, timeout=600,
+                env={**os.environ, "SHINE_DATA_DIR": str(data_dir)},
+            )
         ok = start.returncode == 0
         with _LOCK:
             _STATE.update(
                 phase="ready" if ok else "failed",
                 detail=("后台已重启。" if ok else
-                        f"启动失败（exit {start.returncode}）：{(start.stderr or start.stdout)[-400:]}"),
+                        f"启动失败（exit {start.returncode}），"
+                        f"详见 {log_dir / 'restart.start.log'}"),
+                finished_at=time.time(),
+            )
+    except subprocess.TimeoutExpired:
+        with _LOCK:
+            _STATE.update(
+                phase="failed",
+                detail=f"重启超时，详见 {log_dir / 'restart.start.log'}",
                 finished_at=time.time(),
             )
     except Exception as exc:  # noqa: BLE001 - surfaced to the page, never silent
@@ -307,8 +333,36 @@ def _stop_worker(data_dir: Path) -> tuple[int, dict]:
     if result != 0:
         return 409, {"code": "WORKER_STOP_UNRESOLVED",
                      "detail": "Worker 进程身份无法核验，未强行终止；请走对账。"}
+    _mark_worker_stopped(data_dir)
     return 200, {"status": "STOPPED",
-                 "detail": "Worker 已停止；心跳约 30 秒后过期，即可继续服务核验。"}
+                 "detail": "Worker 已停止，后台记录已同步为离线，可以继续服务核验。"}
+
+
+def _mark_worker_stopped(data_dir: Path) -> None:
+    """Record the stopped Worker as offline right away.
+
+    The worker process is gone, but its last heartbeat stays inside the
+    offline window, so the backend keeps counting it as online for another
+    half minute: a service validation retried in that window is refused with
+    "stop the Worker first" although it already is.  The record is the
+    worker's own state, so the one that stopped it writes it down.
+    """
+    from sqlalchemy import select
+
+    from shine.db import make_engine, make_session_factory
+    from shine.models import WorkerInstance
+
+    engine = make_engine(_settings(data_dir).database_url)
+    factory = make_session_factory(engine)
+    try:
+        with factory.begin() as db:
+            for row in db.scalars(select(WorkerInstance)).all():
+                if row.status != "stopped":
+                    row.status = "stopped"
+    except Exception:  # noqa: BLE001 - the heartbeat still expires on its own
+        pass
+    finally:
+        engine.dispose()
 
 
 def _start_worker(data_dir: Path) -> tuple[int, dict]:
@@ -491,8 +545,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         with _LOCK:
             if _STATE["phase"] in ("stopping", "starting"):
-                self._send(409, {"code": "SUPERVISOR_RESTART_IN_PROGRESS"}, origin)
-                return
+                started_at = _STATE.get("started_at")
+                age = time.time() - float(started_at) if started_at else None
+                if age is not None and age > RESTART_STALE_AFTER_SECONDS:
+                    # A restart that never reported back must not lock the
+                    # button forever: the operator has no way to clear it, so
+                    # the stale attempt is abandoned and a new one is allowed.
+                    _STATE.update(phase="failed",
+                                  detail=f"上一次重启已停滞 {int(age)} 秒，已作废并重新开始",
+                                  finished_at=time.time())
+                else:
+                    self._send(409, {"code": "SUPERVISOR_RESTART_IN_PROGRESS"}, origin)
+                    return
         blocker = _idle_blocker(self.data_dir)
         if blocker:
             with _LOCK:

@@ -108,6 +108,7 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   STORYBOARD_STYLE_NOT_FROZEN: '风格还没有冻结。分镜必须基于一个已冻结的风格版本。',
   SCRIPT_OUTLINE_HAS_NO_SECTIONS: '已确认的大纲里没有可分的场次，请重新整理大纲。',
   EPISODE_SECTION_NOT_STORYBOARDED: '还有场次没有拆成镜头。请先为这些场次生成并应用分镜，再把分集落到镜头上。',
+  STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION: '上一次分镜请求的结果不确定，不能直接重试。先在镜头拆解页「核对这次请求并重试」：确认后才会发起一次新的模型请求。',
   EPISODE_PLAN_NOT_MATERIALIZED: '分集方案里的场次还没有全部落到镜头上，先点「把分集落到镜头」。',
   EPISODE_PLAN_NOT_SCRIPT_FIRST: '这份分集方案是按镜头分组的，不需要再落到镜头。',
   EPISODE_PLAN_COVERAGE_INVALID: '分集方案没有恰好覆盖全部内容（有遗漏、重复或已变化），请重新生成分集。',
@@ -378,16 +379,34 @@ export async function startWorker(): Promise<{ status?: string; code?: string; d
   return response.json();
 }
 
-/** 服务复核验前置：停 Worker 并等心跳过期（约 30s），不伪造心跳。 */
+/** 服务复核验前置：停 Worker 并等它真的下线，不伪造心跳。
+ *
+ *  后端按心跳判断 Worker 是否在线（心跳约 30 秒后过期），只等进程消失就
+ *  重试，服务核验会以「Worker 还在」再拒一次 —— 人就卡在同一个按钮上。
+ *  所以这里等后端自己也说「不在线」再返回。 */
 export async function stopWorkerAndWaitOffline(): Promise<void> {
   const result = await stopWorker();
   if (result.code) throw new Error(result.detail || result.code);
-  for (let tick = 0; tick < 20; tick += 1) {
+  for (let tick = 0; tick < 30; tick += 1) {
     await new Promise((resolve) => setTimeout(resolve, 2000));
     const state = await lifecycleStatus();
-    if (state.worker !== 'running') return;
+    if (state.worker === 'running') continue;
+    if (await workerStillOnline()) continue;
+    return;
   }
   throw new Error('Worker 心跳尚未过期，请稍后重试。');
+}
+
+/** 后端自己的判断：Worker 是否还被算作在线。 */
+async function workerStillOnline(): Promise<boolean> {
+  try {
+    const status = await api<SystemStatus>('/system/status', {
+      signal: timeoutSignal(8000), cache: 'no-store',
+    });
+    return Boolean(status.worker_online ?? status.production_mode?.worker_online);
+  } catch {
+    return false;
+  }
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
@@ -403,6 +422,13 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       detail = body.detail;
       message = body.detail === undefined ? JSON.stringify(body) : describeDetail(body.detail);
       if (typeof body.detail?.code === 'string') code = body.detail.code;
+      else if (typeof body.detail === 'string' && /^[A-Z][A-Z0-9_]*$/.test(body.detail)) {
+        // Many endpoints still answer with the bare code as the detail.  The
+        // page has inline recovery entries keyed by that code (stop the
+        // Worker, then validate again); without the code the button never
+        // appears and the person is told to go and find the switch herself.
+        code = body.detail;
+      }
     } catch { /* keep HTTP status */ }
     if (response.status === 500 && message === 'Internal Server Error') {
       // 只有 FastAPI 的默认 500 文案没有诊断价值：把它换成说清结果的中文。
@@ -591,6 +617,26 @@ export type SystemStatus = {
   h3_connected: boolean; render_mode: string; pending_jobs: number; running_jobs: number;
   failed_jobs: number; blocked_jobs: number; workers: WorkerStatus[]; last_error: string | null;
   production_mode: ProductionModeStatus;
+};
+
+/** The one verdict every configuration surface reads.
+ *
+ * The badge, the director's 基础配置 page and the expert's 设置 page all
+ * describe the same machine.  When each derives its own conclusion they
+ * disagree, and the person cannot tell which one to believe.  This is the
+ * shared answer. */
+export type SetupVerdict = {
+  mode: string;
+  label: string;
+  detail: string;
+  action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix' | null;
+  code: string | null;
+  runtime_status: string | null;
+  runtime_error: string | null;
+  services_verified: boolean;
+  validation_blockers: string[];
+  has_active_runtime: boolean;
+  has_candidate_runtime: boolean;
 };
 
 export type QCReport = {
@@ -1584,13 +1630,15 @@ export type EpisodeStoryboardState = {
     episode_id: string;
     order?: number;
     units: Array<{ index: number; production_section_id: string; state: string;
-                   shot_count: number; material_notices: Array<{ code: string; entity?: string }> }>;
+                   shot_count: number; material_notices: Array<{ code: string; entity?: string }>;
+                   section_order?: number; section_title?: string }>;
     shot_ids: string[];
     status: 'PENDING' | 'IN_PROGRESS' | 'APPLIED' | 'BLOCKED' | string;
     blocker?: {
-      status: string; failed_role: string | null; failed_task_id: string | null;
+      unit_index?: number; status: string; failed_role: string | null; failed_task_id: string | null;
       rejections: Array<{ role: string; code: string; rejection_reason_code?: string;
-                          external_outcome?: string }>;
+                          external_outcome?: string; task_id?: string | null; state_version?: number;
+                          provider_finish_reason?: string | null; provider_text_chars?: number | null }>;
     } | null;
   }>;
 };

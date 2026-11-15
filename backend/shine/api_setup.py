@@ -1078,6 +1078,55 @@ def runtime_state(settings: SettingsDep, db: DBSession):
     return runtime_report(db, settings)
 
 
+@router.get('/verdict')
+def setup_verdict(settings: SettingsDep, db: DBSession):
+    """One answer to "can this machine make a film right now?".
+
+    The workbench has three places that talk about the same machine: the
+    top-right badge, the director's 基础配置 page and the expert's
+    设置 page.  When each of them derives its own conclusion from its own
+    endpoint, they disagree - one says the environment is fine while
+    another says it is not - and the person is left with no way to tell
+    which one to believe.
+
+    This endpoint is the single verdict every surface reads.  It reports the
+    same ``production_mode`` the badge shows, plus the one action that moves
+    the machine forward, so the badge and both configuration pages cannot
+    tell different stories.
+    """
+    from shine.comfyops.runtime_configuration import resolve_runtime, runtime_report
+    from shine.comfyops.service_validation import _worker_online
+    from shine.production_mode import summarize_production_mode
+    from shine.models import AppSetting
+
+    try:
+        effective = resolve_runtime(db, settings)
+    except HTTPException as exc:
+        effective, runtime_error = None, str(exc.detail)
+    else:
+        runtime_error = None
+    report = runtime_report(db, settings)
+    mode = summarize_production_mode(
+        db, settings,
+        effective=effective, runtime_error=runtime_error,
+        worker_online=_worker_online(db, settings),
+        renderer_online=False,
+    )
+    return {
+        "mode": mode["mode"],
+        "label": mode["label"],
+        "detail": mode["detail"],
+        "action": mode["action"],
+        "code": mode["code"],
+        "runtime_status": report.get("status"),
+        "runtime_error": report.get("error"),
+        "services_verified": bool(report.get("services_verified")),
+        "validation_blockers": list((report.get("service_validation") or {}).get("blockers") or []),
+        "has_active_runtime": db.get(AppSetting, "deployment-runtime-active") is not None,
+        "has_candidate_runtime": db.get(AppSetting, "deployment-runtime-candidate") is not None,
+    }
+
+
 @router.get('/managed-processes')
 def managed_processes(db: DBSession):
     """The renderers and local reviewers this workbench owns right now."""

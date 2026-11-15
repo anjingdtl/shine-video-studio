@@ -139,3 +139,36 @@ def test_start_worker_refuses_when_running(server, monkeypatch):
     code, body = _post(base, "/start-worker")
     assert code == 409
     assert body["code"] == "WORKER_ALREADY_RUNNING"
+
+
+def test_a_stopped_worker_is_recorded_offline_at_once(tmp_path, monkeypatch):
+    """A stopped Worker must stop counting as online right away.
+
+    Its last heartbeat stays inside the offline window, so a service
+    validation retried in that window is refused with "stop the Worker
+    first" although it already is - the person clicks the same button again
+    and gets the same answer.
+    """
+    from datetime import datetime, timezone
+
+    from shine.db import Base, make_engine, make_session_factory
+    from shine.models import WorkerInstance
+
+    database_url = f"sqlite:///{(tmp_path / 'shine.db').as_posix()}"
+    monkeypatch.setenv("SHINE_DATABASE_URL", database_url)
+    engine = make_engine(database_url)
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    with factory.begin() as db:
+        db.add(WorkerInstance(worker_id="worker-x", version="1", status="online",
+                              last_heartbeat_at=datetime.now(timezone.utc)))
+    engine.dispose()
+
+    supervisor._mark_worker_stopped(tmp_path)
+
+    engine = make_engine(database_url)
+    factory = make_session_factory(engine)
+    with factory() as db:
+        row = db.get(WorkerInstance, "worker-x")
+        assert row.status == "stopped"
+    engine.dispose()

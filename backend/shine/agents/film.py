@@ -412,6 +412,21 @@ def _visual_language_error(field: str) -> ValueError:
     return error
 
 
+#: A quoted span is content the plan wants rendered as such - a spoken line in
+#: a ``<d>`` block, or an inscription the story needs shown verbatim - so the
+#: language check reads the prose around it.  Every quotation convention the
+#: models actually emit is recognised, not just ASCII: live evidence
+#: (2026-11-15, scene 2) is the beat of this same pipeline quoting the carved
+#: mark as “沈禾”, and a faithful English description that copied that span was
+#: refused as Chinese prose three times.
+_QUOTED_SPAN = re.compile(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」|“[^”]*”|‘[^’]*’|『[^』]*』")
+
+
+def descriptive_text(text: str) -> str:
+    """The prose of a visual or camera field, without its deliberate quotations."""
+    return _QUOTED_SPAN.sub("", text or "")
+
+
 def _normalised_dialogue(text: str) -> str:
     """Typography-insensitive form of a line: whitespace and ellipsis/dash
     variants carry no content, so a faithful copy must not fail on them."""
@@ -526,8 +541,7 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                                cut.visual_description)
                               for cut_index, cut in enumerate(shot.cuts)]
             for field, text in visual_fields:
-                descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", text)
-                if re.search(r"[㐀-鿿]", descriptive):
+                if re.search(r"[㐀-鿿]", descriptive_text(text)):
                     raise _visual_language_error(field)
             beat_ids = [shot.beat_id, *(cut.beat_id for cut in shot.cuts)]
             starts = [0.0, *(cut.start_s for cut in shot.cuts)]
@@ -563,8 +577,7 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
             # Same rule as the director's visual prose: camera language feeds
             # the compiled H3 prompt and must stay in the prompt language.
             for field in ("composition", "movement", "lighting", "axis"):
-                descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", getattr(shot, field))
-                if re.search(r"[㐀-鿿]", descriptive):
+                if re.search(r"[㐀-鿿]", descriptive_text(getattr(shot, field))):
                     raise _visual_language_error(f"shots[{shot_index}].{field}")
     elif isinstance(proposal, SoundPlan):
         voices = {a["id"] for a in context["assets"] if a["kind"] == "audio"}
@@ -1195,7 +1208,14 @@ class FilmAgentDispatcher:
             elif external_outcome not in {"NOT_SENT", "UNKNOWN", "RESPONSE_RECEIVED"}:
                 if (task.trace.get("received_result_sha256")
                         or phase == "VALIDATING_RESULT"
-                        or isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int)):
+                        or isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int)
+                        or isinstance(exc, LLMError) and isinstance(exc.details.get("http_status"), int)):
+                    # The streamed transport meta keys the answer by
+                    # ``http_status`` (not ``status``): a 200 stream that ended
+                    # with finish_reason=length is a received, decided refusal.
+                    # Without this the 2026-11-15 journey's truncated answer was
+                    # mis-classified UNKNOWN and its episode retry had no lawful
+                    # path forward.
                     external_outcome = "RESPONSE_RECEIVED"
                 elif phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}:
                     external_outcome = "NOT_SENT"

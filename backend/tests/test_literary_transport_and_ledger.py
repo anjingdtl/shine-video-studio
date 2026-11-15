@@ -140,6 +140,57 @@ def test_an_unknown_call_is_listed_and_only_a_person_may_free_it(api):
             == "safe_to_resend"
 
 
+def test_an_authorized_retry_does_not_erase_the_failed_attempt(api):
+    """The unknown outcome of the old request must survive the new request.
+
+    A person who authorizes a new request for an unknown outcome gets a *new*
+    physical request.  The two share a fingerprint, so a ledger that keyed on
+    the fingerprint alone wrote the new outcome over the old evidence: the row
+    then claimed the provider had answered while still carrying the old
+    failure code, and the unknown-outcome record - the one thing a later reader
+    needs - was gone.
+    """
+    _client, factory, _settings = api
+    from tests.conftest import create_project
+
+    pid = create_project(_client, "重试")
+    with factory.begin() as db:
+        ledger.record(db, project_id=pid, attempt={
+            "phase": "SENDING", "unit_id": "scene:v1:s1", "role": "r", "purpose": "scene",
+            "attempt_no": 1, "request_fingerprint": "f" * 64,
+        }, task_id="task-old")
+        ledger.record(db, project_id=pid, attempt={
+            "phase": "FINISHED", "unit_id": "scene:v1:s1", "role": "r", "purpose": "scene",
+            "attempt_no": 1, "request_fingerprint": "f" * 64,
+            "external_outcome": "UNKNOWN", "error_code": "LLM_CONNECTION",
+        }, task_id="task-old")
+    # The authorized retry is a new physical request under a new task.
+    with factory.begin() as db:
+        ledger.record(db, project_id=pid, attempt={
+            "phase": "SENDING", "unit_id": "scene:v1:s1", "role": "r", "purpose": "scene",
+            "attempt_no": 1, "request_fingerprint": "f" * 64,
+        }, task_id="task-new")
+        ledger.record(db, project_id=pid, attempt={
+            "phase": "FINISHED", "unit_id": "scene:v1:s1", "role": "r", "purpose": "scene",
+            "attempt_no": 1, "request_fingerprint": "f" * 64,
+            "external_outcome": "RESPONSE_RECEIVED", "http_status": 200,
+            "completion_tokens": 4115,
+        }, task_id="task-new")
+
+    with factory() as db:
+        rows = db.scalars(select(LLMCallAttempt).where(
+            LLMCallAttempt.project_id == pid).order_by(LLMCallAttempt.started_at)).all()
+        assert len(rows) == 2, "two physical requests, two rows"
+        old, new = rows
+        assert old.external_outcome == "UNKNOWN"
+        assert old.error_code == "LLM_CONNECTION"
+        assert new.external_outcome == "RESPONSE_RECEIVED"
+        assert new.error_code is None, "a stale failure code must not survive on a answered row"
+        assert new.output_tokens == 4115
+        # The unknown attempt is still listed, so it can still be reconciled.
+        assert [row.id for row in ledger.unknown_attempts(db, pid)] == [old.id]
+
+
 def test_an_unknown_stream_is_never_asked_again_by_the_governor():
     from shine.literary.adapters import SceneDraft
     from shine.literary.governor import CallGovernor

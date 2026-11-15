@@ -12,7 +12,7 @@
  * 已持久化状态恢复。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Film, ListChecks, Play, RefreshCw, Sparkles, TriangleAlert, Upload } from 'lucide-react';
+import { Check, Film, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import { RequiredActionNotice } from './RequiredActionNotice';
 import type { ErrorActionTarget } from '../errorActions';
 import {
@@ -29,6 +29,8 @@ import {
   generateStoryboardBook,
   deriveShotMaterials,
   queueDirectorStoryboard,
+  reconcileFilmTask,
+  resendUnknownFilmTask,
   retryEpisodeStoryboard,
   API,
   fetchDirectorRequirements,
@@ -290,6 +292,35 @@ const EPISODE_STATUS_LABELS: Record<string, string> = {
   PENDING: '待生成', IN_PROGRESS: '生成中', APPLIED: '可确认', BLOCKED: '被阻塞',
 };
 
+/** 分镜链的五个工种在页面上的人话名（与专家面板同词）。 */
+const CREW_ROLE_LABELS: Record<string, string> = {
+  scriptwriter: '编剧', director: '导演', cinematographer: '摄影',
+  continuity_supervisor: '场记', editor: '剪辑', editor_edit_intent: '剪辑',
+  director_arbitration: '导演裁定',
+  // 五个工种都成功、落镜闸门拒绝时的归属：它不是一个模型工种。
+  landing: '落镜',
+};
+
+/** 一次拒绝在页面上的人话：LLM_FORMAT 的截断证据单独说，常见策略拒绝码给一句话。 */
+const REFUSAL_LABELS: Record<string, string> = {
+  UNAPPROVED_ASSET_OR_UNKNOWN_BEAT: '镜头引用了未批准的主素材，或剧本里不存在的情节拍',
+  CHARACTER_MASTER_BINDING_REQUIRED: '人物还没有绑定已确认的主素材',
+  VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE: '画面描述里混入了中文，需要按提示词语言重写',
+  DIALOGUE_NOT_IN_USER_SCRIPT: '对白不是剧本原文，需要按原文重写',
+};
+
+function refusalReason(rejection: { code?: string; rejection_reason_code?: string;
+                                    provider_finish_reason?: string | null }): string {
+  const code = rejection.rejection_reason_code ?? rejection.code ?? '';
+  if (code === 'LLM_FORMAT') {
+    return rejection.provider_finish_reason === 'length'
+      ? '模型输出被截断，格式解析失败（LLM_FORMAT）'
+      : '模型返回的格式无法解析（LLM_FORMAT）';
+  }
+  const label = REFUSAL_LABELS[code];
+  return label ? `${label}（${code}）` : (code || '分镜被拒绝');
+}
+
 export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh, onGoStage }: {
   projectId: string;
   onMessage?: (message: string) => void;
@@ -381,6 +412,18 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     act(`retry-${episodeId}`, async () => {
       await retryEpisodeStoryboard(projectId, episodeId, version);
     }, `第 ${episodeId} 集已重新排队。`);
+  };
+  /** 结果未知的拒绝没有直接重试权：核对 →（如仍未知）显式授权一次新请求 → 该集重试。 */
+  const reconcileAndRetryEpisode = (episodeId: string, taskId: string | null, taskVersion: number) => {
+    if (!taskId || !state?.state_version) return;
+    const version = state.state_version;
+    act(`reconcile-${episodeId}`, async () => {
+      const checked = await reconcileFilmTask(projectId, taskId, taskVersion);
+      if (checked.outcome === 'UNKNOWN_REQUIRES_NEW_ATTEMPT') {
+        await resendUnknownFilmTask(projectId, taskId, checked.state_version);
+      }
+      await retryEpisodeStoryboard(projectId, episodeId, version);
+    }, '已核对上次请求并授权重发，该集已重新排队。');
   };
   const saveDuration = (shot: EpisodeShotRow) => act(`edit-${shot.shot_id}`, async () => {
     const value = Number(editing?.duration);
@@ -500,22 +543,45 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
           </span>
         </summary>
         <div className="episode-body">
-          {blocked && <div className="blocked-callout">
-            <TriangleAlert size={14} />
-            <span>
-              {episode.blocker?.rejections?.[0]
-                ? `最近一次失败：${episode.blocker.rejections[0].role} · ${episode.blocker.rejections[0].rejection_reason_code
-                   ?? episode.blocker.rejections[0].code}`
-                : '这一集的分镜被拒绝。'}
-              {episode.blocker?.rejections?.[0]?.external_outcome === 'UNKNOWN'
-                ? ' 结果不确定：先在专业面板核对，不会自动重发。' : ''}
-            </span>
-            {episode.blocker?.rejections?.[0]?.external_outcome !== 'UNKNOWN' && (
-              <button type="button" className="btn-secondary" disabled={busy !== ''}
-                onClick={() => retryEpisode(episode.episode_id)}>
-                <RefreshCw size={12} /> 重试这一集
-              </button>)}
-          </div>}
+          {blocked && (() => {
+            const rejection = episode.blocker?.rejections?.[0];
+            const blockedUnit = episode.units.find((unit) => unit.index === episode.blocker?.unit_index)
+              ?? episode.units.find((unit) => unit.state === 'BLOCKED');
+            const order = blockedUnit?.section_order ?? (blockedUnit ? blockedUnit.index + 1 : null);
+            const rawTitle = blockedUnit?.section_title?.trim() ?? '';
+            // 标题常自带「第N场」前缀（来自剧本小标题），避免「第 2 场：第2场…」重复。
+            const title = order === null ? rawTitle
+              : rawTitle.replace(new RegExp(`^第\\s*${order}\\s*场[：:·,，、]?`), '');
+            const scene = blockedUnit
+              ? `第 ${order} 场${title ? `：${title}` : ''}`
+              : '这一集';
+            const roleName = CREW_ROLE_LABELS[rejection?.role ?? ''] ?? rejection?.role ?? '分镜工种';
+            const uncertain = rejection?.external_outcome === 'UNKNOWN';
+            // 落镜拒绝不是一次模型调用：重试只复用已完成的五个工种结果重新落镜。
+            const landingOnly = rejection?.role === 'landing';
+            const failedTaskId = rejection?.task_id ?? episode.blocker?.failed_task_id ?? null;
+            const failedTaskVersion = rejection?.state_version ?? 0;
+            return <div className="blocked-callout">
+              <TriangleAlert size={14} />
+              <span>
+                卡在{scene}：{roleName} · {refusalReason(rejection ?? {})}。
+                {uncertain
+                  ? ' 这次请求的结果不确定，不会自动重发；核对并确认后才会发起一次新请求。'
+                  : landingOnly
+                    ? ' 不会自动重发；重试会复用已完成的工种结果，只重新落镜。'
+                    : ' 不会自动重发；重试会发起一次新的模型请求。'}
+              </span>
+              {uncertain
+                ? <button type="button" className="btn-secondary" disabled={busy !== ''}
+                    onClick={() => reconcileAndRetryEpisode(episode.episode_id, failedTaskId, failedTaskVersion)}>
+                    <ShieldCheck size={12} /> 核对这次请求并重试
+                  </button>
+                : <button type="button" className="btn-secondary" disabled={busy !== ''}
+                    onClick={() => retryEpisode(episode.episode_id)}>
+                    <RefreshCw size={12} /> 重试这一集
+                  </button>}
+            </div>;
+          })()}
           {table && table.shots.length > 0 && <>
             <div className="shot-table-wrap">
             <table className="shot-table shot-table-fixed">

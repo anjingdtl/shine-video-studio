@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import timedelta
@@ -123,3 +124,83 @@ def test_restart_idle_runs_state_machine(supervisor, monkeypatch):
         threading.Event().wait(0.05)
     assert status["phase"] == "ready"
     assert called["args"][1:] == (8000, 5173)
+
+
+def test_a_restart_that_is_still_running_is_refused(supervisor, monkeypatch):
+    """A restart in flight is a real refusal, not a dead end."""
+    server, _factory, _dir = supervisor
+    monkeypatch.setattr(sup, "_run_restart", lambda *a, **k: None)
+    with sup._LOCK:
+        sup._STATE.update(phase="starting", started_at=time.time())
+    req = urllib.request.Request(_url(server, "/restart-stack"), method="POST",
+                                 headers={"Origin": "http://127.0.0.1:5173",
+                                          "x-shine-local-action": "1"})
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=5)
+    assert exc.value.code == 409
+    assert json.loads(exc.value.read())["code"] == "SUPERVISOR_RESTART_IN_PROGRESS"
+
+
+def test_a_restart_that_never_reported_back_does_not_lock_the_next_one(supervisor, monkeypatch):
+    """An abandoned restart must not refuse every later restart forever.
+
+    The page has no other way to clear it, so a stuck attempt is abandoned
+    after the stale window and the operator can try again.
+    """
+    server, _factory, _dir = supervisor
+    started = {}
+
+    def fake_restart(data_dir, api_port, web_port):
+        started["called"] = True
+        with sup._LOCK:
+            sup._STATE.update(phase="ready", detail="后台已重启。")
+
+    monkeypatch.setattr(sup, "_run_restart", fake_restart)
+    with sup._LOCK:
+        sup._STATE.update(phase="starting",
+                          started_at=time.time() - sup.RESTART_STALE_AFTER_SECONDS - 60)
+    req = urllib.request.Request(_url(server, "/restart-stack"), method="POST",
+                                 headers={"Origin": "http://127.0.0.1:5173",
+                                          "x-shine-local-action": "1"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 202
+    for _ in range(50):
+        with urllib.request.urlopen(_url(server, "/restart-status"), timeout=5) as r:
+            status = json.loads(r.read())
+        if status["phase"] == "ready":
+            break
+        threading.Event().wait(0.05)
+    assert status["phase"] == "ready"
+    assert started.get("called") is True
+
+
+def test_the_launcher_never_writes_into_a_pipe_the_supervisor_reads(supervisor, monkeypatch, tmp_path):
+    """The launcher must not hand the stack a pipe it has to wait on.
+
+    The processes it starts inherit the launcher's standard handles.  When
+    those handles are pipes, the supervisor waits for the whole stack to exit
+    before it can report a result - the restart then never finishes and every
+    later restart is refused as "already in progress".
+    """
+    data_dir = tmp_path / "sup"
+    calls = []
+
+    class _Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(command, **kwargs):
+        calls.append({"command": command, **kwargs})
+        return _Result()
+
+    monkeypatch.setattr(sup.subprocess, "run", fake_run)
+    sup._run_restart(data_dir, 8000, 5173)
+    assert calls, "the restart must actually launch something"
+    for call in calls:
+        assert "capture_output" not in call, call["command"]
+        assert call.get("stdout") is not None
+        # A pipe would be the integer ``subprocess.PIPE``; the launcher must
+        # write into a real file instead.
+        assert not isinstance(call["stdout"], int), call["command"]
+        assert str(getattr(call["stdout"], "name", "")).endswith(".log")

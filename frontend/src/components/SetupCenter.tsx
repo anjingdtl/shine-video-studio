@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
   MonitorCheck, Video,
 } from 'lucide-react';
-import { api, json, timeoutSignal, ApiError, knownFreeBytes } from '../api';
+import { api, json, timeoutSignal, ApiError, knownFreeBytes, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
 import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
@@ -234,6 +234,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
   const [storage, setStorage] = useState<Storage | null>(restored?.storage ?? null);
   const [runtime, setRuntime] = useState<RuntimeState | null>(restored?.runtime ?? null);
   const [readiness, setReadiness] = useState<Readiness | null>(restored?.readiness ?? null);
+  /** The one verdict the badge and both configuration pages read. */
+  const [setupVerdict, setSetupVerdict] = useState<SetupVerdict | null>(null);
   const [scan, setScan] = useState<ExistingScan | null>(restored?.scan ?? null);
   const [imageScan, setImageScan] = useState<ExistingScan | null>(restored?.imageScan ?? null);
   const [variants, setVariants] = useState<VariantRecommendation | null>(restored?.variants ?? null);
@@ -277,7 +279,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     setProblem('');
     setResult('');
     try {
-      const [environment, disk, state, ready, existing, imageState, variantRows, catalogRows] = await Promise.all([
+      const [environment, disk, state, ready, existing, imageState, variantRows, catalogRows, verdict] = await Promise.all([
         api<EnvReport>('/setup/environment'),
         api<Storage>('/setup/storage'),
         api<RuntimeState>('/setup/runtime'),
@@ -286,6 +288,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
         api<ImageReadiness>('/setup/image-readiness').catch(() => null),
         api<VariantRecommendation>('/setup/variant-recommendations'),
         api<CatalogSummary>('/setup/catalog').catch(() => null),
+        api<SetupVerdict>('/setup/verdict').catch(() => null),
       ]);
       // 作品 id 在首屏是异步到达的：没有作品时不去问「已采用的安装」，
       // 等 id 到了 effect 会重新检测一次。
@@ -297,6 +300,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
       if (!mounted.current) return;
       setEnv(environment); setStorage(disk); setRuntime(state); setReadiness(ready);
       setImage(imageState); setVariants(variantRows); setCatalog(catalogRows);
+      setSetupVerdict(verdict);
       setAdoptedRoot(availability?.adopted_root ?? null);
       setAvailabilityRows(availability?.variants ?? null);
       const root = existing.installations?.[0];
@@ -1026,9 +1030,16 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           {adoptedRoot && <p>已采用的安装（只读复用）：{adoptedRoot}</p>}
           <p>扫描 {scan?.scanned_files ?? 0} 个文件 · 找到候选 {scan?.matches.length ?? 0} 项 ·
             还缺固定版本文件 {scan?.missing.length ?? 0} 项</p>
-          <p>服务状态：{runtime?.status === 'ACTIVE' && runtime.services_verified ? '配置已激活，服务已核验' : '待配置或待核验'}
+          <p>服务状态：{setupVerdict
+            ? `${setupVerdict.label}${setupVerdict.services_verified ? '（服务已核验）' : ''}`
+            : runtime?.status === 'ACTIVE' && runtime.services_verified ? '配置已激活，服务已核验' : '待配置或待核验'}
             {' · '}就绪层 {readiness?.layers.filter((layer) => layer.status === 'READY').length ?? 0}/{readiness?.layers.length ?? 0}
           </p>
+          {setupVerdict && !['READY', 'RUNNING'].includes(setupVerdict.mode) && <p role="status" className="run-hint">
+            {setupVerdict.detail}{setupVerdict.code ? `（${setupVerdict.code}）` : ''}
+            {setupVerdict.validation_blockers.length > 0
+              ? `；待处理：${setupVerdict.validation_blockers.join('、')}` : ''}
+          </p>}
           <div className="setup-scroll-list">
             {(scan?.matches ?? []).map((row) => <div key={`${row.component_id}:${row.relative_path}`}>
               <b>{row.component_id}</b><span>{row.relative_path}</span><em>{gib(row.size)}</em>

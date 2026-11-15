@@ -108,6 +108,12 @@ export default function DirectorSetupPanel({
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
   const missingRoles = (llm?.roles ?? []).filter((row) => row.code);
+  /** The same verdict the top-right badge and the expert settings page read.
+   *  One machine, one answer: a card that says "ready" while the badge says
+   *  "not available" leaves the person with no way to tell which is true. */
+  const envLabel = ready
+    ? (system?.production_mode?.label ?? '已就绪')
+    : (system?.production_mode?.detail ?? '尚未检查');
 
   async function installAdvisory(kind: 'VLM' | 'ASR') {
     if (!projectId) return;
@@ -156,7 +162,7 @@ export default function DirectorSetupPanel({
     <section className="setup-status-grid">
       <div className={`setup-status ${ready ? 'ok' : 'pending'}`}>
         <div className="setup-status-icon"><Cpu size={16} /></div>
-        <div><b>本机生成环境</b><span>{ready ? system?.production_mode?.label ?? '已就绪' : system?.production_mode?.detail ?? '尚未检查'}</span></div>
+        <div><b>本机生成环境</b><span>{envLabel}</span></div>
         {ready ? <Check size={15} /> : <AlertTriangle size={15} />}
       </div>
       <div className={`setup-status ${llmReady ? 'ok' : 'pending'}`}>

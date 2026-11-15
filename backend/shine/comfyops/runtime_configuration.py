@@ -259,6 +259,42 @@ def resolve_runtime(db, settings):
                    managed_recipe_path=identity['recipe'], managed_recipe_sha256=identity['recipe_sha256'])
 
 
+def _live_installation_attempts(db) -> list[str]:
+    """Installation attempts that can still hold the machine.
+
+    An attempt that already failed (``FAILED_RECONCILE_REQUIRED``) is waiting
+    for a person to reconcile it.  It holds no lease and installs nothing, so
+    it cannot touch the GPU - but counting it anyway froze the whole
+    workbench: one failed download of the *advisory* review models (画面审片 /
+    语音核对) made service validation, runtime activation and the production
+    badge refuse forever, with nothing in the UI able to clear it.
+
+    Two rules, both about not letting an unrelated download freeze everything:
+
+    * a failed attempt only counts while it still owns a lease;
+    * a plan that contains nothing but advisory review components never counts
+      - those models give suggestions and never gate a production.
+    """
+    from shine.comfyops.deployment import REVIEW_COMPONENTS
+    from shine.comfyops.models import InstallationPlan
+
+    review_only = set(REVIEW_COMPONENTS.values())
+    live: list[str] = []
+    rows = db.scalars(select(InstallationAttempt).where(
+        InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING',
+                                        'FAILED_RECONCILE_REQUIRED']))).all()
+    for attempt in rows:
+        if attempt.status == 'FAILED_RECONCILE_REQUIRED' and attempt.lease_owner is None:
+            # The failure is recorded, nothing is running any more.
+            plan = db.get(InstallationPlan, attempt.plan_id)
+            payload = (plan.payload or {}) if plan is not None else {}
+            packages = [str(row.get('id') or '') for row in (payload.get('packages') or [])]
+            if not packages or set(packages).issubset(review_only):
+                continue
+        live.append(attempt.id)
+    return live
+
+
 def require_idle_configuration(db):
     from shine.services import ACTIVE_JOB_STATUSES
 
@@ -276,10 +312,10 @@ def require_idle_configuration(db):
                 Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
             or db.scalar(select(ProductionSeries.id).where(
                 ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(1))
-            or db.scalar(select(InstallationAttempt.id).where(or_(
-                InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING', 'FAILED_RECONCILE_REQUIRED']),
-                (InstallationAttempt.status == 'NEEDS_REVIEW') & InstallationAttempt.lease_owner.is_not(None),
-            )).limit(1))):
+            or db.scalar(select(InstallationAttempt.id).where(
+                (InstallationAttempt.status == 'NEEDS_REVIEW')
+                & (InstallationAttempt.lease_owner.is_not(None))).limit(1))
+            or _live_installation_attempts(db)):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
 
 

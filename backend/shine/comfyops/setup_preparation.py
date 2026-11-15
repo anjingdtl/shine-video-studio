@@ -161,18 +161,38 @@ def read_task(db) -> dict[str, Any]:
 
 
 def _live_installation_work(db, project_id: str) -> list[str]:
-    """Downloads that still own the target; convergence must wait for them."""
+    """Downloads that still own the target; convergence must wait for them.
+
+    Only work that is *still running* may hold the chain, and only work that
+    the chain actually needs.  Two rules, both about not letting an
+    unrelated download freeze the whole machine:
+
+    * An attempt that already failed (``FAILED_RECONCILE_REQUIRED``) will never
+      finish by itself: it waits for a person to reconcile it.  Treating it as
+      live work made the whole preparation wait forever on a download that had
+      already failed - the page showed "waiting for the download" while
+      nothing was downloading at all.
+    * The review models (画面审片 / 语音核对) are advisory.  They give
+      suggestions and never gate a production, so a review download that is
+      still running must not hold the H3 chain either.
+    """
+    from shine.comfyops.deployment import REVIEW_COMPONENTS
     from shine.comfyops.models import InstallationAttempt, InstallationPlan
 
+    review_only = set(REVIEW_COMPONENTS.values())
     rows = db.scalars(select(InstallationAttempt).where(
-        InstallationAttempt.status.in_(["QUEUED", "SUBMIT_INTENT", "INSTALLING",
-                                        "FAILED_RECONCILE_REQUIRED"]))).all()
+        InstallationAttempt.status.in_(["QUEUED", "SUBMIT_INTENT", "INSTALLING"]))).all()
     live = []
     for attempt in rows:
         plan = db.get(InstallationPlan, attempt.plan_id)
         if plan is None:
             continue
-        if (plan.payload or {}).get("project_id") not in (None, project_id):
+        payload = plan.payload or {}
+        if payload.get("project_id") not in (None, project_id):
+            continue
+        packages = [str(row.get("id") or "") for row in (payload.get("packages") or [])]
+        if packages and set(packages).issubset(review_only):
+            # Advisory review models never gate the production chain.
             continue
         live.append(attempt.id)
     return live

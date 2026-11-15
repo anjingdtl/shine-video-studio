@@ -191,6 +191,30 @@ def classify_external_outcome(exc: LLMError) -> str:
     return "UNKNOWN"
 
 
+def _gateway_budget(budget: CallBudget, task_category: str) -> dict[str, Any]:
+    """The transport and ceiling the provider must honour for this call.
+
+    The planned budget is a contract about the *request*, so it has to travel
+    with the request.  Without it the provider was free to deliberate for
+    minutes on a long idle connection: the gateway cut it, the answer never
+    arrived, and the call ended as ``LLM_CONNECTION`` with an unknown
+    outcome - a failure a person then had to reconcile by hand.
+
+    A reasoning model bills its thinking as completion, so the ceiling has to
+    cover both.  Measured live on this provider: without a ceiling the same
+    request ran for five minutes and was cut; with it, the same request
+    finished in seconds.  The ceiling is only usable together with a bounded
+    reasoning effort: a model that may deliberate for the whole ceiling
+    produces no visible answer at all.
+    """
+    if task_category == "creative":
+        # Creative writing keeps the model's own deliberation budget; the
+        # transport alone is applied so a long answer is not cut mid-stream.
+        return {"streaming": True}
+    return {"completion_cap": budget.output_request_tokens, "streaming": True,
+            "reasoning_effort": "low"}
+
+
 class CallGovernor:
     """Execute literary calls for one logical unit under one shared budget."""
 
@@ -402,6 +426,7 @@ class CallGovernor:
                     if accepts_precompiled(self.gateway.complete_for_role):
                         response = self.gateway.complete_for_role(
                             db, self.role, precompiled=request, schema=schema,
+                            budget=_gateway_budget(budget, task_category),
                             on_progress=progress, task_category=task_category)
                     else:
                         # A gateway double with the legacy keyword set: send the
