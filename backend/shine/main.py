@@ -205,6 +205,15 @@ def _audit_entity_label(db: Session, entity_type: str, entity_id: str) -> str | 
     name keeps the id, and the front end falls back to it.
     """
     from shine.asset_center.models import LibraryAsset, LibraryVersion
+    from shine.models import SubtitleTrack
+
+    # 术语表与字幕没有名字，但版本号就是它们的可读身份：
+    # 「人名对照表 · 版本 2」比「人名对照表 · bd82c0fa…」有用得多。
+    revision_models = {"project_terminology": ProjectTerminology, "subtitle_track": SubtitleTrack}
+    revision_model = revision_models.get(entity_type)
+    if revision_model is not None:
+        revision_row = db.get(revision_model, entity_id)
+        return f"版本 {revision_row.revision}" if revision_row is not None else None
 
     getters = {
         "project": (Project, "title"),
