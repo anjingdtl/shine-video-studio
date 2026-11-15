@@ -65,7 +65,9 @@ describe('顶部模式入口（唯一权威状态，只做跳转）', () => {
     let online = false;
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => online
       ? jsonResponse([baseProject()]) : jsonResponse({ detail: 'offline' }, 503) });
-    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({ detail: 'slow probe' }, 504) });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => online
+      ? jsonResponse({ ...SYSTEM_STATUS, api_online: true })
+      : jsonResponse({ detail: 'slow probe' }, 504) });
     render(<App />);
     expect(await screen.findByText('工作台后端失联')).toBeInTheDocument();
     const reconnect = screen.getByRole('button', { name: '重连工作台' });
@@ -78,7 +80,9 @@ describe('顶部模式入口（唯一权威状态，只做跳转）', () => {
     let online = false;
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => online
       ? jsonResponse([baseProject()]) : jsonResponse({ detail: 'offline' }, 503) });
-    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => jsonResponse({ detail: 'slow probe' }, 504) });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => online
+      ? jsonResponse({ ...SYSTEM_STATUS, api_online: true })
+      : jsonResponse({ detail: 'slow probe' }, 504) });
     render(<App />);
     expect(await screen.findByText('工作台后端失联')).toBeInTheDocument();
     online = true;
