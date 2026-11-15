@@ -1563,6 +1563,8 @@ class ReconcileRequest(BaseModel):
     path: str | None = Field(default=None, max_length=1024)
     project_id: str | None = None
     capability: Literal["h3", "image"] = "h3"
+    #: The H3 stack the person chose; its own catalog is what gets verified.
+    variant_id: str | None = Field(default=None, max_length=120)
     #: Adopt is the one confirmation that represents the instance.  Detection
     #: alone never takes ownership of an external ComfyUI.
     adopt: bool = False
@@ -1633,16 +1635,19 @@ def _discovered_roots(settings, db) -> list[str]:
 
 
 @router.get("/summary")
-def setup_summary(settings: SettingsDep, db: DBSession, project_id: str | None = None):
+def setup_summary(settings: SettingsDep, db: DBSession, project_id: str | None = None,
+                  variant_id: str | None = None):
     """The single read-only snapshot every setup entry point shares.
 
     ``GET`` performs no mutation: no file is written, no service is started and
     no package is registered.  Detection is read-only discovery of what is
-    already on the machine.
+    already on the machine.  ``variant_id`` scopes the h3 answer to the stack
+    the person chose; an unknown variant is refused by name.
     """
     from shine.comfyops.setup_summary import summary
 
-    return summary(db, settings, project_id=project_id, discovered=_discovered_roots(settings, db))
+    return summary(db, settings, project_id=project_id, variant_id=variant_id,
+                   discovered=_discovered_roots(settings, db))
 
 
 @router.get("/missing-files")
@@ -1689,7 +1694,7 @@ def setup_reconcile(body: ReconcileRequest, actor: Operator, settings: SettingsD
     db.rollback()  # hashing and adoption open their own transaction boundaries
     return reconcile_installation(
         db, settings, path=path, project_id=body.project_id, capability=body.capability,
-        adopt=body.adopt, port=port, actor=actor,
+        adopt=body.adopt, port=port, actor=actor, variant_id=body.variant_id,
     )
 
 

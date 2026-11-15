@@ -79,6 +79,8 @@ export type SetupSummary = {
   snapshot_version: number;
   computed_at: string;
   project_id: string | null;
+  /** 这份快照描述的是哪套 H3 变体；null = 默认已验收那套。 */
+  variant_id?: string | null;
   installation: {
     selected: InstallationCandidate | null;
     candidates: InstallationCandidate[];
@@ -139,6 +141,8 @@ type Props = {
   /** The director page shows the same facts but performs nothing. */
   readOnly?: boolean;
   refreshEpoch?: number;
+  /** 用户选定的 H3 变体：h3 能力的事实必须跟着它走，而不是默认那套。 */
+  variantId?: string | null;
   onPrepare?: (capability: CapabilityKey, summary: SetupSummary) => void | Promise<void>;
   onTrial?: (capability: CapabilityKey) => void | Promise<void>;
   onReconcile?: (capability: CapabilityKey) => void | Promise<void>;
@@ -147,7 +151,7 @@ type Props = {
 };
 
 export function SetupEnvironmentStatus({
-  projectId, readOnly = false, refreshEpoch = 0, onPrepare, onTrial, onReconcile,
+  projectId, readOnly = false, refreshEpoch = 0, variantId = null, onPrepare, onTrial, onReconcile,
   onGoSettings, onSummary,
 }: Props) {
   const [summary, setSummary] = useState<SetupSummary | null>(null);
@@ -163,7 +167,10 @@ export function SetupEnvironmentStatus({
 
   const load = useCallback(async () => {
     try {
-      const query = projectId ? `?project_id=${encodeURIComponent(projectId)}` : '';
+      const params = new URLSearchParams();
+      if (projectId) params.set('project_id', projectId);
+      if (variantId) params.set('variant_id', variantId);
+      const query = params.toString() ? `?${params.toString()}` : '';
       const next = await api<SetupSummary>(`/setup/summary${query}`);
       if (!mounted.current) return;
       setSummary(next);
@@ -174,7 +181,7 @@ export function SetupEnvironmentStatus({
       setError(problem instanceof Error ? problem.message : String(problem));
       onSummary?.(null);
     }
-  }, [projectId, onSummary]);
+  }, [projectId, variantId, onSummary]);
 
   // 打开页面就检测：不需要先点「检测本机」才看到环境。
   useEffect(() => { void load(); }, [load, refreshEpoch]);

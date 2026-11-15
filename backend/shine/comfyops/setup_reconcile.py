@@ -105,12 +105,15 @@ def _known_port(db, root: str) -> int | None:
 
 def reconcile_installation(db, settings, *, path: str, project_id: str | None = None,
                            capability: str = "h3", adopt: bool = False, port: int | None = None,
-                           actor: str = "local-user") -> dict[str, Any]:
+                           actor: str = "local-user", variant_id: str | None = None) -> dict[str, Any]:
     """Prove what is there, register it, and optionally confirm the instance.
 
     ``adopt`` is the single authorization this function can consume.  Without
     it the installation is only *read*: discovered, hashed, registered.  Nothing
     about the user's own ComfyUI tree is written, moved or terminated.
+
+    ``variant_id`` names the H3 stack the person chose: the bytes are then
+    verified against that variant's own catalog, never the default one.
     """
     from shine.comfyops.existing_installation import inspect, register_verified_packages, verify_models
     from shine.services import add_audit
@@ -119,7 +122,17 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
         return {"status": "IN_PROGRESS", "path": str(key[0]), "capability": capability,
                 "registered": [], "verified": 0, "downloaded_bytes": 0}
     try:
-        catalog = _capability_catalog(capability)
+        required_component_ids: set[str] | None = None
+        if capability == "h3" and variant_id:
+            from shine.comfyops.variant_binding import load_binding
+            from shine.comfyops.variant_readiness import _required_components
+
+            binding = load_binding(str(variant_id), fresh=False)
+            catalog = binding.catalog
+            required_component_ids = {str(row.get("component_id"))
+                                      for row in _required_components(catalog, binding.profiles)}
+        else:
+            catalog = _capability_catalog(capability)
         report = inspect(path, catalog)
         result = verify_models(report, report["snapshot"])
         verified = list(result.get("verified") or [])
@@ -128,6 +141,8 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
         verified_keys = {(row["component_id"], row["relative_path"], row["sha256"], row["size"])
                          for row in verified}
         required = _required_keys(catalog, capability)
+        if required_component_ids is not None:
+            required = {row for row in required if row[0] in required_component_ids}
         complete = bool(required) and required <= verified_keys
         add_audit(db, actor, "SETUP_FACTS_RECONCILED", "deployment", report["catalog_id"], {
             "root": report["root"], "snapshot": report["snapshot"], "capability": capability,

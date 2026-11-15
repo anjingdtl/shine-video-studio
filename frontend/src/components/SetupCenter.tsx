@@ -511,7 +511,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     const report: CapabilityOutcome[] = [];
     try {
       const ensure = () => { if (!mounted.current) throw new Error('页面已切换；后台准备继续在服务器上执行。'); };
-      const fresh = await api<SetupSummary>(`/setup/summary?project_id=${encodeURIComponent(projectId)}`);
+      const fresh = await api<SetupSummary>(
+        `/setup/summary?project_id=${encodeURIComponent(projectId)}`
+        + (selectedVariant ? `&variant_id=${encodeURIComponent(selectedVariant.variant_id)}` : ''));
       setSummary(fresh);
       if (fresh.installation.choice_required) {
         throw new Error('这台电脑上找到不止一套 ComfyUI：先在上面选一次要用的那套，系统会记住。');
@@ -530,6 +532,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
             { ...json('POST', {
               path: installation.root, project_id: projectId, capability, adopt: true,
               port: port ?? undefined,
+              ...(capability === 'h3' && selectedVariant ? { variant_id: selectedVariant.variant_id } : {}),
             }), signal: timeoutSignal(3_600_000) },
           );
         } catch (error) {
@@ -782,6 +785,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
     <SetupEnvironmentStatus
       projectId={projectId}
       refreshEpoch={refreshEpoch}
+      variantId={selectedVariant?.variant_id ?? null}
       onSummary={setSummary}
       onGoSettings={() => window.setTimeout(() => document.getElementById('setup')?.scrollIntoView({ block: 'start' }), 40)}
       onPrepare={(capability) => prepare([capability])}
@@ -790,6 +794,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh, onNeedProj
           project_id: projectId || undefined,
           capability: capability === 'image' ? 'image' : 'h3',
           adopt: false,
+          ...(capability !== 'image' && selectedVariant ? { variant_id: selectedVariant.variant_id } : {}),
         }), signal: timeoutSignal(3_600_000) });
         await detect();
       }}

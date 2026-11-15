@@ -344,9 +344,29 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
 
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,
-                      project_id: str | None) -> dict[str, Any]:
-    """One capability, as a ladder of facts that never impersonate each other."""
-    catalog = _catalog_for(capability)
+                      project_id: str | None, variant_id: str | None = None) -> dict[str, Any]:
+    """One capability, as a ladder of facts that never impersonate each other.
+
+    ``variant_id`` names the H3 stack the person actually chose.  Without it
+    the answer describes the default accepted stack, exactly as before; with
+    it, both the filesystem facts and the ledger facts follow that variant's
+    own catalog — a machine that has the INT8 bytes must not be told the
+    candidate it selected is already prepared.
+    """
+    binding = None
+    if capability == "h3" and variant_id:
+        from shine.comfyops.variant_binding import load_binding
+
+        binding = load_binding(str(variant_id), fresh=False)
+    if binding is not None:
+        from shine.comfyops.variant_readiness import _required_components
+
+        catalog = binding.catalog
+        component_ids = {str(row.get("component_id"))
+                         for row in _required_components(binding.catalog, binding.profiles)}
+    else:
+        catalog = _catalog_for(capability)
+        component_ids = _component_ids_for(capability, catalog) if catalog is not None else set()
     if catalog is None:
         return {
             "key": capability, "label": CAPABILITY_LABELS[capability], "state": "UNKNOWN",
@@ -355,7 +375,6 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
             "missing_files": [], "advisories": [],
         }
-    component_ids = _component_ids_for(capability, catalog)
     presence = model_file_presence(_effective_models_root(settings, capability, installation),
                                    catalog, component_ids)
     registered = _registered_components(db, component_ids)
@@ -384,10 +403,12 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             from shine.comfyops.variant_readiness import readiness as variant_readiness
             from shine.comfyops.variants import list_variant_manifests
 
-            manifest = next((row for row in list_variant_manifests()
-                             if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
-            if manifest and project_id:
-                binding = load_binding(str(manifest["variant_id"]), fresh=False)
+            if binding is None:
+                manifest = next((row for row in list_variant_manifests()
+                                 if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
+                if manifest and project_id:
+                    binding = load_binding(str(manifest["variant_id"]), fresh=False)
+            if binding is not None and project_id:
                 report = variant_readiness(db, settings, binding, project_id)
                 weights = report.get("weights") or []
                 # ``FILES_FOUND`` is never taken from the ledger: its "prepared"
@@ -541,14 +562,20 @@ def _progress(capabilities: dict[str, dict]) -> list[dict[str, str]]:
 
 
 def summary(db, settings, *, project_id: str | None = None,
-            discovered: list[str] | None = None) -> dict[str, Any]:
-    """The one read-only snapshot every entry point shares."""
+            discovered: list[str] | None = None,
+            variant_id: str | None = None) -> dict[str, Any]:
+    """The one read-only snapshot every entry point shares.
+
+    ``variant_id`` is the H3 stack the person chose; the h3 capability then
+    answers about that stack's own weights instead of the default one.
+    """
     from shine.models import utcnow
 
     installation = resolve_installation(db, settings, discovered=discovered)
     selected = installation["selected"]
     capabilities = {
-        key: capability_report(db, settings, key, installation=selected, project_id=project_id)
+        key: capability_report(db, settings, key, installation=selected, project_id=project_id,
+                               variant_id=variant_id if key == "h3" else None)
         for key in CAPABILITIES
     }
     progress = _progress(capabilities)
@@ -561,6 +588,7 @@ def summary(db, settings, *, project_id: str | None = None,
         "snapshot_version": SNAPSHOT_VERSION,
         "computed_at": utcnow().isoformat(),
         "project_id": project_id,
+        "variant_id": variant_id,
         "installation": installation,
         "capabilities": capabilities,
         "progress": progress,
