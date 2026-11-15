@@ -794,6 +794,25 @@ def renderer_log(instance_id: str, settings: SettingsDep):
     return renderer_log_evidence(str(path))
 
 
+@router.get("/renderer-evidence")
+def renderer_evidence(instance_id: str, settings: SettingsDep, db: DBSession):
+    """Read-only crash evidence for one managed image renderer.
+
+    A renderer that dies inside its own native stack leaves no traceback: the
+    process is gone and the log stops.  This reports what is known - the
+    parameters of the last start, the exit code the kernel reported and the
+    tail of the renderer's log - so the cause can be compared with the last
+    working start instead of guessed.  It starts nothing and stops nothing.
+    """
+    from shine.comfyops.image_renderer import renderer_crash_evidence
+
+    if not instance_id or len(instance_id) > 96 or not all(
+        ch.isalnum() or ch == "-" for ch in instance_id
+    ):
+        raise HTTPException(422, "INSTANCE_ID_INVALID")
+    return renderer_crash_evidence(db, settings, instance_id=instance_id)
+
+
 @router.post("/install-plan")
 def install_plan(body: InstallPlanRequest, settings: SettingsDep, db: DBSession):
     """Create an install plan - after the server re-checked the hardware.
