@@ -28,7 +28,22 @@ from shine.schemas import (
 # d21241f0a4b3acbb34c97dae47fa417b7065e438 (skills/h3-prompt-writing).
 LEGACY_AUDIO_COMPILER_VERSION = "shine-h3-compiler/1.2.1"
 LEGACY_STYLE_COMPILER_VERSION = "shine-h3-compiler/1.2.2"
-COMPILER_VERSION = "shine-h3-compiler/1.2.3"
+LEGACY_SOUND_COMPILER_VERSION = "shine-h3-compiler/1.2.3"
+# 1.3.0 rewrites the audio contracts as positive sound descriptions.  The older
+# fixed sentences enumerated forbidden vocal acts ("narration, voice-over,
+# whispering, mumbling, singing, humming..."); a video model reads those as
+# concepts to render, not as prohibitions, and the enumeration primed exactly
+# the unscripted foreign-language narration it tried to forbid.  The new
+# sentences state what the soundtrack contains and anchor every voice to the
+# project language instead.  Historical versions stay byte-identical so stored
+# requests remain verifiable.
+COMPILER_VERSION = "shine-h3-compiler/1.3.0"
+KNOWN_COMPILER_VERSIONS = (
+    LEGACY_AUDIO_COMPILER_VERSION,
+    LEGACY_STYLE_COMPILER_VERSION,
+    LEGACY_SOUND_COMPILER_VERSION,
+    COMPILER_VERSION,
+)
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
 BASE_RULE_SHA256 = "2cfebc096a6e08370f288d468d90b60f7f9bcb938f94bf090816e910e48e75fc"
@@ -78,6 +93,7 @@ class _Context:
     project_language: str = "Chinese"
     legacy_audio: bool = False
     legacy_style: bool = False
+    legacy_sound: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -89,12 +105,18 @@ def _language_tag(text: str, project_language: str) -> str:
     return "English"
 
 
-def _style_sentences(style: StyleBible, style_version_id: str, include_sound: bool = True) -> str:
-    sound_clause = (
-        f"Performance and sound: {style.sound_performance}."
-        if include_sound
-        else "Performance and sound: no spoken dialogue in this shot."
-    )
+def _style_sentences(
+    style: StyleBible, style_version_id: str, include_sound: bool = True, *, legacy_sound: bool = False
+) -> str:
+    if include_sound:
+        sound_clause = f"Performance and sound: {style.sound_performance}."
+    elif legacy_sound:
+        sound_clause = "Performance and sound: no spoken dialogue in this shot."
+    else:
+        sound_clause = (
+            "Performance and sound: this shot is performed without dialogue; "
+            "its soundtrack is entirely non-vocal."
+        )
     film_clause = film_type_sentence(style.film_type)
     film_prefix = f"{film_clause} " if film_clause else ""
     return (
@@ -372,19 +394,28 @@ def _camera_sentence(spec: ShotSpec) -> str:
 def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(
         _prompt_style(ctx.spec, ctx.style, legacy_style=ctx.legacy_style), ctx.spec.style_version_id,
-        include_sound=bool(ctx.spec.dialogue),
+        include_sound=bool(ctx.spec.dialogue), legacy_sound=ctx.legacy_sound,
     )]
     cast = _cast_order(ctx)
     if cast:
         parts.append(cast)
     if not ctx.legacy_audio:
-        parts.append(
-            "Perform speech only for the timed dialogue blocks below. Between those lines, "
-            "use silent reactions and non-vocal scene sounds."
-            if ctx.spec.dialogue else
-            "Show reactions through gaze, gestures and movement with no speaking or mouthing words. "
-            "Use only non-vocal scene sounds."
-        )
+        if ctx.spec.dialogue:
+            parts.append(
+                "Perform speech only for the timed dialogue blocks below. Between those lines, "
+                "use silent reactions and non-vocal scene sounds."
+                if ctx.legacy_sound else
+                "Deliver only the timed dialogue blocks below, exactly as written; between those "
+                "lines the performers react silently and the scene sound stays non-vocal."
+            )
+        else:
+            parts.append(
+                "Show reactions through gaze, gestures and movement with no speaking or mouthing words. "
+                "Use only non-vocal scene sounds."
+                if ctx.legacy_sound else
+                "Performers act with closed mouths, expressing reactions through gaze, gestures and "
+                "movement; the soundtrack stays non-vocal."
+            )
     parts.append(ctx.spec.story_beat.strip())
     camera = _camera_sentence(ctx.spec)
     if camera:
@@ -402,10 +433,14 @@ def _shot_text(ctx: _Context) -> str:
         facts = translated
     if facts:
         continuity_notes = " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
-        parts.append(
+        lead = (
             "Story continuity facts below are background context only; they are not dialogue and must "
-            "never be spoken, narrated or performed as voice-over: " + continuity_notes
+            "never be spoken, narrated or performed as voice-over: "
+            if ctx.legacy_sound else
+            "Story continuity facts below are silent background context for the picture only; they "
+            "inform the visuals and are never heard as audio: "
         )
+        parts.append(lead + continuity_notes)
     if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
         parts.append(narrator_sentence())
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
@@ -445,7 +480,7 @@ def _shot_text(ctx: _Context) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
 
-def _spoken_language_sentence(spec: ShotSpec, project_language: str) -> str:
+def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_sound: bool = False) -> str:
     """The spoken-language contract of the shot.
 
     The whole prompt is written in English, so the language of the voice has to
@@ -453,28 +488,48 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str) -> str:
     model invents English speech when nothing tells it which voice to use, and
     it invents speech at all when a silent shot never says so.
 
+    The contract is written as a positive description of the soundtrack.  The
+    pre-1.3.0 sentences enumerated forbidden vocal acts (narration, voice-over,
+    whispering, mumbling, singing, humming); the video model treats that
+    enumeration as concepts to render and produced unscripted foreign-language
+    narration from it.  The current sentences say what the soundtrack contains
+    and anchor every voice to the project language instead of naming the acts
+    they must not perform.
+
     The language is written in its canonical English name: the official rule
     pack rejects CJK outside the dialogue tags, so a project setting written in
     another script may never be copied into the prompt.
     """
     if not spec.dialogue:
+        if legacy_sound:
+            return (
+                "There is no spoken dialogue in this shot: do not produce speech, narration, voice-over, "
+                "whispering, mumbling, singing, humming or vocal sounds of any kind. Any speech or voice "
+                "mentioned in story facts or visual descriptions is context only, not an audio instruction."
+            )
         return (
-            "There is no spoken dialogue in this shot: do not produce speech, narration, voice-over, "
-            "whispering, mumbling, singing, humming or vocal sounds of any kind. Any speech or voice "
-            "mentioned in story facts or visual descriptions is context only, not an audio instruction."
+            "This shot has no dialogue: the soundtrack is entirely non-vocal. Words quoted in the "
+            "story facts or visual description stay silent context and are never heard."
         )
     language = (project_language or "").strip()
     if not language:
         return ""
+    if legacy_sound:
+        return (
+            f"Only the explicitly tagged dialogue lines in this shot may be spoken in {language}, matching "
+            "the original line text exactly; no other language, unscripted speech, narration, voice-over, "
+            "background chatter, whispering or extra words may appear. Any voice or reading described in "
+            "the story facts or visual description refers only to these exact lines."
+        )
     return (
-        f"Only the explicitly tagged dialogue lines in this shot may be spoken in {language}, matching "
-        "the original line text exactly; no other language, unscripted speech, narration, voice-over, "
-        "background chatter, whispering or extra words may appear. Any voice or reading described in "
-        "the story facts or visual description refers only to these exact lines."
+        f"Every voice in this shot speaks {language}. The only words heard are the explicitly tagged "
+        "dialogue lines of this shot, delivered exactly as written at their timed positions; all "
+        "other sound stays non-vocal. Any voice or reading described in the story facts "
+        "or visual description refers only to these exact lines."
     )
 
 
-def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "") -> str:
+def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "", *, legacy_sound: bool = False) -> str:
     style = _prompt_style(spec, style)
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
@@ -490,17 +545,19 @@ def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "") -
             # and invites the model to invent foreign-language mumbling.
             sentences = [
                 "Natural room ambience continues throughout the video; this shot has no spoken dialogue."
+                if legacy_sound else
+                "Natural room ambience continues throughout the video; the soundtrack stays entirely non-vocal."
             ]
     else:
         pieces = [piece.rstrip(".") + "." for piece in (environment, ambience) if piece]
         sentences = pieces
-    spoken = _spoken_language_sentence(spec, project_language)
+    spoken = _spoken_language_sentence(spec, project_language, legacy_sound=legacy_sound)
     if spoken:
         sentences.append(spoken)
     return " ".join(sentences)
 
 
-def _music(spec: ShotSpec, *, legacy_audio: bool) -> str:
+def _music(spec: ShotSpec, *, legacy_audio: bool, legacy_sound: bool = False) -> str:
     policy = (spec.sound.get("music") or spec.sound.get("music_policy") or "").strip()
     if not policy:
         return "N/A"
@@ -512,7 +569,11 @@ def _music(spec: ShotSpec, *, legacy_audio: bool) -> str:
         if legacy_audio or spec.dialogue:
             policy = policy.replace("kept low in the mix", "kept well below the dialogue")
     music = policy if policy.endswith(".") else policy + "."
-    return music if legacy_audio else music + " Instrumental only, with no vocals or lyrics."
+    if legacy_audio:
+        return music
+    # "Instrumental" already excludes voices; naming vocals and lyrics only
+    # primed them (see _spoken_language_sentence).
+    return music + (" Instrumental only, with no vocals or lyrics." if legacy_sound else " Instrumental only.")
 
 
 def _align_instruction(mode: GenerationMode, manifest: list[ReferenceManifestItem], duration: float) -> str:
@@ -596,13 +657,19 @@ def _subject_definitions(ctx: _Context) -> str:
         elif item.use_as == ReferenceUse.VIDEO:
             lines.append(f"{item.label} is an approved video reference for motion, framing, or continuation.")
         else:
-            purpose = "non-vocal ambience"
-            if item.role != "continuity_derivative" and ctx.spec.dialogue:
-                purpose = "voice timbre for scripted lines and non-vocal sound"
-            lines.append(
-                f"{item.label} is an approved audio reference."
-                if ctx.legacy_audio else f"{item.label} is a reference for {purpose} only."
-            )
+            if ctx.legacy_audio:
+                lines.append(f"{item.label} is an approved audio reference.")
+            elif ctx.legacy_sound:
+                purpose = "non-vocal ambience"
+                if item.role != "continuity_derivative" and ctx.spec.dialogue:
+                    purpose = "voice timbre for scripted lines and non-vocal sound"
+                lines.append(f"{item.label} is a reference for {purpose} only.")
+            elif item.role != "continuity_derivative" and ctx.spec.dialogue:
+                lines.append(
+                    f"{item.label} is a reference for the scripted lines' voice timbre and non-vocal sound only."
+                )
+            else:
+                lines.append(f"{item.label} is a reference for non-vocal ambience only.")
     return "\n".join(lines)
 
 
@@ -671,10 +738,17 @@ def _retention(ctx: _Context) -> str:
                 + ("" if ctx.legacy_audio else " Use the visual track only.")
             )
         else:
-            lines.append(
-                f"{item.label}: {marker} - the approved audio signal or timbre is referenced."
-                if ctx.legacy_audio else f"{item.label}: {marker} - never carry over any words or vocals."
-            )
+            if ctx.legacy_audio:
+                lines.append(f"{item.label}: {marker} - the approved audio signal or timbre is referenced.")
+            elif ctx.legacy_sound:
+                lines.append(f"{item.label}: {marker} - never carry over any words or vocals.")
+            elif ctx.spec.dialogue and item.role != "continuity_derivative":
+                lines.append(
+                    f"{item.label}: {marker} - the approved timbre voices only the scripted dialogue "
+                    "lines of this shot."
+                )
+            else:
+                lines.append(f"{item.label}: {marker} - referenced only for non-vocal ambience.")
     return "\n".join(lines)
 
 
@@ -701,6 +775,9 @@ class H3PromptCompiler:
     ) -> CompiledPrompt:
         legacy_audio = compiler_version == LEGACY_AUDIO_COMPILER_VERSION
         legacy_style = compiler_version in (LEGACY_AUDIO_COMPILER_VERSION, LEGACY_STYLE_COMPILER_VERSION)
+        legacy_sound = compiler_version in (
+            LEGACY_AUDIO_COMPILER_VERSION, LEGACY_STYLE_COMPILER_VERSION, LEGACY_SOUND_COMPILER_VERSION
+        )
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -723,6 +800,7 @@ class H3PromptCompiler:
             project_language=spoken_language,
             legacy_audio=legacy_audio,
             legacy_style=legacy_style,
+            legacy_sound=legacy_sound,
         )
         if language_fallback:
             ctx.warnings.append(
@@ -743,8 +821,8 @@ class H3PromptCompiler:
         shots = _shot_text(ctx)
         if mode in {GenerationMode.T2VA, GenerationMode.I2VA, GenerationMode.FL2VA, GenerationMode.L2VA}:
             sections["integrated_multimodal_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
-            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio)
+            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language, legacy_sound=legacy_sound)
+            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio, legacy_sound=legacy_sound)
             instruction = _align_instruction(mode, manifest, spec.duration_target_s)
             body = "\n".join(f"{name}: {sections[name]}" for name in BASE_SECTION_ORDER)
             prompt = f"{instruction}\n\n{body}" if instruction else body
@@ -754,8 +832,8 @@ class H3PromptCompiler:
             sections["summary"] = _summary(ctx)
             sections["retention_analysis"] = _retention(ctx)
             sections["detailed_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language)
-            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio)
+            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language, legacy_sound=legacy_sound)
+            sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio, legacy_sound=legacy_sound)
             prompt = "\n\n".join(f"{name}:\n{sections[name]}" for name in REF_SECTION_ORDER)
             section_order = REF_SECTION_ORDER
 
@@ -789,7 +867,7 @@ class H3PromptCompiler:
         prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
         return CompiledPrompt(
             mode=mode,
-            compiler_version=compiler_version if legacy_style else COMPILER_VERSION,
+            compiler_version=compiler_version if compiler_version in KNOWN_COMPILER_VERSIONS else COMPILER_VERSION,
             rule_version=RULE_VERSION,
             skill_sha256=SKILL_SHA256,
             base_rule_sha256=BASE_RULE_SHA256,

@@ -1703,3 +1703,24 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   用 `GET /setup/renderer-evidence` 取到的启动参数、退出码与日志尾部，
   与最后一次成功启动逐项比对（解释器归属、torch wheel、自定义节点版本）。
   证据 `docs/ACCEPTANCE_20261115_IMAGE_RENDERER_CRASH_EVIDENCE.md`。
+
+## 2026-11-15 拍摄提示词调优轮（编译器 1.3.0：正向音频合同，扫清不明语言旁白）
+
+- **不明语言旁白的诱导源是固定句式的否定枚举**。≤1.2.3 的禁声/语言合同点名
+  "narration, voice-over, whispering, mumbling, singing, humming…"；视频模型把
+  枚举当渲染概念而非禁令，且这些概念没有语言锚点，于是随机语言发声。
+  `H3PromptCompiler` 1.3.0 把音频合同改为**正向描述**：无对白镜头只陈述
+  "没有对白、声带全非人声"；有对白镜头锚定 "Every voice in this shot speaks
+  {language}"，唯一能听到的词是被 `<d>` 标记的台词原文。配乐句只留
+  "Instrumental only."，音频参考保留句改为非人声环境声/台词音色的正向表述。
+- **历史版本逐字节不变**：`LEGACY_SOUND_COMPILER_VERSION=1.2.3` 与
+  `legacy_sound` 门控保留全部旧句式；1.2.1/1.2.2/1.2.3 重编译仍得原哈希，
+  已落库请求的 provenance 校验不受影响。`KNOWN_COMPILER_VERSIONS` 保证历史
+  版本回执如实报告自身版本号。规则包钉住、章节顺序、`<d>` 标签格式不变。
+- **旁白功能不变**：用户开启的画外音（`narrator.py`）照常走语言标签，并被
+  新的语言锚点覆盖；冻结风格声音维度仍只在有对白镜头引用。
+- 回归：`test_h3_compiler.py` 30 例（含诱导词表反例与 5 组镜头 × 3 历史版本
+  的 SHA-256 基线）+ 35 模块定向 4 批共 473 例全绿；Ruff 干净。未改
+  `worker.py`/`preproduction.py`，不触发 VLM 重校准。**真机边界**：离线测试
+  不能证明 H3 不再发出旁白，需在用户机以 1.3.0 重新出片并人耳核对；历史成片
+  不重写。证据 `docs/PROMPT_TUNING_20261115_NARRATION_PRIMING.md`。
