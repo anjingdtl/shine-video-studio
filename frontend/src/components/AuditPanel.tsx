@@ -28,7 +28,7 @@ export default function AuditPanel({ page, busy, onLoad, onMore }: Props) {
               <span className="audit-time">{new Date(item.created_at).toLocaleString('zh-CN', { hour12: false })}</span>
               <span className="audit-actor">{label(auditActorLabels, item.actor)}</span>
               <b>{auditEventLabel(item.event_type, item.entity_type)}</b>
-              <span className="audit-entity">{label(auditEntityLabels, item.entity_type)} · {item.entity_id.slice(0, 8)}…</span>
+              <span className="audit-entity">{label(auditEntityLabels, item.entity_type)} · {item.entity_label ?? `${item.entity_id.slice(0, 8)}…`}</span>
             </div>
           ))}
           {page.items.length === 0 && <div className="empty-inline">还没有操作记录。</div>}
