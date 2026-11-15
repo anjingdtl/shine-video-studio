@@ -62,11 +62,14 @@ def _mask_png(width: int, height: int) -> bytes:
 
 def queue_image_edit_validation(factory, settings, *, actor: str = "worker:setup",
                                 size: int = 512) -> dict[str, Any]:
-    """Register an isolated test base + mask and queue I2I/INPAINT validation.
+    """Register isolated test images and queue every edit-mode validation.
 
-    Returns ``{"I2I": [task_id...], "INPAINT": [task_id...]}``. Each invocation
-    uses a fresh idempotency key; the caller (the preparation task) records the
-    result and never re-queues a finished mode.
+    Covers the asset center's full image capability set beyond T2I (which the
+    materialprep family samples already prove): I2I, INPAINT, MULTIREF,
+    WARDROBE and RGBA. Each mode gets one real validation sample through the
+    same ``create_image_jobs`` ledger the workshop uses, so the basic config
+    verifies every mode in one place and the asset center consumes the same
+    evidence. Returns ``{mode: [task_id...]}``.
 
     ``create_image_jobs`` commits its own transaction, so this function manages
     short sessions itself rather than running inside an outer ``begin()`` block
@@ -76,6 +79,7 @@ def queue_image_edit_validation(factory, settings, *, actor: str = "worker:setup
     from shine.asset_center import service
 
     base_bytes = _solid_png(size, size, (118, 138, 158))
+    ref_bytes = _solid_png(size, size, (158, 128, 98))
     mask_bytes = _mask_png(size, size)
     common = dict(
         actor=actor, source_type="generated", license_kind="test", scope="local",
@@ -87,25 +91,41 @@ def queue_image_edit_validation(factory, settings, *, actor: str = "worker:setup
         base_media = service.create_media(
             db, settings, content=base_bytes, filename="shine-edit-validation-base.png",
             kind="image", purpose="reference", **common)
+        ref_media = service.create_media(
+            db, settings, content=ref_bytes, filename="shine-edit-validation-ref.png",
+            kind="image", purpose="reference", **common)
         mask_media = service.create_media(
             db, settings, content=mask_bytes, filename="shine-edit-validation-mask.png",
             kind="image", purpose="mask", **common)
         db.commit()
-        base_id, mask_id = base_media.id, mask_media.id
+        base_id, ref_id, mask_id = base_media.id, ref_media.id, mask_media.id
 
+    def ref(media_id: str, order: int, role: str) -> ImageReference:
+        return ImageReference(media_id=media_id, order=order, role=role)
+
+    # mode -> (references, mask, transparent). T2I is excluded: its three family
+    # samples are validated by the materialprep batch, not the edit workflow.
+    specs: dict[str, tuple[list[ImageReference], str | None, bool]] = {
+        "I2I": ([ref(base_id, 0, "canvas")], None, False),
+        "INPAINT": ([ref(base_id, 0, "canvas")], mask_id, False),
+        "MULTIREF": ([ref(base_id, 0, "canvas"), ref(ref_id, 1, "scene")], None, False),
+        "WARDROBE": ([ref(base_id, 0, "subject"), ref(ref_id, 1, "garment")], None, False),
+        "RGBA": ([], None, True),
+    }
     tasks: dict[str, Any] = {}
-    for mode in ("I2I", "INPAINT"):
+    for mode, (references, mask_id, transparent) in specs.items():
         body = ImageJobRequest(
             idempotency_key=f"setup-edit-{mode.lower()}-{uuid4().hex[:16]}",
             title=f"基础配置 {mode} 能力验证",
             mode=mode,
             prompt="a calm portrait in soft window light, plain background",
             category="other",
-            references=[ImageReference(media_id=base_id, order=0, role="canvas")],
-            mask_media_id=mask_id if mode == "INPAINT" else None,
+            references=references,
+            mask_media_id=mask_id,
             output={"width": size, "height": size},
             candidate_count=1,
             validation_only=True,
+            transparent=transparent,
         )
         with factory() as db:
             result = create_image_jobs(body=body, settings=settings, db=db)

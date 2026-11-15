@@ -591,25 +591,31 @@ def _step_image_edit_samples(factory, settings, task) -> dict[str, Any]:
     result = task.get("result") or {}
     edit_tasks = result.get("image_edit_validation")
     if not edit_tasks:
-        with factory.begin() as db:
-            try:
-                edit_tasks = queue_image_edit_validation(db, settings, actor="worker:setup")
-            except Exception as exc:  # noqa: BLE001 - a named refusal is the answer
-                return {"status": "FAILED", "code": _code_of(exc),
-                        "detail": "图生图/局部改图验证未能排队：" + _message_of(exc)}
-            result["image_edit_validation"] = edit_tasks
-            task["result"] = result
-        return {"status": "PENDING", "detail": "图生图与局部改图验证样例已排队。"}
+        try:
+            edit_tasks = queue_image_edit_validation(factory, settings, actor="worker:setup")
+        except Exception as exc:  # noqa: BLE001 - a named refusal is the answer
+            return {"status": "FAILED", "code": _code_of(exc),
+                    "detail": "图生图/局部改图验证未能排队：" + _message_of(exc)}
+        result["image_edit_validation"] = edit_tasks
+        task["result"] = result
+        return {"status": "PENDING", "detail": "图生图/局部改图/多图合成/人物穿戴/透明背景验证样例已排队。"}
     with factory() as db:
         state = edit_validation_state(db, edit_tasks)
-    if all(v == "READY" for v in state.values()):
-        return {"status": "DONE", "detail": "图生图与局部改图均已真实验证，素材中心可直接使用。"}
-    if any(v == "FAILED" for v in state.values()):
-        failed = "、".join(k for k, v in state.items() if v == "FAILED")
-        return {"status": "FAILED", "code": "IMAGE_EDIT_SAMPLES_FAILED",
-                "detail": f"以下出图模式验证未完成：{failed}。可在素材中心单独重试。"}
-    return {"status": "PENDING",
-            "detail": "图生图/局部改图验证进行中：" + "、".join(f"{k}:{v}" for k, v in state.items())}
+    ready = [k for k, v in state.items() if v == "READY"]
+    failed = [k for k, v in state.items() if v == "FAILED"]
+    running = [k for k, v in state.items() if v not in {"READY", "FAILED"}]
+    if running:
+        return {"status": "PENDING",
+                "detail": "出图各模式验证进行中：" + "、".join(f"{k}:{v}" for k, v in state.items())}
+    # Every mode reached a terminal state. The preparation completes; each mode's
+    # real capability state lives in the asset-center ledger. A mode that could
+    # not render is named so the person can retry it alone — it never blocks the
+    # modes that did verify.
+    if not failed:
+        return {"status": "DONE",
+                "detail": f"出图 {len(ready)} 种模式均已真实验证（{'、'.join(ready)}），素材中心可直接使用。"}
+    return {"status": "DONE",
+            "detail": f"已验证：{'、'.join(ready) or '无'}；未通过：{'、'.join(failed)}（可在素材中心单独重试）。"}
 
 
 def _step_instance(factory, settings, task) -> dict[str, Any]:

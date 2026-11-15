@@ -530,6 +530,9 @@ def test_image_start_failure_keeps_the_process_when_cleanup_is_unconfirmed(api, 
         def owns(self, pid, birth):
             return pid == self.pid and birth == "known-birth"
 
+        def exit_code_if_stopped(self):
+            return None  # still running; exit cannot be proven
+
         def terminate(self, *, timeout):
             with factory() as db:
                 assert db.get(AppSetting, key).value["stage"] == "LAUNCHED"
