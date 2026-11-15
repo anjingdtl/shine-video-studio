@@ -521,7 +521,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
           ['T2I', '文生图'], ['I2I', '图生图'], ['INPAINT', '局部修订'],
           ['MULTIREF', '多图合成'], ['WARDROBE', '人物穿戴'], ['RGBA', '透明背景'],
         ].map(([value, label]) => <button key={value} type="button" className={mode === value ? 'active' : ''} onClick={() => selectMode(value)}>
-          {label}{value === 'INPAINT' && <span className="pending-dot">待本机验证</span>}
+          {label}{value === 'INPAINT' && !capabilities?.image_capabilities?.QWEN_IMAGE_INPAINT?.can_generate && <span className="pending-dot">待本机验证</span>}
         </button>)}
       </div>
       <label className="asset-field"><span>{mode === 'T2I' ? '画面描述' : '修改指令'}</span>
