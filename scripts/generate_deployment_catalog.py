@@ -38,6 +38,12 @@ OUT = REPO / "config" / "deployment"
 
 GENERATED = "2026-11-01"
 
+#: 仅用于清单不存在时的初始值；运行时门槛以清单 command_floors 为唯一来源。
+#: npm 与 node 版本号体系不同，逐命令声明，不按包继承。
+DEFAULT_COMMAND_FLOORS = {
+    "uv": "0.9", "node": "20", "npm": "10", "pwsh": "7.3", "ffmpeg": "6", "ffprobe": "6",
+}
+
 H3_COMMUNITY = "minimax-h3-community-license"
 H3_LICENSE_URL = "https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE"
 
@@ -395,10 +401,20 @@ def main():
     catalog["total_bytes"] = sum(f["size"] for c in components for f in c["files"])
 
     tools = json.loads((PINS / "tools.json").read_text(encoding="utf-8"))
+    # command_floors 是已审计的产品策略（探测与安装共用的门槛），不是上游事实：
+    # 再生成必须保留现有清单里的值；只有清单不存在时才用规范默认。
+    tools_path = OUT / "tools-windows-x64.json"
+    existing_floors = None
+    if tools_path.is_file():
+        try:
+            existing_floors = (json.loads(tools_path.read_text(encoding="utf-8")) or {}).get("command_floors")
+        except (OSError, ValueError):
+            existing_floors = None
     tools_manifest = {
         "manifest_id": "shine-bootstrap-tools-windows-x64",
-        "manifest_version": "1.0.0",
+        "manifest_version": "1.1.0",
         "generated": GENERATED,
+        "command_floors": existing_floors or DEFAULT_COMMAND_FLOORS,
         "tools": tools,
     }
     OUT.mkdir(parents=True, exist_ok=True)

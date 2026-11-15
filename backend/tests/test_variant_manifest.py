@@ -361,6 +361,8 @@ def test_regenerating_the_catalog_never_lowers_it():
     path = CATALOG_DIR / "h3-ref2va-windows-x64.json"
     before = path.read_text(encoding="utf-8")
     catalog = json.loads(before)
+    tools_path = CATALOG_DIR / "tools-windows-x64.json"
+    tools_before = json.loads(tools_path.read_text(encoding="utf-8"))
     completed = subprocess.run(
         [sys.executable, str(GENERATOR)], cwd=str(REPO), capture_output=True, text=True, check=False,
     )
@@ -372,6 +374,11 @@ def test_regenerating_the_catalog_never_lowers_it():
     assert {c["component_id"] for c in regenerated["components"]} >= {
         c["component_id"] for c in catalog["components"]}
     assert after == before
+    # command_floors 是已审计的产品策略：再生成不得丢弃或改写它，
+    # 否则探测与安装共用的唯一门槛来源会在跑测试时被悄悄换掉。
+    tools_after = json.loads(tools_path.read_text(encoding="utf-8"))
+    assert tools_after["command_floors"] == tools_before["command_floors"]
+    assert tools_after["tools"] == tools_before["tools"]
 
 
 def test_the_download_breakdown_separates_the_three_sizes():

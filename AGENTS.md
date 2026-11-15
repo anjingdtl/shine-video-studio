@@ -1635,3 +1635,36 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `test_setup_capability_gates`；前端全量 vitest / tsc / build；Ruff 干净。
   真机边界：自动退出与 Worker 停启在开发机验证；裸机全链真实下载与收编机 L4 封存
   在用户机执行并如实报告。证据 `docs/ACCEPTANCE_20261115_SETUP_LIFECYCLE_DEPENDENCIES.md`。
+
+## 2026-11-15 新装机全链路对抗性审查修复轮（唯一性原理）
+
+- **人工验收闭环**：导演模式「待你确认」此前是死状态（无动作入口），唯一审片入口在
+  专家层且每镜 10 项证据表。新增 `delivery_acceptances` 追加式台账（迁移
+  `f180e0010001`）与 `POST /deliveries/{id}/acceptance`：接受必须声明完整观看、
+  拒绝必须写原因、绑定看到的 SHA-256、文件改动/mock/已删除不得验收、request_id
+  防重放。最新决定生效、历史留痕；**不改写** job/门禁/装配 provenance。成片库、
+  分集总览、run summary、journey 叠加人工验收态（`accepted_episode_count`），
+  交付判定语义不变。前端 `EpisodeAcceptance` 接入待审清单/分集卡/成片库；
+  生成分段每镜新增「分项审片」入口复用 `OperatorReview`。
+- **播放性能与完整性**：`media/integrity.py` 分块哈希 + (路径,大小,mtime) 验证缓存；
+  镜头/成片路由不再每请求（含每个 Range 分段）全量读+哈希，加 ETag/304 与
+  `private, no-cache`（采用/重拍互换同路径文件，**不用 immutable**）。缩略图先查
+  ETag 再触文件，ffmpeg 直读已验证路径。篡改仍按原拒绝码拒绝。
+- **就绪度跟随选定变体**：`/setup/summary` 与 `/setup/reconcile` 增 `variant_id`；
+  h3 的文件系统事实与核验清单改用该变体自己的目录（图推导必需组件）。修复
+  「有 INT8 权重时选 W6A8 候选被报成已准备好、候选权重永不下载」的唯一性缺陷。
+  不传参数行为不变；未知变体具名 404。
+- **启动器存活判定唯一化**：install_once 的 API-only「已在运行」捷径改为委托
+  start_shine 三证（API+Web+监听 PID）与半死栈收尾；删除 `Test-ShineApiAlive`。
+- **工具门槛单一来源**：`tools-windows-x64.json` 增 `command_floors`（每命令一个
+  门槛，npm 与 node 版本号体系不同）；bootstrap.ps1 与 host_env 都从清单读取。
+- **指引**：errorActions 补齐 15 个装机/门禁拒绝码导航；summary 的 vlm/asr 标
+  `optional` 且机器级「唯一下一步」跳过可选能力；安装计划的 `runtime_advisories`
+  （显存/内存门槛对比）随下载结论展示；FilmCrewPanel 旧版密码框收进高级折叠。
+- **系统盘显式确认（用户裁定）**：单磁盘机器容量达标且显式确认（YES /
+  `-AllowSystemDrive`）后可装系统盘，180GiB 门槛不降；确认事实经
+  `SHINE_ALLOW_SYSTEM_DRIVE=1` 与 `deployment-storage.json` 贯穿三处守卫。
+- 本轮**未改** `worker.py` / `preproduction.py` / handoff / quality 客户端，不触发
+  VLM 重校准义务；历史校准仍未完成，不得声称已校准。12GB 显卡真机路径与 W6A8
+  候选激活仍 BLOCKED/NOT_RUN（本轮只做诚实指引）。证据
+  `docs/ACCEPTANCE_20261115_FULL_CHAIN_ADVERSARIAL_FIX.md`。

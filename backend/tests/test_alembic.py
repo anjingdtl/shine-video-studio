@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180d0010001"
+HEAD_REVISION = "f180e0010001"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -85,6 +85,9 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
         style_columns = {row[1] for row in connection.execute("PRAGMA table_info(style_versions)")}
         assert "director_style_binding" in style_columns
         assert "director_style_profile_revisions" in tables
+        assert "delivery_acceptances" in tables
+        acceptance_columns = {row[1] for row in connection.execute("PRAGMA table_info(delivery_acceptances)")}
+        assert {"artifact_id", "decision", "watched", "artifact_sha256", "request_id"}.issubset(acceptance_columns)
         asset_columns = {row[1] for row in connection.execute("PRAGMA table_info(assets)")}
         assert {
             "role",
