@@ -99,6 +99,10 @@ def test_one_click_installer_never_writes_to_the_system_drive_and_opens_the_wiza
     assert "Get-ShineFreePort" in text, "busy ports must be handled instead of failing"
     # Idempotence: a second double-click must not install twice.
     assert "processes.json" in text
+    # 2026-11-15 用户裁定：单磁盘机器可显式确认装系统盘，容量门槛不降低。
+    assert "AllowSystemDrive" in text
+    assert "确认安装到系统盘" in text, "interactive install must ask before using the system drive"
+    assert "systemDriveApproved" in text
 
 
 def _run_ps(script_path: Path, timeout=120):

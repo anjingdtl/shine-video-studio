@@ -30,7 +30,7 @@ $launchEnv = Join-Path $repoRoot '.env'
 if (Test-Path -LiteralPath $launchEnv) {
     $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
         'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER', 'SHINE_ENABLE_LOCAL_EXECUTION',
-        'SHINE_IDLE_SHUTDOWN_MINUTES')
+        'SHINE_IDLE_SHUTDOWN_MINUTES', 'SHINE_ALLOW_SYSTEM_DRIVE')
     foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
         if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
             $key, $value = $Matches[1], $Matches[2].Trim()
@@ -57,7 +57,8 @@ $backendEnv = if ($env:SHINE_BACKEND_ENV) { $env:SHINE_BACKEND_ENV } else { Join
 $venvPython = Join-Path $backendEnv 'Scripts/python.exe'
 if ($env:SHINE_BACKEND_ENV) { $env:UV_PROJECT_ENVIRONMENT = $backendEnv }
 if ($env:SHINE_BOOTSTRAP_ROOT) {
-    if ([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:SHINE_BOOTSTRAP_ROOT)).TrimEnd('\') -eq $env:SystemDrive) {
+    $bootstrapDrive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:SHINE_BOOTSTRAP_ROOT)).TrimEnd('\')
+    if ($bootstrapDrive -eq $env:SystemDrive -and $env:SHINE_ALLOW_SYSTEM_DRIVE -ne '1') {
         throw 'Choose a non-system-drive bootstrap installation directory.'
     }
     $env:UV_CACHE_DIR = Join-Path $env:SHINE_BOOTSTRAP_ROOT 'download-cache/uv'

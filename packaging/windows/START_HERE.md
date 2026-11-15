@@ -103,7 +103,7 @@
 - Windows 10/11 x64
 - NVIDIA GPU，显存至少 15.3 GiB（当前基线为 RTX 5080 16GB 级）
 - 系统内存至少 30 GiB（32GB 级）
-- 非系统盘至少 180 GiB 空闲（安装器会挑选剩余空间最大的可用非系统盘）
+- 非系统盘至少 180 GiB 空闲（安装器会挑选剩余空间最大的可用非系统盘）；单磁盘机器在系统盘容量达标并**显式确认**后也可安装（`-AllowSystemDrive`，容量门槛不降低）
 - 可访问 GitHub、Hugging Face、PyPI、PyTorch 官方下载源
 - 安装前请关闭会拦截 PowerShell 的安全软件；不需要管理员权限
 
@@ -111,7 +111,7 @@
 
 | 项目 | 自动行为 |
 | --- | --- |
-| 安装盘 | 选剩余空间最大的非系统盘，装到 `<盘符>:\ShineVideoStudio` |
+| 安装盘 | 选剩余空间最大的非系统盘，装到 `<盘符>:\ShineVideoStudio`；没有合格非系统盘时，容量达标且你显式确认（输入 YES 或 `-AllowSystemDrive`）后才装系统盘 |
 | 工具链 | 按 `config/deployment/tools-windows-x64.json` 的固定版本与 SHA-256 下载安装 |
 | Python / 前端依赖 | `uv sync --locked` + `npm ci`，缓存目录全部放在安装盘 |
 | 数据目录 | `<安装盘>:\ShineVideoStudio\data` |

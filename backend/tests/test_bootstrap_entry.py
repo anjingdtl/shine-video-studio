@@ -127,6 +127,24 @@ def test_bootstrap_system_drive_is_rejected_before_any_download(tmp_path):
     assert not target.exists()
 
 
+def test_explicit_confirmation_allows_system_drive(tmp_path):
+    """2026-11-15 用户裁定：显式确认后系统盘可装；默认拒绝不变。"""
+    zipped = tmp_path / 'fixture.zip'
+    with zipfile.ZipFile(zipped, 'w') as archive:
+        archive.writestr('ffmpeg/ffmpeg.cmd', '@echo off\r\necho ffmpeg version 8.1\r\n')
+    manifest = tmp_path / 'tools.json'
+    manifest.write_text(json.dumps({'command_floors': _FLOORS, 'tools': {'ffmpeg': {
+        'version': '8.1', 'url': zipped.as_uri(), 'sha256': hashlib.sha256(zipped.read_bytes()).hexdigest(),
+        'size': zipped.stat().st_size, 'entries': ['ffmpeg.cmd'],
+    }}}), encoding='utf-8')
+    target = tmp_path / 'system-drive-approved'
+    result = run_bootstrap(manifest, None, '-StorageRoot', str(target), '-AllowSystemDrive',
+                           environment_overrides={'SYSTEMDRIVE': target.drive})
+    report = _report(result.stdout)
+    assert any(row['name'] == 'ffmpeg' for row in report['installed']), report
+    assert (target / 'tools/ffmpeg-8.1/ffmpeg/ffmpeg.cmd').is_file()
+
+
 @pytest.mark.parametrize('existing_data', [False, True])
 @pytest.mark.parametrize('execution_optout', [False, True])
 def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(

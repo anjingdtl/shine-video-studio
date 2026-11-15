@@ -18,7 +18,10 @@
 param(
     [string]$StorageRoot = '',
     [switch]$CheckOnly,
-    [switch]$NoLaunch
+    [switch]$NoLaunch,
+    # 用户显式确认后才允许装到系统盘（容量门槛不降低）。无人值守入口；
+    # 交互模式在没有合格非系统盘时会另行询问一次。
+    [switch]$AllowSystemDrive
 )
 
 $ErrorActionPreference = 'Stop'
@@ -169,7 +172,8 @@ Write-Banner 'Shine 视频工作台 · 一键安装'
 Write-Host '  本程序会：安装固定版本工具链、Python/前端依赖、启动本地服务，' -ForegroundColor Gray
 Write-Host '  然后自动打开浏览器里的「新机设置」向导，先检查本机已有 ComfyUI 和模型。' -ForegroundColor Gray
 Write-Host '  只有明确选择新建环境并确认后，才会下载缺少的软件或模型。' -ForegroundColor Gray
-Write-Host '  不会改动系统盘、不装驱动、不写系统级设置。' -ForegroundColor Gray
+Write-Host '  默认只写非系统盘、不装驱动、不写系统级设置；' -ForegroundColor Gray
+Write-Host '  只有在没有合格非系统盘且你显式确认后，才会装到系统盘。' -ForegroundColor Gray
 
 $envFile = Join-Path $repoRoot '.env'
 $recordedRoot = Get-ShineEnvValue $envFile 'SHINE_BOOTSTRAP_ROOT'
@@ -192,7 +196,7 @@ if ($CheckOnly) {
     $inventory = @(Get-ShineDiskInventory)
     $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
     foreach ($disk in ($inventory | Sort-Object Drive)) {
-        $mark = if ($disk.Drive.TrimEnd('\') -eq $systemDrive) { '系统盘，跳过' }
+        $mark = if ($disk.Drive.TrimEnd('\') -eq $systemDrive) { '系统盘（默认跳过，可显式确认）' }
         elseif ($disk.Free -ge $requiredBytes) { '可用' }
         else { '空间不足' }
         Write-Host ("     {0}  剩余 {1,-12} 总计 {2,-12} {3}" -f $disk.Drive, (Get-GibString $disk.Free), (Get-GibString $disk.Size), $mark) -ForegroundColor Gray
@@ -271,6 +275,7 @@ if ($recordedData) {
 }
 
 # ---- 2. Choose the install root -----------------------------------------
+$systemDriveApproved = [bool]$AllowSystemDrive
 if (-not $StorageRoot) {
     Write-Host ''
     Write-Step '选择安装盘（自动挑选空间最大的非系统盘）'
@@ -279,18 +284,36 @@ if (-not $StorageRoot) {
         Where-Object { $_.Drive -and $_.Drive.TrimEnd('\') -ne $systemDrive -and $_.Free -ge $requiredBytes } |
         Sort-Object Free -Descending)
     if (-not $candidates -or $candidates.Count -eq 0) {
-        Write-Fail "没有找到满足条件的安装盘：需要非系统盘 >= $(Get-GibString $requiredBytes) 空闲空间。"
-        Write-Host ''
-        Write-Host '  当前磁盘：' -ForegroundColor Gray
-        foreach ($disk in @(Get-ShineDiskInventory | Sort-Object Drive)) {
-            Write-Host ("     {0}  剩余 {1}" -f $disk.Drive, (Get-GibString $disk.Free)) -ForegroundColor Gray
+        # 单磁盘机器不再被直接挡死：系统盘容量达标且用户显式确认时可以安装。
+        $systemDisk = @(Get-ShineDiskInventory | Where-Object { $_.Drive -and $_.Drive.TrimEnd('\') -eq $systemDrive }) |
+            Select-Object -First 1
+        $systemFits = $systemDisk -and $systemDisk.Free -ge $requiredBytes
+        if ($systemFits -and -not $systemDriveApproved) {
+            Write-Warn "没有找到满足条件的非系统盘（需要 >= $(Get-GibString $requiredBytes) 空闲）。"
+            Write-Host "  系统盘 $systemDrive 剩余 $(Get-GibString $systemDisk.Free)，容量达标。" -ForegroundColor Gray
+            Write-Host '  安装峰值约 174 GB，会占用系统盘空间；请确认系统盘余量充足。' -ForegroundColor Yellow
+            $answer = Read-Host "  确认安装到系统盘 $systemDrive 吗？输入 YES 继续，其它任意键退出"
+            if ($answer -eq 'YES') { $systemDriveApproved = $true }
         }
-        Write-Host ''
-        Write-Host '  处理办法：清空一个非系统盘，或挂载一块新盘后重新双击安装。' -ForegroundColor Yellow
-        Write-Host '  本项目固定物料完整目录约 60.8 GB（默认生产组件约 48.3 GB，可选审片组件另计），安装峰值约 174 GB，不会写入 C 盘。' -ForegroundColor Yellow
-        exit 11
+        if ($systemFits -and $systemDriveApproved) {
+            $chosen = $systemDisk
+            Write-Warn "经显式确认，安装到系统盘 $systemDrive（容量门槛不降低）。"
+        } else {
+            Write-Fail "没有找到满足条件的安装盘：需要 >= $(Get-GibString $requiredBytes) 空闲空间。"
+            Write-Host ''
+            Write-Host '  当前磁盘：' -ForegroundColor Gray
+            foreach ($disk in @(Get-ShineDiskInventory | Sort-Object Drive)) {
+                Write-Host ("     {0}  剩余 {1}" -f $disk.Drive, (Get-GibString $disk.Free)) -ForegroundColor Gray
+            }
+            Write-Host ''
+            Write-Host '  处理办法：清空一个非系统盘，或挂载一块新盘后重新双击安装；' -ForegroundColor Yellow
+            Write-Host '  单磁盘机器可在容量达标时显式确认安装到系统盘（-AllowSystemDrive）。' -ForegroundColor Yellow
+            Write-Host '  本项目固定物料完整目录约 60.8 GB（默认生产组件约 48.3 GB，可选审片组件另计），安装峰值约 174 GB。' -ForegroundColor Yellow
+            exit 11
+        }
+    } else {
+        $chosen = $candidates[0]
     }
-    $chosen = $candidates[0]
     $StorageRoot = Join-Path $chosen.Drive 'ShineVideoStudio'
     Write-Ok "安装到 $StorageRoot（$($chosen.Drive) 剩余 $(Get-GibString $chosen.Free)）"
     if ($chosen.Free -lt $recommendedBytes) {
@@ -306,8 +329,11 @@ $StorageRoot = [IO.Path]::GetFullPath($StorageRoot)
 $storageDrive = [IO.Path]::GetPathRoot($StorageRoot).TrimEnd('\')
 $systemDrive = if ($env:SystemDrive) { $env:SystemDrive.TrimEnd('\') } else { 'C:' }
 if ($storageDrive -eq $systemDrive) {
-    Write-Fail "安装目录不能在系统盘（$systemDrive）。请换一个非系统盘。"
-    exit 12
+    if (-not $systemDriveApproved) {
+        Write-Fail "安装目录在系统盘（$systemDrive）。默认只装非系统盘；如确需装系统盘，请用 -AllowSystemDrive 显式确认。"
+        exit 12
+    }
+    Write-Warn "经显式确认使用系统盘 $systemDrive；容量门槛不降低。"
 }
 New-Item -ItemType Directory -Force -Path $StorageRoot | Out-Null
 if (-not $recordedData) { $recordedData = Join-Path $StorageRoot 'data' }
@@ -422,6 +448,7 @@ $bootstrapArgs = @{
     WebPort = $webPort
 }
 if ($NoLaunch) { $bootstrapArgs['NoLaunch'] = $true }
+if ($systemDriveApproved) { $bootstrapArgs['AllowSystemDrive'] = $true }
 
 $previous = $ErrorActionPreference
 $ErrorActionPreference = 'Continue'

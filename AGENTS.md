@@ -112,8 +112,12 @@ CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
   The script refuses a dirty working tree, takes files from `git ls-files`, excludes models/databases/secrets/
   `docs/evidence`/virtualenvs, and writes `BUILD_INFO.json` plus a per-file `PACKAGE_MANIFEST.json`.
 - One tester entry only: `一键安装并启动.cmd` (ASCII fallback `SETUP.cmd`) → `scripts/install_once.ps1`.
-  It must stay idempotent (installed → start, running → open the wizard), pick a non-system drive with
-  ≥180 GiB free, and land on `#setup`. Personal desktop setup requires no operator password.
+  It must stay idempotent (installed → start, running → delegate to the launcher's three-proof liveness
+  verdict), prefer a non-system drive with ≥180 GiB free, and land on `#setup`. Personal desktop setup
+  requires no operator password. **2026-11-15 user ruling**: a single-disk machine may install to the
+  system drive only after explicit confirmation (interactive `YES` or `-AllowSystemDrive`); the 180 GiB
+  capacity floor is NOT lowered. The approval persists as `SHINE_ALLOW_SYSTEM_DRIVE=1` in `.env` plus
+  `allow_system_drive` in `deployment-storage.json`; bootstrap and start_shine honor that one fact.
 - Encoding is a correctness requirement, not style: `.cmd` entry files stay pure ASCII (cmd.exe uses the
   active code page), and every `scripts/*.ps1` containing non-ASCII text must be UTF-8 **with BOM**
   (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and fails to parse). `test_package_entrypoints.py`

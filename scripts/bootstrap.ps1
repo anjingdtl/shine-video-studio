@@ -15,7 +15,9 @@ param(
     [string]$StorageRoot = "",
     [string]$OperatorPasswordFile = "",
     [ValidateRange(0, 65535)][int]$ApiPort = 0,
-    [ValidateRange(0, 65535)][int]$WebPort = 0
+    [ValidateRange(0, 65535)][int]$WebPort = 0,
+    # 用户显式确认后才允许系统盘；默认仍然拒绝。与 install_once 的确认同一事实。
+    [switch]$AllowSystemDrive
 )
 # Output encoding contract: everything this script writes to stdout/stderr is
 # UTF-8 on both Windows PowerShell 5.1 and PowerShell 7, so callers (tests and
@@ -40,7 +42,9 @@ if ($StorageRoot -and -not $CheckOnly) {
     $StorageRoot = [IO.Path]::GetFullPath($StorageRoot)
     $storageDrive = [IO.Path]::GetPathRoot($StorageRoot).TrimEnd('\')
     $bootstrapSystemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
-    if ($storageDrive -eq $bootstrapSystemDrive) { throw 'Choose a non-system drive for automatic bootstrap downloads.' }
+    if ($storageDrive -eq $bootstrapSystemDrive -and -not $AllowSystemDrive) {
+        throw 'Choose a non-system drive for automatic bootstrap downloads.'
+    }
     New-Item -ItemType Directory -Force -Path $StorageRoot | Out-Null
     $env:UV_CACHE_DIR = Join-Path $StorageRoot 'download-cache\uv'
     $env:UV_PYTHON_INSTALL_DIR = Join-Path $StorageRoot 'python'
@@ -358,7 +362,7 @@ if ($defaultManifest -and -not $CheckOnly) {
         if ((Test-Path -LiteralPath $legacyDeployment) -and (Get-ChildItem -LiteralPath $legacyDeployment -Force | Select-Object -First 1)) {
             throw 'Existing deployment files require reconciliation; bootstrap will not redirect or move them.'
         }
-        $storageJson = @{ version = 1; root = (Join-Path $StorageRoot 'runtime'); allow_system_drive = $false } | ConvertTo-Json
+        $storageJson = @{ version = 1; root = (Join-Path $StorageRoot 'runtime'); allow_system_drive = [bool]$AllowSystemDrive } | ConvertTo-Json
         [IO.File]::WriteAllText($storagePreferences, $storageJson, (New-Object Text.UTF8Encoding($false)))
     }
     $envFile = Join-Path $repoRoot '.env'
@@ -372,6 +376,7 @@ if ($defaultManifest -and -not $CheckOnly) {
         PIP_CACHE_DIR = $env:PIP_CACHE_DIR
         npm_config_cache = $env:npm_config_cache
     }
+    if ($AllowSystemDrive) { $launchSettings['SHINE_ALLOW_SYSTEM_DRIVE'] = '1' }
     foreach ($key in $launchSettings.Keys) {
         $localConfig = [regex]::Replace($localConfig, "(?m)^$key=.*\r?\n?", '')
         $safeValue = $launchSettings[$key].Replace('\', '/').Replace("'", "\'")
