@@ -60,6 +60,7 @@ _STATE = {
 }
 _LOCK = threading.Lock()
 _PRESENCE = {"last_seen": None, "ever_seen": False}
+_VALIDATE_BUSY = threading.Lock()
 _LAST_STOP: dict | None = None
 
 
@@ -422,6 +423,84 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
     return 200, {"status": "RUNNING", "pid": process.pid}
 
 
+def _validate_services_background(data_dir: Path) -> dict:
+    """Validate and activate the runtime while the Worker is stopped.
+
+    The preparation task runs *inside* the Worker, but service validation
+    requires the Worker offline (so nothing else drives the GPU).  The Worker
+    therefore cannot stop itself: the supervisor does it.  Order: stop Worker →
+    clear the task lease → validate + activate → record the VALIDATE step →
+    restart Worker.  The restarted Worker resumes the task at the next step.
+    """
+    from shine.comfyops.runtime_configuration import activate_runtime, runtime_report
+    from shine.comfyops.service_validation import validate_services
+    from shine.comfyops.setup_preparation import TASK_KEY
+    from shine.db import make_engine, make_session_factory
+    from shine.models import AppSetting, utcnow
+
+    blockers = _stack_blockers(data_dir)
+    if blockers:
+        return {"status": "FAILED", "code": "STACK_BUSY", "blockers": blockers}
+    settings = _settings(data_dir)
+    engine = make_engine(settings.database_url)
+    factory = make_session_factory(engine)
+
+    def mark_task(step_status: str, code: str | None, detail: str) -> None:
+        with factory.begin() as db:
+            row = db.get(AppSetting, TASK_KEY)
+            if row is None or not isinstance(row.value, dict):
+                return
+            task = dict(row.value)
+            task["lease_owner"] = None
+            task["lease_expires_at"] = None
+            for step in task.get("steps", []):
+                if step.get("id") == "VALIDATE":
+                    step["status"] = step_status
+                    step["code"] = code
+                    step["detail"] = detail
+            if step_status == "FAILED":
+                task["status"] = "FAILED"
+                task["error"] = code
+                task["message"] = detail
+            task["updated_at"] = utcnow().isoformat()
+            row.value = task
+
+    try:
+        code, payload = _stop_worker(data_dir)
+        if code != 200:
+            return {"status": "FAILED", "code": payload.get("code", "WORKER_STOP_FAILED"),
+                    "detail": payload.get("detail", "Worker 未能停止，未进行核验。")}
+        with factory() as db:
+            report = runtime_report(db, settings)
+        candidate = report.get("candidate") or {}
+        recipe_sha256 = candidate.get("recipe_sha256")
+        project_id = candidate.get("project_id")
+        if not recipe_sha256 or not project_id:
+            mark_task("FAILED", "GENERATE_RUNTIME_CONFIGURATION_FIRST", "还没有可核验的运行配置。")
+            _start_worker(data_dir)
+            return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST"}
+        try:
+            with factory() as db:
+                validated = validate_services(db, settings, str(project_id), recipe_sha256,
+                                              actor="supervisor:setup")
+            if validated.get("status") != "READY":
+                detail = "服务核验没有通过：" + str(validated.get("status"))
+                mark_task("FAILED", str(validated.get("status") or "SERVICE_VALIDATION_FAILED"), detail)
+                return {"status": "FAILED", "code": validated.get("status"), "detail": detail}
+            with factory() as db:
+                activate_runtime(db, settings, str(project_id), recipe_sha256, "supervisor:setup")
+            mark_task("DONE", None, "服务核验通过，本机配置已激活（Worker 已自动恢复）。")
+            return {"status": "READY"}
+        except Exception as exc:  # noqa: BLE001 - the named refusal is the answer
+            detail = str(getattr(exc, "detail", exc))[:300]
+            mark_task("FAILED", "SERVICE_VALIDATION_FAILED", detail)
+            return {"status": "FAILED", "code": "SERVICE_VALIDATION_FAILED", "detail": detail}
+        finally:
+            _start_worker(data_dir)
+    finally:
+        engine.dispose()
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ShineSupervisor/1.1"
     data_dir: Path
@@ -537,6 +616,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             code, payload = _start_worker(self.data_dir)
             self._send(code, payload, origin)
+            return
+        if path == "/validate-services":
+            if self._refused_marker(origin):
+                return
+            # Long operation (stops Worker, starts renderer, reads nodes,
+            # restarts Worker). Run off the request thread; the caller is the
+            # Worker itself, which is about to be stopped, so it only needs the
+            # acceptance receipt. A second call while one is running is refused.
+            if not _VALIDATE_BUSY.acquire(blocking=False):
+                self._send(409, {"code": "VALIDATION_IN_PROGRESS"}, origin)
+                return
+
+            def _run() -> None:
+                try:
+                    _validate_services_background(self.data_dir)
+                finally:
+                    _VALIDATE_BUSY.release()
+
+            threading.Thread(target=_run, daemon=True).start()
+            self._send(202, {"status": "VALIDATING",
+                             "detail": "已委托监督进程：短暂停止 Worker、核验并激活、自动恢复 Worker。"},
+                       origin)
             return
         if path != "/restart-stack":
             self._send(404, {"code": "SUPERVISOR_UNKNOWN_PATH"}, origin)

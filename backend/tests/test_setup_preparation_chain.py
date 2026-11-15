@@ -175,3 +175,38 @@ def test_scan_step_advances_the_durable_scan(env):
     # On a machine with no queued roots the scan finishes immediately; either
     # way the step reports a real state, never a fake ready.
     assert detail["status"] in {"DONE", "PENDING"}
+
+
+def test_validate_delegates_to_supervisor_and_resumes(env, monkeypatch):
+    _, factory, _, settings = env
+    task = {"project_id": "proj-1", "request": {"capabilities": ["h3"]}}
+    # A candidate recipe exists but is not yet active/verified.
+    monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report",
+                        lambda db, settings: {"status": "NOT_ACTIVATED",
+                                              "candidate": {"project_id": "proj-1",
+                                                            "recipe_sha256": "r" * 64}})
+    calls = []
+    monkeypatch.setattr(setup_preparation, "_delegate_supervisor_validation",
+                        lambda settings: calls.append(1) or {"status": "VALIDATING"})
+    detail = setup_preparation._step_validate(factory, settings, task)
+    assert detail["status"] == "PENDING"
+    assert calls == [1]
+    # After the supervisor validated and activated, the resumed step sees the
+    # active contract and finishes without delegating again.
+    monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report",
+                        lambda db, settings: {"status": "ACTIVE", "services_verified": True,
+                                              "candidate": {"project_id": "proj-1",
+                                                            "recipe_sha256": "r" * 64}})
+    resumed = setup_preparation._step_validate(factory, settings, task)
+    assert resumed["status"] == "DONE"
+    assert calls == [1], "已激活的合同不应再次委托核验"
+
+
+def test_validate_without_candidate_recipe_is_named(env, monkeypatch):
+    _, factory, _, settings = env
+    task = {"project_id": "proj-1", "request": {}}
+    monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report",
+                        lambda db, settings: {"status": "NOT_ACTIVATED", "candidate": None})
+    detail = setup_preparation._step_validate(factory, settings, task)
+    assert detail["status"] == "FAILED"
+    assert detail["code"] == "GENERATE_RUNTIME_CONFIGURATION_FIRST"

@@ -743,8 +743,7 @@ def _step_profiles(factory, settings, task) -> dict[str, Any]:
 
 
 def _step_validate(factory, settings, task) -> dict[str, Any]:
-    from shine.comfyops.runtime_configuration import activate_runtime, runtime_report
-    from shine.comfyops.service_validation import validate_services
+    from shine.comfyops.runtime_configuration import runtime_report
 
     if not task.get("project_id"):
         return {"status": "SKIPPED",
@@ -754,19 +753,54 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
     if report.get("status") == "ACTIVE" and report.get("services_verified"):
         return {"status": "DONE", "detail": "本机运行合同此前已核验并激活，无需重复启动。"}
     candidate = report.get("candidate") or {}
-    recipe_sha256 = candidate.get("recipe_sha256")
-    if not recipe_sha256:
+    if not candidate.get("recipe_sha256"):
         return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST",
                 "detail": "还没有生成这部作品的运行配置。"}
-    with factory() as db:
-        validated = validate_services(db, settings, str(task.get("project_id")), recipe_sha256,
-                                      actor="worker:setup")
-    if validated.get("status") != "READY":
-        return {"status": "FAILED", "code": str(validated.get("status") or "SERVICE_VALIDATION_FAILED"),
-                "detail": "服务核验没有通过：" + str(validated.get("status"))}
-    with factory() as db:
-        activate_runtime(db, settings, str(task.get("project_id")), recipe_sha256, "worker:setup")
-    return {"status": "DONE", "detail": "服务核验通过，本机配置已激活。"}
+    # Service validation needs the Worker offline, but this task runs *inside*
+    # the Worker. Delegate to the supervisor: it stops the Worker, validates and
+    # activates, records this step, then restarts the Worker, which resumes here.
+    delegated = _delegate_supervisor_validation(settings)
+    if delegated.get("status") == "VALIDATING":
+        return {"status": "PENDING",
+                "detail": "已委托后台核验：会短暂停止 Worker、核对真实节点并激活，然后自动恢复 Worker。"}
+    if delegated.get("status") == "IN_PROGRESS":
+        return {"status": "PENDING", "detail": "后台核验正在进行，等待其完成。"}
+    return {"status": "FAILED", "code": delegated.get("code") or "SUPERVISOR_UNAVAILABLE",
+            "detail": delegated.get("detail") or "无法联系监督进程执行服务核验。"}
+
+
+def _delegate_supervisor_validation(settings) -> dict[str, Any]:
+    """Ask the resident supervisor to validate while the Worker is stopped."""
+    import json as _json
+
+    import httpx
+
+    record = Path(settings.data_dir) / "run" / "supervisor.json"
+    try:
+        info = _json.loads(record.read_text(encoding="utf-8"))
+        port = int(info["port"])
+    except (OSError, ValueError, KeyError):
+        return {"status": "FAILED", "code": "SUPERVISOR_NOT_RECORDED",
+                "detail": "没有监督进程记录；请用启动器启动一次工作台后再整备。"}
+    try:
+        # Loopback only; never inherit the host proxy for a local call.
+        with httpx.Client(trust_env=False, timeout=10) as client:
+            response = client.post(
+                f"http://127.0.0.1:{port}/validate-services",
+                headers={"x-shine-local-action": "1"})
+        if response.status_code == 202:
+            return {"status": "VALIDATING"}
+        if response.status_code == 409:
+            body = response.json()
+            if body.get("code") == "VALIDATION_IN_PROGRESS":
+                return {"status": "IN_PROGRESS"}
+            return {"status": "FAILED", "code": body.get("code") or "SUPERVISOR_REFUSED",
+                    "detail": str(body.get("detail") or body)}
+        return {"status": "FAILED", "code": "SUPERVISOR_REFUSED",
+                "detail": f"监督进程返回 {response.status_code}。"}
+    except Exception as exc:  # noqa: BLE001 - an unreachable supervisor is named
+        return {"status": "FAILED", "code": "SUPERVISOR_UNREACHABLE",
+                "detail": f"无法联系监督进程：{type(exc).__name__}。"}
 
 
 def _step_image_verify(factory, settings, task) -> dict[str, Any]:

@@ -490,6 +490,11 @@ function App() {
       setUi('director');
       setDirectorPage(target.page);
       setDirectorPackageId(target.packageId);
+      // 旧深链落到导演页后,地址栏统一成规范 #d/… 形式。
+      const raw = window.location.hash;
+      if (raw && !raw.startsWith('#d/') && !raw.startsWith('#a/')) {
+        window.history.replaceState(null, '', `#d/${target.page}`);
+      }
       if (target.anchor) {
         window.setTimeout(() => document.getElementById(target.anchor!)?.scrollIntoView({ behavior: 'auto', block: 'start' }), 90);
       }
