@@ -62,7 +62,14 @@ $probes = @{
     "ffmpeg"  = @("ffmpeg", "-version")
     "ffprobe" = @("ffprobe", "-version")
 }
-$floors = @{ "uv" = "0.9"; "node" = "20"; "npm" = "10"; "pwsh" = "7.3"; "ffmpeg" = "6"; "ffprobe" = "6" }
+# One source of truth: the pinned manifest carries the per-command floors,
+# so the installer and the workbench's detection cannot drift apart.
+$floors = @{}
+foreach ($toolName in @("uv", "node", "npm", "pwsh", "ffmpeg", "ffprobe")) {
+    $floorValue = $manifest.command_floors.$toolName
+    if (-not $floorValue) { throw "Tools manifest missing command_floors entry: $toolName" }
+    $floors[$toolName] = $floorValue
+}
 
 function Get-ToolVersion([string]$output) {
     if ($output -match "(\d+\.\d+[\w.+]*)") { return $Matches[1] }

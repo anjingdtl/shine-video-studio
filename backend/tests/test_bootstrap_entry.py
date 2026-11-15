@@ -19,6 +19,10 @@ pytestmark = pytest.mark.skipif(os.name != "nt", reason="Windows bootstrap entry
 REPO = Path(__file__).resolve().parents[2]
 BOOTSTRAP = REPO / "scripts" / "bootstrap.ps1"
 
+#: The manifest schema requires per-command floors; synthetic manifests carry
+#: the same shape so the installer's single-source rule is exercised for real.
+_FLOORS = {"uv": "0.9", "node": "20", "npm": "10", "pwsh": "7.3", "ffmpeg": "6", "ffprobe": "6"}
+
 
 def run_bootstrap(manifest_path, install_root, *arguments, environment_overrides=None):
     environment = dict(os.environ)
@@ -51,6 +55,7 @@ def test_installs_pinned_tool_from_local_zip_and_creates_working_shim(tmp_path):
         zipped.writestr("ffmpeg-1.0/ffmpeg.cmd", "@echo off\r\necho shim-test-ffmpeg ok\r\n")
     manifest = {
         "manifest_id": "test", "manifest_version": "0.0.1", "generated": "test",
+        "command_floors": _FLOORS,
         "tools": {"ffmpeg": {"version": "1.0", "url": "file:///" + zip_path.as_posix(),
                              "size": zip_path.stat().st_size,
                              "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
@@ -76,6 +81,7 @@ def test_hash_mismatch_blocks_install(tmp_path):
         zipped.writestr("broken-1.0/tool.cmd", "@echo off\r\n")
     manifest = {
         "manifest_id": "test", "manifest_version": "0.0.1", "generated": "test",
+        "command_floors": _FLOORS,
         "tools": {"ffmpeg": {"version": "1.0", "url": "file:///" + zip_path.as_posix(),
                              "size": zip_path.stat().st_size, "sha256": "0" * 64,
                              "entries": ["tool.cmd"]}},
@@ -94,7 +100,7 @@ def test_selected_bootstrap_directory_owns_tools_and_archive_cache(tmp_path):
     with zipfile.ZipFile(zipped, 'w') as archive:
         archive.writestr('ffmpeg/ffmpeg.cmd', '@echo off\r\necho ffmpeg version 8.1\r\n')
     manifest = tmp_path / 'tools.json'
-    manifest.write_text(json.dumps({'tools': {'ffmpeg': {
+    manifest.write_text(json.dumps({'command_floors': _FLOORS, 'tools': {'ffmpeg': {
         'version': '8.1', 'url': zipped.as_uri(), 'sha256': hashlib.sha256(zipped.read_bytes()).hexdigest(),
         'size': zipped.stat().st_size, 'entries': ['ffmpeg.cmd'],
     }}}), encoding='utf-8')
@@ -112,7 +118,7 @@ def test_selected_bootstrap_directory_owns_tools_and_archive_cache(tmp_path):
 
 def test_bootstrap_system_drive_is_rejected_before_any_download(tmp_path):
     manifest = tmp_path / 'tools.json'
-    manifest.write_text('{"tools": {}}', encoding='utf-8')
+    manifest.write_text(json.dumps({"command_floors": _FLOORS, "tools": {}}), encoding='utf-8')
     target = tmp_path / 'system-drive-install'
     result = run_bootstrap(manifest, None, '-StorageRoot', str(target),
                            environment_overrides={'SYSTEMDRIVE': target.drive})

@@ -58,14 +58,19 @@ PORT_ADOPTABLE_COMFYUI = "ADOPTABLE_COMFYUI"
 PORT_FOREIGN_PROCESS = "FOREIGN_PROCESS"
 PORT_UNKNOWN_IDENTITY = "UNKNOWN_IDENTITY"
 
-FLOOR_VERSIONS = {
-    "uv": "0.9",
-    "node": "20",
-    "npm": "10",
-    "pwsh": "7.3",
-    "ffmpeg": "6",
-    "ffprobe": "6",
-}
+def _floor_versions() -> dict[str, str]:
+    """Tool floors come from the pinned tools manifest — the same file the
+    installer reads, so detection and installation cannot disagree about a
+    version.  One command, one floor (npm's numbering differs from node's).
+    """
+    from shine.comfyops.tool_inventory import TOOL_PACKAGES, load_tools_manifest
+
+    floors = load_tools_manifest().get("command_floors") or {}
+    for _package_id, tools in TOOL_PACKAGES:
+        for tool in tools:
+            if not str(floors.get(tool) or ""):
+                raise ValueError(f"TOOLS_MANIFEST_COMMAND_FLOOR_MISSING: {tool}")
+    return {str(tool): str(floor) for tool, floor in floors.items()}
 
 RAM_MB_MIN = 30 * 1024  # 32GB-class machines report ~31.7GB usable
 VRAM_MB_MIN = 15360
@@ -311,7 +316,7 @@ def probe_command(name: str, *, runner=None, search_paths: list[str] | None = No
     else:
         present, output = False, ""
     version = _version_of(output, probe.version_pattern)
-    floor = FLOOR_VERSIONS[name]
+    floor = _floor_versions()[name]
     return {
         "present": present,
         "version": version,
