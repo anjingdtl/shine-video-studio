@@ -246,6 +246,7 @@ def _set_attempt_and_task(
     output_sha256: str | None = None,
     result_version_id: str | None = None,
     expected_state: int | None = None,
+    details: dict[str, Any] | None = None,
 ) -> int | None:
     with factory.begin() as db:
         task = db.get(LibraryRenderTask, task_id)
@@ -271,6 +272,8 @@ def _set_attempt_and_task(
         attempt.error_code = error_code
         attempt.output_sha256 = output_sha256
         attempt.submit_stage = task_status
+        if details:
+            attempt.payload = {**(attempt.payload or {}), "details": {**details}}
         return task.state_version
 
 
@@ -935,6 +938,12 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                     expected_state=next_state,
                 )
             except Exception as exc:  # noqa: BLE001 - after submit, an unproven fault is UNKNOWN
+                # After the submission the outcome is unknown, but the *reason*
+                # has to be readable.  "IMAGE_POST_SUBMIT_ComfyUnavailable" only
+                # repeats the exception class; a renderer that is provably gone
+                # gets its own code, and the exception class stays in the
+                # attempt payload as the raw detail.
+                gone = image_execution._renderer_gone(factory, settings, renderer)
                 _set_attempt_and_task(
                     factory,
                     task_id,
@@ -942,9 +951,11 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                     task_status="UNKNOWN",
                     attempt_status="UNKNOWN",
                     outcome="UNKNOWN",
-                    error_code=f"IMAGE_POST_SUBMIT_{type(exc).__name__}",
+                    error_code=("IMAGE_RENDERER_GONE" if gone
+                                else f"IMAGE_POST_SUBMIT_{type(exc).__name__}"),
                     prompt_id=prompt_id,
                     expected_state=next_state,
+                    details={"error_type": type(exc).__name__, "renderer_gone": gone},
                 )
     except Exception as exc:  # noqa: BLE001 - no external submission has happened before _open_attempt
         with factory.begin() as db:
