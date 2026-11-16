@@ -490,8 +490,21 @@ def compute_journey(
                 "pending_section_count": pending_sections,
             })
     if storyboard_plan is not None and plan_mode == "sections" and not plan_materialized:
-        shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
-                              "message": "按剧本分好的集还没有全部拆成镜头"})
+        # The message must state the real fact, not a blanket "not storyboarded":
+        # shots already landed but awaiting episode confirmation are a different
+        # state from sections that still have no shots. The counts travel with the
+        # blocker so the display layer shows the server's fact, never a guess.
+        total_landed = sum(row["landed_shot_count"] for row in episode_storyboard)
+        total_pending = sum(row["pending_section_count"] for row in episode_storyboard)
+        if total_pending > 0:
+            message = f"还有 {total_pending} 个场次没有拆成镜头"
+        elif total_landed > 0:
+            message = f"镜头已拆好 {total_landed} 个，确认本集后落到分集"
+        else:
+            message = "按剧本分好的集还没有拆成镜头"
+        shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED", "message": message,
+                              "landed_shot_count": total_landed,
+                              "pending_section_count": total_pending})
     for shot_id in scope_shot_ids:
         shot = by_id.get(shot_id)
         if shot is None:
