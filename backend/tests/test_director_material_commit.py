@@ -183,3 +183,62 @@ def test_confirming_a_master_binds_it_onto_the_shots_that_asked_for_it(api):
     episode = overview["episodes"][0]
     assert episode["materials"]["missing_count"] == 0
     assert episode["state"] in {"READY_TO_PACKAGE", "READY_TO_SHOOT"}
+
+
+def test_a_single_row_commit_keeps_the_whole_requirement_list(api):
+    """上传/重新生成只决策一行；清单不能塌缩成只剩这一行。
+
+    需求页读的是当前 plan 修订的行。confirm 若只迁移决策行，其余需求会滞留
+    旧修订，单条提交后整张清单消失——正是用户报的“上传后只剩一条”。
+    """
+    client, _factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    requirements = derived["requirements"]
+    assert len(requirements) >= 2, "需要至少两项需求才能验证清单不塌缩"
+    target = requirements[0]
+    partial = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": derived["plan_revision_id"],
+            "expected_snapshot": derived["expected_snapshot"],
+            "decisions": [{
+                "requirement_id": target["requirement_id"],
+                "strategy": "generate",
+                "entity_id": target["entity_id"],
+                "asset_id": None,
+            }],
+            "queue_generation": False,
+        }, headers=LOCAL)
+    assert partial.status_code == 201, partial.text
+
+    listed = client.get(f"/api/v1/projects/{project}/director/materials/requirements")
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert body["plan_revision_id"] != derived["plan_revision_id"], "确认应产生新修订"
+    kept = {row["requirement_id"] for row in body["requirements"]}
+    original = {row["requirement_id"] for row in requirements}
+    assert original.issubset(kept), f"单条提交后清单塌缩：丢失 {original - kept}"
+
+
+def test_generation_progress_reads_the_same_run_ledger_as_the_material_page(api):
+    """进度条读的是同一份 public_run 台账，不是第二套判定。"""
+    client, _factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    committed = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": derived["plan_revision_id"],
+            "expected_snapshot": derived["expected_snapshot"],
+            "decisions": _decisions_for(derived),
+        }, headers=LOCAL)
+    assert committed.status_code == 201, committed.text
+
+    progress = client.get(f"/api/v1/projects/{project}/material-preparation/generation-progress")
+    assert progress.status_code == 200, progress.text
+    progress_runs = progress.json()["runs"]
+    full = client.get(f"/api/v1/projects/{project}/material-preparation").json()
+    production = [row for row in full["runs"] if row["kind"] == "production"]
+    assert [row["run_id"] for row in progress_runs] == [row["run_id"] for row in production]
+    for row in progress_runs:
+        assert row["kind"] == "production"
+        assert {"total", "candidate_ready", "queued", "running", "failed", "needs_review"} <= set(row["counts"])

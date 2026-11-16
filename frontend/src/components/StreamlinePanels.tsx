@@ -48,6 +48,7 @@ import {
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { MaterialPromptModal, ShotAssetRequestModal, ShotPromptModal, ShotSubtitleModal } from './ShotEditors';
+import { MaterialGenerationProgress } from './MaterialGenerationProgress';
 
 const FILM_TYPES = [
   { id: 'live_action', label: '真人实拍' },
@@ -738,6 +739,9 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
   const [result, setResult] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [promptTarget, setPromptTarget] = useState<DirectorMaterialRequirement | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [batchTarget, setBatchTarget] = useState<Decision>('generate');
+  const [progressKey, setProgressKey] = useState(0);
   const submitting = useRef(false);
 
   const apply = useCallback((body: DirectorMaterialsView) => {
@@ -821,6 +825,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
       if (outcome.batch_error) setProblem(outcome.batch_error.message);
       onMessage?.('素材决策已确认。');
       await load();
+      setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
       // 断连或超时：先读台账，确认是否其实已经生效，再让用户决定。
@@ -852,6 +857,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
         : `「${row.name ?? row.entity_id}」已改用你上传的主素材。`);
       onMessage?.('这一项素材已更新。');
       await load();
+      setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
     } finally {
@@ -877,6 +883,29 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
   }
 
   const requirements = view?.requirements ?? [];
+  const selectedIds = requirements.filter((row) => selected[row.requirement_id]).map((row) => row.requirement_id);
+  const allSelected = requirements.length > 0 && selectedIds.length === requirements.length;
+  /** 批量设定处理方式：不可用的选项按真实事实降级（缺主素材不能复用、必需项不能跳过），
+   *  与逐项下拉用的是同一份 decisions，提交时仍由 commit() 唯一送出。 */
+  function applyBatch(target: Decision, ids: string[]) {
+    if (busy !== '' || ids.length === 0) return;
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const row of requirements) {
+        if (!ids.includes(row.requirement_id)) continue;
+        next[row.requirement_id] = target === 'reuse_master'
+          ? (row.matched_master ? 'reuse_master' : 'generate')
+          : target === 'skip'
+            ? (row.critical ? 'generate' : 'skip')
+            : target;
+      }
+      return next;
+    });
+    onMessage?.(`已把 ${ids.length} 项素材的处理方式批量更新，确认后一次送出。`);
+  }
+  function toggleAll(checked: boolean) {
+    setSelected(Object.fromEntries(requirements.map((row) => [row.requirement_id, checked])));
+  }
   const pendingChoice = requirements.some((row) => !decisions[row.requirement_id]);
   const missingCritical = requirements.filter(
     (row) => row.critical && !row.matched_master).length;
@@ -917,6 +946,8 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
       {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>去素材中心</button>}
     </p>}
 
+    <MaterialGenerationProgress projectId={projectId} onOpenLibrary={onOpenLibrary} refreshKey={progressKey} />
+
     {loaded && !requirements.length && <p className="empty-inline">
       还没有按镜头的素材清单。先确认至少一集的镜头，再生成清单。
     </p>}
@@ -929,14 +960,42 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
         </span>
         <span>{requirements.filter((row) => row.matched_master).length} 项可复用</span>
       </div>
+      <div className="material-batch-bar">
+        <label className="material-select-cell" title="全选/取消全选">
+          <input type="checkbox" checked={allSelected} disabled={busy !== ''}
+            aria-label="全选素材需求"
+            onChange={(event) => toggleAll(event.target.checked)} />
+        </label>
+        <span className="mgp-counts">已选 {selectedIds.length} 项</span>
+        <select value={batchTarget} disabled={busy !== ''} aria-label="批量处理方式"
+          onChange={(event) => setBatchTarget(event.target.value as Decision)}>
+          <option value="generate">AI 制作</option>
+          <option value="reuse_master">复用现有主素材（缺的自动改 AI 制作）</option>
+          <option value="skip">跳过（必需项自动改 AI 制作）</option>
+        </select>
+        <button type="button" className="btn-secondary" disabled={busy !== '' || selectedIds.length === 0}
+          onClick={() => applyBatch(batchTarget, selectedIds)}>应用到所选</button>
+        <button type="button" className="btn-secondary" disabled={busy !== ''}
+          title="一键把全部素材设为 AI 制作"
+          onClick={() => { toggleAll(true); applyBatch('generate', requirements.map((row) => row.requirement_id)); }}>
+          全部 AI 制作</button>
+        <button type="button" className="btn-text" disabled={busy !== '' || selectedIds.length === 0}
+          onClick={() => setSelected({})}>清空选择</button>
+      </div>
       <table className="shot-table material-table">
         <thead><tr>
-          <th>预览</th><th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th><th>单项操作</th>
+          <th className="material-select-cell">选</th><th>预览</th><th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th><th>单项操作</th>
         </tr></thead>
         <tbody>
           {requirements.map((row) => {
             const rowBusy = busy === `row-${row.requirement_id}`;
             return <tr key={row.requirement_id}>
+            <td className="material-select-cell">
+              <input type="checkbox" checked={!!selected[row.requirement_id]} disabled={busy !== ''}
+                aria-label={`选择 ${row.name ?? row.entity_id}`}
+                onChange={(event) => setSelected((current) => (
+                  { ...current, [row.requirement_id]: event.target.checked }))} />
+            </td>
             <td className="material-thumb-cell">
               {row.matched_master
                 ? <img className="material-thumb" src={`${API}/assets/${row.matched_master.asset_id}/thumbnail`}
@@ -965,6 +1024,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
                 </span>}</td>
             <td>
               <select value={decisions[row.requirement_id] ?? ''} disabled={busy !== ''}
+                aria-label={`处理方式：${row.name ?? row.entity_id}`}
                 onChange={(event) => setDecisions((current) => (
                   { ...current, [row.requirement_id]: event.target.value as Decision }))}>
                 {row.matched_master && <option value="reuse_master">复用现有主素材</option>}

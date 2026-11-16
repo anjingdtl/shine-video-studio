@@ -471,6 +471,16 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         row.sha256 = graph_hash(row.payload)
         row.status = "CONFIRMED"
     db.flush()
+    # A partial commit (one upload, one regenerate) decides a single row, but the
+    # requirements page reads the *current* plan's rows.  If the undecided rows
+    # stayed on the old revision the list would collapse to just the decided row.
+    # Every requirement therefore follows the new revision; the undecided ones
+    # keep their identity, payload and decision unchanged.
+    for row in db.scalars(select(AssetRequirement).where(
+            AssetRequirement.plan_id == source.id,
+            AssetRequirement.project_id == project_id)).all():
+        row.plan_id = plan.id
+    db.flush()
     for asset_id in set(canonical_selections.values()):
         selected = db.get(Asset, asset_id)
         if selected and selected.approved and selected.locked and not (selected.provenance or {}).get("offline_only"):
@@ -1362,3 +1372,19 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         ),
         "generated_at": utcnow().isoformat(),
     }
+
+
+def generation_progress(db, project_id: str) -> dict[str, Any]:
+    """Read-only progress of this project's material generation batches.
+
+    The identical ``public_run`` projection the material page reads, minus the
+    completion judgement (which hashes master files): a progress bar polled
+    every few seconds must not re-hash the library each tick.  This is a read
+    of the same ledger, not a second decision chain.
+    """
+    require_project(db, project_id)
+    runs = [public_run(db, run.id) for run in db.scalars(
+        select(MaterialRun).where(MaterialRun.project_id == project_id)
+        .order_by(MaterialRun.created_at.desc())
+    ).all() if (run.payload or {}).get("kind") == "production"]
+    return {"project_id": project_id, "runs": runs, "generated_at": utcnow().isoformat()}

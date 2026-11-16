@@ -1007,6 +1007,15 @@ function App() {
                   onMessage={report} onOpenLibrary={() => goToAssets('images')}
                   onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
 
+                {nextStage && nextStage.page !== 'materials' && <div className="stage-next-step">
+                  <span className="sns-text">素材已按清单核对，下一步：<b>{nextStage.text}</b>。
+                    缺的必需素材只暂停用到它的镜头，不挡住其余镜头开拍。</span>
+                  <button type="button" className="btn-primary"
+                    onClick={() => goToDirectorPage(nextStage.page, nextStage.id)}>
+                    下一步：{nextStage.text}
+                  </button>
+                </div>}
+
                 <section className="card section-card" id="project-assets">
                   <div className="section-heading">
                     <div>

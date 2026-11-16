@@ -209,6 +209,16 @@ def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
     return service.plan_progress(db, project_id, data_dir=output_root(db, settings))
 
 
+@router.get("/projects/{project_id}/material-preparation/generation-progress")
+def material_generation_progress(project_id: str, db: DBSession):
+    """Lightweight progress of the generation batches, for the progress bars.
+
+    Same ``public_run`` fact as the material page; no completion judgement, so
+    polling it never re-hashes the master library.
+    """
+    return service.generation_progress(db, project_id)
+
+
 @router.post("/projects/{project_id}/material-preparation/complete")
 def complete_materials(project_id: str, actor: Operator, db: DBSession, settings: SettingsDep):
     """Judge the material completion condition and record the outcome.
