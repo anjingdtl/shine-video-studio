@@ -21,6 +21,7 @@ from shine.llm.base import ProviderConfig
 
 MIN_CONNECT_TIMEOUT_S = 10.0
 MIN_FIRST_EVENT_S = 120.0
+MAX_FIRST_EVENT_S = 180.0
 MIN_IDLE_S = 45.0
 TOTAL_TIMEOUT_MULTIPLE = 6.0
 
@@ -64,7 +65,12 @@ def policy_for(config: ProviderConfig, *, streaming: bool | None = None) -> Tran
     enabled = streaming_enabled(config) if streaming is None else bool(streaming)
     return TransportPolicy(
         connect_s=max(MIN_CONNECT_TIMEOUT_S, min(base / 4, 30.0)),
-        first_event_s=max(MIN_FIRST_EVENT_S, base),
+        # The first-event wait is bounded independently of the overall call
+        # budget: a reasoning model emits events while it thinks, so a socket
+        # silent past this ceiling is a hang, not deep thought. Waiting the full
+        # base timeout (600s) for a first event let a stuck stream block a crew
+        # step for ten minutes; a bounded ceiling fails it fast as UNKNOWN.
+        first_event_s=max(MIN_FIRST_EVENT_S, min(base, MAX_FIRST_EVENT_S)),
         idle_s=max(MIN_IDLE_S, base / 2),
         total_s=max(base * TOTAL_TIMEOUT_MULTIPLE, 180.0),
         streaming=enabled,

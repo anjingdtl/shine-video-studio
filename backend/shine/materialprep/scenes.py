@@ -130,6 +130,57 @@ def retire_dead_scene_task(db, task: AgentTaskRecord, scene_key: str) -> bool:
     return True
 
 
+#: How often one scene may be auto-retried after a provably safe failure.
+#: A failure the gateway classified as NOT_SENT (never left this machine) or
+#: RESPONSE_RECEIVED (the provider answered, but the answer is unusable and
+#: there is nothing to buy twice) owns no pending external work, so the same
+#: breakpoint may be re-triggered automatically. An UNKNOWN outcome is never
+#: auto-retried: it may already have reached the provider and waits for a person.
+MAX_SCENE_AUTO_RETRIES = 2
+SAFE_RETRY_OUTCOMES = {"NOT_SENT", "RESPONSE_RECEIVED"}
+
+
+def retire_retryable_scene_task(db, task: AgentTaskRecord, scene_key: str) -> bool:
+    """Retire a scene task that failed provably safely so it can be asked again.
+
+    This is the automatic counterpart of the dead-worker retire: instead of a
+    person noticing a stalled outline and clicking retry, the same executor
+    re-triggers the same breakpoint when the existing reconciliation verdict
+    says no external answer is pending. One fact (the task trace), one verdict
+    (the classified external outcome), one executor (``prepare_scenes``).
+    """
+    trace = task.trace or {}
+    if task.status not in {"FAILED", "NEEDS_REVIEW"}:
+        return False
+    outcome = trace.get("external_outcome")
+    if outcome not in SAFE_RETRY_OUTCOMES:
+        return False
+    superseded = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == task.project_id,
+        AgentTaskRecord.role_id == SCRIPTWRITER_ROLE,
+        AgentTaskRecord.input_hash == task.input_hash,
+        AgentTaskRecord.status == "SUPERSEDED",
+    )).all()
+    used = sum(1 for row in superseded
+               if ((row.trace or {}).get("reconciliation") or {}).get("auto_retry"))
+    if used >= MAX_SCENE_AUTO_RETRIES:
+        return False
+    previous_identity = task.request_identity
+    task.status = "SUPERSEDED"
+    task.request_identity = None
+    task.lease_owner, task.lease_expires_at = None, None
+    task.state_version += 1
+    reconciliation = "NOT_SENT_PROVEN" if outcome == "NOT_SENT" else "RESPONSE_RECEIVED_NO_ANSWER"
+    task.trace = {**trace, "previous_request_identity": previous_identity,
+                  "reconciliation": {"outcome": reconciliation, "auto_retry": True,
+                                     "attempt": used + 1, "checked_at": utcnow().isoformat()}}
+    add_audit(db, "local-user", "MATERIAL_SCENE_AUTO_RETRY", "agent_task", task.id,
+              {"scene_key": scene_key, "external_outcome": outcome,
+               "previous_request_identity": previous_identity, "attempt": used + 1},
+              project_id=task.project_id)
+    return True
+
+
 #: One person may override one unknown scene result with one new request.
 MAX_SCENE_UNKNOWN_RESENDS = 1
 
@@ -189,7 +240,7 @@ def scene_status(db, project_id: str, document) -> dict:
     the page only learns the outcome when that request returns, and a refresh
     loses it entirely.  The ledger is the source of truth, not the response.
     """
-    scenes = segment_document(document.text or "")
+    scenes = segment_document(document.text or "", max_scene_chars=MAX_SCENE_CHARS)
     latest: dict[str, AgentTaskRecord] = {}
     for row in db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
@@ -382,6 +433,11 @@ def prepare_scenes(
                 # released and the scene is asked again with a new request.
                 dead = is_dead_scene_task(existing)
                 if dead and retire_dead_scene_task(db, existing, scene.key):
+                    existing = None
+                elif retire_retryable_scene_task(db, existing, scene.key):
+                    # A provably safe failure (never sent, or answered but
+                    # unusable) is re-triggered at the same breakpoint without
+                    # waiting for a person; an UNKNOWN outcome falls through.
                     existing = None
                 else:
                     entry = {"scene_key": scene.key, "status": existing.status,

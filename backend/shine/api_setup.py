@@ -715,6 +715,16 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         row.name: row
         for row in db.scalars(_select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))
     }
+    # 机器级运行激活已经把规范工作流按真实渲染器的 object_info 校验过
+    # （service_evidence_status READY + workflow_profiles）。这是规范方案就绪的
+    # 唯一裁决：项目继承它，不再要求每个项目把同一套规范图重新登记+重新校验一遍
+    # （那是下级闸卡上级，违反「一个裁决」）。项目自有方案行仍优先（含宽方案）。
+    from shine.comfyops.runtime_configuration import service_evidence_status
+
+    machine_validation = service_evidence_status(db, settings)
+    machine_validated_profiles = (
+        set(machine_validation.get("workflow_profiles") or [])
+        if machine_validation.get("status") == "READY" else set())
     rows = []
     for manifest in list_variant_manifests():
         variant_id = str(manifest.get("variant_id") or "")
@@ -724,6 +734,7 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         profile_names = list(manifest.get("workflow_profile_ids") or [])
         registered = [project_profiles[name] for name in profile_names if name in project_profiles]
         validated = [row for row in registered if (row.validated_against or {})]
+        inherited = [name for name in profile_names if name in machine_validated_profiles]
         entry = {
             "variant_id": variant_id,
             "label": manifest.get("label") or variant_id,
@@ -733,8 +744,8 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             "installed": False,
             "verified": False,
             "bound": False,
-            "profiles_registered": bool(registered),
-            "runtime_validated": bool(validated),
+            "profiles_registered": bool(registered) or bool(inherited),
+            "runtime_validated": bool(validated) or bool(inherited),
             "selectable_for_preparation": False,
             "trial_ready": False,
             "production_ready": False,

@@ -388,14 +388,20 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     presence = model_file_presence(_effective_models_root(settings, capability, installation),
                                    catalog, component_ids)
     registered = _registered_components(db, component_ids)
+    # Reconcile hash-verifies bytes in place, including files the person renamed:
+    # a component it registered as verified owns those bytes on this machine.
+    # The filename-only presence check must not call them missing and trigger a
+    # second download.  The download step and the basic-config page both read
+    # this one converged conclusion instead of each recomputing "what is missing".
+    missing = [item for item in presence["missing"] if item["component_id"] not in registered]
     required = [row for row in (_catalog_components(catalog).get(cid) for cid in component_ids) if row]
     complete_components = {
         cid for cid in component_ids
-        if all(item["component_id"] != cid for item in presence["missing"])
+        if all(item["component_id"] != cid for item in missing)
     }
     files_found = bool(component_ids) and len(complete_components) == len(component_ids)
     files_verified = bool(complete_components) and complete_components <= registered
-    missing_bytes = sum(int(item.get("size") or 0) for item in presence["missing"])
+    missing_bytes = sum(int(item.get("size") or 0) for item in missing)
 
     facts: dict[str, Any] = {
         "FILES_FOUND": files_found,
@@ -488,7 +494,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
 
     state, summary, next_step = _capability_verdict(
         capability, facts, missing_bytes=missing_bytes, has_installation=bool(installation),
-        missing_files=presence["missing"],
+        missing_files=missing,
     )
     return {
         "key": capability,
@@ -502,13 +508,13 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "facts": facts,
         "summary": summary,
         "next_step": next_step,
-        "missing_files": presence["missing"],
+        "missing_files": missing,
         "missing_bytes": missing_bytes,
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
         "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
-                                         missing_files=presence["missing"], advisories=advisories),
+                                         missing_files=missing, advisories=advisories),
     }
 
 

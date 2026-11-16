@@ -155,3 +155,53 @@ def test_the_candidate_summary_is_still_read_only(prep, two_stacks):
     assert response.status_code == 200
     after = sorted(str(p.relative_to(root)) for p in root.rglob("*") if p.is_file())
     assert before == after
+
+
+def test_a_renamed_weight_verified_by_reconcile_is_not_downloaded_again(prep, two_stacks):
+    """指定目录里与清单内容一致的改名权重，核验登记后整备不再计划下载。
+
+    缺件判定必须消费同一份核验事实：reconcile 按尺寸+哈希找到改名文件并登记，
+    capability_report 就不能再按文件名把它算成缺件、触发第二次下载。基础配置
+    与后台下载步读的是同一个结论。
+    """
+    client, factory, settings = prep
+    _, _, payload = two_stacks
+    project = create_project(client)
+    root, _ = _managed_instance(prep)
+    renamed = root / "models" / "diffusion_models" / "我改名的权重.safetensors"
+    renamed.parent.mkdir(parents=True, exist_ok=True)
+    renamed.write_bytes(payload)
+
+    with factory() as db:
+        result = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), project_id=project, capability="h3")
+    assert result["complete"] is True
+    assert result["registered"] == [BASELINE_COMPONENT]
+
+    summary = client.get(f"/api/v1/setup/summary?project_id={project}", headers=HEADERS).json()
+    h3 = summary["capabilities"]["h3"]
+    assert h3["missing_files"] == [], "已核验登记的改名权重不得再被算成缺件"
+    assert h3["missing_bytes"] == 0
+    assert h3["facts"]["FILES_FOUND"] is True
+    assert h3["facts"]["FILES_VERIFIED"] is True
+
+
+def test_a_machine_validated_canonical_profile_is_inherited_without_project_rows(prep):
+    # 三原则（2026-11-16）：机器级运行激活已按真实渲染器校验过的规范方案，项目
+    # 直接继承其「已登记+已校验」事实，不再要求每个项目把同一套规范图重新登记+
+    # 重新校验一遍（下级闸卡上级，违反一个裁决）。没有机器校验也没有项目行时，
+    # 仍如实报未登记，绝不凭空就绪。
+    from shine.comfyops.variant_readiness import _profile_rows
+    client, factory, _settings = prep
+    project = create_project(client)
+    name = "local-h3-ref2va-pdd8-2img-1aud"
+    evidence = {"source": "machine_service_validation", "node_inventory_sha256": "n" * 64}
+    with factory() as db:
+        rows = _profile_rows(db, project, [name], {name: evidence})
+    assert rows[0]["registered"] is True
+    assert rows[0]["validated"] is True
+    assert rows[0]["validated_against"]["source"] == "machine_service_validation"
+    with factory() as db:
+        bare = _profile_rows(db, project, [name])
+    assert bare[0]["registered"] is False
+    assert bare[0]["validated"] is False

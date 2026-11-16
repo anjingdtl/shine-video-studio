@@ -11,6 +11,28 @@
 
 **Current status: M1 hardened; M2/M3 offline foundations implemented and tested; the offline production loop is closed and reproducible.** The backend, SQLite migrations, React workbench, per-shot asset bindings, frozen style versions, concurrency-safe worker, project audit, worker health, independent LLM gateway, Agent planning runtime, official-format H3 prompt compiler, ComfyUI HTTP adapter with strict reference-media transfer, Fake ComfyUI server, five named quality gates, request-revision repair engine, automatic recovery of finished external tasks, and the Offline Production E2E all run without a GPU. Mock and fake-HTTP evidence never counts as real MiniMax-H3 validation. See [`docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md`](docs/OFFLINE_FINAL_ACCEPTANCE_REPORT.md).
 
+## 2026-11-17 三原则收口 · 真实六镜出片（导演模式穿测）
+
+本轮以「一套事实 / 一个裁决 / 一个执行者」收口导演模式③→④→⑤→⑥→⑦链路，并在本机
+（RTX 5080 · INT8 · 8 步加速）完成**一集 6 镜、每镜约 10 秒**的真实 H3 出片穿测：
+
+- **④素材准备归一为按镜头需求的唯一面板**：移除「按场次分析剧本与候选批次(高级)」、
+  重叠的「上传与确认项目素材」与「打开素材中心」引导；清单只从已确认镜头派生，
+  出图→「选用并晋升」→回绑镜头全在本页完成（复用同一晋升执行者，不引去素材中心）。
+- **素材必需性唯一裁决**：需求页 critical 直接消费 journey 的 `_shot_material_problems`
+  （Ref2VA 每镜至少一个参考、点名人物须有主体主素材），不再按方案槽位另判一套。
+- **拆镜完成态口径一致**：journey 与制作页同读逐场落镜事实；合并进邻场的标题不再被
+  错报成「还有 N 场没拆成镜头」；素材未准备确认时旅程如实停在④，不 premature 指向导演包。
+- **⑥生产页统计读同一份任务事实**：顶部排队/生成/等人/失败不再混入系统全局/它项目历史。
+- **字幕装配移⑦后期**：③只逐镜撰写/冻结；字幕轨在后期按真实成片时长生成后再选版本装配。
+- **⑦剪辑方案按集出一版 + 按镜网格**：分集成片之外复用生成分段组件按镜网格展示各镜文件。
+- **安全门保留**：UNKNOWN 外部提交不重发；NEEDS_REVIEW 须先核对（曾放宽后已回退）。
+
+**真实出片证据**：6/6 镜 `PASSED`（`quality_verification=real`，非 mock），分集成片
+`1a678d1e…` SHA-256 `660a4f40…`，h264 1344×768 · 24fps · 58.6s，`DELIVERED`。
+抽帧目检：人物跨镜一致、雨夜实拍光效与冻结风格一致、影片类型 live-action 固定句进入
+H3 提示词。**技术 QC 通过 ≠ 艺术验收**：成片仍待人工「观看并确认」（0 集已确认）。
+
 ## 最新 tester 安装包（2026-11-14 · H3 资源自整备 V2.0 收尾）
 
 **下载**：[GitHub Release v0.1.0-test.20261114](https://github.com/anjingdtl/shine-video-studio/releases/tag/v0.1.0-test.20261114)

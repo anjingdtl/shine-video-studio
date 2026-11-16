@@ -396,6 +396,24 @@ def promote(db, settings, row, actor, decision, *, offline):
         {"candidate_id": row.id, "offline_only": mock or unowned_renderer or offline},
         project_id=row.project_id,
     )
+    # Promotion IS the user's confirmation of this master.  Adopt it into the
+    # requirement and the shots that need it through the same executor every
+    # confirmation path uses, so the material list, the journey and the package
+    # readiness read one fact instead of "matched here, missing there".
+    if item_id:
+        from shine.comfyops.models import AssetRequirement
+        from shine.materialprep.models import MaterialItem
+        from shine.materialprep.service import (
+            bind_adopted_masters_to_shots,
+            bind_material_master,
+        )
+
+        item = db.get(MaterialItem, item_id)
+        requirement = (db.get(AssetRequirement, item.requirement_id)
+                       if item and item.requirement_id else None)
+        if requirement is not None and requirement.project_id == row.project_id:
+            bind_material_master(db, requirement, asset, actor)
+            bind_adopted_masters_to_shots(db, row.project_id, requirement.plan_id, actor)
     return asset
 
 

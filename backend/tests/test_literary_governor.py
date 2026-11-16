@@ -130,7 +130,10 @@ def test_a_small_task_asks_for_a_small_completion_not_the_ceiling():
     request = compile_request(system="s", user="u" * 900, schema={"type": "object"})
     budget = plan_call_budget(_config(), request, purpose="observation")
     assert budget.output_request_tokens < budget.output_cap_tokens
-    assert "REASONING_RESERVE_CONSERVATIVE" in budget.warnings
+    # observation is a low-effort purpose: the shared mechanism gives it a known
+    # small reserve, not the conservative deliberation budget.
+    assert budget.reasoning_reserve_tokens == 512
+    assert "REASONING_RESERVE_CONSERVATIVE" not in budget.warnings
 
 
 def test_an_undeclared_window_is_planned_conservatively_and_never_called_1m():

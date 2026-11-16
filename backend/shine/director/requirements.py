@@ -181,17 +181,29 @@ def _note_local(local: dict[tuple[str, str], dict[str, Any]], family: str, name:
     entry["cited"] = entry["cited"] or cited
 
 
-def _is_critical(family: str, capacity: dict[str, Any], *, cited_by_shot: bool) -> bool:
-    """Whether the renderer refuses to work without this item.
+def _critical_from_verdict(family: str, name: str, entry: dict[str, Any],
+                           shot_problems: dict[str, list[str]],
+                           aliases: dict[str, str]) -> bool:
+    """Whether the renderer refuses to work without this item — the SAME verdict
+    the journey uses (``_shot_material_problems``), never a second opinion.
 
-    A character subject is what Ref2VA anchors on, so it is critical whenever
-    the bound profile declares a subject slot.  A scene or prop plate is critical
-    only when a shot promised that exact asset by id: the shot's own contract is
-    the reason, never a general opinion about good filmmaking.
+    Ref2VA anchors on a named character subject and needs at least one reference
+    per cut shot.  A character is critical when a shot that names it still lacks
+    that subject master; a scene/prop is critical when a shot that uses it is a
+    cut shot still missing its reference, or promised the asset by id.  Profile
+    slot counts are display-only and must not decide criticality.
     """
-    if family == "character":
-        return capacity.get("subjects", 0) > 0
-    return bool(cited_by_shot)
+    for shot_id in entry["shot_ids"]:
+        problems = shot_problems.get(shot_id, [])
+        if family == "character":
+            for problem in problems:
+                if problem.startswith("SHOT_CHARACTER_MASTER_MISSING:"):
+                    raw = problem.split(":", 1)[1]
+                    if aliases.get(character_reference_key(raw), raw) == name:
+                        return True
+        elif "SHOT_REFERENCE_MISSING" in problems:
+            return True
+    return family != "character" and bool(entry.get("cited_by_shot"))
 
 
 def derive(db: Session, project: Project, *, episode_ids: list[str] | None = None) -> dict[str, Any]:
@@ -200,6 +212,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
 
     from shine.api_director import _confirmed_outline
     from shine.director.contracts import EpisodePlanPayload
+    from shine.director.journey import _shot_material_problems
     from shine.director.streamline import _latest_plan
     from shine.materialprep.source_spans import segment_document
     from shine.materialprep.story import section_storyboard_shot_ids
@@ -235,6 +248,9 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
 
     # (family, entity) -> evidence, merged across the whole scope.
     usage: dict[tuple[str, str], dict[str, Any]] = {}
+    # 唯一裁决：每镜的素材缺口直接读 journey 的同一个判断函数（Ref2VA 每镜至少
+    # 一个参考、点名人物必须有主体主素材），需求页不再按方案槽位另判一套。
+    shot_problems: dict[str, list[str]] = {}
     preparations: list[dict[str, Any]] = []
 
     def note(family: str, name: str, *, shot_id: str, episode_id: str,
@@ -280,6 +296,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 if shot is None or shot.project_id != project_id:
                     continue
                 spec = dict(shot.spec or {})
+                shot_problems[shot.id] = _shot_material_problems(db, shot)
                 beat = str(spec.get("story_beat") or "")
                 for reference in _character_names(spec):
                     canonical = aliases.get(character_reference_key(reference), reference)
@@ -376,8 +393,8 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
     rows = []
     for (family, name), entry in sorted(usage.items(), key=lambda item: (item[0][0], item[0][1])):
         master = _master_for(family, name, masters)
-        critical = entry.get("user_specified") or _is_critical(
-            family, capacity, cited_by_shot=entry["cited_by_shot"])
+        critical = bool(entry.get("user_specified")) or _critical_from_verdict(
+            family, name, entry, shot_problems, aliases)
         rows.append({
             **entry,
             "family": family,

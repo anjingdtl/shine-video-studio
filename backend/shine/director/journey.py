@@ -137,6 +137,7 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
     renderable, so the shot must carry the bound master.
     """
     from shine.asset_identity import resolve_character_asset, split_character_names
+    from shine.h3.narrator import is_narrator_speaker
 
     problems: list[str] = []
     try:
@@ -162,9 +163,22 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
                       "entity_id": asset.entity_id})
         if link.role:
             bound_roles.add(link.role)
-    for reference in dict.fromkeys(name for entry in spec.characters for name in split_character_names(entry)):
+    # The narrator speaks off-screen and owns no picture reference: the material
+    # list excludes it (requirements._character_names), so the journey must use
+    # the same rule instead of reporting a missing "narrator portrait".
+    for reference in dict.fromkeys(name for entry in spec.characters
+                                   for name in split_character_names(entry)
+                                   if not is_narrator_speaker(name)):
         if reference not in bound_roles and resolve_character_asset(reference, bound) is None:
             problems.append("SHOT_CHARACTER_MASTER_MISSING:" + reference)
+    # One verdict with the production readiness: Ref2VA renders every
+    # independent (cut) shot from a reference.  A cut shot carrying no binding
+    # at all — e.g. a narrator-only shot whose visual reference was never bound
+    # — cannot render, so the material list must owe it a reference exactly as
+    # the package readiness refuses it, instead of saying "ready" here while the
+    # shoot action there reports a missing reference.
+    if spec.continuity.mode.value == "cut" and not list(shot.bindings):
+        problems.append("SHOT_REFERENCE_MISSING")
     return problems
 
 
@@ -475,9 +489,28 @@ def compute_journey(
                 "landed_shot_count": landed,
                 "pending_section_count": pending_sections,
             })
-    if storyboard_plan is not None and plan_mode == "sections" and not plan_materialized:
-        shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED",
-                              "message": "按剧本分好的集还没有全部拆成镜头"})
+    if storyboard_plan is not None and plan_mode == "sections":
+        # The message must state the real fact, not a blanket "not storyboarded":
+        # shots already landed but awaiting episode confirmation are a different
+        # state from sections that still have no shots. The counts travel with the
+        # blocker so the display layer shows the server's fact, never a guess.
+        total_landed = sum(row["landed_shot_count"] for row in episode_storyboard)
+        total_pending = sum(row["pending_section_count"] for row in episode_storyboard)
+        # 完成态读同一份逐场落镜事实：只要还有场次没拆成镜头，这一阶段就没完成，
+        # 哪怕确认方案里已经记了 shot_ids（plan_materialized）。否则旅程显示绿、
+        # 制作页却说「还有 N 场没拆成镜头」——两套结论，违反三原则。
+        if total_pending > 0:
+            message = f"还有 {total_pending} 个场次没有拆成镜头"
+        elif not plan_materialized and total_landed > 0:
+            message = f"镜头已拆好 {total_landed} 个，确认本集后落到分集"
+        elif not plan_materialized:
+            message = "按剧本分好的集还没有拆成镜头"
+        else:
+            message = ""
+        if message:
+            shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED", "message": message,
+                                  "landed_shot_count": total_landed,
+                                  "pending_section_count": total_pending})
     for shot_id in scope_shot_ids:
         shot = by_id.get(shot_id)
         if shot is None:
@@ -528,12 +561,15 @@ def compute_journey(
     stages.append({
         "id": "assets",
         "label": "拍摄素材准备",
-        # 素材不是落镜的硬前置，但也不是“H3 会自己生成正式资产”。必需项缺失只
-        # 暂停引用它的镜头，其余镜头照常开拍；可选项可以明确跳过。
-        "done": bool(scoped_shots),
+        # 素材不是落镜的硬前置（blockers 恒空，缺图只暂停引用它的镜头），但旅程
+        # 必须如实停在素材准备这一步：只有镜头点名的素材真的都确认为主素材，这一
+        # 阶段才算完成。否则 next_stage 会越过素材直达导演包，页面在素材还没准备
+        # 时就提示「下一步：导演包」——名实不符。完成态读同一份 material_blockers，
+        # 不另造一套就绪判定。
+        "done": bool(scoped_shots) and not material_blockers,
         "summary": (
             f"{len(scoped_shots)} 镜的素材需求已核对" if scoped_shots and not material_blockers
-            else (f"{len(scoped_shots)} 镜的素材需求已核对（{len(material_blockers)} 项必需素材缺失，"
+            else (f"{len(scoped_shots)} 镜的素材待准备（{len(material_blockers)} 项必需素材缺失，"
                   "只影响引用它的镜头）" if scoped_shots
                   else "等待分镜定稿")
         ),

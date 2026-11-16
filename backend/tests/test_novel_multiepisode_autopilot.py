@@ -233,7 +233,7 @@ def test_title_only_section_merges_and_episode_self_confirms(api):
     # An explicit confirm reuses the same shots (idempotent, no double-count).
     confirmed = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert confirmed.status_code == 200, confirmed.text
     assert confirmed.json()["shot_ids"] == episode["shot_ids"]
 

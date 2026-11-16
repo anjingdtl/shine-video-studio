@@ -200,14 +200,14 @@ def build_package(
     creative_lineage: dict[str, Any] | None = None,
     created_by: str = "user",
     settings=None,
-    fill_missing_character_bindings: bool = False,
     strategy: dict[str, Any] | None = None,
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
 
     An incomplete package is still built so the person can see what is missing.
-    The interactive entry may explicitly fill unbound cast slots before the
-    new package snapshots the resulting shot revisions.
+    The package reads the shot bindings the material confirmation flow already
+    wrote; it never re-derives or auto-fills cast slots at packaging time, so a
+    master the person swapped (A→B) is not silently re-added by a second chain.
 
     ``episode_ids`` scopes the package to a subset of the plan's episodes
     (streamline plan §9): a project whose second episode is still being fixed
@@ -358,15 +358,6 @@ def build_package(
         "validated_against": profile.validated_against or {},
     }
     resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
-    scoped_shot_order = [shot_id for e in selected_episodes for shot_id in e.shot_ids] \
-        if plan_payload.mode == "sections" else plan_payload.shot_order()
-    if fill_missing_character_bindings and (
-            profile is None or profile.mode.lower() == "ref2va"):
-        from shine.services import apply_missing_character_bindings
-
-        apply_missing_character_bindings(
-            db, project, [by_id[shot_id] for shot_id in scoped_shot_order], actor=created_by,
-        )
 
     revision = (db.scalars(
         select(DirectorPackageVersion.revision)
@@ -553,6 +544,14 @@ def _compiled_shot_blockers(
             return [_blocker("PACKAGE_GENERATION_MODE_INVALID",
                              "导演包记录的生片模式无效", mode=binding["generation_mode"])]
 
+    # One effective mode for blocker metadata: a static profile carries its own
+    # mode, a dynamic strategy package has no profile row and carries the
+    # strategy's mode.  Reading profile.mode unconditionally crashed a strategy
+    # package into a 500 the moment any shot failed compilation, hiding the real
+    # named blocker.
+    effective_mode = profile.mode if profile is not None else (
+        strategy_contract.generation_mode if strategy_contract is not None else None)
+
     compiler = H3PromptCompiler()
     problems: list[dict[str, Any]] = []
     for episode in episodes:
@@ -602,7 +601,7 @@ def _compiled_shot_blockers(
                     exc.code,
                     f"镜头「{shot.name}」按当前生成方案无法执行：{exc}",
                     shot_id=shot.id,
-                    mode=profile.mode,
+                    mode=effective_mode,
                     details=exc.details,
                 ))
                 continue

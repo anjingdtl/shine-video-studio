@@ -95,6 +95,12 @@ class StyleBible(APIModel):
         description="How much off-screen narration the storyboard may use. Guidance for the crew, "
                     "not a render gate; the narrator speaks without a picture reference.",
     )
+    max_shot_seconds: float | None = Field(
+        default=None, ge=4, le=15,
+        description="Upper bound on one render shot's duration. The crew and the editorial "
+                    "segmentation both read this same cap; H3's hard floor stays 4 seconds, so "
+                    "the configurable window is 4-15. Unset means H3's full 15-second ceiling.",
+    )
 
     @model_serializer(mode="wrap")
     def _omit_unset_settings(self, handler):

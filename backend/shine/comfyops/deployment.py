@@ -586,7 +586,7 @@ def _require_project(db, project_id: str | None):
     return svc_require_project(db, project_id)
 
 
-def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str,
+def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | None,
                        *, instance_name: str, port: int, mode: str = "local"):
     """Create the NEXT controlled instance plan based on current instance state.
 
@@ -594,6 +594,10 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str,
     the next can even be planned (the instance row appears after CREATE runs),
     so a batch "chain" is impossible by design. Returns (plan, action) or
     (None, action) when the chain is complete.
+
+    ``project_id`` may be None: the ComfyUI instance is a machine-level
+    dependency that can be prepared on an empty database, before any work
+    exists to bind it to.
     """
     _require_project(db, project_id)
     from shine.comfyops.instances import InstanceOperation, instance_identity, instance_root, plan_operation
@@ -767,7 +771,7 @@ def advisory_review_readiness(settings: Settings) -> dict:
     return result
 
 
-def generate_configuration(db, settings: Settings, project_id: str, *,
+def generate_configuration(db, settings: Settings, project_id: str | None, *,
                            instance_name: str = 'shine-h3', port: int = 8188,
                            variant_id: str | None = None,
                            capability: str = 'h3') -> dict:

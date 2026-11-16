@@ -267,6 +267,82 @@ def test_unknown_section_role_cannot_be_replaced_without_not_sent_proof(api, mon
         assert replacement is None
 
 
+def test_a_newer_run_that_covered_a_section_does_not_borrow_older_shots(api):
+    # 活缺陷（2026-11-16）：新 run 覆盖了某段但产 0 镜（合并标题/尚未落镜）时，
+    # 旧逻辑回退借用上一轮 run 的整组镜头，把同一个故事重复挂到多个段上。
+    # 最新且覆盖该段的 run 即权威事实：0 镜如实报缺失，绝不回借历史。
+    import datetime
+
+    from shine.director.streamline import DIRECTOR_STORYBOARD_RUN
+    from shine.materialprep.story import section_storyboard_shot_ids
+    client, factory, _settings = api
+    project_id, _master, _document = _studio(client, CHAPTER_ONE)
+    base = datetime.datetime(2026, 11, 16, 10, 0, 0)
+
+    def _run(input_hash, status, created_at, shot_ids):
+        return AgentTaskRecord(
+            project_id=project_id, role_id=DIRECTOR_STORYBOARD_RUN, input_hash=input_hash,
+            asset_manifest_hash="amh", rulepack_id="rp", rulepack_hash="rh",
+            model_profile_id="crew-role-routing", model_id="existing-film-crew",
+            schema_version="1.0", status=status, created_at=created_at,
+            trace={"units": [{"production_section_id": "sec-X", "start_offset": 0}],
+                   "results": [{"unit": {"start_offset": 0}, "apply": {"shot_ids": shot_ids}}]})
+
+    with factory.begin() as db:
+        db.add(_run("old", "PAUSED", base, ["shot-old-1", "shot-old-2"]))
+        db.add(_run("new", "RUNNING", base + datetime.timedelta(minutes=5), []))
+    with factory() as db:
+        resolved = section_storyboard_shot_ids(db, project_id, "sec-X")
+    assert resolved["shot_ids"] == [], "the newer run covered the section; its empty result is authoritative"
+    assert resolved["missing"], "reported as not applied, never borrowed from the old run"
+
+
+def test_the_episode_shot_table_reads_the_live_run_not_the_frozen_confirmation(api):
+    # 活缺陷（2026-11-16）：确认过 v6（17 镜）后重跑拆镜，面板仍显示旧确认的
+    # 17 镜——episode_shot_table 优先用冻结快照 target.shot_ids，最新 run 落的
+    # 新镜永远不显示，重跑看起来只是在叠加记录。表必须读最新逐段落镜（与确认
+    # 同源），并如实报「与已确认快照不同，需重新确认」。
+    import datetime
+
+    from shine.director.models import DirectorEpisodePlan
+    from shine.director.streamline import DIRECTOR_STORYBOARD_RUN, episode_shot_table
+    from shine.models import Shot
+    client, factory, _settings = api
+    project_id, _master, _document = _studio(client, CHAPTER_ONE)
+    base = datetime.datetime(2026, 11, 16, 10, 0, 0)
+
+    def _shot(sid):
+        return Shot(id=sid, project_id=project_id, name=sid, revision=1,
+                    spec={"story_beat": "beat", "duration_target_s": 10.0,
+                          "characters": [], "dialogue": [], "continuity": {"mode": "cut"}})
+
+    with factory.begin() as db:
+        for sid in ("shot-old-1", "shot-old-2", "shot-new-1"):
+            db.add(_shot(sid))
+        db.add(DirectorEpisodePlan(
+            project_id=project_id, version=1, status="CONFIRMED",
+            target_seconds=60, tolerance_seconds=10,
+            payload={"mode": "sections", "target_seconds": 60, "tolerance_seconds": 10,
+                     "episodes": [{"episode_id": "ep-01", "order": 1, "planned_seconds": 20.0,
+                                   "shot_ids": ["shot-old-1", "shot-old-2"], "section_ids": ["sec-X"]}]},
+            sha256="x" * 64, source="script_sections_materialized", created_by="local-user"))
+        db.add(AgentTaskRecord(
+            project_id=project_id, role_id=DIRECTOR_STORYBOARD_RUN, input_hash="new",
+            asset_manifest_hash="amh", rulepack_id="rp", rulepack_hash="rh",
+            model_profile_id="crew-role-routing", model_id="existing-film-crew",
+            schema_version="1.0", status="SUCCEEDED",
+            created_at=base + datetime.timedelta(minutes=5),
+            trace={"units": [{"production_section_id": "sec-X", "start_offset": 0}],
+                   "results": [{"unit": {"start_offset": 0}, "apply": {"shot_ids": ["shot-new-1"]}}]}))
+    with factory() as db:
+        table = episode_shot_table(db, project_id, "ep-01")
+    assert [row["shot_id"] for row in table["shots"]] == ["shot-new-1"], \
+        "the live re-run shot, not the frozen v1 pair"
+    assert table["confirmed_shot_ids"] == ["shot-old-1", "shot-old-2"]
+    assert table["confirmed_version"] == 1
+    assert table["confirmation_stale"] is True
+
+
 def test_section_reconcile_proves_waiting_resource_failure_was_not_sent(api, monkeypatch):
     client, factory, settings = api
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")

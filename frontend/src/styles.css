@@ -2108,6 +2108,45 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .material-row-actions{display:flex;flex-direction:column;gap:4px;align-items:flex-start}
 .material-upload{cursor:pointer;display:inline-flex;align-items:center;gap:4px}
 .material-upload.disabled{opacity:.5;pointer-events:none}
+/* 素材生成进度：素材准备页与素材中心共用同一条台账事实 */
+.material-generation-progress{border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:10px 0;background:var(--surface-2)}
+.mgp-title{display:flex;align-items:center;gap:8px;font-size:var(--fs-caption);color:var(--ink-2);margin-bottom:8px}
+.mgp-title .muted{color:var(--faint)}
+.mgp-run{padding:8px 0;border-top:1px dashed var(--line)}
+.mgp-run:first-of-type{border-top:none}
+.mgp-head{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:var(--fs-caption)}
+.mgp-counts{color:var(--muted);font-variant-numeric:tabular-nums}
+.mgp-bar{height:8px;border-radius:6px;background:var(--surface-3);overflow:hidden;margin:6px 0}
+.mgp-bar i{display:block;height:100%;background:var(--olive);border-radius:6px;transition:width .4s ease}
+.mgp-bar i.is-working{background:linear-gradient(90deg,var(--olive),var(--ok-ink))}
+.mgp-now,.mgp-done,.mgp-review{font-size:var(--fs-caption);color:var(--ink-2);margin:4px 0;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.mgp-review{color:var(--warn-2,#8a6a2f)}
+.mgp-items{font-size:var(--fs-caption);color:var(--muted);margin-top:4px}
+.mgp-items ul{list-style:none;margin:6px 0 0;padding:0;display:grid;gap:3px}
+.mgp-items li{display:flex;justify-content:space-between;gap:12px}
+.mgp-items em{font-style:normal;color:var(--ink-2)}
+.mgp-items em.warn{color:var(--warn-2,#8a6a2f)}
+/* 页内候选选定与晋升（导演④素材准备页，不引去素材中心） */
+.mgp-candidates{margin:8px 0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.mgp-candidates-title{font-size:var(--fs-caption);color:var(--ink-2);margin:0 0 6px}
+.mgp-candidate-item{margin:6px 0}
+.mgp-candidate-entity{font-size:var(--fs-caption);font-weight:600;color:var(--ink-mid);display:block;margin-bottom:4px}
+.mgp-candidate-grid{display:flex;gap:8px;flex-wrap:wrap}
+.mgp-candidate{margin:0;width:120px;display:flex;flex-direction:column;gap:4px;align-items:center}
+.mgp-candidate img{width:120px;height:120px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:var(--surface-3,#eee)}
+.mgp-candidate figcaption{font-size:var(--fs-caption);color:var(--muted);display:flex;align-items:center;gap:4px}
+.mgp-candidate figcaption.ok{color:var(--ok-2,#2f6a3f)}
+.mgp-candidate .btn-text{font-size:var(--fs-caption)}
+/* 素材需求批量处理工具栏 */
+.material-batch-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;margin:6px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:var(--fs-caption)}
+.material-batch-bar select{min-width:150px;width:auto}
+.material-batch-bar .mgp-counts{color:var(--ink-mid);font-weight:600}
+.material-select-cell{width:36px;text-align:center}
+.material-select-cell input{accent-color:var(--olive)}
+/* 阶段下一步：由服务端 journey 的 next_stage 驱动，不在前端另算就绪 */
+.stage-next-step{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;border:1px solid var(--ok-line,#bcd9c0);background:var(--ok-bg,#eef7ef);border-radius:10px;padding:12px 16px;margin:12px 0}
+.stage-next-step .sns-text{font-size:var(--fs-body);color:var(--ink-2)}
+.stage-next-step .sns-text b{color:var(--ok-ink)}
 .segment-filter{display:flex;align-items:center;gap:8px;font-size:var(--fs-caption);color:var(--muted);margin:2px 0 8px}
 .segment-filter select{width:auto;min-width:200px}
 /* ③ 镜头表：表格行不能复用 .shot-row 的 flex 布局，否则表头与内容会错位 */

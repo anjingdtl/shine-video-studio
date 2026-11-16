@@ -25,7 +25,6 @@ import {
 } from '../api';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
-import { StrategyResourceCard } from './StrategyResourceCard';
 import { GuideTip } from './GuideTip';
 
 function describeError(error: unknown): string {
@@ -137,7 +136,7 @@ const FALLBACK_OPTIONS: StrategyOptions = {
   upscale: [],
 };
 
-export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage, onRefresh, onNavigate }: {
+export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage, onRefresh, onNavigate, onGoSetup }: {
   projectId: string;
   overview: DirectorOverview | null;
   demo: boolean;
@@ -146,6 +145,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   onMessage?: (message: string, tone?: 'success' | 'error') => void;
   onRefresh?: () => void;
   onNavigate?: (page: 'package' | 'run') => void;
+  /** 模型下载统一在基础配置完成；本页只把未就绪的变体导航过去，不另设下载入口。 */
+  onGoSetup?: () => void;
 }) {
   const railPresent = useRailPresent();
   const [selected, setSelected] = useState<string[]>([]);
@@ -228,7 +229,6 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   const chosenVariantAvailable = chosen?.available ?? false;
   const chosenVariantReason = chosen?.reason
     ?? (availabilityLoaded ? '本机没有这套权重' : '正在读取本机模型状态…');
-  const chosenSelectable = chosen?.selectable_for_preparation ?? true;
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 
   const toggle = (episodeId: string) => {
@@ -388,16 +388,13 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
               </button>;
             })}
           </div>
-          {!chosenVariantAvailable && <p className="strategy-note">
-            {describeVariantName(variantId)}：{chosenVariantReason}。
-            {chosenSelectable ? '可在下方「模型资源检测」里扫描本机、授权下载并校验；准备完成前不能开拍。'
-              : '到「基础配置 · 安装与下载」准备后再回来开拍。'}
-          </p>}
-          {chosenSelectable && (!chosenVariantAvailable || chosen?.acceptance_status === 'CANDIDATE') && <StrategyResourceCard
-            key={`${projectId}-${variantId}-${acceleratorId}-${secondPass}-${upscale}`}
-            projectId={projectId} strategy={{ schema_version: '1', generation_mode: 'Ref2VA',
-              model_variant_id: variantId, accelerator_id: acceleratorId,
-              second_pass: { enabled: secondPass }, upscale: { enabled: upscale } }} />}
+          {(!chosenVariantAvailable || chosen?.acceptance_status === 'CANDIDATE') && <div className="notice">
+            <p>{describeVariantName(variantId)}：{chosenVariantReason}。
+              模型的检测、下载、登记与校验统一在「基础配置 · 安装与下载」完成，本页不另设下载入口，避免两处配置互相冲突；准备好后回来开拍。</p>
+            {onGoSetup && <button type="button" className="btn-secondary" onClick={onGoSetup}>
+              去基础配置准备模型
+            </button>}
+          </div>}
           <div className="strategy-row" role="radiogroup" aria-label="画面加速">
             <span className="strategy-label">画面加速</span>
             {options.accelerators.map((row) => (

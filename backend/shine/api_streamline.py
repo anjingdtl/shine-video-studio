@@ -189,6 +189,8 @@ class StoryboardBookConfirmBody(APIModel):
     plan_version: int = Field(ge=1)
     expected_sha256: str = Field(min_length=64, max_length=64)
     style: dict[str, Any] | None = None
+    #: Explicit acceptance of a planned duration outside the target window.
+    acknowledge_deviation: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard-book/confirm")
@@ -197,7 +199,7 @@ def confirm_storyboard_book(project_id: str, body: StoryboardBookConfirmBody, ac
     require_project(db, project_id)
     result = streamline.confirm_storyboard_book(
         db, project_id, version=body.plan_version, expected_sha256=body.expected_sha256,
-        style=body.style, actor=actor)
+        style=body.style, actor=actor, acknowledge_deviation=body.acknowledge_deviation)
     db.commit()
     return result
 
@@ -435,13 +437,17 @@ def compile_episode_subtitles(project_id: str, episode_id: str, actor: Operator,
 
 class EpisodeConfirmBody(APIModel):
     expected_state_version: int | None = None
+    #: Explicit acceptance of a landed episode total outside the target window.
+    acknowledge_duration_deviation: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard/episodes/{episode_id}/confirm")
 def confirm_episode(project_id: str, episode_id: str, actor: Operator, db: DBSession,
                     body: EpisodeConfirmBody | None = None) -> dict:
     require_project(db, project_id)
-    result = streamline.confirm_episode_shots(db, project_id, episode_id, actor=actor)
+    result = streamline.confirm_episode_shots(
+        db, project_id, episode_id, actor=actor,
+        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False))
     db.commit()
     return result
 
@@ -554,12 +560,12 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     """Record the decisions and queue exactly the selected candidates, once.
 
     The request identity is derived from what the person confirmed (plan
-    revision + the exact decision set), never from a clock.  A dropped response
-    therefore retries into the same receipt: the same batch, the same
-    confirmation, no second round of images.  The confirmation and the batch are
-    two steps of one intent; if the batch cannot be queued the confirmation is
-    still reported as committed, because it really is, and the response names the
-    step that failed.
+    revision + the exact decision set), never from a clock.  Confirmation,
+    generation batch and commit receipt are written in ONE SQLite transaction:
+    an interruption before that commit leaves nothing behind, so the same
+    request resubmits cleanly instead of hitting a half-applied
+    ``MATERIAL_PLAN_STALE``; a lost response after the commit replays the same
+    receipt.  At most one batch is ever generated for the intent.
     """
     from shine.comfy.workflow import graph_hash
     from shine.materialprep import service
@@ -596,13 +602,12 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         ],
         "notes": body.notes,
     })
-    confirmation = service.confirm(db, actor, project_id, confirmation_body)
-    generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
-                    if row["strategy"] == "generate"]
-    batch = None
-    batch_error = None
-    if body.queue_generation and generate_ids:
-        try:
+    try:
+        confirmation = service.confirm(db, actor, project_id, confirmation_body, commit=False)
+        generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
+                        if row["strategy"] == "generate"]
+        batch = None
+        if body.queue_generation and generate_ids:
             batch = service.create_batch(
                 db,
                 project_id,
@@ -611,96 +616,50 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                 requirement_ids=generate_ids,
                 idempotency_key=request_key + ":" + graph_hash(sorted(generate_ids)),
                 rights_id=None,
+                commit=False,
             )
-        except HTTPException as exc:
-            batch_error = {
-                "code": "MATERIAL_BATCH_REFUSED",
-                "message": "决策已确认，但候选生成没有排队；按下面的原因处理后重试",
-                "detail": exc.detail,
-            }
-    result = {
-        "confirmation": confirmation,
-        "generate_count": len(generate_ids),
-        "batch": batch,
-        "batch_error": batch_error,
-        "request_key": request_key,
-        "replayed": False,
-    }
-    bound_shots = _bind_adopted_masters(db, project_id, confirmation["plan_revision_id"], actor)
-    add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
-              confirmation["plan_revision_id"],
-              {"request_key": request_key,
-               "bound_shot_count": bound_shots,
-               "confirmation_id": confirmation["confirmation_id"],
-               "confirmation_hash": confirmation["confirmation_hash"],
-               "generate_count": len(generate_ids),
-               "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
-                         if batch else None),
-               **({"batch_error": batch_error} if batch_error else {})},
-              project_id=project_id)
-    db.commit()
+        result = {
+            "confirmation": confirmation,
+            "generate_count": len(generate_ids),
+            "batch": batch,
+            "batch_error": None,
+            "request_key": request_key,
+            "replayed": False,
+        }
+        # service.confirm already adopted the masters into the shots (the one
+        # executor); quote its count rather than binding a second time.
+        bound_shots = confirmation.get("bound_shots", 0)
+        add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
+                  confirmation["plan_revision_id"],
+                  {"request_key": request_key,
+                   "bound_shot_count": bound_shots,
+                   "confirmation_id": confirmation["confirmation_id"],
+                   "confirmation_hash": confirmation["confirmation_hash"],
+                   "generate_count": len(generate_ids),
+                   "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
+                             if batch else None)},
+                  project_id=project_id)
+        db.commit()
+    except HTTPException:
+        # One transaction: a refused batch rolls the confirmation back too, so
+        # the person retries the whole intent against an unchanged plan rather
+        # than a half-committed revision that no decision can match.
+        db.rollback()
+        raise
     return result
 
 
 def _bind_adopted_masters(db, project_id: str, plan_id: str, actor: str) -> int:
-    """Bind every confirmed "reuse this master" onto the shots that asked for it.
+    """Idempotent repair of the shot hand-off for a replayed confirmation.
 
-    A confirmed requirement is not yet a shot binding: the shot table and the
-    production readiness read ``shot.bindings``, not the material list.  Without
-    this step a person who just confirmed "reuse this master" still sees the
-    shot as missing its reference and cannot start.  The step is idempotent, so
-    a replayed confirmation repairs a half-finished hand-off.  Shots that
-    already own a current passed take are never touched: adopting a master for a
-    new episode can never invalidate an episode that already shipped.
+    The binding itself lives in the one confirmation executor
+    (``service.confirm`` → ``bind_adopted_masters_to_shots``); this only re-runs
+    it so an early receipt that wrote requirements but not shot bindings is
+    repaired on replay.
     """
-    from sqlalchemy import select as sa_select
+    from shine.materialprep.service import bind_adopted_masters_to_shots
 
-    from shine.comfyops.models import AssetRequirement
-    from shine.models import Asset, Job, Shot
-    from shine.schemas import ReferenceUse, ShotBindingInput
-    from shine.services import require_project, set_shot_bindings
-
-    project = require_project(db, project_id)
-    bound = 0
-    rows = db.scalars(sa_select(AssetRequirement).where(
-        AssetRequirement.plan_id == plan_id,
-        AssetRequirement.project_id == project_id,
-    )).all()
-    for requirement in rows:
-        payload = dict(requirement.payload or {})
-        if payload.get("strategy") != "reuse_master" or payload.get("family") != "character":
-            continue
-        asset_id = payload.get("bound_asset_id")
-        entity = payload.get("entity_id") or ""
-        if not asset_id or not entity:
-            continue
-        asset = db.get(Asset, asset_id)
-        if asset is None or not asset.approved or not asset.locked:
-            continue
-        for shot_id in payload.get("used_shot_ids") or []:
-            shot = db.get(Shot, shot_id)
-            if shot is None or shot.project_id != project_id:
-                continue
-            if entity not in list((shot.spec or {}).get("characters") or []):
-                continue
-            if any(link.asset_id == asset.id for link in shot.bindings):
-                continue
-            passed = db.scalar(sa_select(Job).where(
-                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
-                Job.shot_revision == shot.revision,
-            ))
-            if passed is not None:
-                continue
-            inputs = [
-                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
-                                 role=link.role, ordinal=index)
-                for index, link in enumerate(shot.bindings)
-            ]
-            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.SUBJECT,
-                                           role=entity, ordinal=len(inputs)))
-            set_shot_bindings(db, project, shot, inputs, actor=actor)
-            bound += 1
-    return bound
+    return bind_adopted_masters_to_shots(db, project_id, plan_id, actor)
 
 
 def _material_receipt(db, project_id: str, request_key: str) -> dict | None:

@@ -44,6 +44,7 @@ LEASE_SECONDS = 300
 
 STEP_LABELS = {
     "SCAN": "深搜本机已有资源",
+    "TOOL_REPAIR": "补装缺失基础工具",
     "RECONCILE": "核验并登记已有字节",
     "DOWNLOAD": "下载并安装缺失文件",
     "INSTANCE": "创建/补全本机 ComfyUI 实例",
@@ -63,6 +64,9 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
     steps = []
     if deep_scan:
         steps.append("SCAN")
+    # 补工具是整备链的一环（与下载/实例/核验同一个后台任务），不再是页面直连
+    # 的独立长请求；工具已达标时这一步如实跳过。
+    steps.append("TOOL_REPAIR")
     steps.extend(["RECONCILE", "DOWNLOAD"])
     # The instance/recipe/profile/validation chain belongs to the H3 and image
     # runtimes. RelayVSR is post-production on the existing ComfyUI core: it
@@ -289,7 +293,7 @@ def advance(factory, settings, worker_id: str) -> str | None:
     step_id = str(pending["id"])
     task["current"] = step_id
     try:
-        if step_id not in {"TARGET", "SCAN", "RECONCILE", "DOWNLOAD"}:
+        if step_id not in {"TARGET", "SCAN", "TOOL_REPAIR", "RECONCILE", "DOWNLOAD"}:
             with factory() as db:
                 live = _live_installation_work(db, str(task.get("project_id") or ""))
             if live:
@@ -353,6 +357,7 @@ def _message_of(exc: Exception) -> str:
 def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str, Any]:
     handler = {
         "SCAN": _step_scan,
+        "TOOL_REPAIR": _step_tool_repair,
         "RECONCILE": _step_reconcile,
         "DOWNLOAD": _step_download,
         "INSTANCE": _step_instance,
@@ -366,6 +371,42 @@ def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str
         "IMAGE_EDIT_SAMPLES": _step_image_edit_samples,
     }[step_id]
     return handler(factory, settings, task)
+
+
+def _step_tool_repair(factory, settings, task) -> dict[str, Any]:
+    """Repair missing base tools through the same installer the API uses.
+
+    Tool supplement is one step of the single preparation task, not a separate
+    page-driven long request.  Tools already at floor skip by name; a repair
+    that cannot finish is named, never silently turned into "ready".
+    """
+    from shine.comfyops.environment_repair import (
+        build_repair_plan,
+        execute_repair,
+        read_repair_state,
+    )
+    from shine.comfyops.host_env import probe_host_environment
+
+    with factory() as db:
+        report = probe_host_environment(
+            Path(settings.data_dir), deployment_dir=Path(settings.comfyops_dir))
+        plan = build_repair_plan(settings, report, state=read_repair_state(db))
+    if not plan.get("packages"):
+        return {"status": "SKIPPED", "detail": "基础工具已达标，无需补装。"}
+    with factory() as db:
+        db.rollback()  # 长下载不持有写事务
+        try:
+            result = execute_repair(db, settings, "worker:setup", plan["plan_id"], report=report)
+        except Exception as exc:  # noqa: BLE001 - the named refusal is the answer
+            return {"status": "FAILED", "code": _code_of(exc),
+                    "detail": "基础工具补装未完成：" + _message_of(exc)}
+    status = result.get("status")
+    if status in {"SUCCEEDED", "ALREADY_AVAILABLE"}:
+        return {"status": "DONE", "detail": "基础工具已补装并复查通过。"}
+    if status == "PLAN_UNSUPPORTED":
+        return {"status": "SKIPPED", "detail": "自动补装只在 Windows 本机执行；当前环境未运行安装。"}
+    return {"status": "FAILED", "code": f"TOOL_REPAIR_{status}",
+            "detail": result.get("message") or "基础工具补装未完成，可重试。"}
 
 
 def _step_scan(factory, settings, task) -> dict[str, Any]:
@@ -455,23 +496,35 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     worker.  Each tick re-reads the attempt's real stage; a finished download
     is never re-queued and a failed one is named, not silently retried forever.
     """
+    from shine.comfyops.deployment import REVIEW_COMPONENTS
     from shine.comfyops.models import InstallationAttempt
     from shine.comfyops.setup_summary import capability_report, resolve_installation
 
     request = task.get("request") or {}
     capabilities = request.get("capabilities") or []
+    # 审片（画面审片 / 语音核对）是可选增强：它沿用自己的安装记录在后台推进，
+    # 下载中或失败都不卡住 H3 / 出图的生产链。生产链只按自己的实际依赖推进。
+    review_caps = {key.lower() for key in REVIEW_COMPONENTS}
     downloads = task.setdefault("downloads", {})
 
     pending: list[str] = []
     for capability, info in list(downloads.items()):
+        if info.get("done"):
+            continue  # 这次授权已取回并核验过字节，不必再查安装记录
         with factory() as db:
             attempt = db.get(InstallationAttempt, info.get("attempt_id"))
         if attempt is None:
+            if capability in review_caps:
+                info.pop("attempt_id", None)
+                continue
             return {"status": "FAILED", "code": "DOWNLOAD_ATTEMPT_MISSING",
                     "detail": f"{capability} 的安装尝试记录不在了，请重新发起整备。"}
         stage = attempt.stage or attempt.status
         if attempt.status in {"FAILED", "FAILED_RECONCILE_REQUIRED"} or stage in {
                 "NEEDS_REVIEW", "CANCELLED", "FAILED_RETRYABLE"}:
+            if capability in review_caps:
+                info["review_state"] = "failed"
+                continue
             return {"status": "FAILED", "code": attempt.error_code or "DOWNLOAD_FAILED",
                     "detail": f"{capability} 下载未完成：{attempt.error_message or stage}。"
                               "已下载的字节会保留，核对后可继续。"}
@@ -479,8 +532,14 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
             info["done"] = True
             continue
         if stage in _DOWNLOAD_ACTIVE or attempt.status in _DOWNLOAD_ACTIVE:
+            if capability in review_caps:
+                info["review_state"] = "running"
+                continue
             pending.append(capability)
         else:
+            if capability in review_caps:
+                info["review_state"] = "unknown"
+                continue
             return {"status": "FAILED", "code": "DOWNLOAD_STATE_UNKNOWN",
                     "detail": f"{capability} 的安装停在未知状态 {stage}，需要核对。"}
     if pending:
@@ -494,6 +553,10 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     for capability in capabilities:
         if downloads.get(capability, {}).get("done"):
             continue  # this authorization already fetched and verified the bytes
+        if capability in review_caps and downloads.get(capability, {}).get("attempt_id"):
+            # 审片已排队（运行中或失败）：沿用自己的安装记录，不重复排队，
+            # 也不把它的状态当成生产链的缺件。
+            continue
         with factory() as db:
             report = capability_report(db, settings, capability, installation=selected,
                                        project_id=task.get("project_id"),
@@ -532,6 +595,11 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 plan_view = install_plan(body=body, settings=settings, db=db)
             except Exception as exc:  # noqa: BLE001 - admission refusal is the answer
                 db.rollback()
+                if capability in review_caps:
+                    # 可选审片的下载被拒绝（如硬件门槛）只记录，不卡生产链。
+                    downloads[capability] = {"review_state": "failed",
+                                             "error_code": _code_of(exc)}
+                    continue
                 return {"status": "FAILED", "code": _code_of(exc),
                         "detail": f"{capability} 的安装计划被拒绝：{_message_of(exc)}"}
             plan_id = plan_view["plan_id"]
@@ -546,8 +614,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         attempt_id, _reused = queue_install_attempt(
             factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED")
         downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id}
-    return {"status": "PENDING",
-            "detail": f"已排队下载：{'、'.join(row[0] for row in plans_needed)}（关闭页面也会继续）。"}
+    production_queued = [row[0] for row in plans_needed if row[0] not in review_caps]
+    if production_queued:
+        return {"status": "PENDING",
+                "detail": f"已排队下载：{'、'.join(production_queued)}（关闭页面也会继续）。"}
+    return {"status": "DONE",
+            "detail": "生产所需文件已就绪；可选审片权重在后台沿用自己的安装记录继续。"}
 
 
 def _step_image_samples(factory, settings, task) -> dict[str, Any]:
@@ -646,7 +718,8 @@ def _step_instance(factory, settings, task) -> dict[str, Any]:
     from shine.services import add_audit
 
     request = task.get("request") or {}
-    project_id = str(task.get("project_id"))
+    # 实例是本机机器级依赖：空库（还没有作品）也能创建，不必等关联作品。
+    project_id = task.get("project_id")
     with factory() as db:
         resolved = resolve_installation(db, settings, path=request.get("installation_path"))
         selected = resolved.get("selected") or {}
@@ -744,7 +817,7 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
                 continue
             try:
                 result = deployment.generate_configuration(
-                    db, settings, str(task.get("project_id")),
+                    db, settings, task.get("project_id"),
                     instance_name=target.get("name") or "shine-h3",
                     port=int(target.get("port") or 8188),
                     variant_id=request.get("variant_id"),

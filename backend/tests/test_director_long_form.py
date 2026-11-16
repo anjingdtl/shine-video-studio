@@ -827,13 +827,15 @@ def test_materials_are_judged_after_the_storyboard(api):
     assert stages["plan"]["blockers"] == [], stages["plan"]
     # the storyboard design is finished
     assert stages["storyboard"]["done"] is True, stages["storyboard"]
-    # and the material stage names what is still missing without blocking:
-    # the picture is optional and H3 generates the one that is missing.
-    assert stages["assets"]["done"] is True, stages["assets"]
+    # and the material stage names what is still missing without hard-blocking
+    # production: blockers stay empty (the picture is optional, H3 can generate
+    # it), but the journey honestly stops at material preparation until the
+    # missing master is confirmed — it must not skip ahead to the package.
+    assert stages["assets"]["done"] is False, stages["assets"]
     assert stages["assets"]["blockers"] == [], stages["assets"]
     assert any(row["code"] == "SHOT_REQUIRED_ASSET_NOT_MASTER"
                for row in stages["assets"]["facts"]["material_notices"]), stages["assets"]
-    assert journey["next_stage"] == "package"
+    assert journey["next_stage"] == "assets"
 
 
 def test_the_material_stage_names_a_character_without_a_master(api):
@@ -858,10 +860,12 @@ def test_the_material_stage_names_a_character_without_a_master(api):
     journey = client.get(f"/api/v1/projects/{project_id}/journey").json()
     stages = {stage["id"]: stage for stage in journey["stages"]}
     assert stages["storyboard"]["done"] is True, stages["storyboard"]
-    # The material is a requirement, not a blocker: the stage says what is
-    # still missing, and the picture H3 will generate is named as such.
-    assert stages["assets"]["done"] is True, stages["assets"]
+    # The material is a requirement, not a hard blocker: blockers stay empty,
+    # but the journey stops at material preparation and names the character
+    # that still waits for its master instead of skipping ahead.
+    assert stages["assets"]["done"] is False, stages["assets"]
     assert stages["assets"]["blockers"] == [], stages["assets"]
     notices = stages["assets"]["facts"]["material_notices"]
     assert any(row["code"].startswith("SHOT_CHARACTER_MASTER_MISSING")
                for row in notices), stages["assets"]
+    assert journey["next_stage"] == "assets"

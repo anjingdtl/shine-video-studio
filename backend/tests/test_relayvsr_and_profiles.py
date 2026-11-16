@@ -54,10 +54,10 @@ def test_relayvsr_capability_report_names_missing_weights():
 
 def test_relayvsr_preparation_only_reconciles_and_downloads():
     steps = _steps_for(["relayvsr"], verify_runtime=True)
-    assert steps == ["RECONCILE", "DOWNLOAD"]
+    assert steps == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]
     # With the deep scan requested it leads, but still no H3 runtime chain.
     assert _steps_for(["relayvsr"], verify_runtime=True, deep_scan=True) == [
-        "SCAN", "RECONCILE", "DOWNLOAD"]
+        "SCAN", "TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]
     # H3 keeps its full chain.
     h3 = _steps_for(["h3"], verify_runtime=True)
     assert "INSTANCE" in h3 and "VALIDATE" in h3

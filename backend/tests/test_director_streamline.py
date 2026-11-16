@@ -489,14 +489,14 @@ def test_confirm_one_episode_while_the_other_is_pending(api):
     # The ready episode lands even while the other is blocked.
     confirmed = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert confirmed.status_code == 200, confirmed.text
     shot_ids = confirmed.json()["shot_ids"]
     assert shot_ids
     # A repeated confirmation reuses the same shots, never duplicates them.
     repeat = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert repeat.status_code == 200
     assert repeat.json()["shot_ids"] == shot_ids
 
@@ -952,7 +952,7 @@ def test_derive_materials_matches_masters_and_marks_usage(api):
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
     _run_storyboard_to_rest(client, settings, project)
     client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-                json={}, headers=LOCAL)
+                json={"acknowledge_duration_deviation": True}, headers=LOCAL)
 
     derived = client.post(f"/api/v1/projects/{project}/director/materials/derive",
                           json={"episode_ids": ["ep-01"]}, headers=LOCAL)
@@ -1003,7 +1003,7 @@ def test_episode_scoped_package_freezes_only_ready_episodes(api):
     _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
     confirmed_ep = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert confirmed_ep.status_code == 200, confirmed_ep.text
 
     profile = register_workflow_profile(client, mode="Ref2VA")
@@ -1037,7 +1037,7 @@ def test_journey_reports_per_episode_storyboard_progress(api):
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
     _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
     client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-                json={}, headers=LOCAL)
+                json={"acknowledge_duration_deviation": True}, headers=LOCAL)
 
     journey = client.get(f"/api/v1/projects/{project}/journey").json()
     stage = next(row for row in journey["stages"] if row["id"] == "storyboard")

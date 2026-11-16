@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 
+from shine.materialprep import scenes
 from shine.models import AgentArtifact, AgentTaskRecord
 
 SCRIPT = "场景一：\n林知远：你来了。\n\n场景二：\n林知远转身离开。\n"
@@ -54,6 +55,10 @@ def _prepare(client, project_id: str, document: dict, **body):
 def test_the_server_prepares_every_scene_and_reuses_the_answer(api, monkeypatch):
     client, factory, settings = api
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
+    # Length-driven segmentation merges short scenes; this test exercises the
+    # per-scene reuse path, so force one extraction unit per heading interval
+    # (SCRIPT intervals are 15 and 14 chars; a 20-char ceiling splits them).
+    monkeypatch.setattr(scenes, "MAX_SCENE_CHARS", 20)
     project_id = client.post("/api/v1/projects", json={"title": "雾港"}).json()["id"]
     profile = client.post(
         "/api/v1/provider-profiles", json={"name": "writer-mock", "kind": "mock", "model": "writer"}
@@ -148,6 +153,9 @@ def test_one_failed_scene_does_not_stop_the_others(api, monkeypatch):
     """A long script must not lose the scenes that did work."""
     client, factory, settings = api
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
+    # Three heading intervals of 9/9/8 chars: a 12-char ceiling keeps one unit
+    # per scene so a single scene failure can be isolated from the others.
+    monkeypatch.setattr(scenes, "MAX_SCENE_CHARS", 12)
     project_id = client.post("/api/v1/projects", json={"title": "雾港"}).json()["id"]
     profile = client.post(
         "/api/v1/provider-profiles", json={"name": "writer-mock", "kind": "mock", "model": "writer"}
@@ -179,14 +187,17 @@ def test_one_failed_scene_does_not_stop_the_others(api, monkeypatch):
 
     response = _prepare(client, project_id, document)
     assert response.status_code == 200, response.text
-    scenes = response.json()["scenes"]
-    assert [scene["status"] for scene in scenes] == ["PREPARED", "NEEDS_REVIEW", "PREPARED"], scenes
+    scene_rows = response.json()["scenes"]
+    assert [scene["status"] for scene in scene_rows] == ["PREPARED", "NEEDS_REVIEW", "PREPARED"], scene_rows
     assert len(response.json()["preparations"]) == 2, response.json()
 
 
 def test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input(api, monkeypatch):
     client, factory, settings = api
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "0")
+    # SCRIPT's two heading intervals (15/14 chars) stay separate units at a
+    # 20-char ceiling so the per-scene input identity is exercised.
+    monkeypatch.setattr(scenes, "MAX_SCENE_CHARS", 20)
     project_id = client.post("/api/v1/projects", json={"title": "雾港"}).json()["id"]
     profile = client.post(
         "/api/v1/provider-profiles", json={"name": "writer-mock", "kind": "mock", "model": "writer"}

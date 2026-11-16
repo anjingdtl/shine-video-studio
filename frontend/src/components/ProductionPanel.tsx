@@ -74,6 +74,12 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
   const attentionJobs = jobs.filter((job) => ['NEEDS_REVIEW', 'FAILED', 'BLOCKED'].includes(job.status));
   const activeJobs = jobs.filter((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING', 'PLANNED', 'READY', 'QUEUED'].includes(job.status));
   const doneJobs = jobs.filter((job) => ['PASSED', 'CANCELLED'].includes(job.status));
+  // 顶部计数与下方任务列表读同一份 jobs 事实（三原则），不再混入系统全局/其它
+  // 作品的历史任务——否则本页 0/6 通过却显示「3 等人处理 1 失败」。
+  const queuedJobs = jobs.filter((job) => ['PLANNED', 'READY', 'QUEUED'].includes(job.status));
+  const runningJobs = jobs.filter((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(job.status));
+  const reviewJobs = jobs.filter((job) => ['NEEDS_REVIEW', 'BLOCKED'].includes(job.status));
+  const failedJobs = jobs.filter((job) => job.status === 'FAILED');
   const statusRank = (status: string) => (['NEEDS_REVIEW', 'FAILED', 'BLOCKED'].includes(status) ? 0
     : ['SUBMITTING', 'RUNNING', 'QC_PENDING'].includes(status) ? 1
       : ['PLANNED', 'READY', 'QUEUED'].includes(status) ? 2 : 3);
@@ -102,10 +108,10 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
       </div>
       <div className="status-strip">
         <span>网页服务 {system?.api_online ? '在线' : '离线'} · {production?.label ?? '状态未知'} · MiniMax-H3</span>
-        <span><b>{system?.pending_jobs ?? 0}</b> 排队中</span>
-        <span><b>{system?.running_jobs ?? 0}</b> 生成中</span>
-        <span><b>{system?.blocked_jobs ?? 0}</b> 等人处理</span>
-        <span><b>{system?.failed_jobs ?? 0}</b> 失败</span>
+        <span><b>{queuedJobs.length}</b> 排队中</span>
+        <span><b>{runningJobs.length}</b> 生成中</span>
+        <span><b>{reviewJobs.length}</b> 等人处理</span>
+        <span><b>{failedJobs.length}</b> 失败</span>
         {system?.last_error && <span className="error"><AlertTriangle size={11} /> {system.last_error}</span>}
       </div>
       {!realReady && <div className="scenario-row">

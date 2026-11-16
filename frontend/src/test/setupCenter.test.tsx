@@ -2,7 +2,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SetupCenter } from '../components/SetupCenter';
-import { StudioStub, baseRoutes, jsonResponse, ENV_REPORT } from './studioStub';
+import { StudioStub, baseRoutes, jsonResponse, ENV_REPORT, setupSummary } from './studioStub';
 
 const INT8 = {
   variant_id: 'h3-ref2va-int8-convrot', title: 'H3 Ref2VA INT8 ConvRot（当前生产基线）',
@@ -167,5 +167,43 @@ describe('制作环境：检测快照与候选下载', () => {
     // H3 is verified by the backend, and the image capability is already
     // present, so nothing needs downloading: the same 44GB is never planned twice.
     expect(screen.getByRole('button', { name: /确认并完成配置（不下载）/ })).toBeEnabled();
+  });
+});
+
+describe('页面直连执行旁路已收掉', () => {
+  it('不再有空点的「真实试镜一次」；运行核验交给一键准备', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(setupSummary({
+      capabilities: {
+        ...setupSummary().capabilities,
+        h3: {
+          ...setupSummary().capabilities.h3,
+          facts: { ...setupSummary().capabilities.h3.facts, FILES_FOUND: true, FILES_VERIFIED: true },
+          two_step: { files: { state: 'READY', label: '文件已就绪并核验' },
+                      run: { state: 'UNVERIFIED', label: '运行合同已核对，待真实试镜' } },
+        },
+      },
+    })) });
+    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    await detect();
+    expect(screen.queryByText(/真实试镜一次/)).toBeNull();
+    expect(screen.getByRole('button', { name: /一键绑定渲染器并核对运行合同/ })).toBeTruthy();
+  });
+
+  it('出图验证交给后台一键准备，不在页面直连启动渲染器', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse({
+      configured: true, layer: 'GRAPH_VERIFIED', families: {}, renderer: { state: 'NOT_STARTED' },
+      blockers: [], upstream: { required_bytes: 0 },
+    }) });
+    stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
+      status: 'QUEUED', task_id: 'setup-img', steps: ['TOOL_REPAIR', 'RECONCILE', 'DOWNLOAD', 'IMAGE_VERIFY'] }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    await detect();
+    await user.click(screen.getByRole('button', { name: /交给后台验证出图/ }));
+    await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1), { timeout: 20000 });
+    const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[] };
+    expect(body.capabilities).toEqual(['image']);
+    expect(stub.callsOf('POST', /setup\/image-runtime\/start/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /setup\/image-runtime\/validate/)).toHaveLength(0);
   });
 });

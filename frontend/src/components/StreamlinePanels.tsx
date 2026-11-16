@@ -18,7 +18,6 @@ import type { ErrorActionTarget } from '../errorActions';
 import {
   ApiError,
   api,
-  compileEpisodeSubtitles,
   confirmEpisodeShots,
   confirmStoryboardBook,
   controlDirectorStoryboardTask,
@@ -48,6 +47,7 @@ import {
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { MaterialPromptModal, ShotAssetRequestModal, ShotPromptModal, ShotSubtitleModal } from './ShotEditors';
+import { MaterialGenerationProgress } from './MaterialGenerationProgress';
 
 const FILM_TYPES = [
   { id: 'live_action', label: '真人实拍' },
@@ -93,6 +93,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
+  const [maxShotSeconds, setMaxShotSeconds] = useState(15);
   const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [book, setBook] = useState<StoryboardBook | null>(null);
@@ -103,6 +104,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [confirmedPlan, setConfirmedPlan] = useState<{ version: number } | null>(null);
   /** 比已确认版本更新的一版草稿：需要重新生成预览并确认。 */
   const [pendingDraft, setPendingDraft] = useState<number | null>(null);
+  /** 计划时长超出目标容差窗：服务端具名拒绝后，由用户显式接受或调整目标/分集。 */
+  const [planDeviation, setPlanDeviation] = useState<string | null>(null);
 
   useEffect(() => {
     api<StyleCatalogEntry[]>('/director-styles')
@@ -145,7 +148,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     finally { setBusy(false); }
   }
 
-  async function confirm() {
+  async function confirm(acknowledge = false) {
     if (!book) return;
     setBusy(true); setProblem('');
     try {
@@ -157,25 +160,35 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           film_type: filmType,
           dialogue_ratio_percent: DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45,
           narration_level: narrationLevel,
+          max_shot_seconds: maxShotSeconds,
         },
+        acknowledge_deviation: acknowledge,
       });
       setConfirmedPlan({ version: book.plan_version });
       setPendingDraft(null);
+      setPlanDeviation(null);
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
       onConfirmed?.();
-    } catch (error) { setProblem(describeError(error)); }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'EPISODE_PLAN_DURATION_DEVIATION') {
+        setPlanDeviation(error.message);
+      }
+      setProblem(describeError(error));
+    }
     finally { setBusy(false); }
   }
 
   const railPresent = useRailPresent();
   const primary: RailAction | null = !confirmedPlan
     ? (book
-        ? { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> }
+        ? (planDeviation
+            ? { label: '接受偏差并确认分镜书', onClick: () => void confirm(true), loading: busy, icon: <Check size={14} /> }
+            : { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> })
         : { label: '生成分镜书', onClick: () => void generate(), loading: busy, icon: <Sparkles size={14} /> })
     : null;
   useStageRail('storyboard-book', { priority: 1, primary },
     [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
-      episodeCount, targetSeconds]);
+      episodeCount, targetSeconds, maxShotSeconds, planDeviation]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
@@ -215,6 +228,11 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         <input type="number" min={8} max={3600} value={targetSeconds}
           onChange={(event) => setTargetSeconds(Math.max(8, Number(event.target.value) || 60))} />
       </label>
+      <label>单镜秒数上限
+        <input type="number" min={4} max={15} step={0.5} value={maxShotSeconds}
+          title="第③步镜头拆解里每个渲染镜头的时长上限；H3 单镜最短 4 秒，故可调范围 4–15 秒"
+          onChange={(event) => setMaxShotSeconds(Math.min(15, Math.max(4, Number(event.target.value) || 15)))} />
+      </label>
       <button type="button" className="btn-secondary" disabled={busy || !profileId} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书
       </button>
@@ -241,6 +259,11 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
+    {planDeviation && !confirmedPlan && <div className="notice" role="alert">
+      <p>{planDeviation} 可调整目标时长/分集后重新生成，或显式接受当前偏差继续。</p>
+      {!railPresent && <button type="button" className="btn-secondary" disabled={busy}
+        onClick={() => void confirm(true)}>接受偏差并确认分镜书</button>}
+    </div>}
 
     {book && <div className="book-preview">
       <div className="book-preview-head">
@@ -310,12 +333,21 @@ const REFUSAL_LABELS: Record<string, string> = {
 };
 
 function refusalReason(rejection: { code?: string; rejection_reason_code?: string;
-                                    provider_finish_reason?: string | null }): string {
+                                    provider_finish_reason?: string | null;
+                                    external_outcome?: string | null;
+                                    network_timeout_s?: number | null }): string {
   const code = rejection.rejection_reason_code ?? rejection.code ?? '';
   if (code === 'LLM_FORMAT') {
     return rejection.provider_finish_reason === 'length'
       ? '模型输出被截断，格式解析失败（LLM_FORMAT）'
       : '模型返回的格式无法解析（LLM_FORMAT）';
+  }
+  // 超时/流中断且结果未知：用记录自带的死线事实说清「超过 N 秒无回应」，
+  // 而不是笼统的「连不上远端模型」（连接其实已建立，是模型迟迟不应答）。
+  if (['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(code)
+      && rejection.external_outcome === 'UNKNOWN'
+      && typeof rejection.network_timeout_s === 'number' && rejection.network_timeout_s > 0) {
+    return `模型超过 ${Math.round(rejection.network_timeout_s)} 秒无回应，结果未知（${code}）`;
   }
   const label = REFUSAL_LABELS[code];
   return label ? `${label}（${code}）` : (code || '分镜被拒绝');
@@ -329,7 +361,10 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   onGoStage?: (target: ErrorActionTarget) => void;
 }) {
   const [state, setState] = useState<EpisodeStoryboardState | null>(null);
-  const [tables, setTables] = useState<Record<string, { shots: EpisodeShotRow[]; total: number }>>({});
+  const [tables, setTables] = useState<Record<string, {
+    shots: EpisodeShotRow[]; total: number;
+    stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number;
+  }>>({});
   const [editing, setEditing] = useState<{ shotId: string; duration: string } | null>(null);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
@@ -342,17 +377,24 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     shot: EpisodeShotRow; episodeId: string; lines: ShotSubtitleLine[];
   } | null>(null);
   const [subtitleResult, setSubtitleResult] = useState('');
+  /** 落镜总时长超出目标容差窗：服务端具名拒绝后，由用户显式接受偏差或改时长。 */
+  const [durationDeviation, setDurationDeviation] = useState<{ episodeId: string; text: string } | null>(null);
   const submitting = useRef(false);
 
   const load = useCallback(async () => {
     const rows = await fetchDirectorStoryboardState(projectId);
     setState(rows);
     if (rows.episodes.length) {
-      const next: Record<string, { shots: EpisodeShotRow[]; total: number }> = {};
+      const next: Record<string, { shots: EpisodeShotRow[]; total: number;
+        stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number }> = {};
       await Promise.all(rows.episodes.map(async (episode) => {
         try {
           const table = await fetchEpisodeShots(projectId, episode.episode_id);
-          next[episode.episode_id] = { shots: table.shots, total: table.total_editorial_seconds };
+          next[episode.episode_id] = {
+            shots: table.shots, total: table.total_editorial_seconds,
+            stale: table.confirmation_stale, confirmedVersion: table.confirmed_version,
+            confirmedCount: table.confirmed_shot_ids?.length,
+          };
         } catch { next[episode.episode_id] = { shots: [], total: 0 }; }
       }));
       setTables(next);
@@ -402,9 +444,17 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     await queueDirectorStoryboard(projectId);
     onMessage?.('分镜任务已排队；关掉页面也会由常驻 Worker 继续逐场拆镜。');
   });
-  const confirmEpisode = (episodeId: string) => act(`confirm-${episodeId}`, async () => {
-    await confirmEpisodeShots(projectId, episodeId);
-    onJourneyRefresh?.();
+  const confirmEpisode = (episodeId: string, acknowledge = false) => act(`confirm-${episodeId}`, async () => {
+    try {
+      await confirmEpisodeShots(projectId, episodeId, acknowledge);
+      setDurationDeviation(null);
+      onJourneyRefresh?.();
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
+        setDurationDeviation({ episodeId, text: error.message });
+      }
+      throw error;
+    }
   }, `第 ${episodeId} 集镜头已落定。`);
   const retryEpisode = (episodeId: string) => {
     if (!state?.state_version) return;
@@ -433,6 +483,14 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     });
     setEditing(null);
   });
+  /** 衔接由用户确认：接拍延续上一镜末帧（连贯），切开为独立镜头。后端早已支持
+   *  continuity_mode 修订，这里把确认入口暴露到界面，不再只读。 */
+  const toggleContinuity = (shot: EpisodeShotRow) => act(`continuity-${shot.shot_id}`, async () => {
+    await editEpisodeShotRow(projectId, shot.shot_id, {
+      expected_revision: shot.revision,
+      continuity_mode: shot.continuity_mode === 'last_frame' ? 'cut' : 'last_frame',
+    });
+  }, shot.continuity_mode === 'last_frame' ? '已改为切开（独立镜头）。' : '已改为接拍（延续上一镜末帧）。');
 
   /** 字幕按集读取一次，找到这一镜现有的行；保存后由子面板回调刷新。 */
   const openSubtitle = async (episodeId: string, shot: EpisodeShotRow) => {
@@ -448,22 +506,20 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     }
   };
 
-  const compileSubtitles = (episodeId: string) => act(`subtitles-${episodeId}`, async () => {
-    const body = await compileEpisodeSubtitles(projectId, episodeId);
-    setSubtitleResult(
-      `已生成字幕第 ${body.revision} 版（${body.cue_count} 行，`
-      + `${body.basis === 'actual' ? '按真实成片时长' : '按计划时长'}）。`
-      + (body.basis === 'planned' ? ' 出片后建议再生成一次以对齐真实时长。' : ''));
-    onMessage?.(`本集字幕轨第 ${body.revision} 版已生成；到后期批准并合成。`);
-  }, '本集字幕轨已生成。');
-
   const episodes = state?.episodes ?? [];
   const railPresent = useRailPresent();
   const readyCount = episodes.filter((row) => confirmedEpisodes[row.episode_id]).length;
+  // 操作栏必须名实一致：全部集都已确认且没有待重新确认的新拆镜时，没有「未确认
+  // 的场次」可再跑，主操作应是去旅程的下一步（拍摄素材准备），而不是挂一个空跑
+  // 的再跑按钮，也不能跳过素材准备直接去导演包。
+  const allConfirmed = episodes.length > 0 && readyCount === episodes.length
+    && !episodes.some((row) => tables[row.episode_id]?.stale);
   const primary: RailAction | null = running
     ? null
-    : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
-        loading: busy === 'generate', icon: <Sparkles size={14} /> };
+    : allConfirmed
+      ? { label: '去素材准备', onClick: () => onGoStage?.('assets-stage'), icon: <Film size={14} /> }
+      : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
+          loading: busy === 'generate', icon: <Sparkles size={14} /> };
   useStageRail('episode-storyboard', {
     priority: 1,
     primary,
@@ -472,7 +528,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
         sum + row.units.filter((unit) => unit.state === 'APPLIED').length, 0),
       total: episodes.reduce((sum, row) => sum + row.units.length, 0) || undefined,
     } : null,
-  }, [state, busy, running]);
+  }, [state, busy, running, tables, confirmedEpisodes, allConfirmed]);
 
   return <section className="card section-card" id="episode-storyboard">
     <div className="section-heading">
@@ -491,8 +547,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
 
     <div className="episode-actions">
       {!railPresent && <button type="button" className="btn-primary" disabled={busy !== '' || running}
-        onClick={generate}>
-        <Play size={13} /> {running ? '分镜生成中…' : (state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜')}
+        onClick={allConfirmed ? () => onGoStage?.('assets-stage') : generate}>
+        <Play size={13} /> {running ? '分镜生成中…' : allConfirmed ? '去素材准备' : (state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜')}
       </button>}
       {state?.status === 'NEEDS_REVIEW' && <span className="run-hint">
         <TriangleAlert size={12} /> 有集被阻塞；每一集可单独重试，其余集不受影响。
@@ -532,11 +588,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
       const confirmedVersion = confirmedEpisodes[episode.episode_id];
       const applied = episode.status === 'APPLIED';
       const blocked = episode.status === 'BLOCKED';
-      return <details key={episode.episode_id} className="stage-dock episode-dock" open={!confirmedVersion}>
+      return <details key={episode.episode_id} className="stage-dock episode-dock" open={!confirmedVersion || !!table?.stale}>
         <summary className="produce-focus-summary">
           <span className="focus-summary-label">
             {confirmedVersion
-              ? <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.shots.length ?? 0} 镜）</>
+              ? table?.stale
+                ? <><RefreshCw size={13} /> 第 {episode.order ?? episode.episode_id} 集 · 最新拆镜 {table.shots.length} 镜 · 待重新确认</>
+                : <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.shots.length ?? 0} 镜）</>
               : blocked
                 ? <><TriangleAlert size={13} /> 第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}</>
                 : <>第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}{table?.shots.length ? `（${table.shots.length} 镜）` : ''}</>}
@@ -568,8 +626,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                 {uncertain
                   ? ' 这次请求的结果不确定，不会自动重发；核对并确认后才会发起一次新请求。'
                   : landingOnly
-                    ? ' 不会自动重发；重试会复用已完成的工种结果，只重新落镜。'
-                    : ' 不会自动重发；重试会发起一次新的模型请求。'}
+                    ? ' 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。'
+                    : ' 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。'}
               </span>
               {uncertain
                 ? <button type="button" className="btn-secondary" disabled={busy !== ''}
@@ -578,7 +636,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                   </button>
                 : <button type="button" className="btn-secondary" disabled={busy !== ''}
                     onClick={() => retryEpisode(episode.episode_id)}>
-                    <RefreshCw size={12} /> 重试这一集
+                    <RefreshCw size={12} /> {blockedUnit ? '重试这一场' : '重试这一集'}
                   </button>}
             </div>;
           })()}
@@ -616,7 +674,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                           onChange={(event) => setEditing({ shotId: shot.shot_id, duration: event.target.value })} />
                       : shot.duration_target_s}
                   </td>
-                  <td>{shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}</td>
+                  <td>
+                    <button type="button" className="btn-text" disabled={busy !== '' || (!!confirmedVersion && !table?.stale)}
+                      title="点击切换衔接：接拍延续上一镜末帧（画面连贯），切开为独立镜头"
+                      onClick={() => void toggleContinuity(shot)}>
+                      {shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}
+                    </button>
+                  </td>
                   <td>
                     <span className={`head-chip ${shot.prompt?.status === 'frozen' ? 'ok'
                       : shot.prompt?.status === 'inactive' ? 'warn' : ''}`}
@@ -637,7 +701,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                     {editing?.shotId === shot.shot_id
                       ? <button type="button" className="btn-text" disabled={busy !== ''}
                           onClick={() => void saveDuration(shot)}>保存</button>
-                      : <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
+                      : <button type="button" className="btn-text" disabled={busy !== '' || (!!confirmedVersion && !table?.stale)}
                           onClick={() => setEditing({ shotId: shot.shot_id, duration: String(shot.duration_target_s) })}>
                           改时长</button>}
                     <button type="button" className="btn-text" disabled={busy !== ''}
@@ -656,22 +720,29 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
               本集合计成片时长约 {Math.round(table.total)} 秒；每镜由 {table.shots.length} 个 4–15 秒的 H3 生成片段承载。
               提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
             </p>
-            <div className="episode-subtitle-bar">
-              <button type="button" className="btn-secondary" disabled={busy !== ''}
-                onClick={() => void compileSubtitles(episode.episode_id)}>
-                <ListChecks size={12} /> 生成 / 更新本集字幕轨
-              </button>
-              <span className="run-hint">
-                只使用已冻结的镜头字幕；未出片前按计划时长排布，出片后可再生成一次对齐真实时长。
-                本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
-              </span>
-            </div>
+            <p className="run-hint">
+              字幕在这里逐镜撰写与冻结；字幕轨的生成与装配在「后期成片」按真实成片时长进行，
+              未出片不提前装配。本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
+            </p>
           </>}
           {applied && !confirmedVersion && <button type="button" className="btn-primary"
             disabled={busy !== '' || !table?.shots.length}
             onClick={() => confirmEpisode(episode.episode_id)}>
             <Check size={13} /> 确认本集镜头（{table?.shots.length ?? 0} 镜）
           </button>}
+          {confirmedVersion && table?.stale && <div className="notice" role="alert">
+            <p>最新拆镜落了 {table.shots.length} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
+              重新确认本集才会用新镜头替换旧确认；旧镜头与已出片产物作为历史保留，不会被改写。</p>
+            <button type="button" className="btn-primary" disabled={busy !== '' || !table.shots.length}
+              onClick={() => confirmEpisode(episode.episode_id)}>
+              <Check size={13} /> 重新确认本集（采用最新 {table.shots.length} 镜）
+            </button>
+          </div>}
+          {durationDeviation?.episodeId === episode.episode_id && <div className="notice" role="alert">
+            <p>{durationDeviation.text} 可用每镜「改时长」把总时长调进目标窗，或显式接受当前偏差。</p>
+            <button type="button" className="btn-secondary" disabled={busy !== ''}
+              onClick={() => confirmEpisode(episode.episode_id, true)}>接受偏差并确认本集</button>
+          </div>}
           {!table?.shots.length && !blocked && <p className="empty-inline">
             这一集的分镜还没落镜；{running ? '后台正在生成。' : '点击上方按钮生成。'}
           </p>}
@@ -722,10 +793,9 @@ const FAMILY_LABEL: Record<string, string> = {
   character: '人物', scene: '场景', prop: '道具',
 };
 
-export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoStage }: {
+export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
   projectId: string;
   onMessage?: (message: string) => void;
-  onOpenLibrary?: () => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
   onGoStage?: (target: ErrorActionTarget) => void;
 }) {
@@ -738,15 +808,23 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
   const [result, setResult] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [promptTarget, setPromptTarget] = useState<DirectorMaterialRequirement | null>(null);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [batchTarget, setBatchTarget] = useState<Decision>('generate');
+  const [progressKey, setProgressKey] = useState(0);
   const submitting = useRef(false);
 
   const apply = useCallback((body: DirectorMaterialsView) => {
     setView(body);
     setDecisions((current) => {
-      // 已经做过的选择不会被一次刷新覆盖；新条目按其真实状态取默认值。
+      // 已经做过的选择不会被一次刷新覆盖；但当裁决变化使旧选择失效（必需项不能
+      // 跳过、缺主素材不能复用）时回到默认，避免提交被服务端拒绝（三原则：决策
+      // 跟随同一份裁决）。
       const next: Record<string, Decision> = {};
       for (const row of body.requirements) {
-        next[row.requirement_id] = current[row.requirement_id] ?? defaultDecision(row);
+        const prev = current[row.requirement_id];
+        const stale = prev === 'skip' && row.critical
+          || prev === 'reuse_master' && !row.matched_master;
+        next[row.requirement_id] = prev && !stale ? prev : defaultDecision(row);
       }
       return next;
     });
@@ -821,6 +899,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
       if (outcome.batch_error) setProblem(outcome.batch_error.message);
       onMessage?.('素材决策已确认。');
       await load();
+      setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
       // 断连或超时：先读台账，确认是否其实已经生效，再让用户决定。
@@ -852,6 +931,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
         : `「${row.name ?? row.entity_id}」已改用你上传的主素材。`);
       onMessage?.('这一项素材已更新。');
       await load();
+      setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
     } finally {
@@ -877,11 +957,34 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
   }
 
   const requirements = view?.requirements ?? [];
+  const selectedIds = requirements.filter((row) => selected[row.requirement_id]).map((row) => row.requirement_id);
+  const allSelected = requirements.length > 0 && selectedIds.length === requirements.length;
+  /** 批量设定处理方式：不可用的选项按真实事实降级（缺主素材不能复用、必需项不能跳过），
+   *  与逐项下拉用的是同一份 decisions，提交时仍由 commit() 唯一送出。 */
+  function applyBatch(target: Decision, ids: string[]) {
+    if (busy !== '' || ids.length === 0) return;
+    setDecisions((current) => {
+      const next = { ...current };
+      for (const row of requirements) {
+        if (!ids.includes(row.requirement_id)) continue;
+        next[row.requirement_id] = target === 'reuse_master'
+          ? (row.matched_master ? 'reuse_master' : 'generate')
+          : target === 'skip'
+            ? (row.critical ? 'generate' : 'skip')
+            : target;
+      }
+      return next;
+    });
+    onMessage?.(`已把 ${ids.length} 项素材的处理方式批量更新，确认后一次送出。`);
+  }
+  function toggleAll(checked: boolean) {
+    setSelected(Object.fromEntries(requirements.map((row) => [row.requirement_id, checked])));
+  }
   const pendingChoice = requirements.some((row) => !decisions[row.requirement_id]);
   const missingCritical = requirements.filter(
     (row) => row.critical && !row.matched_master).length;
   const primary: RailAction | null = requirements.length
-    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并送素材中心',
+    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并开始准备素材',
         onClick: () => void commit(), loading: busy === 'commit',
         disabled: busy !== '' || pendingChoice,
         icon: <ListChecks size={14} />,
@@ -913,9 +1016,10 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
-    {result && <p className="run-hint ok-hint"><Check size={12} /> {result}
-      {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>去素材中心</button>}
-    </p>}
+    {result && <p className="run-hint ok-hint"><Check size={12} /> {result}</p>}
+
+    <MaterialGenerationProgress projectId={projectId} refreshKey={progressKey}
+      onPromoted={() => { void load(); }} />
 
     {loaded && !requirements.length && <p className="empty-inline">
       还没有按镜头的素材清单。先确认至少一集的镜头，再生成清单。
@@ -929,14 +1033,42 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
         </span>
         <span>{requirements.filter((row) => row.matched_master).length} 项可复用</span>
       </div>
+      <div className="material-batch-bar">
+        <label className="material-select-cell" title="全选/取消全选">
+          <input type="checkbox" checked={allSelected} disabled={busy !== ''}
+            aria-label="全选素材需求"
+            onChange={(event) => toggleAll(event.target.checked)} />
+        </label>
+        <span className="mgp-counts">已选 {selectedIds.length} 项</span>
+        <select value={batchTarget} disabled={busy !== ''} aria-label="批量处理方式"
+          onChange={(event) => setBatchTarget(event.target.value as Decision)}>
+          <option value="generate">AI 制作</option>
+          <option value="reuse_master">复用现有主素材（缺的自动改 AI 制作）</option>
+          <option value="skip">跳过（必需项自动改 AI 制作）</option>
+        </select>
+        <button type="button" className="btn-secondary" disabled={busy !== '' || selectedIds.length === 0}
+          onClick={() => applyBatch(batchTarget, selectedIds)}>应用到所选</button>
+        <button type="button" className="btn-secondary" disabled={busy !== ''}
+          title="一键把全部素材设为 AI 制作"
+          onClick={() => { toggleAll(true); applyBatch('generate', requirements.map((row) => row.requirement_id)); }}>
+          全部 AI 制作</button>
+        <button type="button" className="btn-text" disabled={busy !== '' || selectedIds.length === 0}
+          onClick={() => setSelected({})}>清空选择</button>
+      </div>
       <table className="shot-table material-table">
         <thead><tr>
-          <th>预览</th><th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th><th>单项操作</th>
+          <th className="material-select-cell">选</th><th>预览</th><th>条目</th><th>说明</th><th>用于</th><th>当前主素材</th><th>你的决定</th><th>单项操作</th>
         </tr></thead>
         <tbody>
           {requirements.map((row) => {
             const rowBusy = busy === `row-${row.requirement_id}`;
             return <tr key={row.requirement_id}>
+            <td className="material-select-cell">
+              <input type="checkbox" checked={!!selected[row.requirement_id]} disabled={busy !== ''}
+                aria-label={`选择 ${row.name ?? row.entity_id}`}
+                onChange={(event) => setSelected((current) => (
+                  { ...current, [row.requirement_id]: event.target.checked }))} />
+            </td>
             <td className="material-thumb-cell">
               {row.matched_master
                 ? <img className="material-thumb" src={`${API}/assets/${row.matched_master.asset_id}/thumbnail`}
@@ -965,6 +1097,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
                 </span>}</td>
             <td>
               <select value={decisions[row.requirement_id] ?? ''} disabled={busy !== ''}
+                aria-label={`处理方式：${row.name ?? row.entity_id}`}
                 onChange={(event) => setDecisions((current) => (
                   { ...current, [row.requirement_id]: event.target.value as Decision }))}>
                 {row.matched_master && <option value="reuse_master">复用现有主素材</option>}

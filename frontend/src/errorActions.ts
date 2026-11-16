@@ -14,6 +14,8 @@ export type ErrorAction = {
   /** 当 action 的落点页就是用户当前所在页时改指的动作：真正的上游前置。
    *  例如分集未确认出现在剧本统筹页本身，此时真正缺的是第 1 阶段的大纲确认。 */
   selfLoopAction?: { label: string; target: ErrorActionTarget };
+  /** 文案以服务端 message 为准（状态相关码）：前端不拿静态句盖掉后端事实。 */
+  serverMessage?: boolean;
 };
 
 export const ERROR_ACTIONS: Record<string, ErrorAction> = {
@@ -22,10 +24,12 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   PROFILE_NOT_VALIDATED: { reason: '生成方案还没在本机验证节点', action: { label: '去验证本机节点', target: 'setup-models' } },
   H3_CHARACTER_REFERENCE_MISSING: { reason: '有出场人物没有主素材', action: { label: '去准备素材', target: 'assets-stage' } },
   SHOT_CHARACTER_MASTER_MISSING: { reason: '镜头点名的人物缺主素材', action: { label: '去准备素材', target: 'assets-stage' } },
+  SHOT_REFERENCE_MISSING: { reason: '镜头至少需要一张参考图（人物或场景）才能 Ref2VA 开拍', action: { label: '去准备场景图', target: 'assets-stage' } },
   SCRIPT_TEXT_CONSENT_REQUIRED: { reason: '首次发送剧本到云端需同意', action: { label: '查看说明并同意', target: 'consent' } },
   REMOTE_AGENT_CONSENT_REQUIRED: { reason: '首次发送剧本到云端需同意', action: { label: '查看说明并同意', target: 'consent' } },
   SHOT_REVISION_CHANGED: { reason: '镜头已升版，需要新导演包', action: { label: '重新生成导演包', target: 'package-stage' } },
   PIPELINE_EPISODE_SCRIPT_SUPERSEDED: { reason: '分集剧本已被新大纲替代', action: { label: '重做这一卷分集', target: 'package-stage' } },
+  SHOT_DURATION_OVER_LIMIT: { reason: '镜头时长超过你设的单镜秒数上限', why: '在剧本统筹调高「单镜秒数上限」，或让这一镜的台词更短。', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_TIMEOUT: { reason: '云端模型响应超时', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_RATE_LIMIT: { reason: '云端模型限流，稍后重试', action: { label: '重试这一场', target: 'retry-scene' } },
   MATERIAL_IDENTITY_AMBIGUOUS: { reason: '同一人物在多场外观描述不一致', action: { label: '按单场拆分计划', target: 'split-plan' } },
@@ -54,11 +58,13 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
     why: '分集、分镜和导演包都以你确认的那一版大纲为依据，大纲未确认时它们无法成立。',
     action: { label: '去确认大纲', target: 'creative-stage' },
   },
-  // 分集方案要先落到已应用的镜头上，才谈得上下游一致。
+  // 分集方案要先落到已应用的镜头上，才谈得上下游一致。文案由服务端按真实
+  // 落镜/待确认状态给出（serverMessage），前端不拿静态句盖掉事实。
   EPISODE_PLAN_NOT_MATERIALIZED: {
-    reason: '分集方案还没有落到镜头上',
+    reason: '本集镜头待确认落到分集',
     why: '分集要按场次对应到已应用的镜头，否则这一集的镜头范围不成立。',
-    action: { label: '去把分集落到镜头', target: 'produce-stage' },
+    action: { label: '去确认本集镜头', target: 'produce-stage' },
+    serverMessage: true,
   },
   IMAGE_RUNTIME_NOT_READY: { reason: '本机出图环境还没就绪', action: { label: '去基础配置', target: 'setup-env' } },
   LLM_NOT_CONFIGURED: { reason: '还没配置文本模型', action: { label: '去配置文本模型', target: 'setup-models' } },
@@ -96,7 +102,10 @@ export function describeBlocker(
 } {
   const known = code ? ERROR_ACTIONS[code] : undefined;
   if (known) {
-    return { reason: known.reason, why: known.why, action: known.action, selfLoopAction: known.selfLoopAction };
+    // 状态相关码（serverMessage）：reason 用服务端按真实状态算出的 message，
+    // 静态 reason 只在服务端没给文案时兜底；动作仍由前端映射。
+    const reason = known.serverMessage && message ? message : known.reason;
+    return { reason, why: known.why, action: known.action, selfLoopAction: known.selfLoopAction };
   }
   return { reason: message || code || '需要处理' };
 }

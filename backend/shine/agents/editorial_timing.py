@@ -12,8 +12,15 @@ MIN_SEGMENT_MS = int(MIN_SEGMENT_S * 1000)
 MAX_SEGMENT_MS = int(MAX_SEGMENT_S * 1000)
 
 
-def editorial_timing_preview(brief: str) -> dict | None:
-    """Group an explicit cut table without changing its timestamps or creating jobs."""
+def editorial_timing_preview(brief: str, max_segment_s: float = MAX_SEGMENT_S) -> dict | None:
+    """Group an explicit cut table without changing its timestamps or creating jobs.
+
+    ``max_segment_s`` is the project's per-shot ceiling (never above H3's own
+    15-second maximum); it is the same cap the director prompt and the landed
+    spec are checked against, so the computed segmentation cannot promise a
+    shot the duration verdict would then reject.
+    """
+    max_segment_ms = int(min(MAX_SEGMENT_S, max_segment_s) * 1000)
     brief = brief.replace("\r\n", "\n")
     table = re.search(r"(?m)^\|\s*#\s*\|\s*切点\s*\|\s*时长\s*\|[^\n]*\n"
                       r"\|[-: |]+\n((?:\|[^\n]+(?:\n|$))+)", brief)
@@ -35,7 +42,7 @@ def editorial_timing_preview(brief: str) -> dict | None:
     for first, second in combinations(range(1, count), 2):
         indices = (0, first, second, count)
         lengths = [boundaries[b] - boundaries[a] for a, b in zip(indices, indices[1:], strict=False)]
-        if all(4000 <= length <= 15000 for length in lengths):
+        if all(MIN_SEGMENT_MS <= length <= max_segment_ms for length in lengths):
             options.append((max(lengths) - min(lengths), indices))
     indices = min(options)[1] if options else ()
     if not indices:
@@ -43,7 +50,7 @@ def editorial_timing_preview(brief: str) -> dict | None:
         # grouping in most cases: two editorial shots, or a short table, are
         # common.  The crew is served one grouping; without it the model is
         # asked to invent an arithmetic the server then rejects.
-        indices = _fallback_indices(boundaries, count)
+        indices = _fallback_indices(boundaries, count, max_segment_ms)
     return {
         "editorial_shot_count": count,
         "cut_starts_s": [boundary / 1000 for boundary in boundaries[:-1]],
@@ -55,7 +62,8 @@ def editorial_timing_preview(brief: str) -> dict | None:
     }
 
 
-def _fallback_indices(boundaries: list[int], count: int) -> tuple[int, ...]:
+def _fallback_indices(boundaries: list[int], count: int,
+                      max_segment_ms: int = MAX_SEGMENT_MS) -> tuple[int, ...]:
     """The best legal grouping when no three-segment grouping exists.
 
     The search minimises the longest render segment and prefers more segments
@@ -70,7 +78,7 @@ def _fallback_indices(boundaries: list[int], count: int) -> tuple[int, ...]:
             return None
         if segments == 1:
             length = boundaries[count] - boundaries[start]
-            if MIN_SEGMENT_MS <= length <= MAX_SEGMENT_MS:
+            if MIN_SEGMENT_MS <= length <= max_segment_ms:
                 return (length, (count,))
             return None
         key = (segments, start)
@@ -81,7 +89,7 @@ def _fallback_indices(boundaries: list[int], count: int) -> tuple[int, ...]:
             length = boundaries[cut] - boundaries[start]
             if length < MIN_SEGMENT_MS:
                 continue
-            if length > MAX_SEGMENT_MS:
+            if length > max_segment_ms:
                 break
             rest = solve(segments - 1, cut)
             if rest is None:
@@ -109,7 +117,7 @@ def editorial_shot_lengths(timing: dict) -> list[float]:
     return [round(end - start, 3) for start, end in zip(starts, starts[1:], strict=False)]
 
 
-def editorial_timing_blocker(timing: dict) -> dict | None:
+def editorial_timing_blocker(timing: dict, max_segment_s: float = MAX_SEGMENT_S) -> dict | None:
     """Why an editorial cut table cannot become H3 render segments, if it cannot.
 
     Some cut tables have no legal grouping at all: a 1.7 second shot cannot be
@@ -127,7 +135,7 @@ def editorial_timing_blocker(timing: dict) -> dict | None:
         "editorial_shot_lengths_s": lengths,
         "total_s": timing["total_s"],
         "min_segment_s": MIN_SEGMENT_S,
-        "max_segment_s": MAX_SEGMENT_S,
+        "max_segment_s": min(MAX_SEGMENT_S, max_segment_s),
         "shortest_shot_s": min(lengths) if lengths else None,
         "longest_shot_s": max(lengths) if lengths else None,
     }

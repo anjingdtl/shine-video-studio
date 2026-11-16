@@ -272,12 +272,17 @@ def _blocked_outline(api, monkeypatch, phase):
 
     client, factory, project, doc = setup_scene(
         api, monkeypatch, "场景一：房间\n阿德：出发。\n场景二：码头\n阿德：等船。")
+    # Length-driven segmentation merges this short two-scene script into one
+    # unit at the production ceiling. This fixture exercises a blocked SECOND
+    # scene, so force one unit per heading interval (14/13 chars) with a 20-char
+    # ceiling, applied to both the run and the helper's own segmentation.
+    monkeypatch.setattr(story, "_extract_segment_chars", lambda *a, **k: 20)
     gateway = LLMGateway(SecretStore(api[2].secret_store_dir), mock_responder=responder)
     task_id = _queue(client, project, doc)
     assert story.run_pending_story_task(factory, api[2], "first-worker", gateway=gateway)
     with factory() as db:
         text = db.get(ProjectDocument, doc["id"]).text
-    source = segment_document(text)
+    source = segment_document(text, max_scene_chars=20)
     assert len(source) >= 2
     with factory.begin() as db:
         root = db.get(AgentTaskRecord, task_id)
@@ -452,7 +457,7 @@ def _blocked_outline_state(db, project, doc, task_id, stuck_id, attempt):
     from shine.materialprep.source_spans import segment_document
 
     text = db.get(__import__("shine.models", fromlist=["ProjectDocument"]).ProjectDocument, doc["id"]).text
-    scene_key = segment_document(text)[1].key
+    scene_key = segment_document(text, max_scene_chars=20)[1].key
     stuck = db.get(AgentTaskRecord, stuck_id)
     stuck.status = "FAILED"
     stuck.error_code = "LLM_FORMAT"

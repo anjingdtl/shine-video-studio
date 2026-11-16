@@ -67,6 +67,16 @@ PURPOSE_GOAL_MULTIPLIER = {
     "observation": 0.10,
     "qa": 0.08,
     "structured": 0.30,
+    # Extracting one scene's facts into the preparation contract is structured
+    # work, not creative writing. Without its own row it fell back to the
+    # creative goal (4k) and a large reasoning reserve, and the model spent the
+    # allowance deliberating instead of answering - the outline stalled on a
+    # silent stream. Size it like the structured task it is.
+    "scene_prep": 0.30,
+    # The whole-project entity catalog is structured extraction (one cast/scene/
+    # prop list), not creative writing; its answer grows with the cast, so it has
+    # its own wider goal ceiling below rather than the creative fallback.
+    "entity_catalog": 0.30,
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
@@ -75,6 +85,49 @@ PURPOSE_MIN_GOAL = {
     "observation": 1_024,
     "qa": 768,
     "structured": 1_024,
+    # A scene-preparation segment can carry the whole short script (length-driven
+    # segmentation packs it into one unit), so its visible answer is several
+    # scenes' facts — not a 1k snippet. The goal must cover that answer; with the
+    # small low-effort reserve this keeps the completion cap at the proven ~5.4k
+    # rather than flooring at 4k and returning an empty completion.
+    "scene_prep": 4_096,
+    "entity_catalog": 2_048,
+}
+
+# The reasoning reserve is decided here, by purpose, for every caller — one
+# verdict, not a per-call override. These purposes run under the governor's
+# non-creative transport (completion_cap + reasoning_effort=low), where private
+# deliberation is bounded to tens of tokens (measured live), so the reserve is a
+# known small margin rather than the conservative deliberation budget that let a
+# capped call deliberate until the transport wall. Creative purposes keep the
+# conservative reserve below because they keep the model's own thinking budget.
+LOW_EFFORT_REASONING_RESERVE = 1_024
+PURPOSE_REASONING_RESERVE = {
+    "structured": LOW_EFFORT_REASONING_RESERVE,
+    "scene_prep": LOW_EFFORT_REASONING_RESERVE,
+    "outline": LOW_EFFORT_REASONING_RESERVE,
+    "entity_catalog": LOW_EFFORT_REASONING_RESERVE,
+    "observation": 512,
+    "qa": 512,
+}
+
+# The visible-output ceiling per purpose: the largest answer the task itself
+# produces, independent of how long the source is. This is the budget-usage
+# identification that lets a 500,000-character script be processed without a
+# single call demanding a six-figure completion. A narrative outline / scene plan
+# is a few thousand tokens; the entity catalog grows with the cast, so it gets a
+# wider ceiling. A genuine truncation retry escalates past the goal via the
+# verified hard cap, so a ceiling never silently caps a answer that really needs
+# more room — it only stops the input-proportional explosion.
+PURPOSE_MAX_GOAL = {
+    "scene": 6_144,
+    "creative": 12_288,
+    "outline": 6_144,
+    "observation": 2_048,
+    "qa": 2_048,
+    "structured": 6_144,
+    "scene_prep": 6_144,
+    "entity_catalog": 16_384,
 }
 
 
@@ -142,10 +195,22 @@ def _positive(value: Any) -> int | None:
 
 
 def default_visible_goal(input_tokens: int, purpose: str) -> int:
-    """A defensible visible-output target from the input size and the task."""
+    """A defensible visible-output target from the input size and the task.
+
+    The output need is bounded by the *task*, not the input length: a outline or
+    a scene plan is a few thousand tokens whether the script is 500 or 500,000
+    characters (the length-driven segmentation already keeps each unit small).
+    Scaling the goal with the input alone let a whole-script call (entity catalog,
+    top-level merge) demand a six-figure completion and deliberate until the
+    transport wall. The per-purpose ceiling identifies that bounded need; the
+    floor keeps a small unit from being starved, and a truncation retry still
+    escalates toward the verified hard cap.
+    """
     multiplier = PURPOSE_GOAL_MULTIPLIER.get(purpose, PURPOSE_GOAL_MULTIPLIER["creative"])
     floor = PURPOSE_MIN_GOAL.get(purpose, PURPOSE_MIN_GOAL["creative"])
-    return max(floor, int(math.ceil(input_tokens * multiplier)))
+    ceiling = PURPOSE_MAX_GOAL.get(purpose, PURPOSE_MAX_GOAL["creative"])
+    scaled = int(math.ceil(input_tokens * multiplier))
+    return max(floor, min(ceiling, scaled))
 
 
 def plan_call_budget(
@@ -180,11 +245,14 @@ def plan_call_budget(
     goal = min(goal, hard_cap)
 
     configured_reserve = _positive(config.generation_options.get("reasoning_reserve_tokens"))
-    reserve_known = reasoning_reserve_tokens is not None or configured_reserve is not None
+    purpose_reserve = PURPOSE_REASONING_RESERVE.get(purpose)
+    reserve_known = (reasoning_reserve_tokens is not None or configured_reserve is not None
+                     or purpose_reserve is not None)
     # A reasoning model's private deliberation is proportional to the task, not
-    # a rounding error: reserve at least twice the visible goal, never less than
-    # 4k, and cap it so one call still fits a generous window.
-    reserve = reasoning_reserve_tokens or configured_reserve or \
+    # a rounding error: low-effort purposes use the known small reserve decided
+    # above; creative purposes reserve at least twice the visible goal, never
+    # less than 4k, capped so one call still fits a generous window.
+    reserve = reasoning_reserve_tokens or configured_reserve or purpose_reserve or \
         max(4_096, min(16_384, int(math.ceil(goal * 2.0))))
     if not reserve_known:
         warnings.append("REASONING_RESERVE_CONSERVATIVE")

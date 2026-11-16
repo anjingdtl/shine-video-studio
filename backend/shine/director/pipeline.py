@@ -3167,6 +3167,10 @@ def build_volume_handoff(db, project_id: str, volume_id: str, workflow_profile_i
     if problems:
         raise ValueError("PIPELINE_VOLUME_PLAN_SCOPE_INVALID:" + ",".join(problems)[:400])
     plan_dump = payload.model_dump(mode="json")
+    # The four-stage volume handoff binds the approved cast into its shots as
+    # part of its own contract (the person approves masters here, not on the
+    # director material page).  It fills only missing slots and protects frozen
+    # / in-flight shots; it never replaces a binding the material flow confirmed.
     profile = db.get(WorkflowProfile, workflow_profile_id)
     if profile and profile.project_id in (None, project_id) and profile.mode.lower() == "ref2va":
         apply_missing_character_bindings(

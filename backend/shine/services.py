@@ -559,24 +559,39 @@ def complete_character_bindings(
     return result
 
 
-def apply_missing_character_bindings(db: Session, project: Project, shots: list[Shot], *, actor: str) -> None:
-    """Persist new subject bindings only on shots that can still be revised."""
+def protected_shot_ids(db: Session, project_id: str, shot_ids: list[str]) -> set[str]:
+    """The shots that must not be revised right now.
+
+    One protection rule shared by every executor that writes shot bindings: a
+    shot frozen into a confirmed package, owned by a live shoot, or holding an
+    unreconciled unknown submission is left alone.  A material re-confirmation
+    and a start admission therefore protect the same versions, instead of each
+    inventing its own guard.
+    """
     from shine.comfyops.ownership import shot_ownership
     from shine.director.package import latest_package, package_episodes
 
-    package = latest_package(db, project.id)
-    frozen_ids = {
+    wanted = set(shot_ids)
+    if not wanted:
+        return set()
+    package = latest_package(db, project_id)
+    frozen = {
         entry["shot_id"] for episode in package_episodes(db, package.id)
         for entry in (episode.manifest or {}).get("shots", [])
     } if package and package.status == "CONFIRMED" and not package.stale else set()
-    shot_ids = [shot.id for shot in shots if shot.id not in frozen_ids]
-    busy_ids = set(shot_ownership(db, project.id, shot_ids))
-    busy_ids.update(db.scalars(select(Job.shot_id).where(
-        Job.project_id == project.id, Job.shot_id.in_(shot_ids),
+    busy = set(shot_ownership(db, project_id, shot_ids))
+    busy.update(db.scalars(select(Job.shot_id).where(
+        Job.project_id == project_id, Job.shot_id.in_(shot_ids),
         Job.status == "NEEDS_REVIEW", Job.failure_code.in_(UNKNOWN_SUBMISSION_CODES),
     )))
+    return (frozen & wanted) | busy
+
+
+def apply_missing_character_bindings(db: Session, project: Project, shots: list[Shot], *, actor: str) -> None:
+    """Persist new subject bindings only on shots that can still be revised."""
+    protected = protected_shot_ids(db, project.id, [shot.id for shot in shots])
     for shot in shots:
-        if shot.id in frozen_ids or shot.id in busy_ids:
+        if shot.id in protected:
             continue
         spec = ShotSpec.model_validate(shot.spec)
         current = [ShotBindingInput(asset_id=row.asset_id, use_as=row.use_as, role=row.role,

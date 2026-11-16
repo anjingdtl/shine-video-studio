@@ -41,9 +41,11 @@ def _generate_storyboard(client, project: str) -> dict:
 
 
 def _confirmed_first_episode(client, project: str, episode_id: str) -> dict:
+    # 本测试关注「完成的集不被阻塞集拖累」，不关注时长窗口；夹具集时长可能落在
+    # 目标窗口外，按产品路径显式承认偏差后确认（duration 门禁另有专测）。
     response = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/{episode_id}/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -114,6 +116,52 @@ def test_overview_reads_are_stable_and_read_only(api):
     # And the read really describes the confirmed book, not a guess.
     assert first["plan"]["version"] == book["plan_version"]
     assert first["style"] is not None
+
+
+def test_a_merged_section_is_pending_in_neither_view(api, monkeypatch):
+    """合并进邻场的标题已被满足：旅程与制作页都不能把它报成「没拆成镜头」。
+
+    2026-11-16 用户报障：③镜头拆解全绿，⑥制作页却说「还有 2 场没拆成镜头」。
+    根因是 overview 把 merged_into 的标题当成缺镜，而 journey 正确跳过。两处读
+    同一份 section_storyboard_shot_ids，口径必须一致（三原则：一套事实一个裁决）。
+    """
+    client, _factory, _settings = api
+    prepared = _prepare_project(client, sections=2)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+
+    plans = client.get(f"/api/v1/projects/{project}/episode-plans").json()
+    confirmed = next(p for p in plans if p["version"] == book["plan_version"])
+    section_ids = confirmed["payload"]["episodes"][0]["section_ids"]
+    assert len(section_ids) >= 2
+    landed_section, merged_section = section_ids[0], section_ids[1]
+
+    from shine.materialprep import story as story_mod
+    real = story_mod.section_storyboard_shot_ids
+
+    def fake(db, project_id, section_id):
+        if section_id == merged_section:
+            return {"shot_ids": [], "missing": [], "merged_into": landed_section}
+        if section_id == landed_section:
+            return {"shot_ids": ["shot-1"], "missing": []}
+        return real(db, project_id, section_id)
+
+    monkeypatch.setattr(story_mod, "section_storyboard_shot_ids", fake)
+
+    overview = _overview(client, project)
+    episode = next(r for r in overview["episodes"] if r["episode_id"] == "ep-01")
+    pending_ids = [s["section_id"] for s in episode["storyboard"]["pending_sections"]]
+    assert merged_section not in pending_ids
+    assert episode["storyboard"]["landed_section_count"] == 1
+
+    journey = client.get(f"/api/v1/projects/{project}/journey").json()
+    storyboard = next(s for s in journey["stages"] if s["id"] == "storyboard")
+    journey_episode = next(e for e in storyboard["facts"]["episodes"]
+                           if e["episode_id"] == "ep-01")
+    assert journey_episode["pending_section_count"] == 0
+    # 同一口径：两个视图的缺镜数一致，合并场谁都不报。
+    assert len(pending_ids) == journey_episode["pending_section_count"]
 
 
 def test_overview_gaps_are_grouped_by_missing_master():

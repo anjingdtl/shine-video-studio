@@ -16,6 +16,7 @@ import {
   uploadLibraryMedia,
 } from './api';
 import type { CapabilityReport, ImageGraphReport, LibraryAsset, LibraryTask, LibraryVersion } from './api';
+import { MaterialGenerationProgress } from '../components/MaterialGenerationProgress';
 import './assets.css';
 
 export type AssetCenterPage = 'home' | 'images' | 'voices' | 'library' | 'assignments';
@@ -216,7 +217,7 @@ export function AssetsWorkspace({
         </header>
         {capabilityError && <div className="asset-inline-error" role="alert">暂时无法读取本机能力状态：{capabilityError}</div>}
         <div className="asset-center-page">
-          {page === 'home' && <HomePage capabilities={capabilities} onNavigate={navigate} />}
+          {page === 'home' && <HomePage capabilities={capabilities} onNavigate={navigate} projectId={projectId} />}
           {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate}
             onValidated={refreshCapabilities} onOpenImageSetup={onOpenImageSetup} />}
           {page === 'voices' && <VoiceWorkshop capabilities={capabilities} onNavigate={navigate} />}
@@ -228,7 +229,7 @@ export function AssetsWorkspace({
   );
 }
 
-function HomePage({ capabilities, onNavigate }: { capabilities: CapabilityReport | null; onNavigate: (page: AssetCenterPage) => void }) {
+function HomePage({ capabilities, onNavigate, projectId }: { capabilities: CapabilityReport | null; onNavigate: (page: AssetCenterPage) => void; projectId: string }) {
   const { assets, loading, error } = useFreshList();
   const [tasks, setTasks] = useState<LibraryTask[]>([]);
   const [taskError, setTaskError] = useState('');
@@ -254,6 +255,7 @@ function HomePage({ capabilities, onNavigate }: { capabilities: CapabilityReport
         <p>导入、创作、审核并整理图片与声音。需要时再把选定版本分配给导演工作台中的作品。</p></div>
       <div className="asset-welcome-art"><div className="asset-art-card art-one"><FileImage size={23} /></div><div className="asset-art-card art-two"><AudioLines size={22} /></div><div className="asset-art-orbit" /></div>
     </section>
+    {projectId && <MaterialGenerationProgress projectId={projectId} onOpenLibrary={() => onNavigate('library')} />}
     <section className="asset-section">
       <div className="asset-section-heading"><div><h2>开始创作</h2><p>选择一种常见操作。</p></div></div>
       <div className="asset-shortcuts">

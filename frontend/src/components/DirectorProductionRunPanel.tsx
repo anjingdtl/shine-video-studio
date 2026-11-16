@@ -4,14 +4,16 @@ import {
   ShieldAlert, Sparkles, Square, Video,
 } from 'lucide-react';
 import {
-  API, ApiError, api, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
+  API, ApiError, api, compileEpisodeSubtitles, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
   json, listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
   type DeliveryAcceptance, type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness,
   type ProductionRun, type RunEvent, type WorkflowProfile,
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
+import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { EpisodeAcceptance } from './EpisodeAcceptance';
+import GenerationSegmentsPanel from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
@@ -112,6 +114,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
+  /** 画幅与分辨率档位：只产出 OutputSpec 宽高，走既有导演包→渲染器链路。 */
+  const [orientation, setOrientation] = useState<Orientation>('landscape');
+  const [resolutionScale, setResolutionScale] = useState(1.0);
   /** 每个方案在本机能不能用于生产：服务端判定，浏览器只显示结论和原因。 */
   const [gates, setGates] = useState<Record<string, ProfileGate>>({});
   const ref2vaProfiles = useMemo(
@@ -294,10 +299,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       onMessage(`这个生成方案现在不能用于生产：${gateReason(gate)}`, 'error');
       return;
     }
+    const frame = frameSize(orientation, resolutionScale);
     return act('package', () => createDirectorPackage(projectId, {
       workflow_profile_id: profileId,
       generation_mode: profileMode,
-      fill_missing_character_bindings: profileMode === 'Ref2VA',
+      output: { width: frame.width, height: frame.height, fps: 24 },
       policy: { batch_shot_limit: 6, max_repairs_per_shot: 2 },
       episode_ids: effectiveScope.length ? effectiveScope : null,
     }), '导演包已生成，请查看就绪检查后确认');
@@ -384,6 +390,22 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
     ?? []).filter((blocker) => blocker.code !== 'PACKAGE_NOT_CONFIRMED');
 
+  // 字幕轨在后期按真实成片时长生成/装配（③只撰写），不在出片前提前装配。
+  const [compilingEp, setCompilingEp] = useState('');
+  async function compileTrack(episodeId: string) {
+    if (compilingEp) return;
+    setCompilingEp(episodeId);
+    try {
+      const body = await compileEpisodeSubtitles(projectId, episodeId);
+      onMessage?.(`本集字幕轨第 ${body.revision} 版已按${body.basis === 'actual' ? '真实成片' : '计划'}时长生成；在下方选择该版本重新装配。`, 'success');
+      onRefresh?.();
+    } catch (exc) {
+      onMessage?.(exc instanceof ApiError ? exc.message : String(exc), 'error');
+    } finally {
+      setCompilingEp('');
+    }
+  }
+
   // 逐集成片：跨运行按集读取，不跟随"当前这一次运行"。
   const postCards = mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
     ? <ol className="run-episodes post-episode-cards">
@@ -421,6 +443,13 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         {!episode.delivery?.artifact_id && !episode.production && <p className="run-hint">
           这一集还没有开拍：到「导演包」勾选它并开始真实制作。
         </p>}
+        <div className="episode-subtitle-bar">
+          <button type="button" className="btn-secondary" disabled={!!compilingEp}
+            onClick={() => { void compileTrack(episode.episode_id); }}>
+            {compilingEp === episode.episode_id ? '生成中…' : '按真实成片时长生成 / 更新字幕轨'}
+          </button>
+          <span className="run-hint">字幕轨在这里按真实成片时长生成；再到下方「修订剪辑 / 字幕」选择版本装配。</span>
+        </div>
       </li>)}
     </ol>
     : null;
@@ -555,6 +584,21 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               })}
             </select>
           </label>
+          <label>画幅
+            <select value={orientation} onChange={(event) => setOrientation(event.target.value as Orientation)}>
+              {(Object.keys(ORIENTATION_LABELS) as Orientation[]).map((key) => (
+                <option key={key} value={key}>{ORIENTATION_LABELS[key]}</option>
+              ))}
+            </select>
+          </label>
+          <label>分辨率档位
+            <select value={resolutionScale} onChange={(event) => setResolutionScale(Number(event.target.value))}>
+              {RESOLUTION_SCALES.map((scale) => {
+                const frame = frameSize(orientation, scale);
+                return <option key={scale} value={scale}>{scaleLabel(scale)} · {frame.width}×{frame.height}</option>;
+              })}
+            </select>
+          </label>
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
@@ -608,6 +652,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               ? `第 ${latestPackage.style.version} 版 · 已冻结` : '未冻结'}</dd></div>
             <div><dt>生成方案</dt><dd>{latestPackage.binding
               ? latestPackage.binding.mode : '未绑定'}</dd></div>
+            <div><dt>画幅</dt><dd>{latestPackage.binding?.output?.width && latestPackage.binding?.output?.height
+              ? `${latestPackage.binding.output.width}×${latestPackage.binding.output.height}` : '沿用生成方案'}</dd></div>
             <div><dt>自动返工</dt><dd>{String(latestPackage.policy?.max_repairs_per_shot ?? '—')} 次/镜（有界）</dd></div>
           </dl>
 
@@ -662,6 +708,18 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
 
       {/* 逐集成片与"当前这次运行"无关：第 1 集交付后开始拍第 2 集，第 1 集仍然在这里。 */}
       {postCards}
+      {mode === 'post' && <section className="card section-card run-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">剪辑方案 · 按镜网格</div>
+            <h2>每一镜的成片文件</h2>
+            <p>按集出一版成片；这里按镜网格展示各镜文件，供核对与单镜返修。</p>
+          </div>
+          <Film size={16} />
+        </div>
+        <GenerationSegmentsPanel projectId={projectId}
+          fingerprint={`post-${overviewEpisodes?.map((row) => row.delivery?.artifact_id ?? row.episode_id).join(',') ?? ''}`} />
+      </section>}
 
       {!activeRun
         ? (mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0

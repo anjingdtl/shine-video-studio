@@ -108,3 +108,31 @@ def test_a_stream_cut_after_events_is_unknown_and_never_replayed(monkeypatch):
         provider.complete([ChatMessage(role="user", content="hi")])
     assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
     assert calls == [True]
+
+
+def test_a_stream_silent_after_acknowledgement_is_unknown_and_never_replayed(monkeypatch):
+    # 活缺陷（2026-11-16）：剧组步骤拿到 200 后流式静默，旧逻辑把首事件超时当成
+    # 「无事件」回退非流式再发一次——重发了已被接受的请求（违反 UNKNOWN 门禁），
+    # 且再等一个完整超时。200 已收即请求已发出，静默超时只能判 UNKNOWN，不回退。
+    calls = []
+
+    class SilentStream(httpx.SyncByteStream):
+        def __iter__(self):
+            raise httpx.ReadTimeout("no event before the first-event deadline")
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(bool(body.get("stream")))
+        if not body.get("stream"):
+            raise AssertionError("a silent acknowledged stream must not fall back to a re-send")
+        return httpx.Response(200, stream=SilentStream(),
+                              headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(openai_compatible, "build_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    with pytest.raises(LLMConnectionError) as excinfo:
+        provider.complete([ChatMessage(role="user", content="hi")])
+    assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
+    assert excinfo.value.details.get("headers_received") is True
+    assert calls == [True]

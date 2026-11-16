@@ -205,6 +205,34 @@ def test_every_crew_prompt_carries_the_official_h3_rules(role):
     assert H3_ALIGNMENT in prompt
 
 
+def test_the_scriptwriter_prompt_makes_the_brief_the_only_beat_source():
+    # 活缺陷（2026-11-16）：编剧把 production_context.story_line（整部故事）当成
+    # 每个单元的内容来源，前言段也复述全故事，六场被重复成多份。提示词须明确
+    # brief 是本段唯一拆镜来源，story_line 只是背景，无动作的标题/设定段产 0 节拍。
+    prompt = crew_prompt("scriptwriter", tool="propose")
+    assert "only source of beats" in prompt
+    assert "story_line" in prompt and "background continuity" in prompt
+    assert "zero beats" in prompt
+
+
+def test_the_continuity_review_is_scoped_to_one_section_not_the_whole_work():
+    # 活缺陷（2026-11-16）：锁定事实「全片共六场六镜」被场记当成单场约束，
+    # 每个单元都被判「缺少 scene_02–06 → conflict → needs_review」，整部 run
+    # 一镜也落不了。整部结构是分集方案的事实（确认时裁决），不是单场连续性
+    # 约束。场记与仲裁都必须明确「只审本场」，整部结构需求一律 not_a_conflict。
+    from shine.agents.crew_prompts import arbiter_prompt
+
+    prompt = crew_prompt("continuity_supervisor", tool="propose")
+    assert "ONE section's shots at a time" in prompt
+    assert "the plan's own fact" in prompt
+    assert "missing the other scenes, beats or shots" in prompt
+    assert "proceed_to_preflight even if the whole work is not yet complete" in prompt
+
+    arbiter = arbiter_prompt()
+    assert "one section at a time" in arbiter
+    assert "whole-work-structure demand not_a_conflict" in arbiter
+
+
 def test_the_director_prompt_states_the_plan_and_forbids_the_two_deviations():
     timing = editorial_timing_preview(_brief())
     plan = editorial_timing_plan(timing, BEAT_IDS)
@@ -223,7 +251,7 @@ def test_the_director_prompt_states_the_plan_and_forbids_the_two_deviations():
 
 def test_without_a_cut_table_the_director_may_still_give_a_dialogue_a_tail():
     prompt = crew_prompt("director", tool="propose")
-    assert "plus a short natural tail" in prompt
+    assert "plus a natural tail that lets the action breathe" in prompt
     assert "A shot's duration_s is fixed by the plan" not in prompt
     # Without a computed plan the model previously fragmented one beat into
     # several same-beat cuts, which the dialogue-window check always rejects.

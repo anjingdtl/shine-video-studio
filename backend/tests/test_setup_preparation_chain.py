@@ -65,7 +65,7 @@ def test_machine_level_prepare_needs_no_project(env):
         task = setup_preparation.read_task(db)
     assert task["project_id"] is None
     ids = [row["id"] for row in task["steps"]]
-    assert ids[:2] == ["RECONCILE", "DOWNLOAD"]
+    assert ids[:3] == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]
     assert "IMAGE_SAMPLES" in ids
 
 
@@ -216,3 +216,34 @@ def test_validate_without_candidate_recipe_is_named(env, monkeypatch):
     detail = setup_preparation._step_validate(factory, settings, task)
     assert detail["status"] == "FAILED"
     assert detail["code"] == "GENERATE_RUNTIME_CONFIGURATION_FIRST"
+
+
+def test_tool_repair_is_one_step_of_the_single_preparation_task(env, monkeypatch):
+    """补工具折进一键整备链：工具达标跳过，缺工具走同一个 execute_repair。
+
+    页面不再直连一个长请求补工具；它与下载/实例/核验共用一个后台任务。
+    """
+    _, factory, _, settings = env
+    monkeypatch.setattr("shine.comfyops.host_env.probe_host_environment",
+                        lambda *a, **k: {"tools": {}})
+    monkeypatch.setattr("shine.comfyops.environment_repair.build_repair_plan",
+                        lambda settings, report, **k: {"plan_id": "p", "packages": []})
+    detail = setup_preparation._step_tool_repair(factory, settings, {"request": {}})
+    assert detail["status"] == "SKIPPED"
+
+    monkeypatch.setattr("shine.comfyops.environment_repair.build_repair_plan",
+                        lambda settings, report, **k: {"plan_id": "p",
+                                                       "packages": [{"package_id": "ffmpeg"}]})
+    called = {}
+
+    def fake_execute(db, settings, actor, plan_id, **k):
+        called["plan_id"] = plan_id
+        called["actor"] = actor
+        return {"status": "SUCCEEDED"}
+
+    monkeypatch.setattr("shine.comfyops.environment_repair.execute_repair", fake_execute)
+    detail = setup_preparation._step_tool_repair(factory, settings, {"request": {}})
+    assert detail["status"] == "DONE"
+    assert called["plan_id"] == "p"
+    assert called["actor"] == "worker:setup"
+    assert "TOOL_REPAIR" in setup_preparation._steps_for(["h3"], verify_runtime=True)

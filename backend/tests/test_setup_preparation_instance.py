@@ -28,8 +28,8 @@ def _plan_row(db, project_id, status="AWAITING_APPROVAL", files=None):
 
 def test_steps_include_instance_first():
     steps = setup_preparation._steps_for(["h3"], verify_runtime=True)
-    # 一次授权从核验已有字节开始,下载缺项,然后才创建实例。
-    assert steps[:3] == ["RECONCILE", "DOWNLOAD", "INSTANCE"]
+    # 一次授权从补工具开始,核验已有字节,下载缺项,然后才创建实例。
+    assert steps[:4] == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "INSTANCE"]
     assert "TARGET" in steps and "VALIDATE" in steps
 
 
@@ -113,14 +113,14 @@ def test_enqueue_includes_instance_only_on_bare_machine(studio, monkeypatch):
     with factory() as db:
         bare = setup_preparation.enqueue(db, project_id=project_id,
                                          capabilities=["h3"], settings=settings)
-    assert [row["id"] for row in bare["steps"]][:3] == ["RECONCILE", "DOWNLOAD", "INSTANCE"]
+    assert [row["id"] for row in bare["steps"]][:4] == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "INSTANCE"]
     monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
                         lambda db, settings, path=None: {"selected": {"instance_id": "i-1"}})
     project2 = create_project(client, title="已有安装")
     with factory() as db:
         existing = setup_preparation.enqueue(db, project_id=project2,
                                              capabilities=["h3"], settings=settings)
-    assert existing["steps"][0]["id"] == "RECONCILE"
+    assert existing["steps"][0]["id"] == "TOOL_REPAIR"
     assert "INSTANCE" not in [row["id"] for row in existing["steps"]]
 
 
@@ -145,3 +145,77 @@ def test_prepare_plan_reports_runtime_gap_and_closure(studio, fake_deployment_ho
     h3 = next(row for row in body["plans"] if row["capability"] == "h3")
     assert "comfyui" in h3["components"]
     assert h3["download_bytes"] > 0
+
+
+def test_instance_step_on_empty_database_passes_no_project(studio, monkeypatch):
+    """空库整备：实例是机器级依赖，创建不该报 Project not found。
+
+    旧代码把 None 项目转成字符串 "None" 传给实例阶梯，项目门禁对着不存在的
+    "None" 作品报错，整备受理后卡在实例创建。机器级依赖必须在建作品前就能整备。
+    """
+    _client, factory, _tmp, settings = studio
+    monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
+                        lambda db, settings, path=None: {"selected": {}})
+    captured = {}
+
+    def fake_next(db, settings, catalog, project_id, **kw):
+        captured["project_id"] = project_id
+        return None, None
+
+    monkeypatch.setattr("shine.comfyops.deployment.next_instance_plan", fake_next)
+    detail = setup_preparation._step_instance(factory, settings, {"project_id": None, "request": {}})
+    assert detail["status"] == "DONE"
+    assert captured["project_id"] is None, "机器级实例计划不得把 None 变成字符串 'None'"
+
+
+def test_machine_level_instance_plan_does_not_require_a_project(studio):
+    """项目门禁对机器级（None）放行；后续拒绝只能是权重/实例原因，不是没有作品。"""
+    from fastapi import HTTPException
+
+    from shine.comfyops import deployment
+
+    _client, factory, _tmp, settings = studio
+    with factory() as db:
+        assert deployment._require_project(db, None) is None
+        try:
+            deployment.next_instance_plan(
+                db, settings, deployment.load_default_catalog(), None,
+                instance_name="shine-h3", port=8188, mode="local")
+        except HTTPException as exc:
+            detail = exc.detail
+            text = detail.get("code") if isinstance(detail, dict) else str(detail)
+            assert "Project not found" not in str(text)
+            assert "PROJECT" not in str(text).upper()
+
+
+def test_optional_review_download_does_not_block_the_production_chain(studio, monkeypatch):
+    """H3 文件齐备时，可选 ASR 下载失败或下载中都不卡住后续整备。
+
+    审片沿用自己的安装记录在后台推进；生产链只按自己的实际依赖推进。旧代码
+    把 ASR 的 FAILED/PENDING 当成整个 DOWNLOAD 步的结论，H3 链被无关下载卡死。
+    """
+    from shine.comfyops.models import InstallationAttempt, InstallationPlan
+
+    _client, factory, _tmp, settings = studio
+    monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
+                        lambda db, settings, path=None: {"selected": {}})
+
+    def _asr_attempt(status, stage):
+        with factory.begin() as db:
+            plan = InstallationPlan(project_id=None, payload={"packages": [{"id": "qwen3-asr-0.6b"}]},
+                                    sha256="x" * 64, status="APPROVED")
+            db.add(plan)
+            db.flush()
+            attempt = InstallationAttempt(plan_id=plan.id, status=status, stage=stage,
+                                          payload={}, sha256="y" * 64,
+                                          error_code="UNTRUSTED_DOWNLOAD_URL")
+            db.add(attempt)
+            db.flush()
+            return attempt.id
+
+    for status, stage in [("FAILED_RECONCILE_REQUIRED", "NEEDS_REVIEW"), ("INSTALLING", "DOWNLOADING")]:
+        attempt_id = _asr_attempt(status, stage)
+        task = {"project_id": None, "request": {"capabilities": ["h3", "asr"]},
+                "downloads": {"h3": {"done": True}, "asr": {"attempt_id": attempt_id}}}
+        detail = setup_preparation._step_download(factory, settings, task)
+        assert detail["status"] == "DONE", f"ASR {status} 不应卡住生产链：{detail}"

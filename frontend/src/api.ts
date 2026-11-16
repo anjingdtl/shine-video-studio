@@ -936,7 +936,7 @@ export const listDirectorPackages = (projectId: string) =>
 export const createDirectorPackage = (
   projectId: string,
   body: { workflow_profile_id: string; generation_mode?: string | null; output?: Record<string, unknown> | null;
-    policy?: Record<string, unknown> | null; fill_missing_character_bindings?: boolean;
+    policy?: Record<string, unknown> | null;
     episode_ids?: string[] | null },
 ) => api<DirectorPackage>(`/projects/${projectId}/director-packages`, json('POST', body));
 
@@ -1591,7 +1591,8 @@ export const generateStoryboardBook = (projectId: string, body: {
 export const confirmStoryboardBook = (projectId: string, body: {
   plan_version: number; expected_sha256: string;
   style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number;
-    narration_level?: 'none' | 'low' | 'high' } | null,
+    narration_level?: 'none' | 'low' | 'high'; max_shot_seconds?: number | null } | null,
+  acknowledge_deviation?: boolean,
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
 
@@ -1638,7 +1639,8 @@ export type EpisodeStoryboardState = {
       unit_index?: number; status: string; failed_role: string | null; failed_task_id: string | null;
       rejections: Array<{ role: string; code: string; rejection_reason_code?: string;
                           external_outcome?: string; task_id?: string | null; state_version?: number;
-                          provider_finish_reason?: string | null; provider_text_chars?: number | null }>;
+                          provider_finish_reason?: string | null; provider_text_chars?: number | null;
+                          network_timeout_s?: number | null; phase?: string | null }>;
     } | null;
   }>;
 };
@@ -1651,13 +1653,15 @@ export const queueDirectorStoryboard = (projectId: string) =>
     `/projects/${projectId}/director/storyboard/generate`, json('POST', {}));
 
 export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
-  api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number }>(
+  api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number;
+        confirmed_shot_ids?: string[]; confirmed_version?: number | null; confirmation_stale?: boolean }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
 
-export const confirmEpisodeShots = (projectId: string, episodeId: string) =>
+export const confirmEpisodeShots = (projectId: string, episodeId: string,
+  acknowledgeDurationDeviation = false) =>
   api<{ plan_version: number; episode_id: string; shot_ids: string[] }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/confirm`,
-    json('POST', {}));
+    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation }));
 
 export const retryEpisodeStoryboard = (projectId: string, episodeId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string; episode_id: string }>(
@@ -2129,4 +2133,17 @@ export const lockProjectAsset = async (assetId: string) => {
   return api<Asset>(`/assets/${assetId}/lock`, json('POST', {
     grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence: ASSET_GRANT_EVIDENCE,
   }));
+};
+
+/** 素材准备页内选用并晋升一个生成候选：与素材中心/专业面板共用同一个晋升执行者
+ *  （/candidate-assets/{id}/promote → 主素材 + 回绑需求与镜头），不另起一套。 */
+export const promoteMaterialCandidate = async (candidateId: string, isMock: boolean) => {
+  const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+    json('POST', { action: 'promote', target_id: candidateId }));
+  return api<{ formal_asset_id?: string; asset_id?: string }>(
+    `/candidate-assets/${candidateId}/promote`,
+    json('POST', {
+      grant_id: grant.grant_id, snapshot: grant.snapshot, offline: isMock,
+      evidence: '导演模式素材准备页人工选用并晋升素材候选。',
+    }));
 };

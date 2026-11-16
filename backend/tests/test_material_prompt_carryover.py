@@ -36,7 +36,7 @@ def _episode_one_requirements(client, settings):
                 headers=LOCAL)
     _run_storyboard_to_rest(client, settings, project)
     client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-                json={}, headers=LOCAL)
+                json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     derived = client.post(f"/api/v1/projects/{project}/director/materials/derive",
                           json={"episode_ids": ["ep-01"]}, headers=LOCAL)
     assert derived.status_code == 200, derived.text

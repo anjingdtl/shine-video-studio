@@ -209,6 +209,16 @@ def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
     return service.plan_progress(db, project_id, data_dir=output_root(db, settings))
 
 
+@router.get("/projects/{project_id}/material-preparation/generation-progress")
+def material_generation_progress(project_id: str, db: DBSession):
+    """Lightweight progress of the generation batches, for the progress bars.
+
+    Same ``public_run`` fact as the material page; no completion judgement, so
+    polling it never re-hashes the master library.
+    """
+    return service.generation_progress(db, project_id)
+
+
 @router.post("/projects/{project_id}/material-preparation/complete")
 def complete_materials(project_id: str, actor: Operator, db: DBSession, settings: SettingsDep):
     """Judge the material completion condition and record the outcome.
@@ -678,6 +688,7 @@ def merge_character(project_id: str, body: MergeCharacterBody, actor: Operator, 
     service.bind_material_master(db, canonical, asset, actor)
     service.bind_material_master(db, alias, asset, actor, canonical_entity_id=entity)
     service.retire_unused_masters(db, plan, asset, actor, entities={entity, alias_entity})
+    service.bind_adopted_masters_to_shots(db, project_id, plan.id, actor)
     db.commit()
     return {"asset_id": asset.id, "canonical_entity_id": entity, "alias_entity_id": alias_entity}
 

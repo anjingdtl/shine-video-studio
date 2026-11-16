@@ -40,4 +40,15 @@ describe('错误码 → 动作映射覆盖', () => {
     expect(result.why).toContain('运行');
     expect(result.action?.target).toBe('setup-env');
   });
+
+  it('EPISODE_PLAN_NOT_MATERIALIZED 文案以服务端真实状态为准（三原则）', () => {
+    // 镜头已落待确认与尚未拆镜是两种状态，前端不拿静态句盖掉后端事实。
+    const landed = describeBlocker('EPISODE_PLAN_NOT_MATERIALIZED', '镜头已拆好 6 个，确认本集后落到分集');
+    expect(landed.reason).toBe('镜头已拆好 6 个，确认本集后落到分集');
+    expect(landed.action?.target).toBe('produce-stage');
+    const pending = describeBlocker('EPISODE_PLAN_NOT_MATERIALIZED', '还有 2 个场次没有拆成镜头');
+    expect(pending.reason).toBe('还有 2 个场次没有拆成镜头');
+    const fallback = describeBlocker('EPISODE_PLAN_NOT_MATERIALIZED', '');
+    expect(fallback.reason).toBe('本集镜头待确认落到分集');
+  });
 });

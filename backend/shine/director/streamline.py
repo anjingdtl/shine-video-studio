@@ -310,7 +310,7 @@ def _confirmed_outline_for_plan(db, project_id: str, payload):
 
 def confirm_storyboard_book(
     db, project_id: str, *, version: int, expected_sha256: str,
-    style: dict[str, Any] | None, actor: str,
+    style: dict[str, Any] | None, actor: str, acknowledge_deviation: bool = False,
 ) -> dict[str, Any]:
     """Confirm the episode plan and freeze the chosen style as one decision.
 
@@ -338,6 +338,22 @@ def confirm_storyboard_book(
     from shine.api_director import _section_plan_problems
 
     payload = EpisodePlanPayload.model_validate(row.payload)
+    # The plan's duration goal is a verdict, not just a displayed deviation: an
+    # episode whose planned total sits outside the target window must be adjusted
+    # or explicitly acknowledged before it can become the production basis.
+    from shine.director.contracts import duration_target_verdict
+
+    deviations = []
+    for episode in payload.episodes:
+        verdict = duration_target_verdict(
+            float(episode.planned_seconds), float(payload.target_seconds),
+            float(payload.tolerance_seconds))
+        if verdict:
+            deviations.append({"episode_id": episode.episode_id, **verdict})
+    if deviations and not acknowledge_deviation:
+        raise HTTPException(409, {"code": "EPISODE_PLAN_DURATION_DEVIATION",
+                                  "message": "计划时长超出目标容差窗：请调整分集/目标，或显式确认接受偏差",
+                                  "deviations": deviations[:50]})
     if payload.mode == "sections":
         problems = _section_plan_problems(db, project_id, payload)
     else:
@@ -360,7 +376,9 @@ def confirm_storyboard_book(
     row.confirmed_at = utcnow()
     add_audit(db, actor, "EPISODE_PLAN_CONFIRMED", "director_episode_plan", row.id,
               {"version": row.version, "sha256": row.sha256, "superseded": superseded,
-               "streamline": True, "style_frozen": bool(style_result)}, project_id=project_id)
+               "streamline": True, "style_frozen": bool(style_result),
+               "deviation_acknowledged": bool(deviations and acknowledge_deviation)},
+              project_id=project_id)
     return {"plan_version": row.version, "plan_sha256": row.sha256,
             "style": style_result, "superseded": superseded}
 
@@ -384,6 +402,7 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     film_type = style.get("film_type")
     dialogue_ratio = style.get("dialogue_ratio_percent")
     narration_level = style.get("narration_level")
+    max_shot_seconds = style.get("max_shot_seconds")
     if not profile_id:
         raise HTTPException(422, "STYLE_PROFILE_REQUIRED")
     try:
@@ -402,6 +421,8 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
         # voice-over the episode may use.  It is guidance, not a render gate.
         "narration_level": narration_level if narration_level in {"none", "low", "high"}
         else current.get("narration_level"),
+        "max_shot_seconds": max_shot_seconds if max_shot_seconds is not None
+        else current.get("max_shot_seconds"),
         "film_type": FilmType(film_type) if film_type else (
             FilmType(current["film_type"]) if current.get("film_type") else None),
     })
@@ -461,6 +482,32 @@ def ensure_project_rulepack(db, project_id: str) -> str | None:
               {"rulepack_id": lock.rulepack_id, "sha256": lock.rulepack_hash,
                "streamline": True}, project_id=project_id)
     return lock.rulepack_id
+
+
+def _allocate_unit_targets(units: list[dict], target_seconds: float) -> None:
+    """Split each episode's duration goal across its units by source length.
+
+    One fact (the episode plan target) becomes one per-unit goal the crew aims
+    for; the units of an episode sum back to the target. A unit's goal is its
+    total screen time, not a single shot's — the per-shot ceiling still applies
+    to every shot the director plans inside the unit. A unit produces at least
+    one H3 segment, so its goal never sits below the renderer's 4s floor; a
+    short fragment is bumped up to it (the episode total keeps its tolerance).
+    """
+    from shine.agents.editorial_timing import MIN_SEGMENT_S
+
+    by_episode: dict[str, list[dict]] = {}
+    for unit in units:
+        by_episode.setdefault(unit["episode_id"], []).append(unit)
+    for episode_units in by_episode.values():
+        total_chars = sum(max(0, u["end_offset"] - u["start_offset"]) for u in episode_units)
+        if total_chars <= 0:
+            for u in episode_units:
+                u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds / len(episode_units)), 1)
+            continue
+        for u in episode_units:
+            share = max(0, u["end_offset"] - u["start_offset"]) / total_chars
+            u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds * share), 1)
 
 
 def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: int | None = None) -> dict:
@@ -534,6 +581,13 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
                 "merged_section_ids": merged.get("merged_section_ids", []),
                 **({"non_narrative": True} if merged.get("non_narrative") else {}),
             })
+    # The episode plan's target_seconds is the one duration goal. It used to
+    # stop at episode grouping and a displayed deviation, so the crew only ever
+    # saw the per-shot ceiling and hugged the dialogue minimum — a 60s target
+    # came out as ~26s of 5s shots. Allocate the goal to each unit by its source
+    # length (the same length-driven basis as segmentation) so the units of an
+    # episode sum back to the target, and carry it to the crew as a fact.
+    _allocate_unit_targets(units, float(payload.target_seconds))
     identity = digest({"tool": DIRECTOR_STORYBOARD_RUN, "outline": outline.sha256,
                        "plan": plan.sha256, "units": units,
                        "style": project.frozen_style_version_id, "assets": asset_hash})
@@ -788,6 +842,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 production_context={
                     "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                     "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                    "unit_target_seconds": unit.get("target_seconds"),
                     "story_line": outline.payload_json.get("story_line", []),
                     "timeline": outline.payload_json.get("timeline", []),
                     "characters": outline.payload_json.get("characters", []),
@@ -910,7 +965,13 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
             if episode is None or episode.get("shot_ids"):
                 # Already materialised (or absent): nothing to confirm again.
                 return
-            confirm_episode_shots(db, project_id, episode_id, actor="local-user")
+            # Auto-confirm is the authorised continuation of a plan the person
+            # already confirmed (target + deviation checked at book confirm), not
+            # a new creative checkpoint: it proceeds and records the landed
+            # deviation in the audit. The duration verdict is enforced on the
+            # person's explicit manual confirmation, where they can adjust or accept.
+            confirm_episode_shots(db, project_id, episode_id, actor="local-user",
+                                  acknowledge_duration_deviation=True)
     except HTTPException as exc:
         logger.warning("director_auto_confirm_blocked project=%s episode=%s detail=%s",
                        project_id, episode_id, exc.detail)
@@ -1064,7 +1125,8 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
 # ---------------------------------------------------------------------------
 
 
-def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -> dict[str, Any]:
+def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
+                          acknowledge_duration_deviation: bool = False) -> dict[str, Any]:
     """Land one episode's storyboarded sections into the confirmed plan.
 
     Only the target episode's sections must be applied; other episodes keep
@@ -1105,6 +1167,24 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -
         raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                   "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
                                   "pending": pending[:50]})
+    # The landed total is checked against the same target window the plan was
+    # confirmed under: the crew aims for the goal, and the person confirms an
+    # episode that actually reaches it (or explicitly accepts the deviation).
+    from shine.director.contracts import duration_target_verdict, planned_seconds
+    from shine.models import Shot
+
+    actual_total = 0.0
+    for shot_id in shot_ids:
+        shot = db.get(Shot, shot_id)
+        if shot is not None and shot.project_id == project_id:
+            actual_total += planned_seconds(shot)
+    duration_verdict = duration_target_verdict(
+        actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
+    if duration_verdict and not acknowledge_duration_deviation:
+        raise HTTPException(409, {**duration_verdict,
+                                  "code": "EPISODE_DURATION_OUT_OF_TARGET",
+                                  "message": "本集落镜总时长超出目标容差窗：用「改时长」调整镜头，或显式确认接受偏差",
+                                  "episode_id": episode_id})
     episodes = []
     for episode in payload.episodes:
         if episode.episode_id == episode_id:
@@ -1140,7 +1220,10 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -
     new_row.confirmed_at = utcnow()
     add_audit(db, actor, "EPISODE_SHOTS_CONFIRMED", "director_episode_plan", new_row.id,
               {"episode_id": episode_id, "version": new_row.version,
-               "shots": len(shot_ids), "streamline": True}, project_id=project_id)
+               "shots": len(shot_ids), "streamline": True,
+               "actual_seconds": round(actual_total, 1),
+               "duration_acknowledged": bool(duration_verdict and acknowledge_duration_deviation)},
+              project_id=project_id)
     return {"plan_version": new_row.version, "plan_sha256": new_row.sha256,
             "episode_id": episode_id, "shot_ids": shot_ids}
 
@@ -1192,19 +1275,35 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
     plan = _latest_plan(db, project_id)
     shot_ids: list[str] = []
     section_of: dict[str, str] = {}
+    confirmed_shot_ids: list[str] = []
+    confirmed_version: int | None = None
     if plan is not None:
         from shine.director.contracts import EpisodePlanPayload
 
         payload = EpisodePlanPayload.model_validate(plan.payload)
         target = next((e for e in payload.episodes if e.episode_id == episode_id), None)
         if target is not None:
-            if target.shot_ids:
-                shot_ids = list(target.shot_ids)
-            else:
-                for section_id in target.section_ids:
-                    for sid in section_storyboard_shot_ids(db, project_id, section_id)["shot_ids"]:
-                        shot_ids.append(sid)
-                        section_of[sid] = section_id
+            confirmed_shot_ids = list(target.shot_ids or [])
+            if plan.status == "CONFIRMED":
+                confirmed_version = plan.version
+            # The table is the LIVE storyboard: the newest applied shots of each
+            # section, the same source confirmation reads. The confirmed plan's
+            # shot_ids are a frozen production snapshot, not the current
+            # storyboard fact; preferring them hid every re-run's new shots
+            # behind the old confirmed set (live 2026-11-16: v6/17 stayed on
+            # screen after a fresh six-shot run, so re-running looked like it
+            # only piled records up instead of replacing the failed scenes).
+            for section_id in target.section_ids:
+                resolved = section_storyboard_shot_ids(db, project_id, section_id)
+                if resolved.get("merged_into"):
+                    continue
+                for sid in resolved["shot_ids"]:
+                    shot_ids.append(sid)
+                    section_of[sid] = section_id
+            if not shot_ids and confirmed_shot_ids:
+                # No run evidence for any section yet (legacy plan): the frozen
+                # snapshot is the only readable fact.
+                shot_ids = list(confirmed_shot_ids)
     from shine.director.models import ShotPromptRevision, ShotSubtitle
     from shine.director.prompt_revisions import manual_status_for
 
@@ -1274,8 +1373,14 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
                 "line_count": len(subtitle_row.lines or []) if subtitle_row is not None else 0,
             },
         })
+    live_ids = [row["shot_id"] for row in rows]
     return {"episode_id": episode_id, "shots": rows,
-            "total_editorial_seconds": round(total, 3), "shot_count": len(rows)}
+            "total_editorial_seconds": round(total, 3), "shot_count": len(rows),
+            "confirmed_shot_ids": confirmed_shot_ids,
+            "confirmed_version": confirmed_version,
+            "confirmation_stale": bool(confirmed_version is not None
+                                       and confirmed_shot_ids
+                                       and live_ids != confirmed_shot_ids)}
 
 
 # ---------------------------------------------------------------------------
@@ -1547,7 +1652,6 @@ def start_director_production(
                 episode_ids=requested,
                 generation_mode="Ref2VA",
                 policy=None,
-                fill_missing_character_bindings=True,
                 created_by=actor,
                 settings=settings,
             )
@@ -1573,7 +1677,6 @@ def start_director_production(
                 episode_ids=requested,
                 generation_mode=profile.mode,
                 policy=None,
-                fill_missing_character_bindings=(profile.mode or "").lower() == "ref2va",
                 created_by=actor,
                 settings=settings,
             )
