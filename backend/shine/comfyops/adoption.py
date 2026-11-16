@@ -540,7 +540,40 @@ def adopt_existing_installation(
     }
 
 
+#: Short-lived cache of the adopted-installation revalidation, keyed by the
+#: instance payload hash + catalog hash + capability. The check walks the
+#: installation, hashes the interpreter and fingerprints every node pack; it is
+#: read on every status/summary/availability projection, so repeating it cold
+#: made a single page load take seconds and timed out the connection probe.
+#: The key changes whenever the adoption record or catalog changes; the TTL
+#: bounds how long an on-disk change (a node pack added/removed without touching
+#: the record) can go unnoticed. Downstream render still verifies weights and
+#: nodes independently, so this is a display-latency cache, not the only gate.
+_ADOPTION_BLOCKERS_CACHE: dict[tuple[str, str, str, int], tuple[float, list[str]]] = {}
+_ADOPTION_BLOCKERS_TTL = 3.0
+
+
 def adopted_installation_blockers(instance, catalog: dict, *, capability: str = "h3") -> list[str]:
+    import time
+
+    from shine.comfyops import existing_installation as _ei
+
+    # The computation late-imports existing_installation.inspect; key by that
+    # callable's identity so substituting it (a refreshed read, or a test)
+    # invalidates the cached projection instead of serving a stale verdict.
+    key = (str(instance.sha256), graph_hash(catalog), capability, id(_ei.inspect))
+    now = time.monotonic()
+    hit = _ADOPTION_BLOCKERS_CACHE.get(key)
+    if hit is not None and now - hit[0] < _ADOPTION_BLOCKERS_TTL:
+        return list(hit[1])
+    result = _adopted_installation_blockers_uncached(instance, catalog, capability=capability)
+    if len(_ADOPTION_BLOCKERS_CACHE) >= 64:
+        _ADOPTION_BLOCKERS_CACHE.clear()
+    _ADOPTION_BLOCKERS_CACHE[key] = (now, result)
+    return list(result)
+
+
+def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capability: str = "h3") -> list[str]:
     """Revalidate the selected install's identity without rehashing model weights.
 
     ``capability`` scopes which confirmed bytes must still be present.  The

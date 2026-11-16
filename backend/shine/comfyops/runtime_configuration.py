@@ -20,6 +20,27 @@ CANDIDATE_KEY = 'deployment-runtime-candidate'
 ACTIVE_KEY = 'deployment-runtime-active'
 SERVICE_EVIDENCE_KEY = 'deployment-service-validation'
 
+#: Stat-keyed cache of pinned-file SHA-256 (resolved path + mtime_ns + size).
+#: configuration_identity is read on every setup/status projection and used to
+#: re-hash every pinned file each time. A file whose bytes change gets a new
+#: mtime/size and is hashed again, so accidental configuration drift is still
+#: detected; only unchanged files reuse their digest.
+_PIN_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _pinned_file_digest(target: Path) -> str:
+    stat = target.stat()
+    key = (str(target.resolve()), stat.st_mtime_ns, stat.st_size)
+    hit = _PIN_HASH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    with target.open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if len(_PIN_HASH_CACHE) >= 256:
+        _PIN_HASH_CACHE.clear()
+    _PIN_HASH_CACHE[key] = digest
+    return digest
+
 #: The series states that can still hold the GPU or be resumed by a Worker.
 #: NEEDS_REVIEW is deliberately absent: it is a blocked, unclaimable record.
 LIVE_SERIES_STATUSES = ('QUEUED', 'CLAIMED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED', 'RECONCILING')
@@ -218,8 +239,7 @@ def configuration_identity(db, settings, path):
         for target in sorted(paths):
             if not target.is_absolute() or not target.is_file():
                 raise HTTPException(409, 'RUNTIME_PINNED_FILE_MISSING')
-            with target.open('rb') as stream:
-                pins[str(target.resolve())] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            pins[str(target.resolve())] = _pinned_file_digest(target)
         return {'recipe': str(path), 'recipe_sha256': graph_hash(raw),
                 'instance_id': instance.id, 'instance_sha256': instance.sha256,
                 'catalog_sha256': graph_hash(load_default_catalog()), 'files': pins,
