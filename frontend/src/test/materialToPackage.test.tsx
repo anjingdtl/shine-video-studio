@@ -132,3 +132,64 @@ describe('素材页下一步由 journey 驱动', () => {
     expect(next).toBeInTheDocument();
   });
 });
+
+describe('素材准备页只保留按镜头需求的唯一面板（2026-11-16 用户裁定）', () => {
+  it('移除大纲候选批次板块、重叠上传板块与「打开素材中心」引导', async () => {
+    window.history.replaceState(null, '', '#d/materials');
+    const ready = {
+      project_id: 'proj-1',
+      stages: [
+        { id: 'script', label: '创意与剧本', done: true, summary: '', blockers: [], facts: {} },
+        { id: 'plan', label: '剧本统筹', done: true, summary: '', blockers: [], facts: {} },
+        { id: 'storyboard', label: '镜头拆解', done: true, summary: '', blockers: [], facts: { shot_count: 6 } },
+        { id: 'assets', label: '拍摄素材准备', done: false, summary: '6 镜的素材待准备', blockers: [], facts: { material_missing_count: 2 } },
+        { id: 'package', label: '导演包', done: false, summary: '', blockers: [], facts: {} },
+        { id: 'production', label: '视频生产', done: false, summary: '', blockers: [], facts: {} },
+        { id: 'post', label: '后期成片', done: false, summary: '', blockers: [], facts: {} },
+      ],
+      next_stage: 'assets', package: null, episode_plan: null, run: null,
+    };
+    stub = new StudioStub(baseRoutes(baseProject({ id: 'proj-1', title: '雾港夜账' })));
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/, respond: () => jsonResponse(ready) });
+    stub.add({ method: 'GET', pattern: /projects\/proj-1\/director\/materials\/requirements$/,
+      respond: () => jsonResponse({ plan_revision_id: 'plan-1', expected_snapshot: 'a'.repeat(64), requirements: [] }) });
+    stub.add({ method: 'GET', pattern: /projects\/proj-1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'proj-1', runs: [] }) });
+    render(<App />);
+    await screen.findByRole('heading', { name: '镜头要什么，就准备什么' });
+    expect(screen.queryByText(/按场次分析剧本与候选批次/)).toBeNull();
+    expect(screen.queryByText('上传与确认项目素材')).toBeNull();
+    expect(screen.queryByRole('button', { name: '打开素材中心' })).toBeNull();
+    // 素材未准备确认时，旅程停在素材准备，不提示「下一步：导演包」。
+    expect(screen.queryByRole('button', { name: '下一步：导演包' })).toBeNull();
+  });
+});
+
+describe('素材准备页内候选选定与晋升（不引去素材中心）', () => {
+  it('候选就绪时本页展示「选用并晋升」，复用同一晋升执行者并回调刷新', async () => {
+    const promoted = vi.fn();
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [{
+        run_id: 'run-1', status: 'SUCCEEDED', kind: 'production',
+        counts: { total: 1, candidate_ready: 1, failed: 0, needs_review: 0, queued: 0, running: 0 },
+        items: [{ item_id: 'i1', requirement_id: 'r1', entity_id: '沈砚', family: 'character',
+          status: 'CANDIDATE_READY', error_code: null,
+          candidates: [{ candidate_id: 'cand-1', status: 'READY_FOR_REVIEW', content_sha256: 'x',
+            is_mock: false, formal_asset_id: null, attempt_no: 1 }] }],
+      }] }) });
+    stub.add({ method: 'POST', pattern: /preparation\/approval-grants$/,
+      respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }) });
+    stub.add({ method: 'POST', pattern: /candidate-assets\/cand-1\/promote$/,
+      respond: () => jsonResponse({ formal_asset_id: 'asset-new' }) });
+    render(<MaterialGenerationProgress projectId="p1" onPromoted={promoted} />);
+    const button = await screen.findByRole('button', { name: '选用并晋升' });
+    expect(screen.queryByText(/去素材中心/)).toBeNull();
+    expect(screen.getByAltText('沈砚 候选 1')).toHaveAttribute('src', '/api/v1/candidate-assets/cand-1/thumbnail');
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(promoted).toHaveBeenCalledTimes(1));
+    expect(stub.callsOf('POST', /preparation\/approval-grants$/)[0].body)
+      .toMatchObject({ action: 'promote', target_id: 'cand-1' });
+    expect(stub.callsOf('POST', /candidate-assets\/cand-1\/promote$/)[0].body)
+      .toMatchObject({ grant_id: 'g1', snapshot: 's1', offline: false });
+  });
+});

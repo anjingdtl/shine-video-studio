@@ -10,8 +10,6 @@ import type { LucideIcon } from 'lucide-react';
 import { useStudio } from './useStudio';
 import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
 import { EngineStatusEntry } from './components/EngineStatusEntry';
-import AssetPanel from './components/AssetPanel';
-import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
 import { DirectorStoryboardStage } from './components/StoryboardDraftSection';
 import { ScriptEntryPanel } from './components/ScriptEntryPanel';
 import { SchemaNotice } from './components/SchemaNotice';
@@ -157,8 +155,8 @@ function App() {
     notices, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
     setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
     realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
-    createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
-    createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze, unlockAsset,
+    createProject, saveStyle, freezeStyle,
+    createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze,
     setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
     setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
@@ -283,7 +281,6 @@ function App() {
   const [journeyState, setJourneyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [journeyError, setJourneyError] = useState('');
   const [journeyRetry, setJourneyRetry] = useState(0);
-  const [documentsVersion, setDocumentsVersion] = useState(0);
   useEffect(() => {
     if (!projectId) { setJourney(null); setJourneyState('idle'); return; }
     let alive = true;
@@ -875,7 +872,7 @@ function App() {
                 key={`script-entry-${projectId}`}
                 projectId={projectId}
                 onMessage={report}
-                onDocumentReady={() => { setDocumentsVersion((n) => n + 1); }}
+                onDocumentReady={() => { refreshAll().catch(() => undefined); }}
                 onGoSetupModels={() => goToDirectorSetup('models')}
               />
               </StageRailProvider>
@@ -989,63 +986,17 @@ function App() {
                   <span>分镜要求的必需素材还没有全部确认为主素材；缺失只影响用到它的镜头，其他镜头照常开拍。可选项可以直接跳过。</span>
                 </div>}
                 <ShotMaterialsPanel key={`shot-materials-${projectId}`} projectId={projectId}
-                  onMessage={report} onOpenLibrary={() => goToAssets('images')}
+                  onMessage={report}
                   onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
 
                 {nextStage && nextStage.page !== 'materials' && <div className="stage-next-step">
-                  <span className="sns-text">素材已按清单核对，下一步：<b>{nextStage.text}</b>。
+                  <span className="sns-text">素材已按清单准备并确认，下一步：<b>{nextStage.text}</b>。
                     缺的必需素材只暂停用到它的镜头，不挡住其余镜头开拍。</span>
                   <button type="button" className="btn-primary"
                     onClick={() => goToDirectorPage(nextStage.page, nextStage.id)}>
                     下一步：{nextStage.text}
                   </button>
                 </div>}
-
-                <section className="card section-card" id="project-assets">
-                  <div className="section-heading">
-                    <div>
-                      <div className="section-kicker">项目素材</div>
-                      <h2>项目素材</h2>
-                      <p>已批准并锁定的主素材才能被镜头引用。上传后到素材中心确认候选、锁定版本；
-                        这里只显示本项目的素材规模。</p>
-                    </div>
-                    <button type="button" className="btn-secondary" onClick={() => goToAssets('home')}>
-                      <Images size={13} /> 打开素材中心
-                    </button>
-                  </div>
-                  <p className="run-hint">
-                    {assets.length} 项在库 · {approvedAssets.length} 项已批准并锁定
-                    {assets.length > approvedAssets.length
-                      ? ` · ${assets.length - approvedAssets.length} 项待确认（到素材中心处理）` : ''}
-                  </p>
-                </section>
-
-                {directorPage === 'materials' && <>
-                  <StageDock id="material-analysis" title="按场次分析剧本与候选批次(高级)">
-                    <MaterialPreparationPanel
-                      key={`material-expert-${projectId}`}
-                      projectId={projectId}
-                      documentsVersion={documentsVersion}
-                      shots={shots}
-                      onMessage={report}
-                      frozenStyle={currentStyle}
-                      storyboardReady={!!stageDone.storyboard}
-                      embedded
-                      onPromoted={() => { refreshAll().catch(() => undefined); }}
-                    />
-                  </StageDock>
-                  <StageDock id="asset-upload" title="上传与确认项目素材">
-                    <AssetPanel
-                      assets={assets}
-                      busy={busy}
-                      onUpload={uploadAsset}
-                      onConfirm={confirmAssets}
-                      onUnlock={unlockAsset}
-                      onPatchMetadata={patchAssetMetadata}
-                      onOpenLibrary={() => goToAssets('library')}
-                    />
-                  </StageDock>
-                </>}
               </StageRailProvider>
             </div>
 

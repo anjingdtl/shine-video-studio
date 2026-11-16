@@ -809,10 +809,9 @@ const FAMILY_LABEL: Record<string, string> = {
   character: '人物', scene: '场景', prop: '道具',
 };
 
-export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoStage }: {
+export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
   projectId: string;
   onMessage?: (message: string) => void;
-  onOpenLibrary?: () => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
   onGoStage?: (target: ErrorActionTarget) => void;
 }) {
@@ -996,7 +995,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
   const missingCritical = requirements.filter(
     (row) => row.critical && !row.matched_master).length;
   const primary: RailAction | null = requirements.length
-    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并送素材中心',
+    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并开始准备素材',
         onClick: () => void commit(), loading: busy === 'commit',
         disabled: busy !== '' || pendingChoice,
         icon: <ListChecks size={14} />,
@@ -1028,11 +1027,10 @@ export function ShotMaterialsPanel({ projectId, onMessage, onOpenLibrary, onGoSt
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
-    {result && <p className="run-hint ok-hint"><Check size={12} /> {result}
-      {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>去素材中心</button>}
-    </p>}
+    {result && <p className="run-hint ok-hint"><Check size={12} /> {result}</p>}
 
-    <MaterialGenerationProgress projectId={projectId} onOpenLibrary={onOpenLibrary} refreshKey={progressKey} />
+    <MaterialGenerationProgress projectId={projectId} refreshKey={progressKey}
+      onPromoted={() => { void load(); }} />
 
     {loaded && !requirements.length && <p className="empty-inline">
       还没有按镜头的素材清单。先确认至少一集的镜头，再生成清单。

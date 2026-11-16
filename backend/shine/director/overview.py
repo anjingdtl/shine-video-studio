@@ -298,9 +298,15 @@ def _episode_node(
     section_ids = [str(item) for item in (plan_row.get("section_ids") or [])]
     landed: list[str] = []
     missing_sections: list[dict[str, Any]] = []
+    landed_section_count = 0
     for section_id in section_ids:
         resolved = _section_shots(db, project.id, section_id, section_cache)
+        # 与 journey 同一口径：合并进邻场的标题已被满足，既不算落镜、也不算缺镜。
+        # 否则旅程显示「分镜已完成」、制作页却说「还有 N 场没拆成镜头」——两套结论。
+        if resolved.get("merged_into"):
+            continue
         if resolved["shot_ids"]:
+            landed_section_count += 1
             landed.extend(str(shot_id) for shot_id in resolved["shot_ids"])
         else:
             missing_sections.append({"section_id": section_id,
@@ -398,7 +404,7 @@ def _episode_node(
         "state_label": _STATE_LABELS.get(state, state),
         "storyboard": {
             "section_count": len(section_ids),
-            "landed_section_count": len(section_ids) - len(missing_sections),
+            "landed_section_count": landed_section_count,
             "pending_sections": missing_sections[:20],
             "ledger_task_id": storyboard.get("task_id"),
             "ledger_task_status": ledger_status,

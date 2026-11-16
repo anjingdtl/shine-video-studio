@@ -2126,6 +2126,17 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .mgp-items li{display:flex;justify-content:space-between;gap:12px}
 .mgp-items em{font-style:normal;color:var(--ink-2)}
 .mgp-items em.warn{color:var(--warn-2,#8a6a2f)}
+/* 页内候选选定与晋升（导演④素材准备页，不引去素材中心） */
+.mgp-candidates{margin:8px 0;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.mgp-candidates-title{font-size:var(--fs-caption);color:var(--ink-2);margin:0 0 6px}
+.mgp-candidate-item{margin:6px 0}
+.mgp-candidate-entity{font-size:var(--fs-caption);font-weight:600;color:var(--ink-mid);display:block;margin-bottom:4px}
+.mgp-candidate-grid{display:flex;gap:8px;flex-wrap:wrap}
+.mgp-candidate{margin:0;width:120px;display:flex;flex-direction:column;gap:4px;align-items:center}
+.mgp-candidate img{width:120px;height:120px;object-fit:cover;border-radius:6px;border:1px solid var(--line);background:var(--surface-3,#eee)}
+.mgp-candidate figcaption{font-size:var(--fs-caption);color:var(--muted);display:flex;align-items:center;gap:4px}
+.mgp-candidate figcaption.ok{color:var(--ok-2,#2f6a3f)}
+.mgp-candidate .btn-text{font-size:var(--fs-caption)}
 /* 素材需求批量处理工具栏 */
 .material-batch-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:8px 10px;margin:6px 0;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font-size:var(--fs-caption)}
 .material-batch-bar select{min-width:150px;width:auto}

@@ -2134,3 +2134,16 @@ export const lockProjectAsset = async (assetId: string) => {
     grant_id: grant.grant_id, snapshot: grant.snapshot, offline: false, evidence: ASSET_GRANT_EVIDENCE,
   }));
 };
+
+/** 素材准备页内选用并晋升一个生成候选：与素材中心/专业面板共用同一个晋升执行者
+ *  （/candidate-assets/{id}/promote → 主素材 + 回绑需求与镜头），不另起一套。 */
+export const promoteMaterialCandidate = async (candidateId: string, isMock: boolean) => {
+  const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
+    json('POST', { action: 'promote', target_id: candidateId }));
+  return api<{ formal_asset_id?: string; asset_id?: string }>(
+    `/candidate-assets/${candidateId}/promote`,
+    json('POST', {
+      grant_id: grant.grant_id, snapshot: grant.snapshot, offline: isMock,
+      evidence: '导演模式素材准备页人工选用并晋升素材候选。',
+    }));
+};
