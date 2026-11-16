@@ -63,6 +63,38 @@
 - **真机**：journey `next_stage=package`、assets done，素材页渲染「下一步：导演包」按钮
   （快照 uid 29_310 / 31_321）。
 
+## 缺陷 5 · 已确认素材，导演包仍报「缺必需素材」（确认链路不一致）
+
+用户复验时报：已确认 3 个人物主素材，导演包仍「等待备料 · 缺 3 项必需素材」，勾选框禁用。
+
+- **根因（多处事实碎片化）**：
+  1. 素材中心晋升走 `POST /candidate-assets/{id}/promote`（`comfyops/assets.py::promote`），
+     只创建主素材，**不把主素材采纳进需求行与镜头**；需求行仍 `strategy=generate`、
+     `bound_asset_id=None`。
+  2. 两条确认链路不一致：`/director/materials/commit` 调 `_bind_adopted_masters` 回绑镜头，
+     而 `/material-preparation/confirm` 只调 `service.confirm`，**不回绑**。
+  3. journey 的 `_shot_material_problems` 把「旁白」也算缺人物素材，而素材清单按
+     `is_narrator_speaker` 排除旁白——两处人物需求规则不一致。
+  素材清单读派生匹配（matched_master），journey/overview/导演包读 `shot.bindings`，
+  主素材独立存在——一个事实被拆成三处状态。
+- **修复（一个执行者）**：
+  - 把镜头回绑逻辑移进 `materialprep/service.py::bind_adopted_masters_to_shots`，并在
+    `service.confirm` 内调用——**所有确认路径**（director commit / material-prep confirm）
+    都由这一个执行者回绑。`api_streamline._bind_adopted_masters` 改为委托它的幂等修复包装。
+  - `promote` 创建主素材后，经候选 `provenance.item_id → MaterialItem.requirement_id`
+    找到需求行，调 `bind_material_master` + `bind_adopted_masters_to_shots`——晋升即采纳。
+  - `upload_requirement_master`（main.py）与 `merge_character`（api_material.py）同样补回绑。
+  - journey `_shot_material_problems` 排除旁白，与素材清单 `_character_names` 同一规则；
+    overview 复用同一函数，导演包页随之同源。
+- **回归**：`test_material_preparation_confirm_binds_shots_like_director_commit`
+  （material-prep confirm 回绑镜头）、`test_promoting_a_candidate_adopts_it_into_requirement_and_shots`
+  （晋升候选→需求转复用+镜头回绑）。
+- **真机**：对用户项目已晋升的 3 个主素材（沈砚/老陈/委托人）经产品确认端点采纳后，
+  `bound_shots=8`，journey `material_missing_count=0`，overview 分集 `READY_TO_PACKAGE`，
+  导演包页第1集由「等待备料 · 缺 3 项」变为「**可打包** · 23 镜」、勾选框可用、
+  「确认拍摄方案并开始真实制作（1 集）」按钮启用（INT8 `available=True`）。
+  一个状态通达全流程。**未替用户点开拍**（23 镜真实生产由用户掌控）。
+
 ## 自动化回归
 
 - **前端**：`npx tsc --noEmit` 通过；`npx vitest run --no-file-parallelism`

@@ -137,6 +137,7 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
     renderable, so the shot must carry the bound master.
     """
     from shine.asset_identity import resolve_character_asset, split_character_names
+    from shine.h3.narrator import is_narrator_speaker
 
     problems: list[str] = []
     try:
@@ -162,7 +163,12 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
                       "entity_id": asset.entity_id})
         if link.role:
             bound_roles.add(link.role)
-    for reference in dict.fromkeys(name for entry in spec.characters for name in split_character_names(entry)):
+    # The narrator speaks off-screen and owns no picture reference: the material
+    # list excludes it (requirements._character_names), so the journey must use
+    # the same rule instead of reporting a missing "narrator portrait".
+    for reference in dict.fromkeys(name for entry in spec.characters
+                                   for name in split_character_names(entry)
+                                   if not is_narrator_speaker(name)):
         if reference not in bound_roles and resolve_character_asset(reference, bound) is None:
             problems.append("SHOT_CHARACTER_MASTER_MISSING:" + reference)
     return problems

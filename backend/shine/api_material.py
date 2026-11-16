@@ -688,6 +688,7 @@ def merge_character(project_id: str, body: MergeCharacterBody, actor: Operator, 
     service.bind_material_master(db, canonical, asset, actor)
     service.bind_material_master(db, alias, asset, actor, canonical_entity_id=entity)
     service.retire_unused_masters(db, plan, asset, actor, entities={entity, alias_entity})
+    service.bind_adopted_masters_to_shots(db, project_id, plan.id, actor)
     db.commit()
     return {"asset_id": asset.id, "canonical_entity_id": entity, "alias_entity_id": alias_entity}
 

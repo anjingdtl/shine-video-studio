@@ -485,14 +485,19 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
         selected = db.get(Asset, asset_id)
         if selected and selected.approved and selected.locked and not (selected.provenance or {}).get("offline_only"):
             retire_unused_masters(db, plan, selected, actor, entities={selected.entity_id})
+    # Confirming a master IS adopting it into the shots that need it: the one
+    # executor every confirmation path runs, so the material list, the journey
+    # and the package readiness read the same shot.bindings fact.
+    bound_shots = bind_adopted_masters_to_shots(db, project_id, plan.id, actor)
     add_audit(db, actor, "MATERIAL_PLAN_CONFIRMED", "preproduction_plan", plan.id,
               {"confirmation_id": confirmation_id, "decisions": len(decisions),
-               "generate": sum(1 for d in decisions if d["strategy"] == "generate")},
+               "generate": sum(1 for d in decisions if d["strategy"] == "generate"),
+               "bound_shots": bound_shots},
               project_id=project_id)
     db.commit()
     return {"plan_revision_id": plan.id, "confirmation_id": confirmation_id,
             "confirmation_hash": graph_hash(confirmation_payload), "decisions": decisions,
-            "identity_notes": identity_notes,
+            "identity_notes": identity_notes, "bound_shots": bound_shots,
             "status": plan.status}
 
 
@@ -1150,6 +1155,68 @@ def bind_material_master(db, requirement, asset, actor: str, *, canonical_entity
     add_audit(db, actor, "MATERIAL_MASTER_SELECTED", "asset_requirement", requirement.id,
               {"previous_asset_id": payload.get("bound_asset_id"), "asset_id": asset.id,
                "canonical_entity_id": payload.get("canonical_entity_id")}, project_id=asset.project_id)
+
+
+def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str) -> int:
+    """Bind every confirmed "reuse this master" onto the shots that asked for it.
+
+    A confirmed requirement is not yet a shot binding: the shot table, the
+    journey, the overview and the package readiness all read ``shot.bindings``,
+    not the material list.  Without this step a person who just confirmed a
+    master still sees the package report "missing material" — two states for one
+    fact.  This is the single executor every confirmation path runs, so the
+    material list and the package always agree.  Idempotent: a replayed
+    confirmation repairs a half-finished hand-off.  Shots that already own a
+    current passed take are never touched.
+    """
+    from sqlalchemy import select as sa_select
+
+    from shine.comfyops.models import AssetRequirement
+    from shine.models import Asset, Job, Shot
+    from shine.schemas import ReferenceUse, ShotBindingInput
+    from shine.services import require_project, set_shot_bindings
+
+    project = require_project(db, project_id)
+    bound = 0
+    rows = db.scalars(sa_select(AssetRequirement).where(
+        AssetRequirement.plan_id == plan_id,
+        AssetRequirement.project_id == project_id,
+    )).all()
+    for requirement in rows:
+        payload = dict(requirement.payload or {})
+        if payload.get("strategy") != "reuse_master" or payload.get("family") != "character":
+            continue
+        asset_id = payload.get("bound_asset_id")
+        entity = payload.get("entity_id") or ""
+        if not asset_id or not entity:
+            continue
+        asset = db.get(Asset, asset_id)
+        if asset is None or not asset.approved or not asset.locked:
+            continue
+        for shot_id in payload.get("used_shot_ids") or []:
+            shot = db.get(Shot, shot_id)
+            if shot is None or shot.project_id != project_id:
+                continue
+            if entity not in list((shot.spec or {}).get("characters") or []):
+                continue
+            if any(link.asset_id == asset.id for link in shot.bindings):
+                continue
+            passed = db.scalar(sa_select(Job).where(
+                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
+                Job.shot_revision == shot.revision,
+            ))
+            if passed is not None:
+                continue
+            inputs = [
+                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
+                                 role=link.role, ordinal=index)
+                for index, link in enumerate(shot.bindings)
+            ]
+            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.SUBJECT,
+                                           role=entity, ordinal=len(inputs)))
+            set_shot_bindings(db, project, shot, inputs, actor=actor)
+            bound += 1
+    return bound
 
 
 def retire_unused_masters(db, plan, selected, actor: str, *, entities: set[str]):

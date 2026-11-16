@@ -876,6 +876,8 @@ def create_app(
         )):
             bind_material_master(db, alias, asset, actor)
         retire_unused_masters(db, plan, asset, actor, entities={entity})
+        from shine.materialprep.service import bind_adopted_masters_to_shots
+        bind_adopted_masters_to_shots(db, project_id, plan.id, actor)
         add_audit(db, actor, "UPLOADED_MATERIAL_APPROVED_AND_LOCKED", "asset", asset.id,
                   {"requirement_id": requirement_id, "sha256": asset.sha256}, project_id=project_id)
         db.commit()

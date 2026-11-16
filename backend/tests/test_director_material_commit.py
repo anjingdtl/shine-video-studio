@@ -220,6 +220,121 @@ def test_a_single_row_commit_keeps_the_whole_requirement_list(api):
     assert original.issubset(kept), f"单条提交后清单塌缩：丢失 {original - kept}"
 
 
+def test_material_preparation_confirm_binds_shots_like_director_commit(api):
+    """晋升走的 /material-preparation/confirm 必须与 director commit 一样回绑镜头。
+
+    素材清单读派生匹配（matched_master），journey/overview/导演包读 shot.bindings。
+    若 material-prep confirm 不回绑，用户晋升了主素材，清单显示「已匹配」而导演包
+    仍报「缺必需素材」——一个事实两处状态。确认必须只有一个执行者。
+    """
+    from sqlalchemy import select
+
+    from shine.models import Shot
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    matched = next(row for row in derived["requirements"]
+                   if row["family"] == "character" and row["matched_master"])
+    decisions = []
+    for row in derived["requirements"]:
+        if row["requirement_id"] == matched["requirement_id"]:
+            strategy, asset_id = "reuse_master", matched["matched_master"]["asset_id"]
+        elif row["family"] == "character":
+            strategy, asset_id = "generate", None
+        else:
+            strategy, asset_id = "skip", None
+        decisions.append({"requirement_id": row["requirement_id"], "strategy": strategy,
+                          "entity_id": row["entity_id"], "asset_id": asset_id})
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/material-preparation/confirm",
+        json={"plan_revision_id": derived["plan_revision_id"],
+              "expected_snapshot": derived["expected_snapshot"],
+              "decisions": decisions}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+
+    master_id = matched["matched_master"]["asset_id"]
+    with factory() as db:
+        shots = db.scalars(select(Shot).where(Shot.project_id == project)).all()
+        bound = [shot for shot in shots if any(link.asset_id == master_id for link in shot.bindings)]
+        assert bound, "material-preparation/confirm 必须回绑镜头，与 director commit 同一事实"
+
+
+def test_promoting_a_candidate_adopts_it_into_requirement_and_shots(api):
+    """晋升候选为主素材必须同时回绑需求与镜头（用户实际走的路径）。
+
+    晋升只创建主素材而不回绑时，素材清单显示「已匹配」而导演包仍报「缺必需素材」。
+    晋升与确认共用同一个采纳执行者，一个事实通达全流程。
+    """
+    import hashlib
+
+    from sqlalchemy import select
+
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement, CandidateAsset
+    from shine.materialprep.models import MaterialItem, MaterialRun
+    from shine.models import Shot
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    target = next(row for row in derived["requirements"]
+                  if row["family"] == "character" and row["used_shot_ids"])
+    entity = target["entity_id"]
+
+    png = (b"\x89PNG\r\n\x1a\n" + b"\x00" * 64)
+    digest = hashlib.sha256(png).hexdigest()
+    storage_path = f"candidates/promote-bind-{target['requirement_id']}.png"
+    (settings.data_dir / storage_path).parent.mkdir(parents=True, exist_ok=True)
+    (settings.data_dir / storage_path).write_bytes(png)
+
+    with factory.begin() as db:
+        run = MaterialRun(
+            project_id=project, plan_id=derived["plan_revision_id"],
+            confirmation_id="c" * 64, confirmation_hash="h" * 64,
+            idempotency_key=f"test-promote-{target['requirement_id']}",
+            request_hash="r" * 64, mode="real", status="COMPLETED",
+            payload={"kind": "production"}, sha256="s" * 64)
+        db.add(run)
+        db.flush()
+        item = MaterialItem(run_id=run.id, project_id=project,
+                            requirement_id=target["requirement_id"],
+                            generation_revision=1, status="CANDIDATE_READY",
+                            payload={}, sha256="i" * 64)
+        db.add(item)
+        db.flush()
+        payload = {
+            "kind": "image", "family": "character", "entity_id": entity,
+            "filename": "promote-bind.png", "content_type": "image/png",
+            "content_sha256": digest, "storage_path": storage_path,
+            "byte_size": len(png), "rights_id": None, "media": {},
+            "provenance": {"item_id": item.id, "is_mock": False, "renderer_owned": True},
+        }
+        candidate = CandidateAsset(project_id=project, status="READY_FOR_REVIEW",
+                                   payload=payload, sha256=graph_hash(payload))
+        db.add(candidate)
+        db.flush()
+        candidate_id = candidate.id
+
+    grant = client.post("/api/v1/preparation/approval-grants",
+                        json={"action": "promote", "target_id": candidate_id}, headers=LOCAL)
+    assert grant.status_code in {200, 201}, grant.text
+    promoted = client.post(f"/api/v1/candidate-assets/{candidate_id}/promote",
+                           json={"grant_id": grant.json()["grant_id"],
+                                 "snapshot": grant.json()["snapshot"],
+                                 "offline": False, "evidence": "回归测试晋升"},
+                           headers=LOCAL)
+    assert promoted.status_code == 200, promoted.text
+    formal_id = promoted.json()["formal_asset_id"]
+    assert formal_id
+
+    with factory() as db:
+        requirement = db.get(AssetRequirement, target["requirement_id"])
+        assert requirement.payload.get("strategy") == "reuse_master"
+        assert requirement.payload.get("bound_asset_id") == formal_id
+        shots = db.scalars(select(Shot).where(Shot.project_id == project)).all()
+        bound = [shot for shot in shots if any(link.asset_id == formal_id for link in shot.bindings)]
+        assert bound, "晋升必须把主素材回绑到需要它的镜头"
+
+
 def test_generation_progress_reads_the_same_run_ledger_as_the_material_page(api):
     """进度条读的是同一份 public_run 台账，不是第二套判定。"""
     client, _factory, settings = api
