@@ -100,8 +100,8 @@ def test_validation_pngs_are_valid_and_aligned():
     assert (base_info.width, base_info.height) == (64, 64)
     assert (mask_info.width, mask_info.height) == (64, 64)
     # mask 中心白、边缘黑（white=edit, black=preserve）
-    import zlib
     import struct
+    import zlib
 
     def _rows(data):
         # 解析 IDAT

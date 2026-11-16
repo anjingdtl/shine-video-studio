@@ -8,6 +8,7 @@ import sys
 import threading
 import time
 import urllib.request
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -149,7 +150,7 @@ def test_a_stopped_worker_is_recorded_offline_at_once(tmp_path, monkeypatch):
     first" although it already is - the person clicks the same button again
     and gets the same answer.
     """
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from shine.db import Base, make_engine, make_session_factory
     from shine.models import WorkerInstance
@@ -161,7 +162,7 @@ def test_a_stopped_worker_is_recorded_offline_at_once(tmp_path, monkeypatch):
     factory = make_session_factory(engine)
     with factory.begin() as db:
         db.add(WorkerInstance(worker_id="worker-x", version="1", status="online",
-                              last_heartbeat_at=datetime.now(timezone.utc)))
+                              last_heartbeat_at=datetime.now(UTC)))
     engine.dispose()
 
     supervisor._mark_worker_stopped(tmp_path)
