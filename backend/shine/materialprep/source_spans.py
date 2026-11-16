@@ -198,23 +198,57 @@ def merge_non_narrative_fragments(fragments: list[dict]) -> list[dict]:
     pending: list[dict] = []
 
     def absorb(target: dict, extras: list[dict], *, forward: bool) -> None:
+        # extras are in source order. Prepend/append them as one block so the
+        # boundary lands on the outermost fragment and the text keeps source
+        # order; a per-fragment prepend reversed a multi-fragment chain and left
+        # the start on the inner fragment instead of the leftmost one.
+        if not extras:
+            return
+        if forward:
+            target["start_offset"] = extras[0]["start_offset"]
+            target["text"] = "".join(e["text"] for e in extras) + target["text"]
+        else:
+            target["end_offset"] = extras[-1]["end_offset"]
+            target["text"] = target["text"] + "".join(e["text"] for e in extras)
         for extra in extras:
-            if forward:
-                target["start_offset"] = extra["start_offset"]
-                target["text"] = extra["text"] + target["text"]
-            else:
-                target["end_offset"] = extra["end_offset"]
-                target["text"] = target["text"] + extra["text"]
             section = extra["production_section_id"]
             if section != target["production_section_id"] \
                     and section not in target["merged_section_ids"]:
                 target["merged_section_ids"].append(section)
 
+    def contiguous_backward(items: list[dict], end: int) -> list[dict]:
+        # The run of pending fragments ending exactly at `end`, walked back while
+        # contiguous (a title + cast/setup chain), returned in source order. A
+        # single-fragment adjacency test stranded a preamble separated from the
+        # narrative unit by another setup fragment: absorbing that neighbour
+        # extends the unit backward, so the whole contiguous chain must join it.
+        chain: list[dict] = []
+        cursor = end
+        for item in reversed(items):
+            if item["end_offset"] == cursor:
+                chain.insert(0, item)
+                cursor = item["start_offset"]
+            else:
+                break
+        return chain
+
+    def contiguous_forward(items: list[dict], start: int) -> list[dict]:
+        chain: list[dict] = []
+        cursor = start
+        for item in items:
+            if item["start_offset"] == cursor:
+                chain.append(item)
+                cursor = item["end_offset"]
+            else:
+                break
+        return chain
+
     for fragment in fragments:
         if is_narrative_fragment(fragment["text"]):
             unit = {**fragment, "merged_section_ids": []}
-            adjacent = [p for p in pending if p["end_offset"] == unit["start_offset"]]
-            isolated = [p for p in pending if p["end_offset"] != unit["start_offset"]]
+            adjacent = contiguous_backward(pending, unit["start_offset"])
+            absorbed = {id(p) for p in adjacent}
+            isolated = [p for p in pending if id(p) not in absorbed]
             # An isolated title cannot join this unit without spanning unrelated
             # text; it stays its own (refusable) unit.
             for stray in isolated:
@@ -228,8 +262,9 @@ def merge_non_narrative_fragments(fragments: list[dict]) -> list[dict]:
         narrative_units = [u for u in units if not u.get("non_narrative")]
         if narrative_units:
             last = narrative_units[-1]
-            adjacent = [p for p in pending if p["start_offset"] == last["end_offset"]]
-            isolated = [p for p in pending if p["start_offset"] != last["end_offset"]]
+            adjacent = contiguous_forward(pending, last["end_offset"])
+            absorbed = {id(p) for p in adjacent}
+            isolated = [p for p in pending if id(p) not in absorbed]
             absorb(last, adjacent, forward=False)
             for stray in isolated:
                 units.append({**stray, "merged_section_ids": [], "non_narrative": True})

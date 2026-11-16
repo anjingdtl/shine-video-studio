@@ -74,3 +74,25 @@ def test_title_and_cast_setup_preamble_merges_into_the_first_scene():
     assert units[0]["production_section_id"] == "s1"
     assert "pre" in units[0]["merged_section_ids"]
     assert "".join(u["text"] for u in units) == "".join(f["text"] for f in fragments)
+
+
+def test_a_contiguous_setup_chain_all_merges_not_just_the_touching_fragment():
+    # 活缺陷（2026-11-16）：前言(0-32)与第一场(62-138)之间隔着场景描述段(32-62)，
+    # 旧「只吸收与原起点相邻的一段」逻辑把前言判孤立单独拆镜。须吸收整条连续
+    # 待合并链：前言+场景描述都并入第一场。
+    from shine.materialprep.source_spans import merge_non_narrative_fragments
+    pre = "雨夜归人\n人物：阿远，三十多岁，深色风衣，神情疲惫。\n"
+    setup = "场景：深夜都市，湿冷柏油路，暖黄路灯，远处霓虹。\n"
+    scene = "第一场\n阿远撑伞走在湿漉漉的街道上，路灯把影子拉得很长，皮鞋踩过积水溅起水花。\n"
+    fragments = []
+    offset = 0
+    for sid, text, order in (("pre", pre, 1), ("setup", setup, 2), ("s1", scene, 3)):
+        fragments.append({"episode_id": "ep-01", "production_section_id": sid, "section_order": order,
+                          "start_offset": offset, "end_offset": offset + len(text), "text": text})
+        offset += len(text)
+    units = merge_non_narrative_fragments(fragments)
+    assert len(units) == 1, "the whole contiguous setup chain joins the one narrative scene"
+    assert units[0]["production_section_id"] == "s1"
+    assert set(units[0]["merged_section_ids"]) == {"pre", "setup"}
+    assert units[0]["start_offset"] == 0
+    assert units[0]["text"] == pre + setup + scene
