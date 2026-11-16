@@ -9,7 +9,7 @@
  *  不再把用户引去素材中心。素材中心是平行的素材管理模块，不串进生产环节。 */
 import { useCallback, useEffect, useState } from 'react';
 import { Check, RefreshCw } from 'lucide-react';
-import { API, ApiError, api, json, promoteMaterialCandidate } from '../api';
+import { API, ApiError, api, promoteMaterialCandidate } from '../api';
 
 type CandidateInfo = {
   candidate_id: string;
@@ -108,27 +108,6 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     }
   }
 
-  const [resuming, setResuming] = useState('');
-  /** 待核对/失败项在本页重试：后端守卫保证 UNKNOWN image 提交不被重发。 */
-  async function resumeReview(run: GenerationRun) {
-    if (resuming) return;
-    const ids = run.items
-      .filter((item) => item.status === 'NEEDS_REVIEW' || item.status === 'FAILED')
-      .map((item) => item.item_id);
-    if (!ids.length) return;
-    setResuming(run.run_id); setPromoError('');
-    try {
-      await api(`/projects/${projectId}/material-preparation/runs/${run.run_id}/resume`,
-        json('POST', { expected_state_version: run.state_version ?? 0, item_ids: ids }));
-      onPromoted?.();
-      await load();
-    } catch (error) {
-      setPromoError(describeError(error));
-    } finally {
-      setResuming('');
-    }
-  }
-
   // 只显示有内容的批次：在途的，或已产出候选的。空批次不占位。
   const shown = runs.filter((row) => row.counts.total > 0
     && (row.counts.running > 0 || row.counts.queued > 0 || row.counts.candidate_ready > 0
@@ -211,9 +190,6 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
         </p>}
         {run.counts.needs_review > 0 && <p className="mgp-review">
           {run.counts.needs_review} 项结果待核对（不会自动重发）。
-          {onPromoted && <button type="button" className="btn-text" disabled={!!resuming}
-            onClick={() => void resumeReview(run)}>
-            {resuming === run.run_id ? '重试中…' : '重试待核对项'}</button>}
           {onOpenLibrary && !onPromoted && <button type="button" className="btn-text" onClick={onOpenLibrary}>
             去素材中心核对</button>}
         </p>}
