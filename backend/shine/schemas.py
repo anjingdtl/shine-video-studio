@@ -830,6 +830,7 @@ class AgentRole(StrEnum):
     SHOT_PLANNER = "shot_planner"
     REPAIR_PLANNER = "repair_planner"
     QC_REVIEWER = "qc_reviewer"
+    SUPPORT_AGENT = "support_agent"
     VLM_REVIEWER = "vlm_reviewer"
     ASR_REVIEWER = "asr_reviewer"
     FOUR_STAGE_BIBLE = "four_stage_bible_run"

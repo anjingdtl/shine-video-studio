@@ -787,3 +787,6 @@ from shine.materialprep import models as materialprep_models  # noqa: E402,F401
 # Auto delivery orders ride the same metadata ledger (V1.4).
 from shine.media import delivery_models  # noqa: E402,F401
 from shine.production import models as production_models  # noqa: E402,F401
+
+# The AI copilot's bounded conversation / authorisation / report ledger.
+from shine.support import models as support_models  # noqa: E402,F401

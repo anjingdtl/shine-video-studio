@@ -522,6 +522,9 @@ def create_app(
     app.include_router(pipeline_router)
     app.include_router(instances_router)
     app.include_router(setup_router)
+    from shine.api_support import router as support_router
+
+    app.include_router(support_router)
     from shine.api_director_styles import router as director_styles_router
 
     app.include_router(director_styles_router)

@@ -42,6 +42,7 @@ import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getDirectorOverview, getJourney, presencePing, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
+import { ShineCopilot } from './components/ShineCopilot';
 import type { Asset, Project } from './api';
 
 /** 导演工作台是唯一入口。旧专业模式深链按用途映射到对应阶段或高级设置，
@@ -535,18 +536,26 @@ function App() {
   const needsSetup = !!production && !['READY', 'RUNNING'].includes(production.mode);
 
   if (ui === 'assets') {
-    return <AssetsWorkspace
-      page={assetPage}
-      onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
-      onWorkspace={(space) => { if (space === 'director') leaveAssets(); else { setUi('director'); setDirectorPage('advanced'); window.history.pushState(null, '', '#d/advanced'); window.scrollTo({ top: 0 }); } }}
-      onOpenImageSetup={() => {
-        goToDirectorSetup();
-        window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
-      }}
-      projects={projects as Project[]}
-      projectId={projectId}
-      projectAssets={assets as Asset[]}
-    />;
+    return <>
+      <AssetsWorkspace
+        page={assetPage}
+        onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
+        onWorkspace={(space) => { if (space === 'director') leaveAssets(); else { setUi('director'); setDirectorPage('advanced'); window.history.pushState(null, '', '#d/advanced'); window.scrollTo({ top: 0 }); } }}
+        onOpenImageSetup={() => {
+          goToDirectorSetup();
+          window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
+        }}
+        projects={projects as Project[]}
+        projectId={projectId}
+        projectAssets={assets as Asset[]}
+      />
+      <ShineCopilot
+        pageId={`assets-${assetPage}`}
+        pageLabel="素材中心"
+        projectId={projectId || undefined}
+        needsSetup={needsSetup}
+      />
+    </>;
   }
 
   const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting || restartPhase !== null}>
@@ -1187,6 +1196,13 @@ function App() {
           </>}
         </div>
       </main>
+
+      <ShineCopilot
+        pageId={directorPage}
+        pageLabel={DIRECTOR_PAGE_LABELS[directorPage]}
+        projectId={projectId || undefined}
+        needsSetup={needsSetup}
+      />
 
       {helpOpen && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="帮助" onClick={() => setHelpOpen(false)}>
         <div className="help-modal" onClick={(event) => event.stopPropagation()}>

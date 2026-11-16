@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180f0010001"
+HEAD_REVISION = "f180f0010002"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -105,6 +105,12 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
         assert "generation_options" in provider_columns
         series_columns = {row[1] for row in connection.execute("PRAGMA table_info(production_series)")}
         assert "output_spec" in series_columns
+        assert {
+            "support_sessions",
+            "support_messages",
+            "support_actions",
+            "support_reports",
+        }.issubset(tables)
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
     finally:
         connection.close()
