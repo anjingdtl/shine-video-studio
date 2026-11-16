@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
-import { StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, SYSTEM_STATUS, baseProject, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
@@ -28,28 +28,33 @@ afterEach(() => {
 
 describe('空数据库与两层界面入口', () => {
   it('中央重新连接显示检查进度、失联原因和恢复后的作品读取进度', async () => {
+    // 唯一性原则：连接探针归一到 /system/status（与制作模式同源），作品读取仍走
+    // /projects。本用例分别控制这两条请求的落定时刻，验证重连两段进度与失败原因。
     let online = false;
-    let probeNext = false;
-    let finishProbe: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
+    let hangStatus = false;
+    let hangProjects = false;
+    let finishStatus: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
     let finishProjects: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
-    const probe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProbe = resolve; });
-    const projects = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProjects = resolve; });
+    const statusProbe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishStatus = resolve; });
+    const projectsProbe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProjects = resolve; });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => {
+      if (hangStatus) { hangStatus = false; return statusProbe; }
+      return jsonResponse({ ...SYSTEM_STATUS, api_online: online });
+    } });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => {
-      if (probeNext) {
-        probeNext = false;
-        return online ? jsonResponse([]) : probe;
-      }
-      return online ? projects : jsonResponse({}, 503);
+      if (hangProjects) { hangProjects = false; return projectsProbe; }
+      return online ? jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]) : jsonResponse({}, 503);
     } });
     render(<App />);
-    probeNext = true;
+    await screen.findByRole('button', { name: '重新连接' });
+    hangStatus = true;
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
     expect(screen.getByRole('progressbar', { name: '正在检查后端…' })).toBeInTheDocument();
-    finishProbe(jsonResponse({}, 503));
+    finishStatus(jsonResponse({ ...SYSTEM_STATUS, api_online: false }));
     expect(await screen.findByText(/后端未响应/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重启后台' })).toBeInTheDocument();
     online = true;
-    probeNext = true;
+    hangProjects = true;
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
     expect(await screen.findByRole('progressbar', { name: '后端已连接，正在读取作品…' })).toBeInTheDocument();
     finishProjects(jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]));
