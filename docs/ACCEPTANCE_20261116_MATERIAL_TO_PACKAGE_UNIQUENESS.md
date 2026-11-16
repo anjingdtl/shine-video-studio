@@ -99,13 +99,15 @@
 
 - **前端**：`npx tsc --noEmit` 通过；`npx vitest run --no-file-parallelism`
   **79 文件 / 401 项全绿**（新增 `materialToPackage.test.tsx` 5 项）；`npm run build` 通过（1652 模块）。
-- **后端定向**：`test_director_material_commit.py` 7 项全绿（含 2 条新反例）；
-  素材相关 12 模块批跑 **EXIT=0、0 FAILED/ERROR，共 166 例**（`CODEBUDDY_SAFE_DELETE_ENABLED=0`、
-  `env -u NO_PROXY`，仓库根）：four_stage_reacceptance 19 / director_streamline 26 /
-  director_long_form 27 / director_material_commit 7 / material_derive 4 / asset_center 25 /
-  material_prompt_carryover 1 / material_image_jobs 32 / material_scene_safety 12 /
-  material_scenes 7 / material_manual_prompt 4 / material_budget_share 2。
-  日志 `/tmp/material-regression.log`。
+- **后端定向**：`test_director_material_commit.py` 9 项全绿（含 3 条新反例：单条提交不塌缩、
+  material-prep confirm 回绑镜头、晋升候选→需求转复用+镜头回绑）；
+  素材+导演+journey **18 模块批跑 EXIT=0、0 FAILED/ERROR，共 196 例**
+  （`CODEBUDDY_SAFE_DELETE_ENABLED=0`、`env -u NO_PROXY`，仓库根）：four_stage_reacceptance 19 /
+  director_streamline 26 / director_long_form 27 / director_material_commit 8 / material_derive 4 /
+  one_click_batch_admission 6 / shoot_ownership 6 / director_execution_contract 6 /
+  director_basis_grouping 4 / director_run_scope 3 / asset_center 25 / material_prompt_carryover 1 /
+  material_image_jobs 32 / material_scene_safety 12 / material_scenes 7 / material_manual_prompt 4 /
+  freeze_unlock 4 / material_budget_share 2。日志 `/tmp/material-final.log`。
 - **Ruff**：改动后端文件全部通过。
 
 ## 唯一性原则核对
