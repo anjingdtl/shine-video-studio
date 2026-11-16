@@ -12,7 +12,6 @@ import { DemoRibbon, ModeStatusEntry } from './components/ModeStatusEntry';
 import { EngineStatusEntry } from './components/EngineStatusEntry';
 import AssetPanel from './components/AssetPanel';
 import { MaterialPreparationPanel } from './components/MaterialPreparationPanel';
-import { FourStagePanel } from './components/FourStagePanel';
 import { DirectorStoryboardStage } from './components/StoryboardDraftSection';
 import { ScriptEntryPanel } from './components/ScriptEntryPanel';
 import { SchemaNotice } from './components/SchemaNotice';
@@ -880,15 +879,6 @@ function App() {
                 onDocumentReady={() => { setDocumentsVersion((n) => n + 1); }}
                 onGoSetupModels={() => goToDirectorSetup('models')}
               />
-              {directorPage === 'creative' && <StageDock id="four-stage" title="文学四阶段自动编导(分卷 · 蓝图 · 分场 · 故事记忆)">
-                <FourStagePanel
-                  key={`four-stage-${projectId}`}
-                  projectId={projectId}
-                  documentsVersion={documentsVersion}
-                  workflowProfiles={workflowProfiles}
-                  onMessage={report}
-                />
-              </StageDock>}
               </StageRailProvider>
             </div>
 
