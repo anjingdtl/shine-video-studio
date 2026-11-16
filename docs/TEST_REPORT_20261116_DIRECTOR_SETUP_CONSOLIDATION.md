@@ -57,6 +57,10 @@
 backend/shine/repair.py backend/shine/preproduction.py` 为空，证明本轮未改这些文件，
 失败非本轮引入。该根因不在本轮范围，留待对应负责人处理。
 
+**平台口径**：上述失败均在**本机 Windows** 复现；`main`（`351f3a4`）的 CI
+**L3 backend full (Linux) 为 success**，即同一批模块在 Linux 全量通过——属 Windows
+本地平台差异，非逻辑回归。本 PR 的 CI（Linux）L1 quick 与 Frontend build 均 success。
+
 ### 3.2 环境假失败
 
 - `test_renderer_supervisor`：本会话 `NO_PROXY` 含 `[::1]`，httpx 解析报
