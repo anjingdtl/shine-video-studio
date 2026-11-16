@@ -223,7 +223,7 @@ def test_the_director_prompt_states_the_plan_and_forbids_the_two_deviations():
 
 def test_without_a_cut_table_the_director_may_still_give_a_dialogue_a_tail():
     prompt = crew_prompt("director", tool="propose")
-    assert "plus a short natural tail" in prompt
+    assert "plus a natural tail that lets the action breathe" in prompt
     assert "A shot's duration_s is fixed by the plan" not in prompt
     # Without a computed plan the model previously fragmented one beat into
     # several same-beat cuts, which the dialogue-window check always rejects.

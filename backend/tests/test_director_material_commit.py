@@ -29,7 +29,7 @@ def _episode_one_requirements(client, settings) -> tuple[str, dict]:
     _run_storyboard_to_rest(client, settings, project)
     confirmed = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert confirmed.status_code == 200, confirmed.text
     register_workflow_profile(client, mode="Ref2VA")
 

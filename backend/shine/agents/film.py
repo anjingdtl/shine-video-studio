@@ -815,6 +815,13 @@ class FilmAgentDispatcher:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
                 db, project_id, body.brief, body.production_context)
+            # The episode plan's duration goal, allocated to this unit by source
+            # length. The director aims for it (developing the action, not hugging
+            # the dialogue minimum) and the landing verdict checks against it —
+            # the same fact the plan recorded, now carried to the executor.
+            unit_target = body.production_context.get("unit_target_seconds")
+            if unit_target is not None:
+                context["unit_target_seconds"] = float(unit_target)
         if role in {"scriptwriter", "director"}:
             memory_view = _storyboard_memory_view(db, project_id, role=role)
             if memory_view is not None:
@@ -1022,6 +1029,7 @@ class FilmAgentDispatcher:
                 dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
                 narration_level=context.get("narration_level"),
                 max_shot_seconds=context.get("max_shot_seconds"),
+                unit_target_seconds=context.get("unit_target_seconds"),
             )
 
         def record_progress(phase: str) -> None:

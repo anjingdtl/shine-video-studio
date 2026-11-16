@@ -1592,6 +1592,7 @@ export const confirmStoryboardBook = (projectId: string, body: {
   plan_version: number; expected_sha256: string;
   style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number;
     narration_level?: 'none' | 'low' | 'high'; max_shot_seconds?: number | null } | null,
+  acknowledge_deviation?: boolean,
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
 
@@ -1654,10 +1655,11 @@ export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
   api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
 
-export const confirmEpisodeShots = (projectId: string, episodeId: string) =>
+export const confirmEpisodeShots = (projectId: string, episodeId: string,
+  acknowledgeDurationDeviation = false) =>
   api<{ plan_version: number; episode_id: string; shot_ids: string[] }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/confirm`,
-    json('POST', {}));
+    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation }));
 
 export const retryEpisodeStoryboard = (projectId: string, episodeId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string; episode_id: string }>(

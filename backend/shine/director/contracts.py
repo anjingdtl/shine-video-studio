@@ -178,6 +178,31 @@ def planned_seconds(shot: Any) -> float:
         return 0.0
 
 
+def duration_target_verdict(actual_seconds: float, target_seconds: float,
+                            tolerance_seconds: float) -> dict | None:
+    """The one duration-goal verdict shared by plan and episode confirmation.
+
+    ``target_seconds`` is the episode plan's goal; a total inside
+    ``[target - tolerance, target + tolerance]`` fits. Outside it, the verdict
+    returns the named deviation the confirmation must surface so the person
+    either adjusts the durations or explicitly acknowledges the deviation —
+    never a silent pass. Returns None when the total fits.
+    """
+    low = max(0.0, target_seconds - tolerance_seconds)
+    high = target_seconds + tolerance_seconds
+    if low <= actual_seconds <= high:
+        return None
+    return {
+        "code": "DURATION_TARGET_DEVIATION",
+        "actual_seconds": round(actual_seconds, 1),
+        "target_seconds": round(target_seconds, 1),
+        "tolerance_seconds": round(tolerance_seconds, 1),
+        "window_low_s": round(low, 1),
+        "window_high_s": round(high, 1),
+        "deviation_seconds": round(actual_seconds - target_seconds, 1),
+    }
+
+
 def derive_episode_plan(
     shots: Iterable[Any],
     *,

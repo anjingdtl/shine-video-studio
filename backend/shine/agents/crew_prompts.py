@@ -232,6 +232,7 @@ def crew_prompt(
     dialogue_ratio_percent: int | None = None,
     narration_level: str | None = None,
     max_shot_seconds: float | None = None,
+    unit_target_seconds: float | None = None,
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "script_prepare":
@@ -338,13 +339,15 @@ def crew_prompt(
             f"Each shots entry is one 4-{ceiling_label} second render segment, not necessarily one editorial shot. "
             "Use beat_id and visual_description for the opening shot and cuts for later beats, "
             "with each cut's start_s measured from the segment start. "
-            "Decide the incoming boundary of each render segment individually, following the "
-            "storyboard, frozen style and planned camera coverage. Set continuity.mode=cut for the "
-            "first segment and for a new angle, shot scale, reaction, location, time or memory insert. "
-            "Preserve character identity, screen direction and action matching across those cuts. "
-            "Use continuity.mode=last_frame only when the storyboard calls for the same visible "
-            "action and composition to continue across a render boundary. A shared scene or cast "
-            "does not require last_frame. In continuity.note, state the editorial reason for the choice. "
+            "Decide the incoming boundary of each render segment by the narrative flow, not by a change "
+            "of framing alone. The first segment is continuity.mode=cut. For a later segment that continues "
+            "the same visible action, time and place — even from a new angle or shot scale — prefer "
+            "continuity.mode=last_frame so the renderer carries the predecessor's closing frame forward and "
+            "the sequence stays coherent rather than fragmenting into independent shots. Reserve "
+            "continuity.mode=cut for a genuine narrative break: a new location, a time jump, a memory or "
+            "insert, or a deliberately independent reaction shot. "
+            "Preserve character identity, screen direction and action matching across every boundary. "
+            "In continuity.note, state the editorial reason for the choice. "
             "Both shots[].visual_description and shots[].cuts[].visual_description must be English prose. "
             "The brief and upstream beats can be Chinese. Describe their action, location and camera "
             "movement in English rather than copying Chinese phrases, names, shot labels or lyrics. "
@@ -429,9 +432,20 @@ def crew_prompt(
                 "are local to each beat, not cumulative."
             )
         else:
+            target_note = ""
+            if unit_target_seconds is not None:
+                target_note = (
+                    f"This segment targets about {unit_target_seconds:g} seconds of total screen time. "
+                    "Plan the shot durations so their sum reaches this target: develop each shot's action, "
+                    "camera movement and atmosphere fully across its segment instead of stopping at the "
+                    "dialogue minimum. A shot may run up to the per-shot ceiling to carry that action; "
+                    "only shorten a shot when its beat's action genuinely completes sooner. "
+                )
             parts.append(
+                target_note +
                 "Set each shot's duration_s long enough to contain the latest dialogue end_s in its beat "
-                "plus a short natural tail. Dialogue timecodes are local to each beat, not cumulative. "
+                "plus a natural tail that lets the action breathe. Dialogue timecodes are local to each "
+                "beat, not cumulative. "
                 "Do not shorten a shot below its spoken dialogue. "
                 f"Never set duration_s above {ceiling_label} seconds: that is this production's per-shot "
                 "ceiling and the server rejects a longer shot. If a beat's dialogue cannot fit under the "

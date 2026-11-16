@@ -32,7 +32,7 @@ def _ready_first_episode(client, settings) -> tuple[str, str]:
     _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
     confirmed = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert confirmed.status_code == 200, confirmed.text
     return project, pending_section
 

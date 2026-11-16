@@ -105,6 +105,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [confirmedPlan, setConfirmedPlan] = useState<{ version: number } | null>(null);
   /** 比已确认版本更新的一版草稿：需要重新生成预览并确认。 */
   const [pendingDraft, setPendingDraft] = useState<number | null>(null);
+  /** 计划时长超出目标容差窗：服务端具名拒绝后，由用户显式接受或调整目标/分集。 */
+  const [planDeviation, setPlanDeviation] = useState<string | null>(null);
 
   useEffect(() => {
     api<StyleCatalogEntry[]>('/director-styles')
@@ -147,7 +149,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     finally { setBusy(false); }
   }
 
-  async function confirm() {
+  async function confirm(acknowledge = false) {
     if (!book) return;
     setBusy(true); setProblem('');
     try {
@@ -161,24 +163,33 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           narration_level: narrationLevel,
           max_shot_seconds: maxShotSeconds,
         },
+        acknowledge_deviation: acknowledge,
       });
       setConfirmedPlan({ version: book.plan_version });
       setPendingDraft(null);
+      setPlanDeviation(null);
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
       onConfirmed?.();
-    } catch (error) { setProblem(describeError(error)); }
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'EPISODE_PLAN_DURATION_DEVIATION') {
+        setPlanDeviation(error.message);
+      }
+      setProblem(describeError(error));
+    }
     finally { setBusy(false); }
   }
 
   const railPresent = useRailPresent();
   const primary: RailAction | null = !confirmedPlan
     ? (book
-        ? { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> }
+        ? (planDeviation
+            ? { label: '接受偏差并确认分镜书', onClick: () => void confirm(true), loading: busy, icon: <Check size={14} /> }
+            : { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> })
         : { label: '生成分镜书', onClick: () => void generate(), loading: busy, icon: <Sparkles size={14} /> })
     : null;
   useStageRail('storyboard-book', { priority: 1, primary },
     [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
-      episodeCount, targetSeconds, maxShotSeconds]);
+      episodeCount, targetSeconds, maxShotSeconds, planDeviation]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
@@ -249,6 +260,11 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
+    {planDeviation && !confirmedPlan && <div className="notice" role="alert">
+      <p>{planDeviation} 可调整目标时长/分集后重新生成，或显式接受当前偏差继续。</p>
+      {!railPresent && <button type="button" className="btn-secondary" disabled={busy}
+        onClick={() => void confirm(true)}>接受偏差并确认分镜书</button>}
+    </div>}
 
     {book && <div className="book-preview">
       <div className="book-preview-head">
@@ -350,6 +366,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     shot: EpisodeShotRow; episodeId: string; lines: ShotSubtitleLine[];
   } | null>(null);
   const [subtitleResult, setSubtitleResult] = useState('');
+  /** 落镜总时长超出目标容差窗：服务端具名拒绝后，由用户显式接受偏差或改时长。 */
+  const [durationDeviation, setDurationDeviation] = useState<{ episodeId: string; text: string } | null>(null);
   const submitting = useRef(false);
 
   const load = useCallback(async () => {
@@ -410,9 +428,17 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     await queueDirectorStoryboard(projectId);
     onMessage?.('分镜任务已排队；关掉页面也会由常驻 Worker 继续逐场拆镜。');
   });
-  const confirmEpisode = (episodeId: string) => act(`confirm-${episodeId}`, async () => {
-    await confirmEpisodeShots(projectId, episodeId);
-    onJourneyRefresh?.();
+  const confirmEpisode = (episodeId: string, acknowledge = false) => act(`confirm-${episodeId}`, async () => {
+    try {
+      await confirmEpisodeShots(projectId, episodeId, acknowledge);
+      setDurationDeviation(null);
+      onJourneyRefresh?.();
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
+        setDurationDeviation({ episodeId, text: error.message });
+      }
+      throw error;
+    }
   }, `第 ${episodeId} 集镜头已落定。`);
   const retryEpisode = (episodeId: string) => {
     if (!state?.state_version) return;
@@ -441,6 +467,14 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     });
     setEditing(null);
   });
+  /** 衔接由用户确认：接拍延续上一镜末帧（连贯），切开为独立镜头。后端早已支持
+   *  continuity_mode 修订，这里把确认入口暴露到界面，不再只读。 */
+  const toggleContinuity = (shot: EpisodeShotRow) => act(`continuity-${shot.shot_id}`, async () => {
+    await editEpisodeShotRow(projectId, shot.shot_id, {
+      expected_revision: shot.revision,
+      continuity_mode: shot.continuity_mode === 'last_frame' ? 'cut' : 'last_frame',
+    });
+  }, shot.continuity_mode === 'last_frame' ? '已改为切开（独立镜头）。' : '已改为接拍（延续上一镜末帧）。');
 
   /** 字幕按集读取一次，找到这一镜现有的行；保存后由子面板回调刷新。 */
   const openSubtitle = async (episodeId: string, shot: EpisodeShotRow) => {
@@ -624,7 +658,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                           onChange={(event) => setEditing({ shotId: shot.shot_id, duration: event.target.value })} />
                       : shot.duration_target_s}
                   </td>
-                  <td>{shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}</td>
+                  <td>
+                    <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
+                      title="点击切换衔接：接拍延续上一镜末帧（画面连贯），切开为独立镜头"
+                      onClick={() => void toggleContinuity(shot)}>
+                      {shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}
+                    </button>
+                  </td>
                   <td>
                     <span className={`head-chip ${shot.prompt?.status === 'frozen' ? 'ok'
                       : shot.prompt?.status === 'inactive' ? 'warn' : ''}`}
@@ -680,6 +720,11 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
             onClick={() => confirmEpisode(episode.episode_id)}>
             <Check size={13} /> 确认本集镜头（{table?.shots.length ?? 0} 镜）
           </button>}
+          {durationDeviation?.episodeId === episode.episode_id && <div className="notice" role="alert">
+            <p>{durationDeviation.text} 可用每镜「改时长」把总时长调进目标窗，或显式接受当前偏差。</p>
+            <button type="button" className="btn-secondary" disabled={busy !== ''}
+              onClick={() => confirmEpisode(episode.episode_id, true)}>接受偏差并确认本集</button>
+          </div>}
           {!table?.shots.length && !blocked && <p className="empty-inline">
             这一集的分镜还没落镜；{running ? '后台正在生成。' : '点击上方按钮生成。'}
           </p>}

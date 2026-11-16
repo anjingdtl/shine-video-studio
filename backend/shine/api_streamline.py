@@ -189,6 +189,8 @@ class StoryboardBookConfirmBody(APIModel):
     plan_version: int = Field(ge=1)
     expected_sha256: str = Field(min_length=64, max_length=64)
     style: dict[str, Any] | None = None
+    #: Explicit acceptance of a planned duration outside the target window.
+    acknowledge_deviation: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard-book/confirm")
@@ -197,7 +199,7 @@ def confirm_storyboard_book(project_id: str, body: StoryboardBookConfirmBody, ac
     require_project(db, project_id)
     result = streamline.confirm_storyboard_book(
         db, project_id, version=body.plan_version, expected_sha256=body.expected_sha256,
-        style=body.style, actor=actor)
+        style=body.style, actor=actor, acknowledge_deviation=body.acknowledge_deviation)
     db.commit()
     return result
 
@@ -435,13 +437,17 @@ def compile_episode_subtitles(project_id: str, episode_id: str, actor: Operator,
 
 class EpisodeConfirmBody(APIModel):
     expected_state_version: int | None = None
+    #: Explicit acceptance of a landed episode total outside the target window.
+    acknowledge_duration_deviation: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard/episodes/{episode_id}/confirm")
 def confirm_episode(project_id: str, episode_id: str, actor: Operator, db: DBSession,
                     body: EpisodeConfirmBody | None = None) -> dict:
     require_project(db, project_id)
-    result = streamline.confirm_episode_shots(db, project_id, episode_id, actor=actor)
+    result = streamline.confirm_episode_shots(
+        db, project_id, episode_id, actor=actor,
+        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False))
     db.commit()
     return result
 

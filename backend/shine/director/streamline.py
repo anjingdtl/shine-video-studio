@@ -310,7 +310,7 @@ def _confirmed_outline_for_plan(db, project_id: str, payload):
 
 def confirm_storyboard_book(
     db, project_id: str, *, version: int, expected_sha256: str,
-    style: dict[str, Any] | None, actor: str,
+    style: dict[str, Any] | None, actor: str, acknowledge_deviation: bool = False,
 ) -> dict[str, Any]:
     """Confirm the episode plan and freeze the chosen style as one decision.
 
@@ -338,6 +338,22 @@ def confirm_storyboard_book(
     from shine.api_director import _section_plan_problems
 
     payload = EpisodePlanPayload.model_validate(row.payload)
+    # The plan's duration goal is a verdict, not just a displayed deviation: an
+    # episode whose planned total sits outside the target window must be adjusted
+    # or explicitly acknowledged before it can become the production basis.
+    from shine.director.contracts import duration_target_verdict
+
+    deviations = []
+    for episode in payload.episodes:
+        verdict = duration_target_verdict(
+            float(episode.planned_seconds), float(payload.target_seconds),
+            float(payload.tolerance_seconds))
+        if verdict:
+            deviations.append({"episode_id": episode.episode_id, **verdict})
+    if deviations and not acknowledge_deviation:
+        raise HTTPException(409, {"code": "EPISODE_PLAN_DURATION_DEVIATION",
+                                  "message": "计划时长超出目标容差窗：请调整分集/目标，或显式确认接受偏差",
+                                  "deviations": deviations[:50]})
     if payload.mode == "sections":
         problems = _section_plan_problems(db, project_id, payload)
     else:
@@ -360,7 +376,9 @@ def confirm_storyboard_book(
     row.confirmed_at = utcnow()
     add_audit(db, actor, "EPISODE_PLAN_CONFIRMED", "director_episode_plan", row.id,
               {"version": row.version, "sha256": row.sha256, "superseded": superseded,
-               "streamline": True, "style_frozen": bool(style_result)}, project_id=project_id)
+               "streamline": True, "style_frozen": bool(style_result),
+               "deviation_acknowledged": bool(deviations and acknowledge_deviation)},
+              project_id=project_id)
     return {"plan_version": row.version, "plan_sha256": row.sha256,
             "style": style_result, "superseded": superseded}
 
@@ -466,6 +484,28 @@ def ensure_project_rulepack(db, project_id: str) -> str | None:
     return lock.rulepack_id
 
 
+def _allocate_unit_targets(units: list[dict], target_seconds: float) -> None:
+    """Split each episode's duration goal across its units by source length.
+
+    One fact (the episode plan target) becomes one per-unit goal the crew aims
+    for; the units of an episode sum back to the target. A unit's goal is its
+    total screen time, not a single shot's — the per-shot ceiling still applies
+    to every shot the director plans inside the unit.
+    """
+    by_episode: dict[str, list[dict]] = {}
+    for unit in units:
+        by_episode.setdefault(unit["episode_id"], []).append(unit)
+    for episode_units in by_episode.values():
+        total_chars = sum(max(0, u["end_offset"] - u["start_offset"]) for u in episode_units)
+        if total_chars <= 0:
+            for u in episode_units:
+                u["target_seconds"] = round(target_seconds / len(episode_units), 1)
+            continue
+        for u in episode_units:
+            share = max(0, u["end_offset"] - u["start_offset"]) / total_chars
+            u["target_seconds"] = round(target_seconds * share, 1)
+
+
 def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: int | None = None) -> dict:
     """Queue one durable run that storyboards every section of the confirmed
     episode plan, in script order, landing each unit's shots before the next.
@@ -537,6 +577,13 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
                 "merged_section_ids": merged.get("merged_section_ids", []),
                 **({"non_narrative": True} if merged.get("non_narrative") else {}),
             })
+    # The episode plan's target_seconds is the one duration goal. It used to
+    # stop at episode grouping and a displayed deviation, so the crew only ever
+    # saw the per-shot ceiling and hugged the dialogue minimum — a 60s target
+    # came out as ~26s of 5s shots. Allocate the goal to each unit by its source
+    # length (the same length-driven basis as segmentation) so the units of an
+    # episode sum back to the target, and carry it to the crew as a fact.
+    _allocate_unit_targets(units, float(payload.target_seconds))
     identity = digest({"tool": DIRECTOR_STORYBOARD_RUN, "outline": outline.sha256,
                        "plan": plan.sha256, "units": units,
                        "style": project.frozen_style_version_id, "assets": asset_hash})
@@ -791,6 +838,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 production_context={
                     "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                     "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                    "unit_target_seconds": unit.get("target_seconds"),
                     "story_line": outline.payload_json.get("story_line", []),
                     "timeline": outline.payload_json.get("timeline", []),
                     "characters": outline.payload_json.get("characters", []),
@@ -913,7 +961,13 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
             if episode is None or episode.get("shot_ids"):
                 # Already materialised (or absent): nothing to confirm again.
                 return
-            confirm_episode_shots(db, project_id, episode_id, actor="local-user")
+            # Auto-confirm is the authorised continuation of a plan the person
+            # already confirmed (target + deviation checked at book confirm), not
+            # a new creative checkpoint: it proceeds and records the landed
+            # deviation in the audit. The duration verdict is enforced on the
+            # person's explicit manual confirmation, where they can adjust or accept.
+            confirm_episode_shots(db, project_id, episode_id, actor="local-user",
+                                  acknowledge_duration_deviation=True)
     except HTTPException as exc:
         logger.warning("director_auto_confirm_blocked project=%s episode=%s detail=%s",
                        project_id, episode_id, exc.detail)
@@ -1067,7 +1121,8 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
 # ---------------------------------------------------------------------------
 
 
-def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -> dict[str, Any]:
+def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
+                          acknowledge_duration_deviation: bool = False) -> dict[str, Any]:
     """Land one episode's storyboarded sections into the confirmed plan.
 
     Only the target episode's sections must be applied; other episodes keep
@@ -1108,6 +1163,24 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -
         raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                   "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
                                   "pending": pending[:50]})
+    # The landed total is checked against the same target window the plan was
+    # confirmed under: the crew aims for the goal, and the person confirms an
+    # episode that actually reaches it (or explicitly accepts the deviation).
+    from shine.director.contracts import duration_target_verdict, planned_seconds
+    from shine.models import Shot
+
+    actual_total = 0.0
+    for shot_id in shot_ids:
+        shot = db.get(Shot, shot_id)
+        if shot is not None and shot.project_id == project_id:
+            actual_total += planned_seconds(shot)
+    duration_verdict = duration_target_verdict(
+        actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
+    if duration_verdict and not acknowledge_duration_deviation:
+        raise HTTPException(409, {**duration_verdict,
+                                  "code": "EPISODE_DURATION_OUT_OF_TARGET",
+                                  "message": "本集落镜总时长超出目标容差窗：用「改时长」调整镜头，或显式确认接受偏差",
+                                  "episode_id": episode_id})
     episodes = []
     for episode in payload.episodes:
         if episode.episode_id == episode_id:
@@ -1143,7 +1216,10 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str) -
     new_row.confirmed_at = utcnow()
     add_audit(db, actor, "EPISODE_SHOTS_CONFIRMED", "director_episode_plan", new_row.id,
               {"episode_id": episode_id, "version": new_row.version,
-               "shots": len(shot_ids), "streamline": True}, project_id=project_id)
+               "shots": len(shot_ids), "streamline": True,
+               "actual_seconds": round(actual_total, 1),
+               "duration_acknowledged": bool(duration_verdict and acknowledge_duration_deviation)},
+              project_id=project_id)
     return {"plan_version": new_row.version, "plan_sha256": new_row.sha256,
             "episode_id": episode_id, "shot_ids": shot_ids}
 
