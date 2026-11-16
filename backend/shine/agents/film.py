@@ -1084,6 +1084,13 @@ class FilmAgentDispatcher:
                 bounded_config, crew_request, purpose="structured",
                 output_ceiling=agent_output_limit,
                 output_floor_tokens=agent_output_limit if escalate_output_budget else None,
+                # The gateway forces reasoning_effort=low on these capped crew
+                # calls, so private deliberation is tiny (measured: tens of tokens,
+                # not thousands). The conservative max(4096, 2*goal) reserve let the
+                # model deliberate/generate until the 600s wall; a known small reserve
+                # right-sizes the cap to the visible plan. A truncation retry still
+                # escalates to the full ceiling via output_floor_tokens above.
+                reasoning_reserve_tokens=1024,
             )
             task.trace = {**task.trace, "call_budget": crew_budget.as_dict(),
                           **({"output_budget_escalated": True} if escalate_output_budget else {})}

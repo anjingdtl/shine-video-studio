@@ -53,3 +53,29 @@ def test_a_large_scene_still_scales_but_stays_below_creative():
     scene_prep = plan_call_budget(_config(), request, purpose="scene_prep")
     creative = plan_call_budget(_config(), request, purpose="creative")
     assert scene_prep.output_request_tokens < creative.output_request_tokens
+
+
+def test_crew_structured_call_uses_a_known_small_reserve_under_low_effort():
+    # The gateway forces reasoning_effort=low on capped crew calls, so private
+    # deliberation is tiny. The conservative max(4096, 2*goal) reserve let the
+    # model deliberate until the 600s wall; a known small reserve right-sizes it.
+    request = compile_request(system="s", user="浪" * 6_000, schema={"type": "object"})
+    conservative = plan_call_budget(_config(), request, purpose="structured")
+    low_effort = plan_call_budget(_config(), request, purpose="structured",
+                                  reasoning_reserve_tokens=1024)
+    assert conservative.reasoning_reserve_tokens >= 4096
+    assert "REASONING_RESERVE_CONSERVATIVE" in conservative.warnings
+    assert low_effort.reasoning_reserve_tokens == 1024
+    assert "REASONING_RESERVE_CONSERVATIVE" not in low_effort.warnings
+    assert low_effort.output_request_tokens < conservative.output_request_tokens
+
+
+def test_a_truncation_retry_still_escalates_to_the_hard_cap():
+    request = compile_request(system="s", user="浪" * 6_000, schema={"type": "object"})
+    low_effort = plan_call_budget(_config(), request, purpose="structured",
+                                  reasoning_reserve_tokens=1024)
+    escalated = plan_call_budget(_config(), request, purpose="structured",
+                                 reasoning_reserve_tokens=1024,
+                                 output_ceiling=32_000, output_floor_tokens=32_000)
+    assert escalated.output_request_tokens > low_effort.output_request_tokens
+    assert escalated.output_request_tokens == escalated.output_cap_tokens
