@@ -205,6 +205,16 @@ def test_every_crew_prompt_carries_the_official_h3_rules(role):
     assert H3_ALIGNMENT in prompt
 
 
+def test_the_scriptwriter_prompt_makes_the_brief_the_only_beat_source():
+    # 活缺陷（2026-11-16）：编剧把 production_context.story_line（整部故事）当成
+    # 每个单元的内容来源，前言段也复述全故事，六场被重复成多份。提示词须明确
+    # brief 是本段唯一拆镜来源，story_line 只是背景，无动作的标题/设定段产 0 节拍。
+    prompt = crew_prompt("scriptwriter", tool="propose")
+    assert "only source of beats" in prompt
+    assert "story_line" in prompt and "background continuity" in prompt
+    assert "zero beats" in prompt
+
+
 def test_the_director_prompt_states_the_plan_and_forbids_the_two_deviations():
     timing = editorial_timing_preview(_brief())
     plan = editorial_timing_plan(timing, BEAT_IDS)

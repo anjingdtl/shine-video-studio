@@ -34,6 +34,14 @@ CHAPTER_MARKER = re.compile(r"^\s*第[^\n]{1,20}[章节回卷]")
 not itself story prose, so a fragment made only of these lines carries no
 plot a crew could storyboard."""
 
+FRONT_MATTER = re.compile(r"^\s*(?:人物|角色|出场人物|主要人物|时间|地点|时代|背景)\s*[:：]")
+"""A cast/setting setup line (人物：… / 时间：… / 地点：…).  Like a heading it
+states the production's facts but is not dramatic action.  A fragment made only
+of a title plus such setup lines carries no plot: it merges into the first
+narrative scene instead of becoming its own unit.  Without this, a character
+intro long enough to pass the body floor was storyboarded as a standalone unit
+and the crew retold the whole story_line inside it, duplicating every scene."""
+
 MIN_NARRATIVE_BODY_CHARS = 20
 """The smallest body that counts as a narratable creation unit.
 
@@ -49,7 +57,8 @@ def narrative_body(text: str) -> str:
     parts: list[str] = []
     for line in (text or "").splitlines():
         stripped = line.strip()
-        if not stripped or HEADING.match(line) or CHAPTER_MARKER.match(line):
+        if not stripped or HEADING.match(line) or CHAPTER_MARKER.match(line) \
+                or FRONT_MATTER.match(line):
             continue
         parts.append(stripped)
     return "".join(parts)

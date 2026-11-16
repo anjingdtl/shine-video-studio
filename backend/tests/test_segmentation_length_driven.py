@@ -51,3 +51,26 @@ def test_segmentation_never_loses_or_reorders_source_bytes():
         assert spans[-1].end_offset == len(text)
         for left, right in zip(spans, spans[1:], strict=False):
             assert left.end_offset == right.start_offset
+
+
+def test_title_and_cast_setup_preamble_merges_into_the_first_scene():
+    # 活缺陷（2026-11-16）：「人物：阿远…」介绍正文够长，被当成叙事段单独拆镜，
+    # 剧组又在其中复述整条 story_line，六个场景被重复成多份。标题+人物/场景设定
+    # 是 front matter，不是剧情，须并入首个叙事段。
+    from shine.materialprep.source_spans import is_narrative_fragment, merge_non_narrative_fragments
+    preamble = ("雨夜归人\n人物：阿远，三十多岁，深色风衣，神情疲惫，眼神克制。\n"
+                "场景：深夜都市，湿冷柏油路，暖黄路灯。\n")
+    assert not is_narrative_fragment(preamble), "title + cast/setting setup is front matter, not a scene"
+    fragments = [{"episode_id": "ep-01", "production_section_id": "pre", "section_order": 1,
+                  "start_offset": 0, "end_offset": len(preamble), "text": preamble}]
+    offset = len(preamble)
+    for i in range(1, 7):
+        body = f"第{i}场\n阿远撑伞走在湿漉漉的街道上，路灯把影子拉得很长，皮鞋踩过积水溅起水花。\n"
+        fragments.append({"episode_id": "ep-01", "production_section_id": f"s{i}", "section_order": i + 1,
+                          "start_offset": offset, "end_offset": offset + len(body), "text": body})
+        offset += len(body)
+    units = merge_non_narrative_fragments(fragments)
+    assert len(units) == 6, "the preamble merges into the first scene; six scenes remain"
+    assert units[0]["production_section_id"] == "s1"
+    assert "pre" in units[0]["merged_section_ids"]
+    assert "".join(u["text"] for u in units) == "".join(f["text"] for f in fragments)

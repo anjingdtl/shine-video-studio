@@ -963,11 +963,15 @@ def _section_apply_evidence(db, project_id, production_section_id):
                                 "reason": "STORYBOARD_NOT_APPLIED"})
                 continue
             shots.extend(shot_ids)
-        if shots:
-            director_pick = (candidate, shots, missing, candidate.created_at.isoformat())
-            break
-        if director_pick is None:
-            director_pick = (candidate, shots, missing, candidate.created_at.isoformat())
+        # This run covered the section, so its result is the current fact — even
+        # when it produced zero shots (a merged title) or has not applied it yet.
+        # An older run's shots for the same section are history and are never
+        # borrowed back: borrowing them let a newer empty/pending section inherit
+        # a previous run's whole story, duplicating it across sections (live
+        # 2026-11-16). A run that never covered the section is skipped above, so
+        # a partial re-run still leaves unrelated sections' history intact.
+        director_pick = (candidate, shots, missing, candidate.created_at.isoformat())
+        break
     if director_pick is not None and (director_pick[1] or run is None
                                       or director_pick[0].created_at > run.created_at):
         run, run_shots, run_missing, run_at = director_pick

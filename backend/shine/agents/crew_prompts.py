@@ -261,6 +261,15 @@ def crew_prompt(
             "translations of each of its seven fields. Leave prompt_style.film_type unset; the server "
             "copies the frozen film type. Never alter the frozen source style."
         )
+        parts.append(
+            "The brief is THIS section's source text and the only source of beats: break down exactly "
+            "the dramatic action the brief itself describes, and nothing beyond it. The "
+            "production_context.story_line and timeline are background continuity for the whole work; "
+            "they tell you where this section sits, never extra scenes to add. Do not retell the whole "
+            "story in every section: a section covers only its own brief. A brief that is a title, a "
+            "character introduction or pure scene-setting with no dramatic action produces zero beats. "
+            "Each beat must cite action present in the brief, not action found only in story_line."
+        )
     parts.append(_NO_TOOLS)
     if role != "qc_reviewer":
         # The text-input critic compares two frozen texts; the prompt rules are
