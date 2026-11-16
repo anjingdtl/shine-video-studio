@@ -610,8 +610,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                 {uncertain
                   ? ' 这次请求的结果不确定，不会自动重发；核对并确认后才会发起一次新请求。'
                   : landingOnly
-                    ? ' 不会自动重发；重试会复用已完成的工种结果，只重新落镜。'
-                    : ' 不会自动重发；重试会发起一次新的模型请求。'}
+                    ? ' 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。'
+                    : ' 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。'}
               </span>
               {uncertain
                 ? <button type="button" className="btn-secondary" disabled={busy !== ''}
@@ -620,7 +620,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                   </button>
                 : <button type="button" className="btn-secondary" disabled={busy !== ''}
                     onClick={() => retryEpisode(episode.episode_id)}>
-                    <RefreshCw size={12} /> 重试这一集
+                    <RefreshCw size={12} /> {blockedUnit ? '重试这一场' : '重试这一集'}
                   </button>}
             </div>;
           })()}

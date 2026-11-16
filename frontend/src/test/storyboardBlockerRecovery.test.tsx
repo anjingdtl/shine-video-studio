@@ -4,7 +4,7 @@
  * finish_reason=length），整集 BLOCKED。此前页面只说「第 1 集 · 被阻塞」和一句
  * 「先在专业面板核对」——没有场次、没有可点的下一步（用户原话：我都不知道哪个
  * 地方还有镜头）。本文件固定三条恢复契约：
- * 1) 已决拒绝（RESPONSE_RECEIVED）→ 报出场次与标题 + 「重试这一集」；
+ * 1) 已决拒绝（RESPONSE_RECEIVED）→ 报出场次与标题 + 「重试这一场」；
  * 2) 结果未知（UNKNOWN，含旧版误分类但有截断证据）→ 「核对这次请求并重试」：
  *    reconcile → resend-unknown → 该集重试，全部当场可点；
  * 3) 绝不再出现「先去别处核对」这种没有出口的提示。
@@ -83,7 +83,7 @@ function stubBlockedPanel(rejection: RejectionOverrides, onRetry?: () => void) {
 }
 
 describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
-  it('已决拒绝（RESPONSE_RECEIVED）报出场次与标题，并可直接「重试这一集」', async () => {
+  it('已决拒绝（RESPONSE_RECEIVED）报出场次与标题，并可直接「重试这一场」', async () => {
     const retried = vi.fn();
     stubBlockedPanel({ external_outcome: 'RESPONSE_RECEIVED' }, retried);
     render(<EpisodeStoryboardPanel projectId={PROJECT} />);
@@ -94,8 +94,10 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(callout.textContent).not.toContain('第 2 场：第2场');
     expect(callout.textContent).toContain('编剧');
     expect(callout.textContent).toContain('LLM_FORMAT');
+    // 动作是「回退到失败单元续跑」，标签与说明须与之一致：只重跑这一场，已落镜保留。
+    expect(callout.textContent).toContain('已落镜的场次保留');
 
-    await userEvent.setup().click(screen.getByRole('button', { name: '重试这一集' }));
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试这一场' }));
     await waitFor(() => expect(retried).toHaveBeenCalledTimes(1));
     expect(stub.callsOf('POST', /episodes\/ep-01\/retry$/)[0].body)
       .toMatchObject({ expected_state_version: 6 });
@@ -112,7 +114,7 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(callout.textContent).toContain('结果不确定');
     // 旧版提示「先在专业面板核对」不再出现：当场就有可点的下一步。
     expect(callout.textContent).not.toContain('先在专业面板核对');
-    expect(screen.queryByRole('button', { name: '重试这一集' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '重试这一场' })).toBeNull();
 
     await userEvent.setup().click(screen.getByRole('button', { name: '核对这次请求并重试' }));
 
@@ -184,6 +186,6 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     const callout = await screen.findByText(/第 2 场/);
     expect(callout.textContent).toContain('镜头引用了未批准的主素材');
     expect(callout.textContent).toContain('UNAPPROVED_ASSET_OR_UNKNOWN_BEAT');
-    expect(screen.getByRole('button', { name: '重试这一集' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: '重试这一场' })).toBeEnabled();
   });
 });
