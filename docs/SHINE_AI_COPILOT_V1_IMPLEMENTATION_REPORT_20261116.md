@@ -5,7 +5,7 @@
 - 开发分支：`feat/shine-ai-copilot-support-agent-v1`
 - 基线：`origin/main` @ `a2ea6af`（Merge PR #53）
 - 工作方式：独立 Worktree（当前 `/workspace/.worktrees/shine-copilot`），未触碰 main 工作区与其他分支/Worktree
-- 迁移版本：`f180f0010001` → `f180f0010003`（support ledger + 可重试授权 attempt）
+- 迁移版本：`f180f0010001` → `f180f0010004`（support ledger + 可重试授权 attempt + 动作级事实指纹）
 
 ## 1. 架构审查结论
 
@@ -40,16 +40,17 @@
 | `backend/shine/support/privacy.py` | 密钥、Token、用户目录、私有数据根的统一脱敏 |
 | `backend/shine/support/tools.py` | READ / CONFIRM 工具注册表、FORBIDDEN 能力清单、注入意图识别、`MAX_TOOL_STEPS=8` |
 | `backend/shine/support/context.py` | 单一证据快照（裁决/运行态/资源/进程/任务）、`evidence_id`、来源标注、TTL、快照 revision |
-| `backend/shine/support/occupancy.py` | 组合既有生产/租约/受管进程/素材批次/未决结果，输出唯一占用结论，失败即 fail-closed |
+| `backend/shine/support/occupancy.py` | 组合既有生产/租约/受管进程/素材批次/未决结果，输出唯一占用结论，失败即 fail-closed；另提供 `release_occupancy`（受管释放专用门禁）与 `occupancy_facts`（指纹投影） |
 | `backend/shine/support/investigation.py` | 有界多步取证规划器（≤8 步 / 2.5s），仅调用注册表内只读工具，标注证据等级 |
 | `backend/shine/support/diagnostics.py` | 确定性规则诊断：UNKNOWN/RECONCILE、BLOCKED、SETUP、VALIDATION、生产忙、失败保持、无法判定等 |
 | `backend/shine/support/knowledge.py` | 版本化本地知识库（`shine-support-kb-2026.11.16`），官方联网检索默认关闭、域名白名单、仅引用 |
 | `backend/shine/support/reports.py` | BLOCKER/BUG/REQUIREMENT MD 报告；受控目录、文件名白名单、原子写、24h 指纹去重 |
-| `backend/shine/support/actions.py` | 预览→授权→委托执行→回读裁决→可回滚；参数白名单；生产/GPU 忙时拒绝；幂等 |
+| `backend/shine/support/actions.py` | 预览→授权→委托执行→回读裁决→可回滚；参数白名单；生产/GPU 忙时拒绝；幂等；动作级事实指纹；授权终态收束；对账结果归属 |
 | `backend/shine/support/agent.py` | 会话（30 天）、`support_agent` 路由、最多 8 步工具轨迹、LLM 不可用回退、联网开关 |
 | `backend/shine/api_support.py` | `/api/v1/support` REST API，写操作需 Operator 本地动作，Schema `extra="forbid"` |
 | `backend/alembic/versions/f180f0010002_support_agent.py` | 幂等创建四表与索引，支持空库与旧库升级 |
 | `backend/alembic/versions/f180f0010003_support_action_attempts.py` | 为既有授权行增加 `request_key` / `attempt_no`，回填并保留历史记录 |
+| `backend/alembic/versions/f180f0010004_support_action_target_fingerprint.py` | 增加可空 `target_fingerprint`，旧授权与旧库不受影响 |
 
 ### 2.2 后端修改
 
@@ -134,12 +135,12 @@ GET  /api/v1/support/reports/{id}/download
 
 详见《Shine AI 管家 V1.0 验收报告》（`docs/SHINE_AI_COPILOT_V1_ACCEPTANCE_REPORT_20261116.md`）。
 
-- 后端定向：`tests/test_support_agent.py` 39 项全部通过。
-- 后端八分片全量（第二轮重新完整执行）：共 2958 项参与，8 个分片全部退出码 0。
-- 前端：79 个测试文件 / 405 项 Vitest 全部通过；`tsc -b` + `vite build` 通过。
+- 后端定向：`tests/test_support_agent.py` 55 项全部通过（最终代码复跑）。
+- 后端八分片全量（第三轮重新完整执行）：共 2974 项参与，8 个分片全部退出码 0。
+- 前端：79 个测试文件 / 406 项 Vitest 全部通过；`tsc -b` + `vite build` 通过。
 - Ruff：`shine` 与 `tests` 全部通过。
-- 迁移：空库 `alembic upgrade head` 成功（`f180f0010003`）；旧库升级保留授权行并回填 `request_key/attempt_no`；Windows 迁移用例通过。
-- 浏览器 E2E：真实 Vite dev + 真实后端（临时数据目录、无 LLM、无 ComfyUI），浮动管家可打开、读取真实裁决、离线回复诊断与证据，证据标签与新工具链正常，控制台无错误。
+- 迁移：空库 `alembic upgrade head` 成功（`f180f0010004`）；旧库升级保留授权行并回填 `request_key/attempt_no`，`target_fingerprint` 为空不影响执行；Windows 迁移用例通过。
+- 浏览器 E2E：第二轮已在真实 Vite dev + 真实后端（临时数据目录、无 LLM、无 ComfyUI）下 PASS；第三轮 UI 变更为动作面板状态说明与“重新预览”，由 `shineCopilot.test.tsx` 的真实 DOM 交互覆盖，本轮未重跑浏览器截图。
 - 未执行：Windows 真机、真实 ComfyUI/GPU、真实 H3 生成、安装包实机安装、启动器离线诊断（LLM/ComfyUI/GPU 相关项在验收报告中逐条标注）。
 
 ## 7. 用户使用说明（简版）
@@ -219,4 +220,36 @@ GET  /api/v1/support/reports/{id}/download
 
 - 远端 `launcher/` 是独立 Rust + Slint 的工程预览，尚未提供稳定的“无后端离线诊断 + Markdown 导出”接口，且与本功能分支无合入关系。
 - 本轮不重构启动器、不把其他分支未验收代码合入。S29 继续标 **BLOCKED**，依赖接口与后续要求写入验收报告。
+
+## 10. 第三轮定点收束（PR #55 最终验收修复）
+
+### 10.1 P1-01 受管释放权限
+
+- `support/occupancy.py` 新增 `release_occupancy(db, only=...)`：仍未决外部结果、素材/审片、真实生产、目标受管服务在途时 fail-closed；**不再把空闲 `ResourceLease` 本身当作释放的阻断理由**。配置变更类动作继续使用 `resource_occupancy` 全量保护。
+- `support/actions.py` 的预览/授权按动作类型选择门禁；`managed_release` 仍完整复用 `release_managed_processes_guarded()` 的生命周期锁与底层 GPU 租约释放/reconcile 合同。
+- `comfyops/renderer_release.py` 的租约读取新增 `unresolved_outcome`：关联 `JobAttempt` 处于未决外部结果时拒绝强停，不做“先停再核对”。
+- 释放结果按 `RELEASED / PARTIAL / REFUSED / UNKNOWN` 分类写回，`REFUSED` 保留底层错误码；只有取得真实停止/已停止证据才报告释放。`refresh_action` 不再用全局进程列表把旧结果洗成 `RELEASED`。
+
+### 10.2 P1-02 授权生命周期
+
+- 原子抢占后执行器抛 `ActionBlocked`：立即写入 `REFUSED`、`last_error`（原错误码与原因）、`verification.outcome=REFUSED` 与 `SUPPORT_ACTION_REFUSED` 审计，再返回 423；不会再留下永久 `APPROVED`。
+- 普通异常保持 `FAILED`；执行器未决/无法归属保持 `NEEDS_REVIEW`，不自动重试。
+- 崩溃遗留的 `APPROVED` 超过 10 分钟在预览/刷新时转 `NEEDS_REVIEW`，允许重新预览与确认；重复点击仍由原子 `UPDATE ... WHERE status='PREVIEWED'` 保证只执行一次。
+- 前端动作面板展示状态通俗解释与真实错误，终态提供“重新预览”按钮；不新增设置项。
+
+### 10.3 P1-03 对账结果归属
+
+- 同步对账返回后生成 `result_identity`（动作 ID、attempt 身份、目标路径、快照、能力、变体、目录）并关联到 `verification` 与审计 `SUPPORT_ACTION_RECONCILE_RESULT`。
+- `IN_PROGRESS`（已有核验持锁）不再读取全局文件裁决冒充成功：状态 `NEEDS_REVIEW`、`verification.outcome=IN_PROGRESS`、`attributed=false`、无结果身份。
+- `adopt=true` 需同时满足接管状态 `ADOPTED/ALREADY_ADOPTED` 与权威 `instance_bound`；哈希拒绝、文件不完整时不报告登记完成。
+- `verification.layers` 独立保存 `files_verified / instance_bound / production_ready`；刷新只用已归属结果结算，不重新做全量哈希。
+
+### 10.4 P1-04 动作级事实指纹
+
+- 新增 `SupportAction.target_fingerprint`（迁移 `f180f0010004`）。
+- 指纹按动作类型采集目标事实：
+  - 整备/对账：安装实例身份、能力状态与缺失清单、变体、核验回执摘要、占用事实；
+  - 工作流副本：源 graph hash（实时计算）、参数映射、媒体转移、必需节点、模型身份、校验口径与目标项目；
+  - 受管释放：目标服务状态/租约/在途事实与占用。
+- 时间戳、心跳、过期时刻等易变显示字段不入指纹；授权前重算，不一致返回 409 与“配置在确认前发生变化，请重新确认。”；读不到必要事实保守拒绝，不猜测“未变化”。
 

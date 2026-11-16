@@ -69,6 +69,10 @@ class SupportAction(Base):
     request_identity: Mapped[str] = mapped_column(String(96), nullable=False)
     preview_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot_revision: Mapped[str] = mapped_column(String(64), nullable=False)
+    #: Action-scoped facts (installation, bindings, receipts, workflow graph,
+    #: release targets).  ``None`` means the facts could not be read and the
+    #: preview may never be executed.
+    target_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
     params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     preview: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     actor: Mapped[str] = mapped_column(String(64), default="local-user", nullable=False)

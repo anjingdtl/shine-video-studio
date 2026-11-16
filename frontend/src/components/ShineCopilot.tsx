@@ -81,6 +81,24 @@ type ActionState = {
   last_error?: string | null;
 };
 
+const ACTION_STATUS_LABELS: Record<string, string> = {
+  PREVIEWED: '待确认',
+  APPROVED: '已确认，等待执行',
+  DELEGATED: '已交给原执行器',
+  EXECUTED: '已执行，等待权威复核',
+  SUCCEEDED: '已完成并通过权威复核',
+  FAILED: '执行失败，可重新预览',
+  REFUSED: '已拒绝执行，可处理后重新预览',
+  EXPIRED: '预览已过期，请重新确认',
+  NEEDS_REVIEW: '需要人工核对，可重新预览',
+  SUPERSEDED: '原任务已被新任务取代',
+  ROLLED_BACK: '已回滚',
+};
+
+const TERMINAL_ACTION_STATUSES = new Set([
+  'SUCCEEDED', 'FAILED', 'REFUSED', 'EXPIRED', 'NEEDS_REVIEW', 'SUPERSEDED', 'ROLLED_BACK',
+]);
+
 type ReportMeta = {
   id: string;
   kind: string;
@@ -129,6 +147,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [notice, setNotice] = useState('');
   const [fault, setFault] = useState<CopilotFault | null>(() => currentCopilotFault());
   const [preview, setPreview] = useState<ActionState | null>(null);
+  const [lastAction, setLastAction] = useState<RecommendedAction | null>(null);
   const [approving, setApproving] = useState(false);
   const [report, setReport] = useState<ReportMeta | null>(null);
   const [reporting, setReporting] = useState(false);
@@ -299,6 +318,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     setBusy(true);
     setError('');
     setReport(null);
+    setLastAction(action);
     try {
       const result = await api<{ action: ActionState; reused: boolean }>('/support/actions/preview', {
         method: 'POST',
@@ -330,10 +350,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         body: JSON.stringify({ preview_hash: preview.preview_hash, confirm: true }),
       });
       setPreview(result.action);
+      const settled = TERMINAL_ACTION_STATUSES.has(result.action.status);
       setNotice(
         result.action.status === 'DELEGATED'
           ? `已交给原有执行器（任务 ${result.action.original_task_id || '进行中'}）。完成情况以原环境裁决为准。`
-          : '授权动作已交给原有执行器；结果仍需以权威裁决复核。',
+          : settled
+            ? `${ACTION_STATUS_LABELS[result.action.status] || result.action.status}${
+              result.action.last_error ? `：${result.action.last_error}` : ''
+            }`
+            : '授权动作已交给原有执行器；结果仍需以权威裁决复核。',
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : '授权执行没有完成。');
@@ -597,7 +622,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                 </ul>
                 <p className="copilot-authorization">{preview.preview.authorization_summary}</p>
                 <div className="copilot-actions">
-                  <button type="button" className="copilot-action" disabled={approving || preview.preview.blocked}
+                  <button type="button" className="copilot-action"
+                    disabled={approving || preview.preview.blocked || TERMINAL_ACTION_STATUSES.has(preview.status)}
                     onClick={() => void approveAction()}>
                     {approving ? <Loader2 size={13} className="copilot-spin" /> : <CheckCircle2 size={13} />}
                     我确认执行
@@ -608,14 +634,22 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                       <RefreshCw size={13} />刷新进度
                     </button>
                   )}
+                  {TERMINAL_ACTION_STATUSES.has(preview.status) && lastAction && (
+                    <button type="button" className="copilot-action ghost" onClick={() => void previewAction(lastAction)}>
+                      <RefreshCw size={13} />重新预览
+                    </button>
+                  )}
                 </div>
                 {preview.status !== 'PREVIEWED' && (
                   <p className="copilot-authorization">
-                    状态：{preview.status}
+                    状态：{ACTION_STATUS_LABELS[preview.status] || preview.status}
                     {preview.original_task_id ? ` · 原执行器任务 ${preview.original_task_id}` : ''}
                     {preview.verification?.outcome ? ` · 复核 ${preview.verification.outcome}` : ''}
                     {preview.verification?.authority ? `（${preview.verification.authority}）` : ''}
                   </p>
+                )}
+                {preview.last_error && (
+                  <p className="copilot-authorization" role="status">{preview.last_error}</p>
                 )}
               </div>
             )}

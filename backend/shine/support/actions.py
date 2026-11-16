@@ -25,7 +25,7 @@ from sqlalchemy import func, select, update
 from shine.models import AppSetting, AuditEvent, new_id, utcnow
 from shine.support.context import build_evidence_snapshot, snapshot_revision
 from shine.support.models import SupportAction
-from shine.support.occupancy import resource_occupancy
+from shine.support.occupancy import occupancy_facts, release_occupancy, resource_occupancy
 from shine.support.privacy import private_roots_for, redact_payload
 from shine.support.tools import ACTION_SPECS, ToolDenied, action_spec
 
@@ -38,6 +38,25 @@ REUSABLE_STATUSES = {"PREVIEWED", "APPROVED", "DELEGATED"}
 READY_CAPABILITY_STATES = {"READY", "VERIFIED_RENDER"}
 #: Reconcile only proves files; it never claims a render contract.
 VERIFIED_CAPABILITY_STATES = {"VERIFIED", "BOUND", "READY", "VERIFIED_RENDER"}
+
+#: An authorization claimed but never finished (crash between the atomic claim
+#: and the terminal write) may not stay APPROVED forever.  After this grace it
+#: becomes NEEDS_REVIEW and a fresh preview may be requested again.
+APPROVAL_GRACE = timedelta(minutes=10)
+
+#: Final states of the authorization lifecycle after the executor has spoken.
+TERMINAL_ACTION_STATUSES = {
+    "SUCCEEDED",
+    "FAILED",
+    "REFUSED",
+    "EXPIRED",
+    "NEEDS_REVIEW",
+    "SUPERSEDED",
+    "ROLLED_BACK",
+}
+
+#: Executor outcomes of a guarded release, kept verbatim for the user.
+RELEASE_OUTCOMES = {"RELEASED", "PARTIAL", "REFUSED", "UNKNOWN"}
 
 
 class ActionBlocked(RuntimeError):
@@ -148,6 +167,248 @@ def _occupancy(db) -> dict[str, Any]:
     return resource_occupancy(db)
 
 
+def _action_occupancy(db, kind: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Occupancy for this kind of action.
+
+    Releasing idle managed services is the one action whose *purpose* is to
+    clear a GPU lease, so it must not be refused by the generic lease gate.
+    Every other configuration change keeps the full fail-closed protection.
+    """
+    if kind == "managed_release":
+        return release_occupancy(db, only=set(params.get("only") or []) or None)
+    return _occupancy(db)
+
+
+def _release_verification(value: dict[str, Any], only: set[str] | None) -> dict[str, Any]:
+    """Keep the guarded executor's own verdict: RELEASED/PARTIAL/REFUSED/UNKNOWN."""
+    stopped = [row for row in (value.get("stopped") or []) if isinstance(row, dict)]
+    refused = [row for row in (value.get("refused") or []) if isinstance(row, dict)]
+    codes = sorted(
+        {
+            str(row.get("outcome") or row.get("reason") or "REFUSED")
+            for row in refused
+        }
+    )
+    if not stopped and not refused:
+        outcome, reason = "UNKNOWN", "NOTHING_TO_RELEASE"
+    elif refused and not stopped:
+        outcome, reason = "REFUSED", codes[0]
+    elif refused:
+        outcome, reason = "PARTIAL", codes[0]
+    else:
+        outcome, reason = "RELEASED", None
+    return {
+        "outcome": outcome,
+        "reason": reason,
+        "refused_codes": codes,
+        "stopped": stopped,
+        "refused": refused,
+        "released": value.get("released") or [],
+        "only": sorted(only) if only else None,
+        "authority": "/api/v1/setup/managed-processes",
+        "checked_at": utcnow().isoformat(),
+    }
+
+
+def _receipt_facts(db) -> list[dict[str, Any]]:
+    """Verification receipts as stable facts (no mtime, no display fields)."""
+    rows = db.scalars(
+        select(AppSetting).where(AppSetting.key.like("verify-receipt:%"))
+    ).all()
+    facts: list[dict[str, Any]] = []
+    for row in rows:
+        value = row.value if isinstance(row.value, dict) else {}
+        raw_files = value.get("files")
+        if isinstance(raw_files, dict):
+            entries = list(raw_files.values())
+        elif isinstance(raw_files, list):
+            entries = raw_files
+        else:
+            entries = []
+        facts.append(
+            {
+                "key": row.key,
+                "variant_id": value.get("variant_id"),
+                "component_id": value.get("component_id"),
+                "revision": value.get("revision"),
+                "identity": value.get("identity"),
+                "files": sorted(
+                    (
+                        {
+                            "relative_path": str(item.get("relative_path") or ""),
+                            "sha256": str(item.get("sha256") or "").lower(),
+                            "size": int(item.get("size") or 0),
+                        }
+                        for item in entries
+                        if isinstance(item, dict)
+                    ),
+                    key=lambda item: item["relative_path"],
+                ),
+            }
+        )
+    return sorted(facts, key=lambda item: item["key"])
+
+
+def _installation_facts(selected: dict[str, Any]) -> dict[str, Any]:
+    """Identity of the installation this action targets."""
+    return {
+        "instance_id": selected.get("instance_id"),
+        "root": selected.get("root"),
+        "source": selected.get("source"),
+        "managed": bool(selected.get("managed")),
+        "status": selected.get("status"),
+        "exists": selected.get("exists"),
+        "port": selected.get("port"),
+    }
+
+
+def _setup_target_facts(
+    db, settings, params: dict[str, Any], project_id: str | None
+) -> tuple[dict[str, Any], str | None]:
+    from shine.comfyops.setup_summary import (
+        capability_report,
+        resolve_installation,
+        runtime_closure_gap,
+    )
+
+    resolved = resolve_installation(
+        db, settings, path=params.get("installation_path"), discovered=[]
+    )
+    selected = resolved.get("selected") or {}
+    facts: dict[str, Any] = {
+        "installation": _installation_facts(selected),
+        "variant_id": params.get("variant_id"),
+        "occupancy": occupancy_facts(db),
+        "receipts": _receipt_facts(db),
+    }
+    targets = params.get("capabilities") or []
+    if params.get("capability"):
+        targets = [str(params.get("capability"))]
+    capability_facts: dict[str, Any] = {}
+    for capability in targets:
+        report = capability_report(
+            db, settings, capability, installation=selected, project_id=project_id,
+            variant_id=params.get("variant_id"),
+        )
+        report_facts = report.get("facts") or {}
+        missing = [
+            {
+                "component_id": item.get("component_id"),
+                "relative_path": item.get("relative_path"),
+                "size": item.get("size"),
+            }
+            for item in (report.get("missing_files") or [])
+            if isinstance(item, dict)
+        ]
+        capability_facts[capability] = {
+            "state": report.get("state"),
+            "facts": {key: bool(value) for key, value in report_facts.items()},
+            "missing": sorted(
+                missing,
+                key=lambda item: (str(item["component_id"]), str(item["relative_path"])),
+            ),
+        }
+    facts["capabilities"] = capability_facts
+    if params.get("capabilities"):
+        gap = runtime_closure_gap(db, settings, selected)
+        facts["runtime_closure"] = sorted(gap.get("missing_components") or [])
+    return facts, None
+
+
+def _workflow_target_facts(
+    db, params: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    from shine.comfy.workflow import graph_hash
+    from shine.models import WorkflowProfile
+
+    source = db.get(WorkflowProfile, str(params.get("source_profile_id") or ""))
+    if source is None:
+        return {}, "SOURCE_PROFILE_MISSING"
+    return {
+        "source": {
+            "id": source.id,
+            "project_id": source.project_id,
+            "name": source.name,
+            "mode": source.mode,
+            "graph_sha256": graph_hash(source.graph or {}),
+            "stored_graph_sha256": source.graph_sha256,
+            "parameter_map": source.parameter_map or {},
+            "media_transfers": source.media_transfers or {},
+            "required_nodes": sorted(source.required_nodes or []),
+            "checkpoint_id": source.checkpoint_id,
+            "model_identity": source.model_identity or {},
+            "validated_against": source.validated_against,
+        },
+        "requested": {
+            "name": params.get("name"),
+            "overrides": params.get("parameter_overrides") or {},
+            "project_id": params.get("project_id") or source.project_id,
+        },
+    }, None
+
+
+def _release_target_facts(
+    db, params: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    from shine.comfyops.renderer_release import _record_key, describe_managed_processes
+
+    only = set(params.get("only") or []) or None
+    targets = []
+    for row in describe_managed_processes(db):
+        if not isinstance(row, dict) or (only is not None and _record_key(row) not in only):
+            continue
+        targets.append(
+            {
+                "key": _record_key(row),
+                "kind": row.get("kind"),
+                "state": row.get("state"),
+                "in_flight": bool(row.get("in_flight")),
+                "lease_id": row.get("lease_id"),
+                "lease_status": row.get("lease_status"),
+                "job_id": row.get("job_id"),
+                "job_status": row.get("job_status"),
+            }
+        )
+    targets.sort(key=lambda item: str(item["key"]))
+    return {"targets": targets, "occupancy": occupancy_facts(db)}, None
+
+
+def _target_fingerprint(
+    db, settings, kind: str, params: dict[str, Any], project_id: str | None
+) -> tuple[str | None, dict[str, Any] | None, str | None]:
+    """Action-scoped facts that make a preview authorization meaningful.
+
+    Only facts the action actually depends on are included, and every volatile
+    display field (timestamps, heartbeats, expiry) is excluded.  ``None`` means
+    a required fact could not be read; the caller must refuse rather than guess
+    that nothing changed.
+    """
+    try:
+        facts: dict[str, Any] = {"kind": kind, "project_id": project_id}
+        reason = None
+        if kind in {"setup_repair", "setup_reconcile"}:
+            scoped, reason = _setup_target_facts(db, settings, params, project_id)
+            facts.update(scoped)
+        elif kind == "workflow_user_copy":
+            scoped, reason = _workflow_target_facts(db, params)
+            facts.update(scoped)
+        elif kind == "managed_release":
+            scoped, reason = _release_target_facts(db, params)
+            facts.update(scoped)
+        else:
+            return None, None, "UNKNOWN_KIND"
+        if reason:
+            return None, facts, reason
+        if kind in {"setup_repair", "setup_reconcile"}:
+            unreadable = (facts.get("occupancy") or {}).get("unreadable") or []
+            if unreadable:
+                return None, facts, "TARGET_FACTS_UNAVAILABLE"
+        digest = hashlib.sha256(_canonical(facts).encode("utf-8")).hexdigest()
+        return digest, facts, None
+    except Exception as exc:  # noqa: BLE001 - unreadable facts are never "unchanged"
+        return None, None, type(exc).__name__
+
+
 def _validate_scope(db, *, kind: str, params: dict[str, Any], project_id: str | None) -> None:
     """Project scoping is checked before a preview exists, not only at approval."""
     from shine.models import Project, WorkflowProfile
@@ -168,7 +429,7 @@ def _validate_scope(db, *, kind: str, params: dict[str, Any], project_id: str | 
 
 
 def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any]:
-    occupancy = _occupancy(db)
+    occupancy = _action_occupancy(db, kind, params)
     busy = bool(occupancy["busy"])
     common = {
         "kind": kind,
@@ -255,13 +516,19 @@ def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any
                     "id": row.get("id"),
                     "kind": row.get("kind"),
                     "state": row.get("state"),
+                    "in_flight": bool(row.get("in_flight")),
+                    "lease_status": row.get("lease_status"),
                     "ownership_evidence": row.get("ownership_evidence"),
                 }
                 for row in processes[:10]
             ],
+            # A live lease is not a blocker here: the guarded executor re-checks
+            # whether that lease belongs to an in-flight job before stopping it.
+            "idle_leases": occupancy.get("idle_leases") or [],
             "will_start_gpu": False,
             "will_modify_user_comfyui": False,
-            "authorization_summary": "不会强停外部 ComfyUI；忙碌或无法证明归属的服务保持不变。",
+            "authorization_summary": "不会强停外部 ComfyUI；提交中、生成中、审片中、"
+            "结果待核对或无法证明归属的服务保持不变，底层租约释放合同原样复用。",
         }
     if kind == "workflow_user_copy":
         from shine.models import WorkflowProfile
@@ -329,6 +596,7 @@ def _public(row: SupportAction) -> dict[str, Any]:
         "preview": row.preview,
         "preview_hash": row.preview_hash,
         "snapshot_revision": row.snapshot_revision,
+        "target_fingerprint": row.target_fingerprint,
         "approved_at": row.approved_at.isoformat() if row.approved_at else None,
         "original_task_id": row.original_task_id,
         "verification": row.verification,
@@ -346,6 +614,14 @@ def _is_expired(row: SupportAction) -> bool:
         return datetime.fromisoformat(str(raw)) < utcnow()
     except ValueError:
         return False
+
+
+def _approval_abandoned(row: SupportAction) -> bool:
+    """An APPROVED row older than the grace period never reached its executor."""
+    if row.status != "APPROVED":
+        return False
+    stamp = row.approved_at or row.updated_at or row.created_at
+    return stamp is not None and (utcnow() - stamp) > APPROVAL_GRACE
 
 
 def preview_action(
@@ -381,6 +657,19 @@ def preview_action(
         if latest.status == "PREVIEWED" and _is_expired(latest):
             latest.status = "EXPIRED"
             db.commit()
+        elif latest.status == "APPROVED" and _approval_abandoned(latest):
+            # The process died between the atomic claim and the terminal write.
+            # Never leave the user with an authorization that can neither run
+            # nor be re-created; a fresh preview lets them confirm again.
+            latest.status = "NEEDS_REVIEW"
+            latest.last_error = "上一次授权未完成就中断了，请核对后重新预览并确认。"
+            latest.verification = {
+                **(latest.verification or {}),
+                "outcome": "UNKNOWN",
+                "reason": "APPROVAL_INTERRUPTED",
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
         else:
             return _public(latest), True
 
@@ -396,11 +685,20 @@ def preview_action(
         db, settings, page_id="setup", project_id=project_id or params.get("project_id")
     )
     revision = snapshot_revision(snapshot)
+    fingerprint, _, fingerprint_reason = _target_fingerprint(
+        db, settings, kind, params, project_id or params.get("project_id")
+    )
     preview = _preflight(db, settings, kind, params)
     preview["snapshot_revision"] = revision
+    preview["fingerprint"] = {
+        "available": fingerprint is not None,
+        "reason": fingerprint_reason,
+    }
     preview["requires_authorization"] = True
     preview["expires_at"] = (utcnow() + timedelta(minutes=15)).replace(microsecond=0).isoformat()
-    digest = hashlib.sha256((identity + "|" + revision).encode()).hexdigest()
+    digest = hashlib.sha256(
+        (identity + "|" + revision + "|" + str(fingerprint)).encode()
+    ).hexdigest()
     row = SupportAction(
         id=new_id(),
         session_id=session_id,
@@ -412,6 +710,7 @@ def preview_action(
         request_identity=identity,
         preview_hash=digest,
         snapshot_revision=revision,
+        target_fingerprint=fingerprint,
         # Executor parameters are stored verbatim so a delegated call can never
         # receive a redaction placeholder as a real path.  Nothing redacted is
         # ever executed; the preview below is the redacted projection that is
@@ -608,7 +907,28 @@ def approve_action(
         row.status = "EXPIRED"
         row.last_error = "PREVIEW_STALE"
         db.commit()
-        raise ActionStale("预览之后本机事实已变化，请重新预览并授权。")
+        raise ActionStale("配置在确认前发生变化，请重新确认。")
+
+    # The snapshot covers the setup verdict and managed processes; the action
+    # fingerprint covers the resources *this* action targets (installation,
+    # instance binding, receipts, workflow contract, release targets).
+    current_fingerprint, _, fingerprint_reason = _target_fingerprint(
+        db, settings, row.kind, dict(row.params or {}), row.project_id
+    )
+    if row.target_fingerprint is None or current_fingerprint is None:
+        row.status = "EXPIRED"
+        row.last_error = "TARGET_FACTS_UNAVAILABLE"
+        db.commit()
+        raise ActionBlocked(
+            "TARGET_FACTS_UNAVAILABLE",
+            "无法读取这次操作针对的资源事实，已拒绝执行；请稍后重新预览。",
+            details={"reason": fingerprint_reason, "action_fingerprint": row.target_fingerprint},
+        )
+    if current_fingerprint != row.target_fingerprint:
+        row.status = "EXPIRED"
+        row.last_error = "PREVIEW_STALE"
+        db.commit()
+        raise ActionStale("配置在确认前发生变化，请重新确认。")
 
     if not _claim_approval(db, row, actor):
         db.refresh(row)
@@ -619,11 +939,19 @@ def approve_action(
     spec = action_spec(row.kind)
 
     # The second occupancy read closes the preview→approval race: a render can
-    # start between the two requests.
-    occupancy = _occupancy(db)
+    # start between the two requests.  Release uses the release-specific gate so
+    # an idle lease the action exists to clear is not a self-blocker.
+    occupancy = _action_occupancy(db, row.kind, params)
     if occupancy["busy"]:
         row.status = "REFUSED"
         row.last_error = str(occupancy["code"] or "BUSY")
+        row.verification = {
+            **(row.verification or {}),
+            "outcome": "REFUSED",
+            "reason": row.last_error,
+            "occupancy": occupancy,
+            "checked_at": utcnow().isoformat(),
+        }
         db.commit()
         raise ActionBlocked(
             row.last_error,
@@ -690,28 +1018,150 @@ def approve_action(
                     "INSTALLATION_UNKNOWN",
                     "还没有可核验的 ComfyUI 路径，请先在基础配置中选择或整备环境。",
                 )
+            capability = str(params.get("capability") or "h3")
             value = reconcile_installation(
                 db,
                 settings,
                 path=str(Path(str(target))),
                 project_id=params.get("project_id"),
-                capability=str(params.get("capability") or "h3"),
+                capability=capability,
                 adopt=bool(params.get("adopt")),
                 port=params.get("port"),
                 actor=actor,
                 variant_id=params.get("variant_id"),
             )
-            row.status = "DELEGATED" if value.get("status") == "IN_PROGRESS" else "EXECUTED"
-            row.verification = {
-                "outcome": "PENDING",
+            result_status = str(value.get("status") or "UNKNOWN")
+            adoption = value.get("adoption") if isinstance(value.get("adoption"), dict) else None
+            adoption_status = str((adoption or {}).get("status") or "")
+            result_identity = hashlib.sha256(
+                _canonical(
+                    {
+                        "action": row.id,
+                        "attempt": row.request_identity,
+                        "target": str(target),
+                        "snapshot": value.get("snapshot"),
+                        "capability": capability,
+                        "variant_id": params.get("variant_id"),
+                        "catalog": value.get("catalog"),
+                    }
+                ).encode()
+            ).hexdigest()
+            base_verification = {
                 "executor": spec.executor,
-                "result_status": value.get("status"),
-                "verified": value.get("verified"),
-                "registered": value.get("registered"),
+                "result_status": result_status,
+                "result_identity": result_identity,
                 "target": str(target),
+                "capability": capability,
+                "variant_id": params.get("variant_id"),
+                "snapshot": value.get("snapshot"),
+                "catalog": value.get("catalog"),
+                "verified": value.get("verified"),
+                "rejected": value.get("rejected"),
+                "registered": value.get("registered"),
+                "complete": value.get("complete"),
+                "missing_components": value.get("missing_components") or [],
+                "adoption": adoption,
                 "checked_at": utcnow().isoformat(),
             }
-            _record_verification(db, settings, row)
+            if result_status == "IN_PROGRESS":
+                # Another identical reconcile already holds the executor's lock.
+                # It has no durable task id we could cite, so nothing proves the
+                # pending result belongs to this authorization.  Report the real
+                # state and never borrow the global file verdict for success.
+                row.status = "NEEDS_REVIEW"
+                row.last_error = "已有一轮相同核验正在执行，本次无法证明结果归属；请等它结束后重新预览核验。"
+                row.verification = {
+                    **base_verification,
+                    "outcome": "IN_PROGRESS",
+                    "attributed": False,
+                    "result_identity": None,
+                    "authority": "/api/v1/setup/summary#capabilities",
+                }
+                add_audit(
+                    db,
+                    actor,
+                    "SUPPORT_ACTION_RECONCILE_BUSY",
+                    "support_action",
+                    row.id,
+                    {"kind": row.kind, "target": str(target), "capability": capability},
+                    project_id=row.project_id,
+                )
+            else:
+                executor_failed = result_status not in {"RECONCILED", "VERIFIED"}
+                files_ok = (
+                    not executor_failed
+                    and value.get("complete") is not False
+                    and int(value.get("rejected") or 0) == 0
+                    and not (value.get("missing_components") or [])
+                )
+                adoption_ok = adoption_status in {"ADOPTED", "ALREADY_ADOPTED"}
+                row.status = "EXECUTED"
+                row.verification = {
+                    **base_verification,
+                    "outcome": "PENDING",
+                    "attributed": True,
+                    "files_ok": files_ok,
+                    "adoption_ok": adoption_ok if params.get("adopt") else None,
+                }
+                evidence = _record_verification(db, settings, row) or {}
+                targets = evidence.get("targets") or {}
+                target_facts = targets.get(capability) or {}
+                layers = {
+                    "files_verified": bool(target_facts.get("files_verified")),
+                    "instance_bound": bool(target_facts.get("instance_bound")),
+                    "production_ready": bool(target_facts.get("production_ready")),
+                }
+                if not files_ok or executor_failed:
+                    outcome = "NOT_VERIFIED"
+                elif params.get("adopt") and not (adoption_status in {"ADOPTED", "ALREADY_ADOPTED"}
+                                                  and layers["instance_bound"]):
+                    outcome = "NOT_VERIFIED"
+                elif evidence.get("outcome") == "VERIFIED":
+                    outcome = "VERIFIED"
+                elif evidence.get("outcome") == "NOT_VERIFIED":
+                    outcome = "NOT_VERIFIED"
+                else:
+                    outcome = "UNKNOWN"
+                row.verification = {
+                    **(row.verification or {}),
+                    "outcome": outcome,
+                    "layers": layers,
+                    "files_ok": files_ok,
+                    "adoption_ok": adoption_ok if params.get("adopt") else None,
+                }
+                if outcome == "VERIFIED":
+                    row.status = "SUCCEEDED"
+                else:
+                    row.status = "NEEDS_REVIEW"
+                    reasons = []
+                    if executor_failed:
+                        reasons.append(f"核验执行器状态 {result_status}")
+                    if value.get("complete") is False:
+                        reasons.append("固定清单尚未全部通过核验")
+                    if int(value.get("rejected") or 0):
+                        reasons.append(f"{int(value.get('rejected') or 0)} 个文件未通过哈希校验")
+                    if value.get("missing_components"):
+                        reasons.append("仍有缺失文件")
+                    if params.get("adopt") and adoption_status not in {"ADOPTED", "ALREADY_ADOPTED"}:
+                        reasons.append(f"实例接管状态 {adoption_status or 'UNKNOWN'}")
+                    row.last_error = "；".join(reasons) or "核验结果尚未被权威裁决确认。"
+                add_audit(
+                    db,
+                    actor,
+                    "SUPPORT_ACTION_RECONCILE_RESULT",
+                    "support_action",
+                    row.id,
+                    {
+                        "kind": row.kind,
+                        "target": str(target),
+                        "capability": capability,
+                        "result_status": result_status,
+                        "result_identity": result_identity,
+                        "outcome": outcome,
+                        "layers": layers,
+                    },
+                    project_id=row.project_id,
+                )
         elif row.kind == "workflow_user_copy":
             import copy
 
@@ -755,24 +1205,68 @@ def approve_action(
         elif row.kind == "managed_release":
             from shine.comfyops.renderer_release import release_managed_processes_guarded
 
+            only = set(params.get("only") or []) or None
             value = release_managed_processes_guarded(
                 session_factory,
                 actor=actor,
                 reason="AI 管家受控释放（用户已授权）",
-                only=set(params.get("only") or []) or None,
+                only=only,
             )
-            row.status = "EXECUTED"
-            row.verification = {
-                "outcome": "RELEASED" if not value.get("failed") else "PARTIAL",
-                "executor": spec.executor,
-                "released": value.get("released"),
-                "skipped": value.get("skipped"),
-                "failed": value.get("failed"),
-                "checked_at": utcnow().isoformat(),
-            }
+            verification = _release_verification(value, only)
+            verification["executor"] = spec.executor
+            row.verification = verification
+            if verification["outcome"] == "RELEASED":
+                row.status = "SUCCEEDED"
+            elif verification["outcome"] == "REFUSED":
+                row.status = "REFUSED"
+                row.last_error = f"底层释放执行器拒绝：{verification['reason']}"
+            else:
+                row.status = "NEEDS_REVIEW"
+                row.last_error = (
+                    f"释放结果 {verification['outcome']}：{verification['reason'] or '需要人工核对'}"
+                )
+            add_audit(
+                db,
+                actor,
+                "SUPPORT_ACTION_RELEASE_RESULT",
+                "support_action",
+                row.id,
+                {
+                    "kind": row.kind,
+                    "outcome": verification["outcome"],
+                    "reason": verification["reason"],
+                    "stopped": [item.get("id") for item in verification["stopped"]],
+                    "refused": [item.get("id") for item in verification["refused"]],
+                },
+                project_id=row.project_id,
+            )
         else:  # pragma: no cover - the registry above is exhaustive
             raise ToolDenied(f"未知动作：{row.kind}")
-    except ActionBlocked:
+    except ActionBlocked as exc:
+        # The authorization was already claimed.  A pre-execution refusal must
+        # become a real terminal state, otherwise the APPROVED row would be
+        # reused forever and the user could never preview again.
+        row.status = "REFUSED"
+        row.last_error = f"{exc.code}: {exc.message}"
+        row.verification = {
+            **(row.verification or {}),
+            "outcome": "REFUSED",
+            "reason": exc.code,
+            "message": exc.message,
+            "executor": spec.executor,
+            "checked_at": utcnow().isoformat(),
+        }
+        db.commit()
+        add_audit(
+            db,
+            actor,
+            "SUPPORT_ACTION_REFUSED",
+            "support_action",
+            row.id,
+            {"kind": row.kind, "code": exc.code, "message": exc.message[:200]},
+            project_id=row.project_id,
+        )
+        db.commit()
         raise
     except Exception as exc:  # noqa: BLE001 - a delegated executor error is reported, not hidden
         row.status = "FAILED"
@@ -806,6 +1300,18 @@ def approve_action(
 def refresh_action(db, settings, row: SupportAction) -> dict[str, Any]:
     """Refresh a delegated action from its *bind* executor task, never a lookalike."""
     if row.status not in {"DELEGATED", "EXECUTED", "APPROVED"}:
+        return _public(row)
+
+    if row.status == "APPROVED" and _approval_abandoned(row):
+        row.status = "NEEDS_REVIEW"
+        row.last_error = "上一次授权未完成就中断了，请核对后重新预览并确认。"
+        row.verification = {
+            **(row.verification or {}),
+            "outcome": "UNKNOWN",
+            "reason": "APPROVAL_INTERRUPTED",
+            "checked_at": utcnow().isoformat(),
+        }
+        db.commit()
         return _public(row)
 
     if row.kind == "setup_repair":
@@ -883,28 +1389,59 @@ def refresh_action(db, settings, row: SupportAction) -> dict[str, Any]:
         return _public(row)
 
     if row.kind in {"setup_reconcile"}:
-        verification = _record_verification(db, settings, row)
-        row.verification = {**(row.verification or {}), **verification}
+        # A DELEGATED reconcile means the executor held its lock and returned
+        # IN_PROGRESS without a durable task id.  Nothing proves the pending
+        # result belongs to this authorization, so the global file verdict must
+        # never be promoted into this action's success.
         if row.status == "DELEGATED":
-            if verification.get("outcome") == "VERIFIED":
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "核验由另一轮请求执行，本次授权无法证明结果归属；请重新预览后再核验。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "IN_PROGRESS",
+                "attributed": False,
+                "authority": "/api/v1/setup/summary#capabilities",
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
+        elif row.status == "EXECUTED":
+            # Only the result already attributed to this authorization may settle
+            # it; the global file verdict is never re-read into a success here.
+            outcome = str((row.verification or {}).get("outcome") or "")
+            if outcome == "VERIFIED":
                 row.status = "SUCCEEDED"
-            elif verification.get("outcome") == "UNKNOWN":
+            else:
                 row.status = "NEEDS_REVIEW"
+                row.last_error = row.last_error or "核验结果没有可归属的最终结论，请重新预览。"
             db.commit()
         return _public(row)
 
     if row.kind == "managed_release":
-        from shine.comfyops.renderer_release import describe_managed_processes
-
-        remaining = [row_ for row_ in describe_managed_processes(db) if row_.get("in_flight")]
-        occupancy = _occupancy(db)
-        verification = {
-            "outcome": "RELEASED" if not remaining else "PARTIAL",
-            "authority": "/api/v1/setup/managed-processes",
-            "occupancy": {"busy": occupancy["busy"], "code": occupancy["code"]},
-            "checked_at": utcnow().isoformat(),
+        if row.status in {"DELEGATED", "EXECUTED"}:
+            # Legacy or interrupted release: there is no attributable executor
+            # report.  Never synthesise "RELEASED" from the global process list.
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "这次释放没有留下可归属的执行结果，请核对服务状态后重新预览。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "attributed": False,
+                "authority": "/api/v1/setup/managed-processes",
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
+            return _public(row)
+        # A terminal release keeps the executor's own outcome.  Only append the
+        # current occupancy as observational context.
+        occupancy = _action_occupancy(db, row.kind, dict(row.params or {}))
+        row.verification = {
+            **(row.verification or {}),
+            "current_occupancy": {
+                "busy": occupancy["busy"],
+                "code": occupancy["code"],
+                "checked_at": utcnow().isoformat(),
+            },
         }
-        row.verification = {**(row.verification or {}), **verification}
         db.commit()
         return _public(row)
 

@@ -159,7 +159,57 @@ describe('ShineCopilot', () => {
     await waitFor(() => expect(screen.getByText(/原执行器任务 setup-9/)).toBeTruthy());
     const approve = stub.calls.find((call) => /\/approve$/.test(call.url));
     expect(approve?.body).toMatchObject({ preview_hash: 'hash-1', confirm: true });
-    expect(screen.getByText(/状态：DELEGATED/)).toBeTruthy();
+    expect(screen.getByText(/状态：已交给原执行器/)).toBeTruthy();
+  });
+
+  it('explains a refused action and lets the user preview again without leaving the page', async () => {
+    let previews = 0;
+    stub = routeBase([
+      {
+        method: 'POST',
+        pattern: /\/support\/actions\/preview$/,
+        respond: () => {
+          previews += 1;
+          return jsonResponse({
+            action: {
+              id: `a${previews}`, kind: 'setup_repair', label: '补齐真实制作环境',
+              status: 'PREVIEWED', preview_hash: `hash-${previews}`,
+              preview: {
+                summary: '补齐固定清单中的缺失文件。', blocked: false,
+                authorization_summary: '只下载缺失文件。',
+              },
+              original_task_id: null, verification: {},
+            },
+            reused: false,
+          });
+        },
+      },
+      {
+        method: 'POST',
+        pattern: /\/support\/actions\/a1\/approve$/,
+        respond: () => jsonResponse({
+          action: {
+            id: 'a1', kind: 'setup_repair', label: '补齐真实制作环境',
+            status: 'REFUSED', preview_hash: 'hash-1',
+            preview: { summary: '补齐固定清单中的缺失文件。' },
+            original_task_id: null, verification: { outcome: 'REFUSED' },
+            last_error: 'INSTALLATION_UNKNOWN: 还没有可核验的 ComfyUI 路径',
+          },
+          reused: false,
+        }),
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ShineCopilot pageId="setup" pageLabel="基础配置" />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    await user.click(await screen.findByText('帮我检查环境'));
+    await user.click(await screen.findByText('预览补齐真实制作环境'));
+    await user.click(await screen.findByText('我确认执行'));
+    expect(await screen.findByText(/状态：已拒绝执行，可处理后重新预览/)).toBeTruthy();
+    expect(screen.getAllByText(/INSTALLATION_UNKNOWN/).length).toBeGreaterThan(0);
+    await user.click(screen.getByText('重新预览'));
+    await waitFor(() => expect(previews).toBe(2));
+    expect(screen.queryByText(/状态：已拒绝执行/)).toBeNull();
   });
 
   it('refuses an injected command and never offers an action', async () => {

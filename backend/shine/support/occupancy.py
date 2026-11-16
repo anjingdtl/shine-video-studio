@@ -44,19 +44,15 @@ MATERIAL_ACTIVE = "MATERIAL_ACTIVE"
 UNRESOLVED_OUTCOME = "UNRESOLVED_EXTERNAL_OUTCOME"
 
 
-def resource_occupancy(db, settings=None) -> dict[str, Any]:
-    """Compose the existing occupancy ledgers into one fail-closed answer."""
-    signals: list[dict[str, Any]] = []
+def _collect(db) -> dict[str, Any]:
+    """Read every existing occupancy layer once, without judging it yet."""
+    live_work: list[str] = []
     unknown: list[str] = []
 
-    live_work = False
     try:
         from shine.media.output_layout import active_work_blockers
 
-        blockers = active_work_blockers(db)
-        live_work = bool(blockers)
-        for row in blockers:
-            signals.append({"key": "live_work", "label": str(row)[:120]})
+        live_work = [str(row)[:120] for row in active_work_blockers(db)]
     except Exception as exc:  # noqa: BLE001 - an unreadable gate must not authorise a change
         unknown.append(f"live_work:{type(exc).__name__}")
 
@@ -76,21 +72,24 @@ def resource_occupancy(db, settings=None) -> dict[str, Any]:
             }
             for row in rows
         ]
-        for row in leases:
-            signals.append({"key": "gpu_lease", "label": f"{row['owner']} / {row['status']}"})
     except Exception as exc:  # noqa: BLE001
         unknown.append(f"gpu_lease:{type(exc).__name__}")
 
-    managed_in_flight = 0
+    processes: list[dict[str, Any]] = []
     try:
-        from shine.comfyops.renderer_release import describe_managed_processes
+        from shine.comfyops.renderer_release import _record_key, describe_managed_processes
 
-        for row in describe_managed_processes(db):
-            if isinstance(row, dict) and row.get("in_flight"):
-                managed_in_flight += 1
-                signals.append(
-                    {"key": "managed_in_flight", "label": str(row.get("kind") or "renderer")}
-                )
+        described = describe_managed_processes(db)
+        processes = [
+            {
+                "key": _record_key(row),
+                "kind": row.get("kind"),
+                "state": row.get("state"),
+                "in_flight": bool(row.get("in_flight")),
+            }
+            for row in described
+            if isinstance(row, dict)
+        ]
     except Exception as exc:  # noqa: BLE001
         unknown.append(f"managed_processes:{type(exc).__name__}")
 
@@ -109,10 +108,20 @@ def resource_occupancy(db, settings=None) -> dict[str, Any]:
             )
             or 0
         )
-        if materials:
-            signals.append({"key": "material_runs", "label": f"{materials} 个素材生成批次"})
     except Exception as exc:  # noqa: BLE001
         unknown.append(f"material_runs:{type(exc).__name__}")
+
+    image_work: list[dict[str, Any]] = []
+    try:
+        from shine.runtime_orchestrator.identity import in_flight_image_work
+
+        image_work = [
+            {"kind": str(row.get("kind")), "id": str(row.get("id"))}
+            for row in in_flight_image_work(db)
+            if isinstance(row, dict)
+        ]
+    except Exception as exc:  # noqa: BLE001
+        unknown.append(f"image_work:{type(exc).__name__}")
 
     unresolved = 0
     try:
@@ -128,12 +137,82 @@ def resource_occupancy(db, settings=None) -> dict[str, Any]:
             )
             or 0
         )
-        if unresolved:
-            signals.append(
-                {"key": "unresolved_outcome", "label": f"{unresolved} 个任务结果待核对"}
-            )
     except Exception as exc:  # noqa: BLE001
         unknown.append(f"unresolved_outcome:{type(exc).__name__}")
+
+    return {
+        "live_work": live_work,
+        "leases": leases,
+        "processes": processes,
+        "materials": materials,
+        "image_work": image_work,
+        "unresolved": unresolved,
+        "unknown": unknown,
+    }
+
+
+def occupancy_facts(db) -> dict[str, Any]:
+    """A stable, non-volatile projection of every occupancy layer.
+
+    Used by the action fingerprint: key extraction only, no timestamps, no
+    expiry instants and no human labels, so an untouched machine keeps the
+    same facts while a real lease, job or process change invalidates a preview.
+    """
+    layers = _collect(db)
+    return {
+        "unresolved": layers["unresolved"],
+        "materials": layers["materials"],
+        "image_work": sorted(layers["image_work"], key=lambda row: (row["kind"], row["id"])),
+        "live_work": sorted(layers["live_work"]),
+        "leases": sorted(
+            ({"owner": row["owner"], "status": row["status"]} for row in layers["leases"]),
+            key=lambda row: (row["owner"], row["status"]),
+        ),
+        "processes": sorted(
+            (
+                {"key": row["key"], "state": row["state"], "in_flight": row["in_flight"]}
+                for row in layers["processes"]
+            ),
+            key=lambda row: row["key"],
+        ),
+        "unreadable": sorted(layers["unknown"]),
+    }
+
+
+def _signals(layers: dict[str, Any]) -> list[dict[str, Any]]:
+    signals: list[dict[str, Any]] = []
+    for label in layers["live_work"]:
+        signals.append({"key": "live_work", "label": label})
+    for row in layers["leases"]:
+        signals.append({"key": "gpu_lease", "label": f"{row['owner']} / {row['status']}"})
+    for row in layers["processes"]:
+        if row["in_flight"]:
+            signals.append({"key": "managed_in_flight", "label": str(row["kind"] or "renderer")})
+    if layers["materials"]:
+        signals.append({"key": "material_runs", "label": f"{layers['materials']} 个素材生成批次"})
+    for row in layers["image_work"]:
+        signals.append({"key": "image_work", "label": f"{row['kind']} / {row['id']}"})
+    if layers["unresolved"]:
+        signals.append(
+            {"key": "unresolved_outcome", "label": f"{layers['unresolved']} 个任务结果待核对"}
+        )
+    return signals[:12]
+
+
+def _managed_in_flight(layers: dict[str, Any]) -> int:
+    return sum(1 for row in layers["processes"] if row["in_flight"])
+
+
+def resource_occupancy(db, settings=None) -> dict[str, Any]:
+    """Compose the existing occupancy ledgers into one fail-closed answer."""
+    layers = _collect(db)
+    unknown = layers["unknown"]
+    leases = layers["leases"]
+    live_work = bool(layers["live_work"])
+    managed_in_flight = _managed_in_flight(layers)
+    materials = layers["materials"]
+    unresolved = layers["unresolved"]
+    signals = _signals(layers)
 
     if unknown:
         code = OCCUPANCY_UNKNOWN
@@ -163,10 +242,69 @@ def resource_occupancy(db, settings=None) -> dict[str, Any]:
         "busy": code is not None,
         "code": code,
         "label": labels[code],
-        "signals": signals[:12],
+        "signals": signals,
         "leases": leases[:8],
         "managed_in_flight": managed_in_flight,
         "material_runs": materials,
         "unresolved_outcomes": unresolved,
         "unreadable_layers": unknown,
+    }
+
+
+def release_occupancy(db, *, only: set[str] | None = None) -> dict[str, Any]:
+    """Occupancy for releasing *this installation's* managed processes.
+
+    A live GPU lease is the thing a release exists to clear, so the lease alone
+    is not a reason to refuse: the guarded release executor still re-checks the
+    lease's job and every physical ownership fact before stopping anything.
+    Everything that would make a release unsafe - unreadable layers, unresolved
+    external outcomes, material generation, review work or real production - is
+    still fail-closed here.
+    """
+    layers = _collect(db)
+    unknown = layers["unknown"]
+    targets = [
+        row for row in layers["processes"]
+        if only is None or row["key"] in only
+    ]
+    target_in_flight = sum(1 for row in targets if row["in_flight"])
+    signals = _signals(layers)
+
+    if unknown:
+        code = OCCUPANCY_UNKNOWN
+    elif layers["unresolved"]:
+        code = UNRESOLVED_OUTCOME
+    elif layers["materials"] or layers["image_work"]:
+        code = MATERIAL_ACTIVE
+    elif layers["live_work"]:
+        code = PRODUCTION_ACTIVE
+    elif target_in_flight:
+        code = PRODUCTION_ACTIVE
+    else:
+        code = None
+
+    labels = {
+        OCCUPANCY_UNKNOWN: "无法完整读取资源占用情况，已拒绝释放。",
+        UNRESOLVED_OUTCOME: "有任务的外部结果尚未核对，不能释放相关服务。",
+        MATERIAL_ACTIVE: "素材生成或审片正在进行，不能释放相关服务。",
+        PRODUCTION_ACTIVE: "有生产任务或受管服务正在运行，不能释放。",
+        None: "可以释放本工作台拥有且已空闲的受管服务。",
+    }
+    return {
+        "checked_at": utcnow().isoformat(),
+        "busy": code is not None,
+        "code": code,
+        "label": labels[code],
+        "signals": signals,
+        "leases": layers["leases"][:8],
+        "idle_leases": [
+            row for row in layers["leases"]
+            if row["status"] == "ACTIVE"
+        ][:8],
+        "managed_in_flight": _managed_in_flight(layers),
+        "target_in_flight": target_in_flight,
+        "material_runs": layers["materials"],
+        "unresolved_outcomes": layers["unresolved"],
+        "unreadable_layers": unknown,
+        "release_targets": targets,
     }

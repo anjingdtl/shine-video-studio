@@ -936,3 +936,622 @@ def test_support_snapshot_redacts_private_roots(api):
     dumped = json.dumps(snapshot, ensure_ascii=False)
     assert str(settings.data_dir) not in dumped
     assert len(snapshot["provenance"]) >= 4
+
+
+# ---------------------------------------------------------------------------
+# Third-round P1 regressions: release gate, approval lifecycle, reconcile
+# attribution and action-scoped fingerprints.
+# ---------------------------------------------------------------------------
+def _add_lease(db, lease_id: str, owner: str, status: str = "ACTIVE") -> None:
+    from datetime import timedelta
+
+    from shine.comfyops.models import ResourceLease
+    from shine.models import utcnow
+
+    db.add(ResourceLease(
+        id=lease_id, owner=owner, gpu="gpu-0", budget_mb=8192, exclusive=True,
+        priority=10, status=status, heartbeat_at=utcnow(),
+        expires_at=utcnow() + timedelta(minutes=5),
+    ))
+
+
+def _idle_running_job(api, status: str = "RUNNING") -> tuple[str, str]:
+    from shine.models import Job
+    from tests.conftest import (
+        create_job,
+        create_project,
+        create_referenced_shot,
+        freeze_style,
+        register_workflow_profile,
+    )
+
+    client, factory, _ = api
+    project = create_project(client, "释放测试项目")
+    style = freeze_style(client, project)
+    shot = create_referenced_shot(client, project, style["id"], character="测试角色")
+    profile = register_workflow_profile(client)
+    job = create_job(client, project, shot["id"], provider="comfyui",
+                     workflow_profile_id=profile["id"])
+    with factory.begin() as db:
+        row = db.get(Job, job["id"])
+        row.status = status
+        row.state_version += 1
+    return project, job["id"]
+
+
+def _successful_reconcile(path: str, *, adopt: str | None = None, **overrides) -> dict:
+    payload = {
+        "status": "RECONCILED",
+        "path": path,
+        "capability": "h3",
+        "catalog": "catalog-test",
+        "snapshot": "snap-1",
+        "verified": 3,
+        "rejected": 0,
+        "registered": ["component-a"],
+        "complete": True,
+        "missing_components": [],
+    }
+    if adopt is not None:
+        payload["adoption"] = {"status": adopt, "code": adopt}
+    payload.update(overrides)
+    return payload
+
+
+def test_a_live_gpu_lease_without_in_flight_work_does_not_block_release(api, monkeypatch):
+    client, factory, _ = api
+    with factory.begin() as db:
+        _add_lease(db, "lease-idle", "h3:already-finished")
+    calls: list[dict] = []
+
+    def fake_release(factory_, **kwargs):
+        calls.append(kwargs)
+        return {
+            "stopped": [{"id": "renderer-1", "outcome": "stopped"}],
+            "refused": [],
+            "released": [{"lease_id": "lease-idle", "outcome": "released"}],
+        }
+
+    monkeypatch.setattr(
+        "shine.comfyops.renderer_release.release_managed_processes_guarded", fake_release
+    )
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "managed_release", "params": {}},
+        headers=HEADERS,
+    ).json()["action"]
+    assert preview["preview"]["blocked"] is False
+    assert preview["preview"]["occupancy"]["leases"]
+    approved = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    action = approved.json()["action"]
+    assert action["status"] == "SUCCEEDED"
+    assert action["verification"]["outcome"] == "RELEASED"
+    assert calls and calls[0]["only"] is None
+
+
+def test_release_is_refused_while_a_shot_is_really_running(api, monkeypatch):
+    client, factory, _ = api
+    _, job_id = _idle_running_job(api)
+    with factory.begin() as db:
+        _add_lease(db, "lease-running", f"h3:{job_id}")
+    monkeypatch.setattr(
+        "shine.comfyops.renderer_release.release_managed_processes_guarded",
+        lambda *args, **kwargs: pytest.fail("the release executor must not be called"),
+    )
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "managed_release", "params": {}},
+        headers=HEADERS,
+    ).json()["action"]
+    assert preview["preview"]["blocked"] is True
+    assert preview["preview"]["blocked_code"] == "PRODUCTION_ACTIVE"
+    refused = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert refused.status_code == 423
+    assert refused.json()["detail"]["code"] == "PRODUCTION_ACTIVE"
+
+
+def test_unresolved_external_outcome_blocks_release(api, monkeypatch):
+    from datetime import timedelta
+
+    from shine.models import JobAttempt, utcnow
+
+    client, factory, _ = api
+    _, job_id = _idle_running_job(api, status="NEEDS_REVIEW")
+    with factory.begin() as db:
+        db.add(JobAttempt(
+            job_id=job_id, attempt_no=1, request_fingerprint="a" * 64,
+            status="SUBMITTED", reconciliation_state="submission_unknown",
+            lease_owner="worker-a", lease_expires_at=utcnow() + timedelta(minutes=5),
+            prompt_graph_sha256="b" * 64,
+        ))
+    monkeypatch.setattr(
+        "shine.comfyops.renderer_release.release_managed_processes_guarded",
+        lambda *args, **kwargs: pytest.fail("the release executor must not be called"),
+    )
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "managed_release", "params": {}},
+        headers=HEADERS,
+    ).json()["action"]
+    assert preview["preview"]["blocked"] is True
+    assert preview["preview"]["blocked_code"] == "UNRESOLVED_EXTERNAL_OUTCOME"
+
+
+def test_release_keeps_the_executors_refusal_instead_of_claiming_success(api, monkeypatch):
+    client, factory, _ = api
+
+    def fake_release(factory_, **kwargs):
+        return {
+            "stopped": [],
+            "refused": [{"id": "renderer-x", "outcome": "unverified",
+                         "reason": "ownership cannot be proven"}],
+            "released": [],
+        }
+
+    monkeypatch.setattr(
+        "shine.comfyops.renderer_release.release_managed_processes_guarded", fake_release
+    )
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "managed_release", "params": {}},
+        headers=HEADERS,
+    ).json()["action"]
+    approved = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    action = approved.json()["action"]
+    assert action["status"] == "REFUSED"
+    assert action["verification"]["outcome"] == "REFUSED"
+    assert action["verification"]["refused_codes"] == ["unverified"]
+    assert "unverified" in (action["last_error"] or "")
+
+
+def test_release_partial_and_unknown_results_stay_reviewable(api, monkeypatch):
+    client, factory, _ = api
+    results = [
+        ({"stopped": [{"id": "r1", "outcome": "stopped"}],
+          "refused": [{"id": "r2", "outcome": "unverified"}], "released": []},
+         "PARTIAL"),
+        ({"stopped": [], "refused": [], "released": []}, "UNKNOWN"),
+    ]
+    for payload, expected in results:
+        monkeypatch.setattr(
+            "shine.comfyops.renderer_release.release_managed_processes_guarded",
+            lambda *args, _payload=payload, **kwargs: _payload,
+        )
+        preview = client.post(
+            "/api/v1/support/actions/preview",
+            json={"kind": "managed_release", "params": {}},
+            headers=HEADERS,
+        ).json()["action"]
+        approved = client.post(
+            f"/api/v1/support/actions/{preview['id']}/approve",
+            json={"preview_hash": preview["preview_hash"], "confirm": True},
+            headers=HEADERS,
+        )
+        assert approved.status_code == 200, approved.text
+        action = approved.json()["action"]
+        assert action["status"] == "NEEDS_REVIEW"
+        assert action["verification"]["outcome"] == expected
+
+
+def test_a_blocked_executor_turns_the_authorization_terminal_and_allows_a_new_preview(
+    api, monkeypatch, tmp_path
+):
+    client, factory, _ = api
+    first = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {"capability": "h3"}},
+        headers=HEADERS,
+    ).json()["action"]
+    blocked = client.post(
+        f"/api/v1/support/actions/{first['id']}/approve",
+        json={"preview_hash": first["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert blocked.status_code == 423
+    with factory() as db:
+        row = db.get(SupportAction, first["id"])
+        assert row.status == "REFUSED"
+        assert "INSTALLATION_UNKNOWN" in (row.last_error or "")
+    calls: list[dict] = []
+
+    def fake_reconcile(db, settings, **kwargs):
+        calls.append(kwargs)
+        return _successful_reconcile(kwargs["path"])
+
+    monkeypatch.setattr("shine.comfyops.setup_reconcile.reconcile_installation", fake_reconcile)
+    second = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {
+            "capability": "h3", "installation_path": str(tmp_path),
+        }},
+        headers=HEADERS,
+    ).json()["action"]
+    assert second["id"] != first["id"]
+    assert second["attempt_no"] >= 1
+    approved = client.post(
+        f"/api/v1/support/actions/{second['id']}/approve",
+        json={"preview_hash": second["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    assert calls and calls[0]["path"] == str(tmp_path)
+    assert approved.json()["action"]["status"] in {"SUCCEEDED", "NEEDS_REVIEW"}
+
+
+def test_abandoned_approval_is_recovered_by_a_new_preview(api):
+    from datetime import timedelta
+
+    from shine.models import utcnow
+
+    client, factory, _ = api
+    payload = {"kind": "setup_repair", "params": {"capabilities": ["h3"]}}
+    first = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()["action"]
+    with factory.begin() as db:
+        row = db.get(SupportAction, first["id"])
+        row.status = "APPROVED"
+        row.approved_at = utcnow() - timedelta(minutes=45)
+    again = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()
+    assert again["reused"] is False
+    assert again["action"]["attempt_no"] == 2
+    with factory() as db:
+        assert db.get(SupportAction, first["id"]).status == "NEEDS_REVIEW"
+
+
+def test_reconcile_in_progress_is_never_attributed_to_this_authorization(
+    api, monkeypatch, tmp_path
+):
+    client, factory, _ = api
+
+    def fake_reconcile(db, settings, **kwargs):
+        return {
+            "status": "IN_PROGRESS", "path": kwargs["path"], "capability": "h3",
+            "verified": 0, "registered": [],
+        }
+
+    monkeypatch.setattr("shine.comfyops.setup_reconcile.reconcile_installation", fake_reconcile)
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {
+            "capability": "h3", "installation_path": str(tmp_path),
+        }},
+        headers=HEADERS,
+    ).json()["action"]
+    approved = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    action = approved.json()["action"]
+    assert action["status"] == "NEEDS_REVIEW"
+    assert action["verification"]["outcome"] == "IN_PROGRESS"
+    assert action["verification"]["attributed"] is False
+    assert action["verification"]["result_identity"] is None
+    refreshed = client.get(f"/api/v1/support/actions/{preview['id']}").json()["action"]
+    assert refreshed["status"] == "NEEDS_REVIEW"
+    assert refreshed["verification"]["outcome"] == "IN_PROGRESS"
+
+
+def test_reconcile_reports_rejected_bytes_and_adoption_layers_separately(
+    api, monkeypatch, tmp_path
+):
+    client, factory, _ = api
+    scenarios = [
+        ({"complete": False, "rejected": 1,
+          "adoption": {"status": "ADOPTED"}}, "哈希"),
+        ({"complete": True, "rejected": 0,
+          "adoption": {"status": "FILES_INCOMPLETE"}}, "接管"),
+    ]
+    for overrides, expected in scenarios:
+        def fake_reconcile(db, settings, _overrides=overrides, **kwargs):
+            return _successful_reconcile(kwargs["path"], **_overrides)
+
+        monkeypatch.setattr(
+            "shine.comfyops.setup_reconcile.reconcile_installation", fake_reconcile
+        )
+        preview = client.post(
+            "/api/v1/support/actions/preview",
+            json={"kind": "setup_reconcile", "params": {
+                "capability": "h3", "installation_path": str(tmp_path), "adopt": True,
+            }},
+            headers=HEADERS,
+        ).json()["action"]
+        approved = client.post(
+            f"/api/v1/support/actions/{preview['id']}/approve",
+            json={"preview_hash": preview["preview_hash"], "confirm": True},
+            headers=HEADERS,
+        )
+        assert approved.status_code == 200, approved.text
+        action = approved.json()["action"]
+        assert action["status"] == "NEEDS_REVIEW"
+        assert action["verification"]["outcome"] == "NOT_VERIFIED"
+        assert action["verification"]["result_identity"]
+        assert action["verification"]["attributed"] is True
+        assert set(action["verification"]["layers"]) == {
+            "files_verified", "instance_bound", "production_ready",
+        }
+        assert expected in (action["last_error"] or "")
+
+
+def test_workflow_copy_preview_is_stale_when_the_source_graph_changes(api, monkeypatch):
+    from shine.models import WorkflowProfile
+
+    client, factory, _ = api
+    with factory.begin() as db:
+        db.add(WorkflowProfile(
+            id="wf-fingerprint", project_id=None, name="内置 H3", mode="Ref2VA",
+            graph={"1": {}}, parameter_map={"duration": "2.inputs.seconds"},
+            media_transfers=None, required_nodes=[], checkpoint_id="MiniMax-H3-Base",
+            graph_sha256="a" * 64, model_identity={}, validated_against=None,
+        ))
+    monkeypatch.setattr(
+        "shine.api_comfy.create_workflow_profile",
+        lambda *args, **kwargs: pytest.fail("stale authorization must not execute"),
+    )
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "workflow_user_copy", "params": {
+            "source_profile_id": "wf-fingerprint", "name": "副本",
+        }},
+        headers=HEADERS,
+    ).json()["action"]
+    with factory.begin() as db:
+        db.get(WorkflowProfile, "wf-fingerprint").graph = {"1": {"changed": True}}
+    stale = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "PREVIEW_STALE"
+    with factory() as db:
+        assert db.get(SupportAction, preview["id"]).status == "EXPIRED"
+
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(
+        "shine.api_comfy.create_workflow_profile",
+        lambda body, settings=None, db=None: SimpleNamespace(
+            id="wf-copy-fresh", name=body.name, validated_against=None
+        ),
+    )
+    fresh = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "workflow_user_copy", "params": {
+            "source_profile_id": "wf-fingerprint", "name": "副本",
+        }},
+        headers=HEADERS,
+    ).json()
+    assert fresh["reused"] is False
+    assert fresh["action"]["id"] != preview["id"]
+    approved = client.post(
+        f"/api/v1/support/actions/{fresh['action']['id']}/approve",
+        json={"preview_hash": fresh["action"]["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+
+
+def test_workflow_copy_ignores_unrelated_ui_state_but_represents_fresh_preview(api, monkeypatch):
+    from types import SimpleNamespace
+
+    from shine.models import WorkflowProfile
+
+    client, factory, _ = api
+    with factory.begin() as db:
+        db.add(WorkflowProfile(
+            id="wf-ui", project_id=None, name="内置 H3 二", mode="Ref2VA",
+            graph={"1": {}}, parameter_map={"duration": "2.inputs.seconds"},
+            media_transfers=None, required_nodes=[], checkpoint_id="MiniMax-H3-Base",
+            graph_sha256="a" * 64, model_identity={}, validated_against=None,
+        ))
+    calls: list[str] = []
+
+    def fake_create(body, settings=None, db=None):
+        calls.append(body.name)
+        return SimpleNamespace(id="wf-copy-ui", name=body.name, validated_against=None)
+
+    monkeypatch.setattr("shine.api_comfy.create_workflow_profile", fake_create)
+    payload = {"kind": "workflow_user_copy", "params": {
+        "source_profile_id": "wf-ui", "name": "UI 副本",
+    }}
+    preview = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()["action"]
+    with factory.begin() as db:
+        db.merge(AppSetting(key="ui.theme", value={"accent": "blue"}))
+    approved = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    assert calls == ["UI 副本"]
+
+
+def test_setup_preview_is_stale_when_a_verification_receipt_changes(api, tmp_path):
+    client, factory, _ = api
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {
+            "capability": "h3", "installation_path": str(tmp_path),
+        }},
+        headers=HEADERS,
+    ).json()["action"]
+    with factory.begin() as db:
+        db.add(AppSetting(key="verify-receipt:test", value={
+            "variant_id": "h3-standard", "component_id": "runtime",
+            "revision": "r1", "identity": "i1",
+            "files": [{"relative_path": "a.bin", "sha256": "a" * 64, "size": 3}],
+        }))
+    stale = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "PREVIEW_STALE"
+
+
+def test_a_refused_repair_can_be_previewed_again_with_the_same_request(api, monkeypatch):
+    from shine.support.occupancy import resource_occupancy
+
+    client, factory, settings = api
+
+    def busy(db):
+        return {
+            "busy": True, "code": "PRODUCTION_ACTIVE", "label": "有生产任务",
+            "signals": [], "leases": [],
+        }
+
+    payload = {"kind": "setup_repair", "params": {"capabilities": ["h3"]}}
+    monkeypatch.setattr(action_service, "_occupancy", busy)
+    first = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()["action"]
+    refused = client.post(
+        f"/api/v1/support/actions/{first['id']}/approve",
+        json={"preview_hash": first["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert refused.status_code == 423
+    monkeypatch.setattr(action_service, "_occupancy", resource_occupancy)
+
+    def fake_enqueue(db, **kwargs):
+        return {"status": "QUEUED", "task_id": "setup-after-refusal"}
+
+    monkeypatch.setattr("shine.comfyops.setup_preparation.enqueue", fake_enqueue)
+    second = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()
+    assert second["reused"] is False
+    assert second["action"]["id"] != first["id"]
+    assert second["action"]["attempt_no"] == 2
+    approved = client.post(
+        f"/api/v1/support/actions/{second['action']['id']}/approve",
+        json={"preview_hash": second["action"]["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["action"]["original_task_id"] == "setup-after-refusal"
+
+
+def test_action_fingerprint_covers_selected_installation_and_receipt_variant(api, monkeypatch):
+    from shine.comfyops import setup_summary
+
+    client, factory, settings = api
+    state = {
+        "selected": {
+            "instance_id": "instance-a", "root": "/opt/comfy-a", "source": "selected",
+            "managed": True, "status": "READY", "exists": True, "port": 8188,
+        }
+    }
+    monkeypatch.setattr(
+        setup_summary, "resolve_installation",
+        lambda *args, **kwargs: {"selected": dict(state["selected"]), "candidates": []},
+    )
+    with factory() as db:
+        first, _, reason = action_service._target_fingerprint(
+            db, settings, "setup_repair", {"capabilities": ["h3"]}, None
+        )
+        assert first and reason is None
+        state["selected"] = {
+            "instance_id": "instance-b", "root": "/opt/comfy-b", "source": "selected",
+            "managed": True, "status": "READY", "exists": True, "port": 8189,
+        }
+        second, _, _ = action_service._target_fingerprint(
+            db, settings, "setup_repair", {"capabilities": ["h3"]}, None
+        )
+        assert second and second != first
+        db.add(AppSetting(key="verify-receipt:variant-a", value={
+            "variant_id": "h3-standard", "component_id": "runtime",
+            "revision": "r1", "identity": "i1", "files": [],
+        }))
+        db.commit()
+        third, _, _ = action_service._target_fingerprint(
+            db, settings, "setup_repair", {"capabilities": ["h3"]}, None
+        )
+        db.merge(AppSetting(key="verify-receipt:variant-a", value={
+            "variant_id": "h3-low-vram", "component_id": "runtime",
+            "revision": "r1", "identity": "i1", "files": [],
+        }))
+        db.commit()
+        fourth, _, _ = action_service._target_fingerprint(
+            db, settings, "setup_repair", {"capabilities": ["h3"]}, None
+        )
+    assert third != second
+    assert fourth != third
+
+
+def test_repeating_the_same_valid_approval_never_executes_twice(api, monkeypatch):
+    client, factory, _ = api
+    calls: list[dict] = []
+
+    def fake_enqueue(db, **kwargs):
+        calls.append(kwargs)
+        return {"status": "QUEUED", "task_id": "setup-once"}
+
+    monkeypatch.setattr("shine.comfyops.setup_preparation.enqueue", fake_enqueue)
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_repair", "params": {"capabilities": ["h3"]}},
+        headers=HEADERS,
+    ).json()["action"]
+    body = {"preview_hash": preview["preview_hash"], "confirm": True}
+    first = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve", json=body, headers=HEADERS
+    )
+    second = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve", json=body, headers=HEADERS
+    )
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert len(calls) == 1
+    assert second.json()["reused"] is True
+
+
+def test_an_executor_exception_is_persisted_as_failed_and_recoverable(api, monkeypatch):
+    client, factory, _ = api
+
+    def boom(db, **kwargs):
+        raise RuntimeError("executor crashed")
+
+    monkeypatch.setattr("shine.comfyops.setup_preparation.enqueue", boom)
+    payload = {"kind": "setup_repair", "params": {"capabilities": ["h3"]}}
+    preview = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()["action"]
+    approved = client.post(
+        f"/api/v1/support/actions/{preview['id']}/approve",
+        json={"preview_hash": preview["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    action = approved.json()["action"]
+    assert action["status"] == "FAILED"
+    assert "RuntimeError" in (action["last_error"] or "")
+    with factory() as db:
+        assert db.get(SupportAction, preview["id"]).status == "FAILED"
+    again = client.post(
+        "/api/v1/support/actions/preview", json=payload, headers=HEADERS
+    ).json()
+    assert again["reused"] is False
+    assert again["action"]["id"] != preview["id"]
