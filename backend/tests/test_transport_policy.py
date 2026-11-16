@@ -22,7 +22,9 @@ def _config(timeout_s: float) -> ProviderConfig:
 def test_idle_stays_bounded_at_half_the_base_timeout():
     policy = policy_for(_config(600.0), streaming=True)
     assert policy.idle_s == 300.0
-    assert policy.first_event_s == 600.0
+    # 首事件死线独立封顶：推理模型边思考边发事件，静默超过上限即挂起，
+    # 不应拿满 base（600s）等首事件让一个卡死的剧组步骤空等十分钟。
+    assert policy.first_event_s == 180.0
     assert policy.total_s == 3600.0
     assert policy.connect_s == 30.0
 

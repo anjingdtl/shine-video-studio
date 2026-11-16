@@ -225,6 +225,7 @@ class OpenAICompatibleProvider:
         saw_done = False
         usage: dict[str, Any] = {}
         body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
+        headers_received = False
         try:
             client = build_client(url, policy.first_event_s)
         except Exception:
@@ -245,6 +246,11 @@ class OpenAICompatibleProvider:
                             return None
                         response.read()
                         raise self._classify(response)
+                    # The provider acknowledged the request (200). From here a
+                    # silent socket is an unknown outcome, never a shape refusal:
+                    # falling back to a plain request would re-send a request the
+                    # provider already accepted and could buy a second answer.
+                    headers_received = True
                     for line in response.iter_lines():
                         if time.perf_counter() - started > policy.total_s:
                             break
@@ -276,6 +282,14 @@ class OpenAICompatibleProvider:
             return None
         except httpx.HTTPError:
             if not chunks:
+                if headers_received:
+                    # 200 arrived but no event did before the deadline: the
+                    # request was sent and the outcome is unknown. Never fall
+                    # back to a plain re-send (that would replay a sent request).
+                    raise LLMConnectionError("Provider stream silent after acknowledgement", details={
+                        "external_outcome": "UNKNOWN", "streamed": True,
+                        "first_event_ms": first_event_ms, "headers_received": True,
+                    }) from None
                 return None
             raise LLMConnectionError("Provider stream broke", details={
                 "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
@@ -283,6 +297,10 @@ class OpenAICompatibleProvider:
             }) from None
         text = "".join(chunks)
         if not text:
+            # A clean stream that ended with no content at all (no timeout, no
+            # error) is the unprobed-shape case: one plain fallback is safe. A
+            # silent socket that TIMED OUT after 200 is handled above as UNKNOWN
+            # and never reaches here.
             return None
         if not saw_done:
             # The socket ended without a terminal event: the provider may still
