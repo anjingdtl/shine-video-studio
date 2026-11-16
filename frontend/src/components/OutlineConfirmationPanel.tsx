@@ -188,6 +188,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const needsConsentResume = outlineTask?.status === 'NEEDS_REVIEW' && !outlineTask.retry
     && outlineTask.error_code === 'REMOTE_AGENT_CONSENT_REQUIRED';
   let outlinePrimary: RailAction | null = null;
+  let outlineSecondary: RailAction | null = null;
   if (needsConsentResume) {
     outlinePrimary = { label: '恢复大纲任务', onClick: resumeOutline, loading: busy, disabled: busy || !scriptwriterAllowed,
       disabledReason: outlineBlockReason, guide: outlineGuide };
@@ -200,9 +201,9 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
       disabled: busy || display.stale };
   } else {
-    // 已确认后仍要留修订路径：补充锁定事实 → 重新提取。否则「补充锁定事实后
-    // 重新生成」的提示没有可点的入口。
-    outlinePrimary = { label: '补充锁定事实后重新提取大纲', onClick: extractOutline, loading: busy,
+    // 已确认＝本阶段完成：主操作留空，页面指引指向下一步（镜头拆解），不再把
+    // 「重新提取」摆成蓝色主按钮让人误以为还卡在确认大纲。修订是可选次级路径。
+    outlineSecondary = { label: '补充锁定事实后重新提取大纲', onClick: extractOutline, loading: busy,
       disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
       disabledReason: outlineBlockReason ?? (blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined),
       guide: outlineGuide };
@@ -210,6 +211,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   useStageRail('outline-confirm', {
     priority: 1,
     primary: outlinePrimary,
+    secondary: outlineSecondary ? [outlineSecondary] : [],
     running: running ? { label: '大纲提取中', done: outlineTask?.summary?.done, total: outlineTask?.summary?.total } : null,
   }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterConfigured, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing]);
 
