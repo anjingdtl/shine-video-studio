@@ -4,7 +4,7 @@ import {
   ShieldAlert, Sparkles, Square, Video,
 } from 'lucide-react';
 import {
-  API, ApiError, api, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
+  API, ApiError, api, compileEpisodeSubtitles, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
   json, listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
   type DeliveryAcceptance, type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness,
@@ -13,6 +13,7 @@ import {
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { EpisodeAcceptance } from './EpisodeAcceptance';
+import GenerationSegmentsPanel from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
 import { useStageRail, useRailPresent, type StageRegistration } from './StageRail';
@@ -389,6 +390,22 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
     ?? []).filter((blocker) => blocker.code !== 'PACKAGE_NOT_CONFIRMED');
 
+  // 字幕轨在后期按真实成片时长生成/装配（③只撰写），不在出片前提前装配。
+  const [compilingEp, setCompilingEp] = useState('');
+  async function compileTrack(episodeId: string) {
+    if (compilingEp) return;
+    setCompilingEp(episodeId);
+    try {
+      const body = await compileEpisodeSubtitles(projectId, episodeId);
+      onMessage?.(`本集字幕轨第 ${body.revision} 版已按${body.basis === 'actual' ? '真实成片' : '计划'}时长生成；在下方选择该版本重新装配。`, 'success');
+      onRefresh?.();
+    } catch (exc) {
+      onMessage?.(exc instanceof ApiError ? exc.message : String(exc), 'error');
+    } finally {
+      setCompilingEp('');
+    }
+  }
+
   // 逐集成片：跨运行按集读取，不跟随"当前这一次运行"。
   const postCards = mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
     ? <ol className="run-episodes post-episode-cards">
@@ -426,6 +443,13 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         {!episode.delivery?.artifact_id && !episode.production && <p className="run-hint">
           这一集还没有开拍：到「导演包」勾选它并开始真实制作。
         </p>}
+        <div className="episode-subtitle-bar">
+          <button type="button" className="btn-secondary" disabled={!!compilingEp}
+            onClick={() => { void compileTrack(episode.episode_id); }}>
+            {compilingEp === episode.episode_id ? '生成中…' : '按真实成片时长生成 / 更新字幕轨'}
+          </button>
+          <span className="run-hint">字幕轨在这里按真实成片时长生成；再到下方「修订剪辑 / 字幕」选择版本装配。</span>
+        </div>
       </li>)}
     </ol>
     : null;
@@ -684,6 +708,18 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
 
       {/* 逐集成片与"当前这次运行"无关：第 1 集交付后开始拍第 2 集，第 1 集仍然在这里。 */}
       {postCards}
+      {mode === 'post' && <section className="card section-card run-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">剪辑方案 · 按镜网格</div>
+            <h2>每一镜的成片文件</h2>
+            <p>按集出一版成片；这里按镜网格展示各镜文件，供核对与单镜返修。</p>
+          </div>
+          <Film size={16} />
+        </div>
+        <GenerationSegmentsPanel projectId={projectId}
+          fingerprint={`post-${overviewEpisodes?.map((row) => row.delivery?.artifact_id ?? row.episode_id).join(',') ?? ''}`} />
+      </section>}
 
       {!activeRun
         ? (mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0

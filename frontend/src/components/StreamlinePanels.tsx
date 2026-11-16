@@ -18,7 +18,6 @@ import type { ErrorActionTarget } from '../errorActions';
 import {
   ApiError,
   api,
-  compileEpisodeSubtitles,
   confirmEpisodeShots,
   confirmStoryboardBook,
   controlDirectorStoryboardTask,
@@ -507,15 +506,6 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     }
   };
 
-  const compileSubtitles = (episodeId: string) => act(`subtitles-${episodeId}`, async () => {
-    const body = await compileEpisodeSubtitles(projectId, episodeId);
-    setSubtitleResult(
-      `已生成字幕第 ${body.revision} 版（${body.cue_count} 行，`
-      + `${body.basis === 'actual' ? '按真实成片时长' : '按计划时长'}）。`
-      + (body.basis === 'planned' ? ' 出片后建议再生成一次以对齐真实时长。' : ''));
-    onMessage?.(`本集字幕轨第 ${body.revision} 版已生成；到后期批准并合成。`);
-  }, '本集字幕轨已生成。');
-
   const episodes = state?.episodes ?? [];
   const railPresent = useRailPresent();
   const readyCount = episodes.filter((row) => confirmedEpisodes[row.episode_id]).length;
@@ -730,16 +720,10 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
               本集合计成片时长约 {Math.round(table.total)} 秒；每镜由 {table.shots.length} 个 4–15 秒的 H3 生成片段承载。
               提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
             </p>
-            <div className="episode-subtitle-bar">
-              <button type="button" className="btn-secondary" disabled={busy !== ''}
-                onClick={() => void compileSubtitles(episode.episode_id)}>
-                <ListChecks size={12} /> 生成 / 更新本集字幕轨
-              </button>
-              <span className="run-hint">
-                只使用已冻结的镜头字幕；未出片前按计划时长排布，出片后可再生成一次对齐真实时长。
-                本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
-              </span>
-            </div>
+            <p className="run-hint">
+              字幕在这里逐镜撰写与冻结；字幕轨的生成与装配在「后期成片」按真实成片时长进行，
+              未出片不提前装配。本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
+            </p>
           </>}
           {applied && !confirmedVersion && <button type="button" className="btn-primary"
             disabled={busy !== '' || !table?.shots.length}
