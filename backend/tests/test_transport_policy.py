@@ -1,9 +1,9 @@
-"""传输超时策略：长思考模型的事件间隔容忍度。
+"""传输超时策略：idle 保持有界，长思考靠预算右尺寸而非加时限。
 
-穿测《雨夜归人》时 MiniMax 在第 4/6 段静默思考约 5 分钟，旧 idle_s=base/2
-（base=600 时 300s）把活着的长思考切成 LLM_CONNECTION/UNKNOWN，用户被迫逐段
-手动重试。idle 提高到与首事件同等的 base 容忍度，让长但活着的思考跑完；总
-deadline 仍约束整次调用。
+穿测《雨夜归人》时曾把 idle_s 从 base/2 提到 base 以容纳 MiniMax 的长思考，
+但那是治标：场景提取拿了 creative 档的大额度，模型把额度用来反复思考。健康
+修法是按任务右尺寸输出预算（见 test_scene_extraction_budget），让思考量本身
+变小；idle 仍保持 base/2，及时识别真正停滞的连接，总 deadline 约束整次调用。
 """
 from shine.llm.base import ProviderConfig
 from shine.llm.transport_policy import policy_for
@@ -19,9 +19,9 @@ def _config(timeout_s: float) -> ProviderConfig:
     )
 
 
-def test_a_long_thinking_provider_gets_full_base_idle_headroom():
+def test_idle_stays_bounded_at_half_the_base_timeout():
     policy = policy_for(_config(600.0), streaming=True)
-    assert policy.idle_s == 600.0
+    assert policy.idle_s == 300.0
     assert policy.first_event_s == 600.0
     assert policy.total_s == 3600.0
     assert policy.connect_s == 30.0
@@ -36,6 +36,6 @@ def test_idle_never_drops_below_the_floor():
 
 def test_a_short_provider_timeout_still_bounds_the_whole_call():
     policy = policy_for(_config(60.0), streaming=True)
-    assert policy.idle_s == 60.0
+    assert policy.idle_s == 45.0
     assert policy.total_s == 360.0
     assert policy.idle_s < policy.total_s

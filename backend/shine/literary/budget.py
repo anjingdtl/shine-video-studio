@@ -67,6 +67,12 @@ PURPOSE_GOAL_MULTIPLIER = {
     "observation": 0.10,
     "qa": 0.08,
     "structured": 0.30,
+    # Extracting one scene's facts into the preparation contract is structured
+    # work, not creative writing. Without its own row it fell back to the
+    # creative goal (4k) and a large reasoning reserve, and the model spent the
+    # allowance deliberating instead of answering - the outline stalled on a
+    # silent stream. Size it like the structured task it is.
+    "scene_prep": 0.30,
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
@@ -75,6 +81,7 @@ PURPOSE_MIN_GOAL = {
     "observation": 1_024,
     "qa": 768,
     "structured": 1_024,
+    "scene_prep": 1_024,
 }
 
 
