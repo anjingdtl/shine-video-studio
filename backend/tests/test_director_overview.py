@@ -41,9 +41,11 @@ def _generate_storyboard(client, project: str) -> dict:
 
 
 def _confirmed_first_episode(client, project: str, episode_id: str) -> dict:
+    # 本测试关注「完成的集不被阻塞集拖累」，不关注时长窗口；夹具集时长可能落在
+    # 目标窗口外，按产品路径显式承认偏差后确认（duration 门禁另有专测）。
     response = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/{episode_id}/confirm",
-        json={}, headers=LOCAL)
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert response.status_code == 200, response.text
     return response.json()
 
