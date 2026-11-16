@@ -384,6 +384,7 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     film_type = style.get("film_type")
     dialogue_ratio = style.get("dialogue_ratio_percent")
     narration_level = style.get("narration_level")
+    max_shot_seconds = style.get("max_shot_seconds")
     if not profile_id:
         raise HTTPException(422, "STYLE_PROFILE_REQUIRED")
     try:
@@ -402,6 +403,8 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
         # voice-over the episode may use.  It is guidance, not a render gate.
         "narration_level": narration_level if narration_level in {"none", "low", "high"}
         else current.get("narration_level"),
+        "max_shot_seconds": max_shot_seconds if max_shot_seconds is not None
+        else current.get("max_shot_seconds"),
         "film_type": FilmType(film_type) if film_type else (
             FilmType(current["film_type"]) if current.get("film_type") else None),
     })

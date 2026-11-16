@@ -11,6 +11,7 @@ import {
   type ProductionRun, type RunEvent, type WorkflowProfile,
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
+import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { EpisodeAcceptance } from './EpisodeAcceptance';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
@@ -112,6 +113,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
+  /** 画幅与分辨率档位：只产出 OutputSpec 宽高，走既有导演包→渲染器链路。 */
+  const [orientation, setOrientation] = useState<Orientation>('landscape');
+  const [resolutionScale, setResolutionScale] = useState(1.0);
   /** 每个方案在本机能不能用于生产：服务端判定，浏览器只显示结论和原因。 */
   const [gates, setGates] = useState<Record<string, ProfileGate>>({});
   const ref2vaProfiles = useMemo(
@@ -294,9 +298,11 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       onMessage(`这个生成方案现在不能用于生产：${gateReason(gate)}`, 'error');
       return;
     }
+    const frame = frameSize(orientation, resolutionScale);
     return act('package', () => createDirectorPackage(projectId, {
       workflow_profile_id: profileId,
       generation_mode: profileMode,
+      output: { width: frame.width, height: frame.height, fps: 24 },
       policy: { batch_shot_limit: 6, max_repairs_per_shot: 2 },
       episode_ids: effectiveScope.length ? effectiveScope : null,
     }), '导演包已生成，请查看就绪检查后确认');
@@ -554,6 +560,21 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               })}
             </select>
           </label>
+          <label>画幅
+            <select value={orientation} onChange={(event) => setOrientation(event.target.value as Orientation)}>
+              {(Object.keys(ORIENTATION_LABELS) as Orientation[]).map((key) => (
+                <option key={key} value={key}>{ORIENTATION_LABELS[key]}</option>
+              ))}
+            </select>
+          </label>
+          <label>分辨率档位
+            <select value={resolutionScale} onChange={(event) => setResolutionScale(Number(event.target.value))}>
+              {RESOLUTION_SCALES.map((scale) => {
+                const frame = frameSize(orientation, scale);
+                return <option key={scale} value={scale}>{scaleLabel(scale)} · {frame.width}×{frame.height}</option>;
+              })}
+            </select>
+          </label>
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
@@ -607,6 +628,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               ? `第 ${latestPackage.style.version} 版 · 已冻结` : '未冻结'}</dd></div>
             <div><dt>生成方案</dt><dd>{latestPackage.binding
               ? latestPackage.binding.mode : '未绑定'}</dd></div>
+            <div><dt>画幅</dt><dd>{latestPackage.binding?.output?.width && latestPackage.binding?.output?.height
+              ? `${latestPackage.binding.output.width}×${latestPackage.binding.output.height}` : '沿用生成方案'}</dd></div>
             <div><dt>自动返工</dt><dd>{String(latestPackage.policy?.max_repairs_per_shot ?? '—')} 次/镜（有界）</dd></div>
           </dl>
 

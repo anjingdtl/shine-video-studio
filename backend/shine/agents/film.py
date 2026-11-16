@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from shine.agents.crew_prompts import arbiter_prompt, crew_prompt
 from shine.agents.editorial_timing import (
+    MAX_SEGMENT_S,
     editorial_timing_blocker,
     editorial_timing_plan,
     editorial_timing_preview,
@@ -530,9 +531,15 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         if len({s.id for s in proposal.shots}) != len(proposal.shots):
             raise ValueError("DUPLICATE_SHOT_INTENT")
         timing = context.get("editorial_timing")
+        cap = context.get("max_shot_seconds")
         timeline = []
         elapsed = 0.0
         for shot_index, shot in enumerate(proposal.shots):
+            # The same per-shot ceiling the editorial segmentation and the
+            # director prompt were given; a shot above it is refused by name
+            # rather than landed and rejected at render time.
+            if cap is not None and shot.duration_s > cap + 1e-6:
+                raise ValueError("SHOT_DURATION_OVER_LIMIT")
             # Spoken words belong to the dialogue structure, never to the
             # visual prose: text the model renders as picture description is
             # otherwise read aloud by H3 outside the audio channel.
@@ -796,6 +803,14 @@ class FilmAgentDispatcher:
                 # Guidance for the scriptwriter: how much of the story may be
                 # told by an off-screen narrator.
                 context["narration_level"] = narration
+        if project.frozen_style_version_id and style:
+            # The per-shot ceiling is a production decision frozen with the
+            # storyboard book, read here for every role so the editorial
+            # segmentation, the director prompt and the landed-spec verdict
+            # all enforce the same cap (one fact, one verdict).
+            cap = style.snapshot.get("max_shot_seconds")
+            if cap is not None:
+                context["max_shot_seconds"] = float(cap)
         if body.production_context is not None:
             from shine.materialprep.story import verified_production_context
             context["production_context"] = verified_production_context(
@@ -806,9 +821,12 @@ class FilmAgentDispatcher:
                 context["memory"] = memory_view
         refusal: dict | None = None
         if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
-            timing = editorial_timing_preview(body.brief)
+            cap = context.get("max_shot_seconds")
+            timing = editorial_timing_preview(
+                body.brief, max_segment_s=cap if cap is not None else MAX_SEGMENT_S)
             if timing:
-                blocker = editorial_timing_blocker(timing)
+                blocker = editorial_timing_blocker(
+                    timing, max_segment_s=cap if cap is not None else MAX_SEGMENT_S)
                 beat_ids = _plan_beat_ids(role, inputs)
                 if blocker:
                     refusal = blocker
@@ -1003,6 +1021,7 @@ class FilmAgentDispatcher:
                 repair_director=repair_director,
                 dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
                 narration_level=context.get("narration_level"),
+                max_shot_seconds=context.get("max_shot_seconds"),
             )
 
         def record_progress(phase: str) -> None:

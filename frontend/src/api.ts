@@ -1591,7 +1591,7 @@ export const generateStoryboardBook = (projectId: string, body: {
 export const confirmStoryboardBook = (projectId: string, body: {
   plan_version: number; expected_sha256: string;
   style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number;
-    narration_level?: 'none' | 'low' | 'high' } | null,
+    narration_level?: 'none' | 'low' | 'high'; max_shot_seconds?: number | null } | null,
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
 

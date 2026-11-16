@@ -94,6 +94,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
+  const [maxShotSeconds, setMaxShotSeconds] = useState(15);
   const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [book, setBook] = useState<StoryboardBook | null>(null);
@@ -158,6 +159,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           film_type: filmType,
           dialogue_ratio_percent: DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45,
           narration_level: narrationLevel,
+          max_shot_seconds: maxShotSeconds,
         },
       });
       setConfirmedPlan({ version: book.plan_version });
@@ -176,7 +178,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     : null;
   useStageRail('storyboard-book', { priority: 1, primary },
     [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
-      episodeCount, targetSeconds]);
+      episodeCount, targetSeconds, maxShotSeconds]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
@@ -215,6 +217,11 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       <label>每集目标秒数
         <input type="number" min={8} max={3600} value={targetSeconds}
           onChange={(event) => setTargetSeconds(Math.max(8, Number(event.target.value) || 60))} />
+      </label>
+      <label>单镜秒数上限
+        <input type="number" min={4} max={15} step={0.5} value={maxShotSeconds}
+          title="第③步镜头拆解里每个渲染镜头的时长上限；H3 单镜最短 4 秒，故可调范围 4–15 秒"
+          onChange={(event) => setMaxShotSeconds(Math.min(15, Math.max(4, Number(event.target.value) || 15)))} />
       </label>
       <button type="button" className="btn-secondary" disabled={busy || !profileId} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书

@@ -27,6 +27,7 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   REMOTE_AGENT_CONSENT_REQUIRED: { reason: '首次发送剧本到云端需同意', action: { label: '查看说明并同意', target: 'consent' } },
   SHOT_REVISION_CHANGED: { reason: '镜头已升版，需要新导演包', action: { label: '重新生成导演包', target: 'package-stage' } },
   PIPELINE_EPISODE_SCRIPT_SUPERSEDED: { reason: '分集剧本已被新大纲替代', action: { label: '重做这一卷分集', target: 'package-stage' } },
+  SHOT_DURATION_OVER_LIMIT: { reason: '镜头时长超过你设的单镜秒数上限', why: '在剧本统筹调高「单镜秒数上限」，或让这一镜的台词更短。', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_TIMEOUT: { reason: '云端模型响应超时', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_RATE_LIMIT: { reason: '云端模型限流，稍后重试', action: { label: '重试这一场', target: 'retry-scene' } },
   MATERIAL_IDENTITY_AMBIGUOUS: { reason: '同一人物在多场外观描述不一致', action: { label: '按单场拆分计划', target: 'split-plan' } },

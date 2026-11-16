@@ -52,6 +52,31 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
   stub.restore();
 });
 
+it('单镜秒数上限随分镜书确认进入冻结风格（同一控制链路）', async () => {
+  const confirms: Array<Record<string, unknown>> = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
+      { id: 'noir', name_zh: '黑色电影', summary_zh: '低照度、硬光', version: '1.0' },
+    ]) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/director\/storyboard-book$/, respond: () => jsonResponse(BOOK) },
+    { method: 'POST', pattern: /\/director\/storyboard-book\/confirm$/, respond: (_url, init) => {
+      confirms.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ plan_version: 1, style: { style_version_id: 'style-1' } });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  await screen.findByRole('option', { name: /黑色电影/ });
+  fireEvent.change(screen.getByLabelText('单镜秒数上限'), { target: { value: '10' } });
+  await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
+  await screen.findByText(/计划总时长/);
+  await user.click(screen.getByRole('button', { name: /确认分镜书/ }));
+  await waitFor(() => expect(confirms).toHaveLength(1));
+  expect(confirms[0].style).toMatchObject({ profile_id: 'noir', max_shot_seconds: 10 });
+  stub.restore();
+});
+
 it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注册时的旧值', async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const stub = new StudioStub([
