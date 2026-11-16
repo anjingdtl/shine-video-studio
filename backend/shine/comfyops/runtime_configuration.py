@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import or_, select, text
+from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe
@@ -19,6 +19,27 @@ from shine.services import add_audit, require_project
 CANDIDATE_KEY = 'deployment-runtime-candidate'
 ACTIVE_KEY = 'deployment-runtime-active'
 SERVICE_EVIDENCE_KEY = 'deployment-service-validation'
+
+#: Stat-keyed cache of pinned-file SHA-256 (resolved path + mtime_ns + size).
+#: configuration_identity is read on every setup/status projection and used to
+#: re-hash every pinned file each time. A file whose bytes change gets a new
+#: mtime/size and is hashed again, so accidental configuration drift is still
+#: detected; only unchanged files reuse their digest.
+_PIN_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def _pinned_file_digest(target: Path) -> str:
+    stat = target.stat()
+    key = (str(target.resolve()), stat.st_mtime_ns, stat.st_size)
+    hit = _PIN_HASH_CACHE.get(key)
+    if hit is not None:
+        return hit
+    with target.open('rb') as stream:
+        digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+    if len(_PIN_HASH_CACHE) >= 256:
+        _PIN_HASH_CACHE.clear()
+    _PIN_HASH_CACHE[key] = digest
+    return digest
 
 #: The series states that can still hold the GPU or be resumed by a Worker.
 #: NEEDS_REVIEW is deliberately absent: it is a blocked, unclaimable record.
@@ -218,8 +239,7 @@ def configuration_identity(db, settings, path):
         for target in sorted(paths):
             if not target.is_absolute() or not target.is_file():
                 raise HTTPException(409, 'RUNTIME_PINNED_FILE_MISSING')
-            with target.open('rb') as stream:
-                pins[str(target.resolve())] = hashlib.file_digest(stream, 'sha256').hexdigest()
+            pins[str(target.resolve())] = _pinned_file_digest(target)
         return {'recipe': str(path), 'recipe_sha256': graph_hash(raw),
                 'instance_id': instance.id, 'instance_sha256': instance.sha256,
                 'catalog_sha256': graph_hash(load_default_catalog()), 'files': pins,
@@ -259,6 +279,42 @@ def resolve_runtime(db, settings):
                    managed_recipe_path=identity['recipe'], managed_recipe_sha256=identity['recipe_sha256'])
 
 
+def _live_installation_attempts(db) -> list[str]:
+    """Installation attempts that can still hold the machine.
+
+    An attempt that already failed (``FAILED_RECONCILE_REQUIRED``) is waiting
+    for a person to reconcile it.  It holds no lease and installs nothing, so
+    it cannot touch the GPU - but counting it anyway froze the whole
+    workbench: one failed download of the *advisory* review models (画面审片 /
+    语音核对) made service validation, runtime activation and the production
+    badge refuse forever, with nothing in the UI able to clear it.
+
+    Two rules, both about not letting an unrelated download freeze everything:
+
+    * a failed attempt only counts while it still owns a lease;
+    * a plan that contains nothing but advisory review components never counts
+      - those models give suggestions and never gate a production.
+    """
+    from shine.comfyops.deployment import REVIEW_COMPONENTS
+    from shine.comfyops.models import InstallationPlan
+
+    review_only = set(REVIEW_COMPONENTS.values())
+    live: list[str] = []
+    rows = db.scalars(select(InstallationAttempt).where(
+        InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING',
+                                        'FAILED_RECONCILE_REQUIRED']))).all()
+    for attempt in rows:
+        if attempt.status == 'FAILED_RECONCILE_REQUIRED' and attempt.lease_owner is None:
+            # The failure is recorded, nothing is running any more.
+            plan = db.get(InstallationPlan, attempt.plan_id)
+            payload = (plan.payload or {}) if plan is not None else {}
+            packages = [str(row.get('id') or '') for row in (payload.get('packages') or [])]
+            if not packages or set(packages).issubset(review_only):
+                continue
+        live.append(attempt.id)
+    return live
+
+
 def require_idle_configuration(db):
     from shine.services import ACTIVE_JOB_STATUSES
 
@@ -276,10 +332,10 @@ def require_idle_configuration(db):
                 Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
             or db.scalar(select(ProductionSeries.id).where(
                 ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(1))
-            or db.scalar(select(InstallationAttempt.id).where(or_(
-                InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING', 'FAILED_RECONCILE_REQUIRED']),
-                (InstallationAttempt.status == 'NEEDS_REVIEW') & InstallationAttempt.lease_owner.is_not(None),
-            )).limit(1))):
+            or db.scalar(select(InstallationAttempt.id).where(
+                (InstallationAttempt.status == 'NEEDS_REVIEW')
+                & (InstallationAttempt.lease_owner.is_not(None))).limit(1))
+            or _live_installation_attempts(db)):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
 
 

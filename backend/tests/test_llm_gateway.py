@@ -17,7 +17,8 @@ from shine.llm.base import (
     LLMTimeout,
     ProviderConfig,
 )
-from shine.llm.gateway import agent_output_config
+from shine.llm.gateway import LLMGateway, agent_output_config
+from shine.llm.mock import MockLLMProvider
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from tests.fake_http import FakeOpenAIServer
@@ -128,6 +129,67 @@ def test_minimax_m31_flash_never_expands_an_explicit_output_budget(fake_openai):
         fake_openai, model="MiniMax-M3.1-Flash", generation_options={"max_completion_tokens": 100_000},
     )
     assert agent_output_config(original).generation_options["max_completion_tokens"] == 100_000
+
+
+class _StructuredProfile:
+    """The shape a routed crew profile has, without a database."""
+
+    id = "p-crew"
+    name = "crew"
+    kind = "openai_compatible"
+    base_url = "https://api.example.com/v1"
+    model = "test-model"
+    enabled = True
+    api_key_ref = None
+    timeout_s = 30
+    max_retries = 1
+    temperature = 1.0
+    generation_options: dict = {}
+    capabilities = {"model_metadata": [{"id": "test-model"}]}
+
+
+def _precompiled_gateway(seen: list[ProviderConfig]) -> LLMGateway:
+    def factory(provider_config, _responder):
+        seen.append(provider_config)
+        return MockLLMProvider(provider_config, responder=lambda messages, schema: {"ok": True})
+
+    gateway = LLMGateway(None, provider_factory=factory)
+    gateway.profile_for_role = lambda db, role: _StructuredProfile()
+    return gateway
+
+
+def test_a_precompiled_structured_budget_bounds_the_reasoning_effort():
+    """A ceiling without a bounded effort buys no visible answer at all.
+
+    The crew roles are structured calls: they read and answer, exactly like the
+    calls ``agent_output_config`` bounds.  Live evidence (2026-11-15, scene 2):
+    with a 6,916-token ceiling and no reasoning effort the provider spent the
+    whole ceiling thinking - ``finish_reason=length``, zero answer characters -
+    and the unit was refused as LLM_FORMAT twice in a row.  The crew path hands
+    the gateway a precompiled budget, so the bounded effort has to travel with
+    that budget too, not only with the literary governor's.
+    """
+    from shine.literary.requests import compile_request
+
+    seen: list[ProviderConfig] = []
+    gateway = _precompiled_gateway(seen)
+    request = compile_request(system="s", user="u", schema={"type": "object"})
+    gateway.complete_for_role(None, "director", precompiled=request,
+                              budget={"completion_cap": 6916, "streaming": True})
+    assert seen[-1].generation_options["max_completion_tokens"] == 6916
+    assert seen[-1].generation_options["reasoning_effort"] == "low"
+
+
+def test_an_explicit_reasoning_effort_in_the_budget_is_kept():
+    from shine.literary.requests import compile_request
+
+    seen: list[ProviderConfig] = []
+    gateway = _precompiled_gateway(seen)
+    request = compile_request(system="s", user="u", schema={"type": "object"})
+    gateway.complete_for_role(None, "director", precompiled=request,
+                              budget={"completion_cap": 6916, "streaming": True,
+                                      "reasoning_effort": "medium"})
+    assert seen[-1].generation_options["reasoning_effort"] == "medium"
 
 
 def test_truncated_completion_names_the_finish_reason_and_reasoning_usage(monkeypatch, fake_openai):

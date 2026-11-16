@@ -53,7 +53,18 @@ def _as_int(value: Any) -> int | None:
 
 def record_row(db, *, project_id: str, attempt: dict[str, Any],
                task_id: str | None = None) -> LLMCallAttempt:
-    """Insert or update one attempt row.  Never raises into the caller."""
+    """Insert or update one attempt row.  Never raises into the caller.
+
+    One row is one **physical request**.  It is written twice: once as
+    ``SENDING`` before the request leaves, once with the real outcome after.
+
+    A person may authorize a new request for a call whose outcome is still
+    unknown.  That new request is a **new physical request** and gets its own
+    row, because the unknown outcome of the old one is exactly the evidence a
+    later reader needs.  The two are told apart by ``task_id``: the authorized
+    retry runs as a new task, while the same task writing the same fingerprint
+    twice is one request recorded before and after it left the machine.
+    """
     phase = str(attempt.get("phase") or "FINISHED")
     unit_id = str(attempt.get("unit_id") or "unknown")[:160]
     fingerprint = str(attempt.get("request_fingerprint") or "")
@@ -66,6 +77,7 @@ def record_row(db, *, project_id: str, attempt: dict[str, Any],
             LLMCallAttempt.unit_id == unit_id,
             LLMCallAttempt.request_fingerprint == fingerprint,
             LLMCallAttempt.attempt_no == attempt_no,
+            LLMCallAttempt.task_id == task_id,
         ).order_by(LLMCallAttempt.started_at.desc())).first()
     if row is None:
         row = LLMCallAttempt(
@@ -94,7 +106,7 @@ def record_row(db, *, project_id: str, attempt: dict[str, Any],
     row.provider_code = _as_int(attempt.get("provider_code")) or row.provider_code
     row.finish_reason = (str(attempt.get("finish_reason"))[:32]
                          if attempt.get("finish_reason") else row.finish_reason)
-    row.error_code = str(attempt.get("error_code"))[:64] if attempt.get("error_code") else row.error_code
+    row.error_code = str(attempt.get("error_code"))[:64] if attempt.get("error_code") else None
     row.latency_ms = _as_int(attempt.get("latency_ms")) or row.latency_ms
     row.first_event_ms = _as_int(attempt.get("first_event_ms")) or row.first_event_ms
     row.last_event_ms = _as_int(attempt.get("last_event_ms")) or row.last_event_ms

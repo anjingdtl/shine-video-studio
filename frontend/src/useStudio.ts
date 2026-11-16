@@ -128,8 +128,12 @@ export function useStudio() {
     const probe = ++healthProbe.current;
     let online = false;
     try {
-      const projects = await api<Project[]>('/projects', { signal: timeoutSignal(2500), cache: 'no-store' });
-      online = Array.isArray(projects);
+      // 唯一性原则：连接状态与制作模式同源于 /system/status 这一条后台检验链路。
+      // 原先 apiOnline 另用 /projects 短超时探测，负载下与 production_mode 分裂，
+      // 出现「后端失联」却「制作已就绪」的矛盾。现统一读 api_online。
+      const status = await api<SystemStatus>('/system/status', { signal: timeoutSignal(8000), cache: 'no-store' });
+      online = Boolean(status.api_online);
+      if (probe === healthProbe.current) setSystem(status);
     } catch { /* A failed health probe means the API cannot be reached. */ }
     if (probe === healthProbe.current) {
       setApiOnline(online);

@@ -177,7 +177,7 @@ function sceneStatusLabel(scene: SceneStatus): string {
   }
 }
 
-function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [], storyboardReady = true }: {
+function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenStyle, documentsVersion, shots = [], storyboardReady = true, embedded = false }: {
   projectId: string;
   onMessage?: (message: string) => void;
   onPromoted?: () => void;
@@ -188,6 +188,9 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   shots?: Shot[];
   /** ③ 镜头拆解是否完成：素材按定稿分镜准备，分镜没定稿不先备料。 */
   storyboardReady?: boolean;
+  /** 作为导演素材页的高级折叠区嵌入：不再注册与主面板竞争的操作栏主按钮，
+   *  避免两套确认链路共用同一清单修订号、点其中一个把另一个顶成 STALE。 */
+  embedded?: boolean;
 }) {
   const [state, setState] = useState<MaterialState | null>(null);
   const [documents, setDocuments] = useState<{ id: string; filename: string; sha256: string }[]>([]);
@@ -816,9 +819,12 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     materialPrimary = { ...materialPrimary, disabled: true,
       disabledReason: '先完成③镜头拆解：分镜定稿后才按清单备料' };
   }
+  // 嵌入高级折叠区时不抢操作栏：导演素材页的主操作由 ShotMaterialsPanel 唯一提供，
+  // 本面板只在展开的折叠区内用行内按钮，避免两套确认链路互相顶成 STALE。
+  if (embedded) materialPrimary = null;
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
     [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts, storyboardReady,
-      state, selected, bindings, strategy]);
+      state, selected, bindings, strategy, embedded]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -971,7 +977,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               ))}
             </select>
           </label>
-          {hasContracts && !railPresent && <button type="button" className="btn-primary" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
+          {hasContracts && (!railPresent || embedded) && <button type="button" className="btn-primary" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
             {busy ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 复用分镜分析生成素材清单
           </button>}
           {hasContracts && <p className="material-hint">分集与分镜已由四阶段链路分析过；这里用一次全项目统揽生成清单：同一人物（含别名）只定义一次，衣服/外貌变化按场记为变体，场景与道具只取关键项。依据不变时复用统揽目录，不重复调用模型。</p>}
@@ -981,7 +987,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             <button type="button" className="btn-text" disabled={busy}
               onClick={() => resendUnknownScene({ scene_key: '全项目统揽', task_id: catalogBlock.task_id, state_version: catalogBlock.state_version } as SceneStatus)}>明确重发统揽任务</button>
           </div>}
-          {!railPresent && !hasContracts && <button type="button" className="btn-primary"
+          {(!railPresent || embedded) && !hasContracts && <button type="button" className="btn-primary"
             disabled={busy || !documentId || analysing || scenesRunning || !storyboardReady} onClick={analyseScript}>
             {busy || analysing ? <Loader2 size={13} className="spin" /> : <Sparkles size={13} />} 分析剧本
           </button>}
@@ -1169,7 +1175,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           {hasContracts && <button type="button" className="btn-text" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
             复用分镜分析重新生成清单
           </button>}
-          {!railPresent && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0 || !storyboardReady} onClick={confirmAndGenerate}>
+          {(!railPresent || embedded) && <button type="button" className="btn-primary" disabled={busy || requirements.length === 0 || !storyboardReady} onClick={confirmAndGenerate}>
             {confirmLabel}
           </button>}
         </div>
@@ -1266,7 +1272,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </p>)}
             </details>
           </>}
-          {!railPresent && <button type="button" className="btn-primary" disabled={busy || !promotable} onClick={promoteSelected}>
+          {(!railPresent || embedded) && <button type="button" className="btn-primary" disabled={busy || !promotable} onClick={promoteSelected}>
             确认使用所选素材
           </button>}
           <button type="button" className="btn-text" disabled={busy || !runs.length} onClick={regenerateAll}>

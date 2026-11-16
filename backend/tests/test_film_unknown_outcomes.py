@@ -350,6 +350,36 @@ def test_a_refused_answer_that_arrived_allows_one_authorized_new_request(prep, m
     assert len(calls) == 1
 
 
+def test_a_streamed_truncated_answer_is_a_decided_refusal(prep, monkeypatch):  # noqa: F811
+    """The streamed transport meta keys the answer by ``http_status`` (not
+    ``status``): a 200 stream that ended with finish_reason=length is a
+    received, decided refusal — never UNKNOWN.  The 2026-11-15 journey hit
+    this exactly: MiniMax streamed 3140 chars then stopped (length), the
+    record was mis-classified UNKNOWN, and the storyboard episode retry had
+    no lawful path forward.
+    """
+    from shine.llm.base import LLMFormatError
+
+    def truncated_stream():
+        return LLMFormatError(
+            "Provider completion is truncated or filtered",
+            details={"http_status": 200, "streamed": True, "finish_reason": "length",
+                     "first_event_ms": 12, "last_event_ms": 300, "provider_text": '{"beats": [{"id":'})
+
+    client, factory, project_id, task_id, path, body, calls = uncertain(
+        prep, monkeypatch, failure=truncated_stream,
+    )
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task.status == "REJECTED"
+        assert task.trace["external_outcome"] == "RESPONSE_RECEIVED"
+        assert task.trace["provider_finish_reason"] == "length"
+        assert task.trace["provider_text_chars"] > 0
+        assert task.trace["diagnostic_category"] == "provider_format"
+        assert task.trace["automatic_replay"] is False
+    assert len(calls) == 1
+
+
 def _dead_crew_task(factory, project_id: str, *, phase: str, age_s: int = 4000):
     """A crew task left RUNNING by a process that died."""
     with factory.begin() as db:

@@ -474,6 +474,44 @@ def test_profile_routing_remote_consent_errors_redaction_and_staleness(api):
     )
 
 
+def test_a_quoted_inscription_in_english_prose_is_not_chinese_prose(api):
+    """A deliberate quotation is the same exception in every quotation spelling.
+
+    Live evidence (2026-11-15, scene 2): the ScriptBreakdown beat of the same
+    pipeline reads "the visible carved text emerges clearly as “沈禾”" - the
+    model quotes the scratched mark with typographic curly quotes.  A faithful
+    English visual description that copied that span was refused as Chinese
+    prose three times, because only ASCII quotes and corner brackets were
+    stripped.  Bare Chinese prose stays refused.
+    """
+    client, factory, _ = api
+    project_id, _, _ = prepare(client)
+    script = call(client, project_id, "scriptwriter", SCRIPT)
+    master = next(a for a in client.get(f"/api/v1/projects/{project_id}/assets").json()
+                  if a["entity_id"] == "Lin")
+    quoted = {"shots": [{**DIRECTOR["shots"][0], "asset_ids": [master["id"]],
+                         "visual_description": (
+                             "A close-up of the corroded case: the carved inscription emerges as “沈禾”. "
+                             "The brush clears the last of the rust.")}]}
+    direction = call(client, project_id, "director", quoted, inputs=[script["id"]])
+    assert direction["kind"] == "DirectorialPlan"
+
+    bare = {"shots": [{**DIRECTOR["shots"][0], "asset_ids": [master["id"]],
+                       "visual_description": "沈禾两个字在锈迹下露出来。"}]}
+    client.app.state.mock_llm_responder = lambda *_: copy.deepcopy(bare)
+    rejected = client.post(
+        f"/api/v1/projects/{project_id}/film-agents/director/run",
+        json={"brief": BRIEF, "locked_story_facts": FACTS, "input_revision_ids": [script["id"]]},
+    )
+    assert rejected.status_code == 422
+    with factory() as db:
+        task = db.scalar(select(AgentTaskRecord).where(
+            AgentTaskRecord.role_id == "director",
+            AgentTaskRecord.status == "REJECTED").order_by(AgentTaskRecord.created_at.desc()))
+        assert task.trace["rejection_reason_code"] == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
+        assert task.trace["visual_field"] == "shots[0].visual_description"
+
+
 def test_rulebook_metadata_cache_tampering_versions_and_license(api, tmp_path):
     client, factory, _ = api
     project_id, _, _ = prepare(client)

@@ -16,9 +16,10 @@ export type OutputDirectoryState = {
   migration: { root?: string; started_at?: string; actor?: string } | null;
   blockers: string[];
   blocker_details?: {
-    jobs: Array<{ id: string; status: string; project_title: string | null }>;
-    series: Array<{ id: string; status: string; project_title: string | null }>;
-    runs: Array<{ id: string; status: string; project_title: string | null }>;
+    jobs: Array<{ id: string; status: string; project_title: string | null;
+      project_id?: string; shot_name?: string | null; shot_id?: string | null }>;
+    series: Array<{ id: string; status: string; project_title: string | null; project_id?: string }>;
+    runs: Array<{ id: string; status: string; project_title: string | null; project_id?: string }>;
     library_tasks: Array<{ id: string; status: string }>;
   };
   worker_online?: boolean;
@@ -159,19 +160,23 @@ export default function OutputDirectoryPanel() {
       )}
       <ul className="blocker-details">
         {(state.blocker_details?.jobs ?? []).map((row) => (
-          <li key={row.id}>镜头任务 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+          <li key={row.id}>
+            镜头任务 {row.id.slice(0, 8)} · {row.status}
+            {row.shot_name ? ` · 镜头「${row.shot_name}」` : ''}
+            {row.project_title ? ` · 作品「${row.project_title}」` : ''}
+          </li>
         ))}
         {(state.blocker_details?.series ?? []).map((row) => (
-          <li key={row.id}>生产序列 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+          <li key={row.id}>生产序列 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · 作品「${row.project_title}」` : ''}</li>
         ))}
         {(state.blocker_details?.runs ?? []).map((row) => (
-          <li key={row.id}>整片运行 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · ${row.project_title}` : ''}</li>
+          <li key={row.id}>整片运行 {row.id.slice(0, 8)} · {row.status}{row.project_title ? ` · 作品「${row.project_title}」` : ''}</li>
         ))}
         {(state.blocker_details?.library_tasks ?? []).map((row) => (
           <li key={row.id}>素材生成 {row.id.slice(0, 8)} · {row.status}</li>
         ))}
       </ul>
-      <span>到「视频生产」页可暂停/核对/结案这些任务；Worker 停止时先启动它。等它们结束后再切换目录。</span>
+      <span>切到上面写出的那个作品，在「视频生产」页可以暂停/核对/结案这些任务；Worker 停止时先启动它。等它们结束后再切换目录。</span>
     </div>}
     <div className="inline-actions">
       <button className="btn-primary" disabled={busy || picking || blockers.length > 0} onClick={() => void choose()}>

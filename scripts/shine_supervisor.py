@@ -45,6 +45,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8790
 DEFAULT_IDLE_SHUTDOWN_MINUTES = 5
 WATCHDOG_TICK_SECONDS = 20
+RESTART_STALE_AFTER_SECONDS = 900.0
+"""A restart that has not reported back for this long is treated as dead.
+
+The page has no other way to clear a stuck restart, so an abandoned attempt
+must not keep refusing every later one.
+"""
 
 _STATE = {
     "phase": "idle",  # idle | stopping | starting | ready | failed | refused
@@ -54,6 +60,7 @@ _STATE = {
 }
 _LOCK = threading.Lock()
 _PRESENCE = {"last_seen": None, "ever_seen": False}
+_VALIDATE_BUSY = threading.Lock()
 _LAST_STOP: dict | None = None
 
 
@@ -214,38 +221,58 @@ def _watchdog(data_dir: Path, minutes: float) -> None:
 
 def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
     python = _venv_python()
+    log_dir = data_dir / "run" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     try:
         with _LOCK:
             _STATE.update(phase="stopping", detail="身份核验停止旧栈…",
                           started_at=time.time(), finished_at=None)
-        stop = subprocess.run(
-            [str(python), str(REPO_ROOT / "scripts" / "stop_shine.py"),
-             "--data-dir", str(data_dir)],
-            capture_output=True, text=True, timeout=180,
-            env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
-        )
-        if stop.returncode not in (0, 1):
-            # 1 = unresolved identities retained for reconciliation; still proceed
-            # only when nothing is left running, otherwise surface the refusal.
+        # The launcher and the stopper must never write into a pipe this
+        # process reads: the stack they start inherits the pipe handle and
+        # keeps it open for as long as it runs, so reading the pipe would wait
+        # for the whole stack - the restart then never reports a result and
+        # every later restart is refused as "already in progress".  Their
+        # output goes to files, where an inherited handle costs nothing.
+        with (log_dir / "restart.stop.log").open("w", encoding="utf-8") as stop_out, \
+                (log_dir / "restart.start.log").open("w", encoding="utf-8") as start_out:
+            stop = subprocess.run(
+                [str(python), str(REPO_ROOT / "scripts" / "stop_shine.py"),
+                 "--data-dir", str(data_dir)],
+                stdout=stop_out, stderr=subprocess.STDOUT, timeout=180,
+                env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
+            )
+            if stop.returncode not in (0, 1):
+                # 1 = unresolved identities retained for reconciliation; still
+                # proceed only when nothing is left running, otherwise surface
+                # the refusal.
+                with _LOCK:
+                    _STATE.update(phase="failed",
+                                  detail=f"停止未完全收尾（exit {stop.returncode}），"
+                                         f"详见 {log_dir / 'restart.stop.log'}")
+                return
             with _LOCK:
-                _STATE.update(phase="failed",
-                              detail=f"停止未完全收尾（exit {stop.returncode}）：{(stop.stdout or stop.stderr)[-300:]}")
-            return
-        with _LOCK:
-            _STATE.update(phase="starting", detail="幂等启动新栈…")
-        launcher = REPO_ROOT / "scripts" / "start_shine.ps1"
-        start = subprocess.run(
-            ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
-             "-ApiPort", str(api_port), "-WebPort", str(web_port)],
-            capture_output=True, text=True, timeout=600,
-            env={**os.environ, "SHINE_DATA_DIR": str(data_dir)},
-        )
+                _STATE.update(phase="starting", detail="幂等启动新栈…")
+            launcher = REPO_ROOT / "scripts" / "start_shine.ps1"
+            start = subprocess.run(
+                ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
+                 "-ApiPort", str(api_port), "-WebPort", str(web_port)],
+                stdout=start_out, stderr=subprocess.STDOUT, timeout=600,
+                env={**os.environ, "SHINE_DATA_DIR": str(data_dir)},
+            )
         ok = start.returncode == 0
         with _LOCK:
             _STATE.update(
                 phase="ready" if ok else "failed",
                 detail=("后台已重启。" if ok else
-                        f"启动失败（exit {start.returncode}）：{(start.stderr or start.stdout)[-400:]}"),
+                        f"启动失败（exit {start.returncode}），"
+                        f"详见 {log_dir / 'restart.start.log'}"),
+                finished_at=time.time(),
+            )
+    except subprocess.TimeoutExpired:
+        with _LOCK:
+            _STATE.update(
+                phase="failed",
+                detail=f"重启超时，详见 {log_dir / 'restart.start.log'}",
                 finished_at=time.time(),
             )
     except Exception as exc:  # noqa: BLE001 - surfaced to the page, never silent
@@ -307,8 +334,36 @@ def _stop_worker(data_dir: Path) -> tuple[int, dict]:
     if result != 0:
         return 409, {"code": "WORKER_STOP_UNRESOLVED",
                      "detail": "Worker 进程身份无法核验，未强行终止；请走对账。"}
+    _mark_worker_stopped(data_dir)
     return 200, {"status": "STOPPED",
-                 "detail": "Worker 已停止；心跳约 30 秒后过期，即可继续服务核验。"}
+                 "detail": "Worker 已停止，后台记录已同步为离线，可以继续服务核验。"}
+
+
+def _mark_worker_stopped(data_dir: Path) -> None:
+    """Record the stopped Worker as offline right away.
+
+    The worker process is gone, but its last heartbeat stays inside the
+    offline window, so the backend keeps counting it as online for another
+    half minute: a service validation retried in that window is refused with
+    "stop the Worker first" although it already is.  The record is the
+    worker's own state, so the one that stopped it writes it down.
+    """
+    from sqlalchemy import select
+
+    from shine.db import make_engine, make_session_factory
+    from shine.models import WorkerInstance
+
+    engine = make_engine(_settings(data_dir).database_url)
+    factory = make_session_factory(engine)
+    try:
+        with factory.begin() as db:
+            for row in db.scalars(select(WorkerInstance)).all():
+                if row.status != "stopped":
+                    row.status = "stopped"
+    except Exception:  # noqa: BLE001 - the heartbeat still expires on its own
+        pass
+    finally:
+        engine.dispose()
 
 
 def _start_worker(data_dir: Path) -> tuple[int, dict]:
@@ -366,6 +421,115 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
     finally:
         stop_shine._release_startup_guard(guard)
     return 200, {"status": "RUNNING", "pid": process.pid}
+
+
+def _validate_project_profiles(factory, settings, project_id: str) -> int:
+    """Validate every registered profile of the project against the renderer.
+
+    Runs while the Worker is stopped and the owned instance is idle (the caller
+    just finished service validation). A profile that cannot validate is left
+    with its own named state; it never blocks the others or the preparation.
+    """
+    from sqlalchemy import select
+
+    from shine.comfyops.service_validation import validate_registered_workflow
+    from shine.models import WorkflowProfile
+
+    with factory() as db:
+        profile_ids = [row.id for row in db.scalars(
+            select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))]
+    checked = 0
+    for profile_id in profile_ids:
+        try:
+            with factory() as db:
+                validate_registered_workflow(db, settings, profile_id)
+            checked += 1
+        except Exception:  # noqa: BLE001 - a named per-profile refusal, not a crash
+            continue
+    return checked
+
+
+def _validate_services_background(data_dir: Path) -> dict:
+    """Validate and activate the runtime while the Worker is stopped.
+
+    The preparation task runs *inside* the Worker, but service validation
+    requires the Worker offline (so nothing else drives the GPU).  The Worker
+    therefore cannot stop itself: the supervisor does it.  Order: stop Worker →
+    clear the task lease → validate + activate → record the VALIDATE step →
+    restart Worker.  The restarted Worker resumes the task at the next step.
+    """
+    from shine.comfyops.runtime_configuration import activate_runtime, runtime_report
+    from shine.comfyops.service_validation import validate_services
+    from shine.comfyops.setup_preparation import TASK_KEY
+    from shine.db import make_engine, make_session_factory
+    from shine.models import AppSetting, utcnow
+
+    blockers = _stack_blockers(data_dir)
+    if blockers:
+        return {"status": "FAILED", "code": "STACK_BUSY", "blockers": blockers}
+    settings = _settings(data_dir)
+    engine = make_engine(settings.database_url)
+    factory = make_session_factory(engine)
+
+    def mark_task(step_status: str, code: str | None, detail: str) -> None:
+        with factory.begin() as db:
+            row = db.get(AppSetting, TASK_KEY)
+            if row is None or not isinstance(row.value, dict):
+                return
+            task = dict(row.value)
+            task["lease_owner"] = None
+            task["lease_expires_at"] = None
+            for step in task.get("steps", []):
+                if step.get("id") == "VALIDATE":
+                    step["status"] = step_status
+                    step["code"] = code
+                    step["detail"] = detail
+            if step_status == "FAILED":
+                task["status"] = "FAILED"
+                task["error"] = code
+                task["message"] = detail
+            task["updated_at"] = utcnow().isoformat()
+            row.value = task
+
+    try:
+        code, payload = _stop_worker(data_dir)
+        if code != 200:
+            return {"status": "FAILED", "code": payload.get("code", "WORKER_STOP_FAILED"),
+                    "detail": payload.get("detail", "Worker 未能停止，未进行核验。")}
+        with factory() as db:
+            report = runtime_report(db, settings)
+        candidate = report.get("candidate") or {}
+        recipe_sha256 = candidate.get("recipe_sha256")
+        project_id = candidate.get("project_id")
+        if not recipe_sha256 or not project_id:
+            mark_task("FAILED", "GENERATE_RUNTIME_CONFIGURATION_FIRST", "还没有可核验的运行配置。")
+            _start_worker(data_dir)
+            return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST"}
+        try:
+            with factory() as db:
+                validated = validate_services(db, settings, str(project_id), recipe_sha256,
+                                              actor="supervisor:setup")
+            if validated.get("status") != "READY":
+                detail = "服务核验没有通过：" + str(validated.get("status"))
+                mark_task("FAILED", str(validated.get("status") or "SERVICE_VALIDATION_FAILED"), detail)
+                return {"status": "FAILED", "code": validated.get("status"), "detail": detail}
+            with factory() as db:
+                activate_runtime(db, settings, str(project_id), recipe_sha256, "supervisor:setup")
+            # One-click preparation also finishes the project-level node check:
+            # validate each registered profile against the live renderer so the
+            # director package shows ready without a separate manual step.
+            checked = _validate_project_profiles(factory, settings, str(project_id))
+            mark_task("DONE", None,
+                      f"服务核验通过，本机配置已激活；已核对 {checked} 个生成方案节点（Worker 已自动恢复）。")
+            return {"status": "READY"}
+        except Exception as exc:  # noqa: BLE001 - the named refusal is the answer
+            detail = str(getattr(exc, "detail", exc))[:300]
+            mark_task("FAILED", "SERVICE_VALIDATION_FAILED", detail)
+            return {"status": "FAILED", "code": "SERVICE_VALIDATION_FAILED", "detail": detail}
+        finally:
+            _start_worker(data_dir)
+    finally:
+        engine.dispose()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -484,6 +648,28 @@ class Handler(BaseHTTPRequestHandler):
             code, payload = _start_worker(self.data_dir)
             self._send(code, payload, origin)
             return
+        if path == "/validate-services":
+            if self._refused_marker(origin):
+                return
+            # Long operation (stops Worker, starts renderer, reads nodes,
+            # restarts Worker). Run off the request thread; the caller is the
+            # Worker itself, which is about to be stopped, so it only needs the
+            # acceptance receipt. A second call while one is running is refused.
+            if not _VALIDATE_BUSY.acquire(blocking=False):
+                self._send(409, {"code": "VALIDATION_IN_PROGRESS"}, origin)
+                return
+
+            def _run() -> None:
+                try:
+                    _validate_services_background(self.data_dir)
+                finally:
+                    _VALIDATE_BUSY.release()
+
+            threading.Thread(target=_run, daemon=True).start()
+            self._send(202, {"status": "VALIDATING",
+                             "detail": "已委托监督进程：短暂停止 Worker、核验并激活、自动恢复 Worker。"},
+                       origin)
+            return
         if path != "/restart-stack":
             self._send(404, {"code": "SUPERVISOR_UNKNOWN_PATH"}, origin)
             return
@@ -491,8 +677,18 @@ class Handler(BaseHTTPRequestHandler):
             return
         with _LOCK:
             if _STATE["phase"] in ("stopping", "starting"):
-                self._send(409, {"code": "SUPERVISOR_RESTART_IN_PROGRESS"}, origin)
-                return
+                started_at = _STATE.get("started_at")
+                age = time.time() - float(started_at) if started_at else None
+                if age is not None and age > RESTART_STALE_AFTER_SECONDS:
+                    # A restart that never reported back must not lock the
+                    # button forever: the operator has no way to clear it, so
+                    # the stale attempt is abandoned and a new one is allowed.
+                    _STATE.update(phase="failed",
+                                  detail=f"上一次重启已停滞 {int(age)} 秒，已作废并重新开始",
+                                  finished_at=time.time())
+                else:
+                    self._send(409, {"code": "SUPERVISOR_RESTART_IN_PROGRESS"}, origin)
+                    return
         blocker = _idle_blocker(self.data_dir)
         if blocker:
             with _LOCK:

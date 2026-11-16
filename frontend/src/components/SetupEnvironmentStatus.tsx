@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ChevronRight, Copy, FolderOpen, Loader2, RefreshCw, X,
+  AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, MonitorCheck, RefreshCw, X,
 } from 'lucide-react';
 import { api, json } from '../api';
 
@@ -16,7 +16,7 @@ import { api, json } from '../api';
  * - `PENDING_RECIPE` 不是「已就绪」，页面不能给它绿灯。
  */
 
-export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr';
+export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr';
 
 export type CapabilityFacts = {
   FILES_FOUND?: boolean;
@@ -49,6 +49,11 @@ export type SetupCapability = {
   missing_bytes?: number;
   required_files?: number;
   advisories?: Array<{ code?: string; message?: string }>;
+  /** 用户-facing 两步归一：①文件齐不齐 ②跑不跑得通。 */
+  two_step?: {
+    files: { state: string; label: string; missing_count?: number; missing_bytes?: number };
+    run: { state: string; label: string; reason?: string };
+  };
 };
 
 export type MissingFile = {
@@ -101,7 +106,7 @@ export type SetupSummary = {
   manual_download_root: string;
 };
 
-const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr'];
+const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr', 'relayvsr'];
 
 const STATE_LABEL: Record<string, string> = {
   MISSING: '未准备',
@@ -292,11 +297,43 @@ export function SetupEnvironmentStatus({
                 <AlertTriangle size={11} /> {row.message}
               </li>)}
             </ul>}
-            <div className="setup-cap-facts">
+            {cap.two_step ? <div className="setup-two-step">
+              <div className={`setup-step-row files-${cap.two_step.files.state.toLowerCase()}`}>
+                <span className="setup-step-key">① 文件</span>
+                {cap.two_step.files.state === 'READY' ? <Check size={11} /> : <X size={11} />}
+                <span>{cap.two_step.files.label}</span>
+              </div>
+              <div className={`setup-step-row run-${cap.two_step.run.state.toLowerCase()}`}>
+                <span className="setup-step-key">② 运行</span>
+                {cap.two_step.run.state === 'READY' ? <Check size={11} /> : <X size={11} />}
+                <span>{cap.two_step.run.label}{cap.two_step.run.reason ? ` · ${cap.two_step.run.reason}` : ''}</span>
+              </div>
+            </div> : <div className="setup-cap-facts">
               {chips.map((chip) => <span key={chip.label} className={chip.ok ? 'ok' : ''}>
                 {chip.ok ? <Check size={10} /> : <X size={10} />}{chip.label}
               </span>)}
-            </div>
+            </div>}
+            {cap.two_step && !readOnly && (() => {
+              const filesReady = cap.two_step.files.state !== 'MISSING';
+              const run = cap.two_step.run.state;
+              if (run === 'READY') return null;
+              if (!filesReady) {
+                return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                  <Download size={12} /> 下载安装缺文件
+                </button>;
+              }
+              if (run === 'UNVERIFIED') {
+                return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onTrial?.(key)}>
+                  <MonitorCheck size={12} /> 真实试镜一次
+                </button>;
+              }
+              return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
+                onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                <Check size={12} /> 一键绑定渲染器并核对运行合同
+              </button>;
+            })()}
             {cap.missing_files.length > 0 && <button type="button" className="btn-text"
               onClick={() => setOpenFiles(openFiles === key ? null : key)}>
               <ChevronRight size={11} />
@@ -328,23 +365,50 @@ export function SetupEnvironmentStatus({
         })}
       </div>
 
-      {preparation && preparation.status !== 'IDLE' && <div className="setup-preparation" role="status">
-        <b>{preparation.status === 'DONE' || preparation.status === 'DONE_WITH_WARNINGS'
-          ? '制作环境准备结束'
-          : preparation.status === 'FAILED' ? '准备在中途停下'
-            : '正在后台准备（关闭页面也会继续）'}</b>
-        <span>{preparation.message ?? ''}</span>
-        <ol>
-          {preparation.steps.map((step) => <li key={step.id} className={`setup-step-${step.status.toLowerCase()}`}>
-            {step.status === 'DONE' ? <Check size={10} />
-              : step.status === 'FAILED' ? <AlertTriangle size={10} /> : <span className="setup-phase-dot" />}
-            {step.label}{step.detail ? ` · ${step.detail}` : ''}
-          </li>)}
-        </ol>
-        {preparation.status === 'FAILED' && <p className="form-error">
-          {preparation.error ?? '准备没有完成'}：已经在前面完成的步骤会保留，不需要从头再来。
-        </p>}
-      </div>}
+      {preparation && preparation.status !== 'IDLE' && (() => {
+        const FILE_STEPS = ['SCAN', 'RECONCILE', 'DOWNLOAD', 'INSTANCE', 'TARGET'];
+        const phase = (ids: string[]) => {
+          const rows = preparation.steps.filter((s) => ids.includes(s.id));
+          if (!rows.length) return 'SKIP';
+          if (rows.some((s) => s.status === 'FAILED')) return 'FAILED';
+          if (rows.every((s) => s.status === 'DONE' || s.status === 'SKIPPED')) return 'DONE';
+          if (rows.some((s) => s.status === 'RUNNING' || s.status === 'PENDING')) return 'RUNNING';
+          return 'PENDING';
+        };
+        const filePhase = phase(FILE_STEPS);
+        const runPhase = phase(preparation.steps.map((s) => s.id).filter((id) => !FILE_STEPS.includes(id)));
+        const phaseRow = (key: string, label: string, st: string) => (
+          <div className={`setup-step-row files-${st.toLowerCase()}`}>
+            <span className="setup-step-key">{key}</span>
+            {st === 'DONE' ? <Check size={11} /> : st === 'FAILED' ? <AlertTriangle size={11} /> : <span className="setup-phase-dot" />}
+            <span>{label}{st === 'RUNNING' ? '（进行中）' : st === 'FAILED' ? '（停下，见明细）' : ''}</span>
+          </div>
+        );
+        return <div className="setup-preparation" role="status">
+          <b>{preparation.status === 'DONE' || preparation.status === 'DONE_WITH_WARNINGS'
+            ? '制作环境准备结束'
+            : preparation.status === 'FAILED' ? '准备在中途停下'
+              : '正在后台准备（关闭页面也会继续）'}</b>
+          <span>{preparation.message ?? ''}</span>
+          <div className="setup-two-step">
+            {phaseRow('①', '文件整备：检索复用 · 补齐缺文件', filePhase)}
+            {phaseRow('②', '运行验证：配置绑定 · 真实试跑', runPhase)}
+          </div>
+          <details className="setup-details">
+            <summary><ChevronRight size={12} /> 工程明细（{preparation.steps.length} 步）</summary>
+            <ol>
+              {preparation.steps.map((step) => <li key={step.id} className={`setup-step-${step.status.toLowerCase()}`}>
+                {step.status === 'DONE' ? <Check size={10} />
+                  : step.status === 'FAILED' ? <AlertTriangle size={10} /> : <span className="setup-phase-dot" />}
+                {step.label}{step.detail ? ` · ${step.detail}` : ''}
+              </li>)}
+            </ol>
+          </details>
+          {preparation.status === 'FAILED' && <p className="form-error">
+            {preparation.error ?? '准备没有完成'}：已经在前面完成的步骤会保留，不需要从头再来。
+          </p>}
+        </div>;
+      })()}
 
       {!readOnly && summary.action_required && summary.action_required.action !== 'SELECT_PROJECT'
         && !summary.installation.choice_required

@@ -153,14 +153,16 @@ def test_windows_cmd_shim_is_run_through_the_command_processor(tmp_path, clean_p
     resolution = host_env.resolve_tool_executable("npm", [str(managed)], windows=True)
     assert resolution["is_script"] is True
 
-    argv = host_env.executable_argv(resolution, ["--version"], windows=True)
+    command = host_env.executable_command(resolution, ["--version"], windows=True)
 
-    assert argv[1:4] == ["/d", "/s", "/c"]
-    assert argv[0].lower().endswith("cmd.exe")
-    # The command is one argument, quoted so a space in the managed path works.
-    assert argv[4].startswith('"')
-    assert str(shim) in argv[4]
-    assert argv[4].endswith('--version"')
+    # One command line, not an argument list: `list2cmdline` would escape the
+    # inner quotes and cmd.exe would fail with "network path was not found".
+    assert isinstance(command, str)
+    assert "/d /s /c" in command
+    assert command.lower().startswith("cmd.exe") or "cmd.exe" in command.lower()
+    # The command is quoted so a space in the managed path works.
+    assert str(shim) in command
+    assert command.endswith('--version"')
 
 
 def test_windows_exe_is_executed_directly(tmp_path, clean_path):
@@ -169,9 +171,9 @@ def test_windows_exe_is_executed_directly(tmp_path, clean_path):
     (managed / "ffmpeg.exe").write_bytes(b"synthetic")
     resolution = host_env.resolve_tool_executable("ffmpeg", [str(managed)], windows=True)
 
-    argv = host_env.executable_argv(resolution, ["-version"], windows=True)
+    command = host_env.executable_command(resolution, ["-version"], windows=True)
 
-    assert argv == [str(managed / "ffmpeg.exe"), "-version"]
+    assert command == [str(managed / "ffmpeg.exe"), "-version"]
 
 
 def test_relative_path_entries_are_never_used(tmp_path, clean_path, monkeypatch):
@@ -182,3 +184,22 @@ def test_relative_path_entries_are_never_used(tmp_path, clean_path, monkeypatch)
     resolution = host_env.resolve_tool_executable("ffmpeg")
 
     assert resolution["resolved"] is False
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows command shim only")
+def test_windows_cmd_shim_in_a_path_with_spaces_really_runs(tmp_path, clean_path):
+    """The regression: a real installed npm.cmd must be detected as present.
+
+    The shim sits in a directory whose name contains a space, exactly like the
+    managed tool directory.  Passing the command to cmd.exe as an argument
+    list made cmd.exe report "The network path was not found", so the tool was
+    reported missing and the setup panel offered to install it again.
+    """
+    managed = tmp_path / "shine data" / "bin"
+    managed.mkdir(parents=True)
+    (managed / "npm.cmd").write_text("@echo off\r\necho 10.9.0\r\n", encoding="utf-8")
+
+    probe = host_env.probe_command("npm", search_paths=[str(managed)], windows=True)
+
+    assert probe["present"] is True
+    assert probe["version"] == "10.9.0"

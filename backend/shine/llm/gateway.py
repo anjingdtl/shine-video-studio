@@ -235,6 +235,18 @@ class LLMGateway:
             else:
                 config = agent_output_config(config)
         elif budget is not None:
+            # A completion ceiling is only usable together with a bounded
+            # reasoning effort: a model allowed to deliberate for the whole
+            # ceiling spends it all thinking and returns no visible answer.
+            # Measured live on this provider (2026-11-15, the crew's Director
+            # on scene 2): a 6,916-token ceiling with no effort ended at
+            # finish_reason=length with zero answer characters, twice.  A
+            # precompiled structured call is a read-and-answer call, exactly
+            # like the ones ``agent_output_config`` bounds, so the bounded
+            # effort travels with the budget.  An effort named by the budget
+            # or configured on the profile still wins.
+            if budget.get("completion_cap") and not budget.get("reasoning_effort"):
+                budget = {**budget, "reasoning_effort": "low"}
             config = apply_output_budget(config, budget)
             budget_evidence = budget
         # An agent step must survive a throttled provider: a 429 is a refusal

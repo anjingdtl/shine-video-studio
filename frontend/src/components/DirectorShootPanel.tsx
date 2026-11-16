@@ -161,6 +161,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
   /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。但「未就绪」不等于
    *  「不可选择」——候选模型可以被选中进入资源准备，只是不能开拍。 */
   const [availability, setAvailability] = useState<Record<string, VariantAvailability>>({});
+  const [availabilityLoaded, setAvailabilityLoaded] = useState(false);
   const submitting = useRef(false);
 
   // 稳定的空数组：每次渲染新建 [] 会让下面的选择 effect 无限触发。
@@ -210,6 +211,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
       .then((rows) => {
         if (cancelled) return;
         setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, row])));
+        setAvailabilityLoaded(true);
         // 默认选第一个已就绪的方案；但用户已经选定的方案（哪怕未就绪、需要
         // 准备资源）保持不变，不被强行切回 INT8。
         setVariantId((current) => {
@@ -224,7 +226,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
 
   const chosen = availability[variantId];
   const chosenVariantAvailable = chosen?.available ?? false;
-  const chosenVariantReason = chosen?.reason ?? '本机没有这套权重';
+  const chosenVariantReason = chosen?.reason
+    ?? (availabilityLoaded ? '本机没有这套权重' : '正在读取本机模型状态…');
   const chosenSelectable = chosen?.selectable_for_preparation ?? true;
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 

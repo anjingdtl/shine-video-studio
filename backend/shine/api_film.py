@@ -947,6 +947,11 @@ class StoryboardRequest(APIModel):
     # context, and the refused record is kept as SUPERSEDED history. Without a
     # named record the guard still refuses a silent replay.
     authorize_replay_task_id: str | None = Field(default=None, max_length=36)
+    # The refusal this retry replaces, as a named lesson for the first call
+    # (reason code plus the field that broke the rule).  It carries no answer
+    # text and authorizes nothing: it only stops a retry from re-buying the
+    # very refusal it was launched to repair.
+    retry_lesson: dict | None = None
     production_context: dict | None = None
     consent_document_id: str | None = None
     consent_document_sha256: str | None = None
@@ -979,6 +984,13 @@ CONTRACT_REPAIR_NOTES = {
     "LOCKED_FACTS_CHANGED": (
         " The previous answer changed a locked fact. Return the locked facts exactly as they were "
         "supplied, in the same order."
+    ),
+    "UNAPPROVED_ASSET_OR_UNKNOWN_BEAT": (
+        " The previous answer referenced a shot's asset_ids that are not on the approved list, or a "
+        "beat_id the breakdown does not contain. Copy every beat_id exactly from the breakdown and "
+        "put only approved asset ids from the context into asset_ids; when no approved master exists "
+        "for a character, leave asset_ids empty — the material stage prepares it, it is never "
+        "invented here."
     ),
     "H3_STYLE_TRANSLATION_REQUIRED": (
         " The previous answer did not translate the frozen style into English. Provide prompt_style "
@@ -1338,6 +1350,9 @@ def generate_storyboard(
 
     def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
+        # The named refusal this retry replaces (if any) travels with the
+        # request so the first call starts already knowing it.
+        lesson = body.retry_lesson
         # The consent identity travels with EVERY crew call, not only with a
         # production-context request: the volume storyboard lane sends derived
         # script text with a document consent and no production context, and
@@ -1359,6 +1374,37 @@ def generate_storyboard(
         # produced, never an unrelated one.
         authorized_replay = (body.authorize_replay_task_id
                              if role == (body.start_role or "scriptwriter") else None)
+        if authorized_replay:
+            # A retry arrives with the record it replaces.  That record's trace
+            # is the last refusal, and the first call must already know it:
+            # without this seed the 2026-11-15 scene-2 retry spent its first
+            # call re-buying the same refusal, and when that call was then
+            # truncated by an unrelated rule, the earlier lesson was dropped
+            # and the scene answered the old mistake again.
+            seed_row = db.get(AgentTaskRecord, authorized_replay)
+            seed = (seed_row.trace or {}) if seed_row is not None else {}
+            # Same test the run uses to authorize the replacement: an answer
+            # arrived (the digest proves it) even when a local validator, not
+            # the provider, produced the refusal.
+            if (seed.get("external_outcome") == "RESPONSE_RECEIVED"
+                    or seed.get("received_result_sha256")):
+                lesson = lesson or {
+                    "rejection_reason_code": seed.get("rejection_reason_code"),
+                    "visual_field": seed.get("visual_field"),
+                    "provider_finish_reason": seed.get("provider_finish_reason")}
+        if role == (body.start_role or "scriptwriter") and (lesson or {}).get(
+                "rejection_reason_code"):
+            # The lesson is prompt guidance only: it authorizes nothing and
+            # carries no answer text, so a mock or an unauthorized lane may
+            # still carry it — a retry that does not know the last refusal
+            # simply buys it again.
+            reason = lesson["rejection_reason_code"]
+            repair_visual_language = (
+                role in {"director", "cinematographer"}
+                and reason == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+            escalate_output_budget = lesson.get("provider_finish_reason") in {
+                "length", "max_tokens", "content_filter"}
+            repair_contract_note = _contract_repair_note(reason, lesson)
         for attempt in range(1, attempts + 1):
             if calls_in_request:
                 # Leave a real gap between two crew calls, and between the
@@ -1399,21 +1445,27 @@ def generate_storyboard(
                 # The next attempt replaces the refusal this request just
                 # recorded, so the guard lets the bounded retry through.
                 authorized_replay = failure.get("task_id") or authorized_replay
-                repair_visual_language = (
-                    role in {"director", "cinematographer"}
-                    and failure.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"
-                )
+                # A lesson already learned in this request is kept, never
+                # replaced: the 2026-11-15 scene-2 retry knew the visual
+                # language refusal, its first call was then truncated, and
+                # overwriting the lesson with the truncation's note made the
+                # second call answer the old mistake again.
+                if (role in {"director", "cinematographer"}
+                        and failure.get("rejection_reason_code") == "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE"):
+                    repair_visual_language = True
                 # A truncated answer (finish_reason=length) is a budget miss, not
                 # a content refusal: one bounded retry may spend up to the verified
                 # output ceiling instead of re-buying the same truncation.  This
                 # never raises max_tokens beyond what the model declared.
-                escalate_output_budget = failure.get("provider_finish_reason") in {
-                    "length", "max_tokens", "content_filter"}
+                if failure.get("provider_finish_reason") in {"length", "max_tokens", "content_filter"}:
+                    escalate_output_budget = True
                 # A refusal without a named reason repeats itself: the retry
                 # has to say what the server refused, or the same answer is
-                # bought twice and refused twice.
-                repair_contract_note = _contract_repair_note(
-                    failure.get("rejection_reason_code"), failure)
+                # bought twice and refused twice.  Notes from an earlier
+                # attempt stay in place beside the new one.
+                note = _contract_repair_note(failure.get("rejection_reason_code"), failure)
+                if note and note not in (repair_contract_note or ""):
+                    repair_contract_note = (repair_contract_note or "") + note
         raise last  # pragma: no cover - the loop always raises or returns
 
     def _contract_repair_note(reason: str | None, failure: dict) -> str | None:
@@ -1433,7 +1485,9 @@ def generate_storyboard(
             return (
                 where + " Rewrite that field in English prose and re-check every visual and camera "
                 "field, including all cuts: no Chinese names, titles, stage directions or lyrics "
-                "outside dialogue blocks; refer to people by English role labels."
+                "outside dialogue blocks; refer to people by English role labels. A Chinese "
+                "inscription the shot must show verbatim may stay only inside quotation marks "
+                "(「」, “” or \"\"), never as bare prose."
             )
         if reason == "SCHEMA_VALIDATION_FAILED":
             paths = [item.get("path") for item in (failure.get("schema_errors") or [])

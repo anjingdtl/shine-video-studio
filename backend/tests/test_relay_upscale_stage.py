@@ -114,7 +114,8 @@ def _enqueue_one(factory, project_id, job_id, shot_id) -> None:
 
 
 def test_unavailable_backend_fails_the_item_by_name_without_submitting(studio, fake_comfy):  # noqa: F811
-    """The pinned machine has no RelayVSR: the item names the blocker, no prompt."""
+    """Weights are pinned, but the fake renderer lacks the RelayVSR core nodes:
+    the item names the blocker and submits no prompt."""
     client, factory, settings = studio
     project_id, job_id, _artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
     _enqueue_one(factory, project_id, job_id, shot_id)
@@ -128,7 +129,7 @@ def test_unavailable_backend_fails_the_item_by_name_without_submitting(studio, f
     with factory() as db:
         item = db.scalar(select(RelayUpscaleItem))
         assert item.status == "NEEDS_REVIEW"
-        assert item.error_code == "RELAYVSR_WEIGHTS_NOT_PINNED"
+        assert item.error_code == "RELAYVSR_NODES_MISSING_IN_LIVE"
         assert item.prompt_id is None
 
 

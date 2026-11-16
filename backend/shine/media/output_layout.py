@@ -48,8 +48,19 @@ MIGRATION_STALE_AFTER = timedelta(hours=6)
 
 _ACTIVE_JOB_STATUSES = (
     "PLANNED", "WAITING_ASSET", "READY", "QUEUED",
-    "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING",
+    "SUBMITTING", "RUNNING", "QC_PENDING",
 )
+"""Jobs that can still write into the output root.
+
+``REPAIR_PENDING`` is deliberately absent: such a job is *parked*, waiting
+for a decision about a finished attempt.  It holds no lease, no renderer and
+no queue slot, so it cannot write a byte while the migration runs - and if
+it is repaired afterwards it re-renders into the root that is current then.
+The setup activation gate already reads the same set
+(:data:`shine.services.ACTIVE_JOB_STATUSES`); counting it here made the
+directory switch impossible while a single parked shot existed, and nothing
+in the workbench could clear it.
+"""
 _ACTIVE_LIBRARY_TASKS = ("QUEUED", "RUNNING")
 
 
@@ -409,23 +420,35 @@ def active_work_details(db) -> dict:
 
     Read-only; the migration gate itself is unchanged. The panel uses this to
     name the blocking tasks and point at the place they can be handled.
+
+    Every entry names the project it belongs to and, for a shot, the shot
+    itself: a blocker that cannot be located cannot be handled, and the
+    person is left with a task id and no way to reach the work.
     """
     from shine.asset_center.models import LibraryRenderTask
     from shine.comfyops.ownership import LIVE_SERIES_STATUSES
-    from shine.models import Job, ProductionSeries, Project
+    from shine.models import Job, ProductionSeries, Project, Shot
     from shine.production.models import ACTIVE_RUN_STATUSES, ProductionRun
 
     def title(project_id):
         project = db.get(Project, project_id) if project_id else None
         return project.title if project is not None else None
 
-    jobs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+    def shot_name(shot_id):
+        shot = db.get(Shot, shot_id) if shot_id else None
+        return shot.name if shot is not None else None
+
+    jobs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id),
+             "project_id": row.project_id, "shot_name": shot_name(row.shot_id),
+             "shot_id": row.shot_id}
             for row in db.scalars(select(Job).where(
                 Job.status.in_(_ACTIVE_JOB_STATUSES)).limit(20))]
-    series = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+    series = [{"id": row.id, "status": row.status, "project_title": title(row.project_id),
+               "project_id": row.project_id}
               for row in db.scalars(select(ProductionSeries).where(
                   ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(20))]
-    runs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id)}
+    runs = [{"id": row.id, "status": row.status, "project_title": title(row.project_id),
+             "project_id": row.project_id}
             for row in db.scalars(select(ProductionRun).where(
                 ProductionRun.status.in_(ACTIVE_RUN_STATUSES)).limit(20))]
     library = [{"id": row.id, "status": row.status}

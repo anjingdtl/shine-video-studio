@@ -169,6 +169,56 @@ def test_migration_refuses_while_a_material_task_is_pending(api, tmp_path):
     assert detail["blockers"]
 
 
+def test_a_parked_shot_does_not_block_the_directory_switch(api, tmp_path):
+    """A shot waiting for a repair decision is not work in flight.
+
+    It holds no lease, no renderer and no queue slot, so it cannot write a
+    byte while the migration runs.  Counting it made the directory switch
+    impossible while one parked shot existed - and nothing in the workbench
+    could clear it, so the operator was stuck on this page forever.
+    """
+    client, factory, _settings = api
+    project_id = create_project(client, "雾港夜账")
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"], title="潮位")
+    with factory.begin() as db:
+        db.add(Job(
+            id="parked-job", project_id=project_id, shot_id=shot["id"],
+            shot_revision=1, style_version_id=style["id"], request={},
+            idempotency_key="parked-job", status="REPAIR_PENDING",
+            provider="comfyui", failure_code="QC_FAILED",
+        ))
+    response = client.put(
+        "/api/v1/settings/output-directory", json={"path": str(tmp_path / "作品输出")},
+        headers=LOCAL,
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_the_blocking_panel_names_the_project_and_the_shot(api):
+    """A blocker the operator cannot locate is a blocker they cannot handle.
+
+    The panel listed a task id and a status; the work happened in a different
+    work, so the person had no way to reach it.
+    """
+    client, factory, _settings = api
+    project_id = create_project(client, "雾港夜账")
+    style = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, style["id"], title="潮位")
+    with factory.begin() as db:
+        db.add(Job(
+            id="live-job", project_id=project_id, shot_id=shot["id"],
+            shot_revision=1, style_version_id=style["id"], request={},
+            idempotency_key="live-job", status="QUEUED", provider="comfyui",
+        ))
+    response = client.get("/api/v1/settings/output-directory", headers=LOCAL)
+    assert response.status_code == 200
+    details = response.json()["blocker_details"]
+    job = next(row for row in details["jobs"] if row["id"] == "live-job")
+    assert job["project_title"] == "雾港夜账"
+    assert job["shot_name"] == "潮位"
+
+
 def test_a_tampered_source_stops_the_migration_before_the_switch(api, tmp_path):
     client, factory, settings = api
     project_id = create_project(client, "雾港夜账")

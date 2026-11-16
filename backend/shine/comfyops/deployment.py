@@ -577,7 +577,11 @@ def create_install_plan(db, settings: Settings, catalog: dict, requested: list[s
     return row
 
 
-def _require_project(db, project_id: str):
+def _require_project(db, project_id: str | None):
+    # A NULL project is a machine-level plan: resource preparation may run on
+    # an empty database, before any work exists to bind it to.
+    if project_id is None:
+        return None
     from shine.services import require_project as svc_require_project
     return svc_require_project(db, project_id)
 

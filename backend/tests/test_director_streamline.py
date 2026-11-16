@@ -207,12 +207,12 @@ def _chain_responder(registry: dict, *, fail_section: str | None = None):
 
 
 def _run_storyboard_to_rest(client, settings, project: str, *, fail_section: str | None = None,
-                            max_ticks: int = 40) -> None:
+                            max_ticks: int = 40, responder=None) -> None:
     """Drive the resident worker's director-storyboard step until it rests."""
     factory = client.app.state.session_factory
     assets = client.get(f"/api/v1/projects/{project}/assets").json()
     master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
-    responder = _chain_responder({"asset": master}, fail_section=fail_section)
+    responder = responder or _chain_responder({"asset": master}, fail_section=fail_section)
     gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
 
     for _ in range(max_ticks):
@@ -525,6 +525,383 @@ def test_blocked_episode_retry_resumes_and_finishes(api):
     state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
     assert state["status"] == "SUCCEEDED", state
     assert all(row["status"] == "APPLIED" for row in state["episodes"])
+
+
+def test_a_structured_landing_refusal_is_named_not_HTTPException(api, monkeypatch):
+    """A gate that refuses with ``{"code": ...}`` must not surface as "HTTPException".
+
+    Live evidence (2026-11-15, scene 2): all five crew roles succeeded, then the
+    landing gate refused with a structured detail.  The run reported
+    ``error_code=HTTPException`` and the episode kept a blocker with an empty
+    rejection list, so the panel showed a blocked scene with no reason and no
+    named next step - the exact "状态未知" shape this work must not produce.
+    """
+    from fastapi import HTTPException
+
+    client, _factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    def refuse(*_args, **_kwargs):
+        raise HTTPException(409, {"code": "FILM_HANDOFF_REFUSED_BY_TEST",
+                                  "message": "landing gate refused"})
+
+    monkeypatch.setattr("shine.api_film.apply_camera", refuse)
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "NEEDS_REVIEW"
+    assert state["error_code"] == "FILM_HANDOFF_REFUSED_BY_TEST"
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-01")
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["blocker"]["rejections"][0]["code"] == "FILM_HANDOFF_REFUSED_BY_TEST"
+
+
+def test_a_landing_fault_names_itself_and_retries_without_the_chain_again(api, monkeypatch):
+    """A landing gate refusal is this unit's reason, not a crew refusal to replay.
+
+    Live evidence (2026-11-15, scene 2): all five crew roles succeeded and the
+    landing gate refused.  The run kept the *previous* attempt's crew refusal as
+    ``failed_task_id``; its retry then hit the replay gate
+    (STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION) against a task the retry itself
+    had superseded, so the unit could never advance.  The landing fault has to
+    name itself and the retry has to reuse the five finished artifacts - no
+    model call and no replay authorisation is involved in re-landing.
+    """
+    from fastapi import HTTPException
+
+    import shine.api_film as api_film
+
+    client, _factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    def refuse(*_args, **_kwargs):
+        raise HTTPException(409, {"code": "FILM_HANDOFF_REFUSED_BY_TEST",
+                                  "message": "landing gate refused"})
+
+    real_apply = api_film.apply_camera
+    monkeypatch.setattr("shine.api_film.apply_camera", refuse)
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["error_code"] == "FILM_HANDOFF_REFUSED_BY_TEST"
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-01")
+    assert blocked["blocker"]["rejections"][0]["code"] == "FILM_HANDOFF_REFUSED_BY_TEST"
+    with _factory() as db:
+        run = db.get(AgentTaskRecord, state["task_id"])
+        assert run.trace.get("failed_task_id") is None, (
+            "a landing fault must not leave a crew refusal as the retry's reason")
+        assert set(run.trace.get("resume_steps") or {}) >= {
+            "scriptwriter", "director", "cinematographer", "continuity_supervisor",
+            "editor_edit_intent"}, "the finished chain must travel with the recovery state"
+
+    monkeypatch.setattr("shine.api_film.apply_camera", real_apply)
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+
+    calls: list[str] = []
+    base = _chain_responder({"asset": next(
+        a["id"] for a in client.get(f"/api/v1/projects/{project}/assets").json()
+        if a["role"] == "character" and a["entity_id"])})
+
+    def counted(messages, schema):
+        calls.append(schema.get("title"))
+        return base(messages, schema)
+
+    factory = client.app.state.session_factory
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=counted)
+    assert streamline.run_pending_director_storyboard(
+        factory, settings, "worker-test", gateway=gateway)
+    assert calls == [], "re-landing must reuse the five finished crew artifacts"
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    first_unit = next(row for row in state["episodes"] if row["episode_id"] == "ep-01")["units"][0]
+    assert first_unit["state"] == "APPLIED", state
+    # The rest of the episode continues normally after the recovered landing.
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert all(row["status"] == "APPLIED" for row in state["episodes"])
+
+
+def test_a_superseded_failure_pointer_does_not_gate_the_retry(api, monkeypatch):
+    """A pointer to a request an earlier retry replaced is history, not a refusal.
+
+    Live evidence (2026-11-15, scene 2): after the landing gate refused, the run
+    still carried the *previous* attempt's director refusal.  That record had
+    already been superseded by the retry's own new call, so the replay gate read
+    a record that no longer represented an open refusal and refused every retry
+    with STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION - a dead end.
+    """
+    from fastapi import HTTPException
+
+    import shine.api_film as api_film
+
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    def refuse(*_args, **_kwargs):
+        raise HTTPException(409, {"code": "FILM_HANDOFF_REFUSED_BY_TEST"})
+
+    real_apply = api_film.apply_camera
+    monkeypatch.setattr("shine.api_film.apply_camera", refuse)
+    _run_storyboard_to_rest(client, settings, project)
+    monkeypatch.setattr("shine.api_film.apply_camera", real_apply)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+
+    # Rebuild the stranded shape the old code left: the pointer names a director
+    # request that a later retry already replaced, and no landing facts exist.
+    with factory.begin() as db:
+        run = db.get(AgentTaskRecord, state["task_id"])
+        predecessor = AgentTaskRecord(
+            project_id=project, role_id="director", request_identity="predecessor",
+            input_hash="0" * 64, asset_manifest_hash="0" * 64, rulepack_id="test",
+            rulepack_hash="0" * 64, model_profile_id="test", model_id="test",
+            status="SUPERSEDED",
+            trace={"rejection_reason_code": "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE",
+                   "is_mock": False},
+        )
+        db.add(predecessor)
+        db.flush()
+        run.trace = {**run.trace, "failed_task_id": predecessor.id, "failed_role": "director",
+                     "failed_unit_index": 0, "pending_landing": None, "resume_steps": {}}
+        run.status, run.error_code = "NEEDS_REVIEW", "HTTPException"
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert all(row["status"] == "APPLIED" for row in state["episodes"])
+
+
+def test_legacy_unknown_refusal_recovery_path_names_and_resumes(api):
+    """A failed record that says UNKNOWN stays behind the reconciliation gate:
+    the direct episode retry refuses with a named code (never a silent
+    nothing), and the person's decision — reconcile + resend-unknown —
+    unlocks exactly one new call so the episode finishes.
+
+    The 2026-11-15 journey hit this shape: a streamed answer cut at
+    finish_reason=length was mis-classified UNKNOWN, so the panel had to
+    offer this decision path instead of a dead "go check the panel" hint.
+    """
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    pending_section = prepared["outline"]["sections"][2]["production_section_id"]
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    assert blocked["status"] == "BLOCKED"
+    rejection = blocked["blocker"]["rejections"][0]
+    failed_task_id = rejection["task_id"]
+    # Rewrite the failed record into the legacy mis-classified shape: UNKNOWN,
+    # no received-result digest, no reconciliation decision yet.
+    with factory.begin() as db:
+        task = db.get(AgentTaskRecord, failed_task_id)
+        assert task is not None
+        task.status = "NEEDS_REVIEW"
+        task.trace = {**task.trace, "external_outcome": "UNKNOWN",
+                      "diagnostic_category": "provider_format",
+                      "provider_finish_reason": "length", "provider_text_chars": 3140}
+        task.trace.pop("received_result_sha256", None)
+        task_version = task.state_version
+
+    # 1) A blind retry cannot silently replay the unknown call: the run stays
+    #    blocked, the failed episode keeps its blocked marker, and the refusal
+    #    is named on the run — never a silent nothing.
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "NEEDS_REVIEW"
+    assert state["error_code"], "the refusal must be named, never status-unknown"
+    still = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    assert still["status"] == "BLOCKED", still
+    assert still["blocker"] is not None, "the episode must keep its blocked marker"
+
+    # 2) The person checks the unknown call, then explicitly authorises one
+    #    new request — the decision path the panel must expose.
+    checked = client.post(f"/api/v1/projects/{project}/film-runs/{failed_task_id}/reconcile",
+                          json={"expected_state_version": task_version}, headers=LOCAL)
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["outcome"] == "UNKNOWN_REQUIRES_NEW_ATTEMPT"
+    resent = client.post(f"/api/v1/projects/{project}/film-runs/{failed_task_id}/resend-unknown",
+                         json={"expected_state_version": checked.json()["state_version"]}, headers=LOCAL)
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["outcome"] == "USER_AUTHORIZED_NEW_REQUEST"
+
+    # 3) Now the episode retry is lawful and the run finishes.
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert all(row["status"] == "APPLIED" for row in state["episodes"])
+
+
+def test_blocked_state_names_the_failed_scene(api):
+    """A blocked episode must tell the person which scene is stuck, not only
+    that the episode failed: the state names each unit's script section."""
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    pending_section = prepared["outline"]["sections"][2]["production_section_id"]
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, fail_section=pending_section)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    unit = next(u for u in blocked["units"] if u["index"] == blocked["blocker"]["unit_index"])
+    assert unit["state"] == "BLOCKED"
+    assert unit["section_order"] == 3
+    assert unit["section_title"] == "第3场"
+    # The applied episode names its scenes too, so the person sees the full map.
+    applied = next(row for row in state["episodes"] if row["episode_id"] == "ep-01")
+    assert applied["units"][0]["section_title"] == "第1场"
+
+
+def test_a_retried_scene_is_told_what_was_refused_before(api):
+    """A retry must carry the last named refusal into its first call.
+
+    The 2026-11-15 journey found the hole: scene 2 was refused twice for
+    Chinese visual prose, and each retry spent its first call re-buying the
+    same refusal.  Worse, when that first call was truncated by an unrelated
+    rule, the earlier lesson was dropped entirely and the retry answered the
+    old mistake again.  The retry names the record it replaces, so that
+    record's trace is the lesson the first call must already carry.
+    """
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    pending_section = prepared["outline"]["sections"][2]["production_section_id"]
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    base = _chain_responder({"asset": master})
+
+    def chinese_prose(messages, schema):
+        plan = base(messages, schema)
+        if schema.get("title") == "DirectorialPlan" and pending_section in "".join(
+                message.content for message in messages):
+            plan["shots"][0]["visual_description"] = "老周把怀表贴近耳朵，又放回丝绒垫上。"
+        return plan
+
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, responder=chinese_prose)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["blocker"]["rejections"][0]["rejection_reason_code"] == (
+        "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+
+    calls: list[str] = []
+
+    def healthy(messages, schema):
+        calls.append(" ".join(message.content for message in messages
+                              if message.role == "system"))
+        return base(messages, schema)
+
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project, responder=healthy)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert calls, "the retry must actually call the model"
+    assert "failed the visual language check" in calls[0], (
+        "the first call of a retry must already carry the last refusal's lesson: "
+        + calls[0][-400:])
+
+
+def test_a_truncated_retry_does_not_drop_the_lesson_it_was_told(api, monkeypatch):
+    """A retry's second call must still carry the lesson its first call earned.
+
+    The live retry on 2026-11-15 exposed this: the retry started already
+    knowing the visual-language refusal, its first call was truncated by an
+    unrelated budget miss (LLM_FORMAT), and the second call overwrote the
+    standing lesson with the truncation's own note.  The episode was then
+    refused for the exact reason the retry had been told to repair.  Lessons
+    accumulate inside one request; a later, unrelated failure never erases one.
+    """
+    from shine.llm import mock as mock_module
+    from shine.llm.base import LLMFormatError
+
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    pending_section = prepared["outline"]["sections"][2]["production_section_id"]
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    base = _chain_responder({"asset": master})
+
+    def chinese_prose(messages, schema):
+        plan = base(messages, schema)
+        if schema.get("title") == "DirectorialPlan" and pending_section in "".join(
+                message.content for message in messages):
+            plan["shots"][0]["visual_description"] = "老周把怀表贴近耳朵，又放回丝绒垫上。"
+        return plan
+
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, responder=chinese_prose)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    assert blocked["status"] == "BLOCKED"
+    assert blocked["blocker"]["rejections"][0]["rejection_reason_code"] == (
+        "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE")
+
+    plan_calls: list[str] = []
+    original = mock_module.MockLLMProvider.complete
+
+    def truncated_first_answer(self, messages, *, schema=None, json_mode=True):
+        system = " ".join(message.content for message in messages
+                          if message.role == "system")
+        if (schema or {}).get("title") == "DirectorialPlan" and pending_section in "".join(
+                message.content for message in messages):
+            plan_calls.append(system)
+            if len(plan_calls) == 1:
+                # A 200 answer that ended mid-object: the same LLM_FORMAT the
+                # live truncated retry produced, and still a received result.
+                raise LLMFormatError("Mock answer truncated", details={"http_status": 200})
+        return original(self, messages, schema=schema, json_mode=json_mode)
+
+    monkeypatch.setattr(mock_module.MockLLMProvider, "complete", truncated_first_answer)
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project, responder=chinese_prose)
+    assert len(plan_calls) >= 2, f"a bounded retry must spend its second call: {plan_calls}"
+    assert "failed the visual language check" in plan_calls[1], (
+        "the second call of a retry must still carry the refusal the retry was told to "
+        "repair, even when the first call failed for another reason: " + plan_calls[1][-400:])
 
 
 def test_shot_row_edit_changes_duration_with_revision_fence(api):

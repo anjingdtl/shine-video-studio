@@ -1724,3 +1724,99 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `worker.py`/`preproduction.py`，不触发 VLM 重校准。**真机边界**：离线测试
   不能证明 H3 不再发出旁白，需在用户机以 1.3.0 重新出片并人耳核对；历史成片
   不重写。证据 `docs/PROMPT_TUNING_20261115_NARRATION_PRIMING.md`。
+## 2026-11-15 解阻滞轮（用户报障：三个地方各说各话 + 目录迁移卡死 + 总是准备不好）
+
+用户原话：「这三个板块就不能合并到一起，减少用户的阻滞吗」「我都不知道哪个地方还有镜头，
+一直卡在这里没办法迁移目录」「能不能解除这些乱七八糟的阻滞点」。本轮把「人看得见、
+动不了」的死路逐条拆掉，每条都留了回归。
+
+- **三处配置面板只有一份结论**：新增只读 `GET /api/v1/setup/verdict`，由
+  `summarize_production_mode` 同一个函数算出（mode/label/detail/action/code/
+  runtime_status/services_verified/validation_blockers）。右上角徽标、导演模式
+  「基础配置」、专业模式「设置」全部改读它；此前徽标读 `/system/status`、
+  基础配置读 `system.production_mode`、专业设置读 `/setup/runtime`，三处各自
+  推导，导演说环境 OK、专业说不行。`api.ts` 新增 `SetupVerdict` 类型。
+- **停泊镜头不再堵死输出目录迁移**：`REPAIR_PENDING` 从「在跑的工作」里移除
+  （它不占租约、不占渲染器、不占队列，也写不出字节）。此前一个停泊镜头就让
+  「迁移目录」永远 409，且面板只给任务 id，人根本找不到是哪个作品的哪个镜头。
+  阻断面板现在报出 `project_title` / `shot_name`，并指到「视频生产」页处理。
+- **失败的「可选审片模型」下载不再冻结整台机器**（两处）：
+  - `setup_preparation._live_installation_work` 只把 `QUEUED/SUBMIT_INTENT/
+    INSTALLING` 算活工作，并跳过全是可选审片组件（VLM/ASR）的计划；
+  - `runtime_configuration.require_idle_configuration` 里 `FAILED_RECONCILE_REQUIRED`
+    只在「还占着租约」或「计划里有非可选组件」时才算活工作。
+  实障：一次 `UNTRUSTED_DOWNLOAD_URL` 的 ASR 下载失败后，服务核验、运行配置激活
+  与真实制作徽标全部永久拒绝，而页面里没有任何地方能清掉它。
+- **Windows 上 npm 探针永远失败**：`host_env` 用 `subprocess.list2cmdline` 转义
+  `.cmd` 里的引号，cmd.exe 不认那个转义，报「找不到网络路径」，于是 npm 永远
+  判为缺失 → L0 阻断 → 整条基础配置走不通。改为把整条命令行交给 cmd.exe 执行。
+  真机复测：npm 11.14.1 present=True、版本达标。
+- **文本通道不再长时间空转**：materialprep 通道既不给输出上限也不走流式，
+  MiniMax 在空连接上反复思考 319 秒后被网关切断 → `LLM_CONNECTION` +
+  `external_outcome=UNKNOWN` → 大纲任务要人工对注重试。现在非创作类调用一律带
+  `completion_cap + streaming + reasoning_effort=low`（同一请求实测 11–16 秒
+  返回；不给上限时 315 秒空转后被切），创作类保留模型自己的思考预算但强制流式。
+  `apply_output_budget` 同步带上 `reasoning_effort`，否则上限不可用。
+- **授权重试不再毁掉失败尝试的证据**：`llm_call_attempts` 一行 = 一次物理请求，
+  查表键加入 `task_id`；新尝试没有错误码时清空 `error_code`。此前重试会覆盖
+  失败行，把 UNKNOWN 的证据抹掉。
+- **监督进程的重启不再永久卡住**：`shine_supervisor._run_restart` 把启动器/停止器
+  的输出改写文件而不是管道——被启动的整栈会继承管道句柄，监督进程就永远等不到
+  EOF，重启状态卡在「starting」，之后每次重启都被判为「进行中」。另外停滞超过
+  15 分钟的重启作废重开（页面有唯一入口，不能被一次卡死锁住）。真机复测：重启
+  18 秒完成并回报「后台已重启」。
+- **停 Worker 后立刻算离线**：监督进程停止 Worker 时直接把它的记录写成
+  `stopped`；前端 `stopWorkerAndWaitOffline` 等的是后端自己的判断，而不是进程
+  消失。此前进程刚停、心跳还有 30 秒才过期，服务核验会以「Worker 还在」再拒
+  一次，人点同一个按钮再得到同一个答复。
+- **裸错误码也要带出 code**：前端 `api()` 只在 `detail.code` 是对象字段时才记
+  code，裸字符串 detail 被丢掉 → 页面上「停止 Worker 并继续验证」这个恢复入口
+  永远不出现，只剩一句让人自己去找开关的说明。现在裸码按码形状取回。
+- **一键准备完成后 Worker 自己回来**：专业设置「一键准备」成功后会恢复 Worker
+  （此前核验前置把 Worker 停下后就没有人叫它回来，关掉页面本机就没有后台了）。
+- 本轮**未改** H3 渲染器生命周期、变体契约、显存门槛与四阶段提示词；**未改**
+  真实推理质量，只恢复「能走通」。回归：新增/修改
+  `test_output_directory.py`（停泊镜头不阻断 + 面板报出作品与镜头）、
+  `test_idle_configuration.py`（可选审片下载不阻断 / 生产下载仍阻断 / 占租约仍阻断）、
+  `test_supervisor_lifecycle.py`（停掉的 Worker 立刻离线）、
+  `test_supervisor_restart.py`（启动器不写管道 / 停滞重启不再锁死）、
+  `test_literary_governor.py`（结构化调用带上限与传输 / 创作类保留思考预算）、
+  `test_literary_transport_and_ledger.py`（重试不抹掉失败证据）、
+  `test_host_tool_resolution.py`（带空格的路径下真的跑起来）、
+  `frontend/src/test/apiError.test.ts`（裸码带出 code）。
+
+## 2026-11-15 分镜链真跑轮（用户授权继续：从第 2 场卡点一路推到落镜）
+
+线上事实：第 2 场连续 4 次被拒，页面只写「CONTRACT_OR_POLICY_REJECTED」，重试一次买一次。
+逐条查下来是五个独立缺陷叠在一起；每条都先写红测试再修。
+
+- **输出上限被思考吃光**：分镜链的五个工种走 `complete_for_role(precompiled=…, budget=…)`，
+  这条预编译路径只带 `completion_cap`，不带 `reasoning_effort`（governor 那条路带）。
+  MiniMax-M3.1-flash 于是把 6916 的额度全花在 reasoning 上：`finish_reason=length`、
+  `provider_text_chars=0`，连一个可见字符都没有；把上限抬到 19660 后同样耗尽 10 分钟。
+  现在网关在「有 completion_cap 且预算没点名 effort」时补 `reasoning_effort=low`
+  （profile 或预算自己写了 effort 的仍然优先）。实测：同一场从 8–10 分钟降到数秒。
+- **引文被当成中文散文**：第 2 场的英文 beat 自己就把刻字写成 `“沈禾”`（弯引号），
+  而 `VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE` 只剥 `"…"` 与 `「…」`。忠实照抄这段引文的
+  英文画面描述被判中文，重试三次都判同一条。现在 `descriptive_text()` 统一剥掉
+  `<d>`、ASCII 引号、`「」`、`“”`、`‘’`、`『』` 六种引法；裸中文散文仍然拒绝。
+- **重试会忘掉刚学到的教训**：同一次请求内 attempt 1 因截断（LLM_FORMAT）失败时，
+  attempt 2 会把 `repair_visual_language` 覆盖回 False、把修注换成截断注，于是第二次
+  调用又把中文写回去。现在修注是累积（OR + 去重追加），不会被后一条失败抹掉。
+- **落镜失败只报 `HTTPException`**：五个工种全成功后落镜闸门用结构化 detail 拒绝，
+  `streamline` 只认字符串 detail，于是 `error_code=HTTPException`，阻断面板的
+  `rejections` 是空的——人看到「这一集被阻塞」却没有任何原因。现在 `_fault_code()`
+  从 `detail.code` 取具名码，并把这条拒绝写进该集的 blocker。
+- **落镜重试被自己的旧记录卡死**：落镜失败后运行仍留着上一次工种拒绝的 `failed_task_id`，
+  而那条记录早被这次重试自己 SUPERSEDED 了；重试于是每次都撞
+  `STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION`（对着一条已被替代的记录）。现在：
+  1) SUPERSEDED/不存在的失败指针按历史处理（不是未决拒绝，也不触发未知对账）；
+  2) 落镜故障单独记 `pending_landing`，重试直接复用五个已完成的工种产物重新落镜，
+     不买任何新模型调用；同一份产物第二次仍被拒时才丢掉它、下次重试重新问工种。
+- **页面话术跟着事实走**：阻断面板新增「落镜」归属，落镜故障时说明「重试会复用已完成
+  的工种结果，只重新落镜」，而不是假的「重试会发起一次新的模型请求」。
+- 回归：`test_llm_gateway.py`（预编译结构化预算必须带 bounded effort / 显式 effort 保留）、
+  `test_film_crew.py`（弯引号引文通过、裸中文仍拒且拒因具名到字段）、
+  `test_director_streamline.py`（落镜故障具名 / 落镜重试零模型调用 / SUPERSEDED 指针不设闸）、
+  既有 `test_a_truncated_retry_does_not_drop_the_lesson_it_was_told`。
+  前端 `vitest` 435 例全绿。

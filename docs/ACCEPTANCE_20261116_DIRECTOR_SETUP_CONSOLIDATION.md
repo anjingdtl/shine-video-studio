@@ -1,0 +1,220 @@
+# 导演模式与本机环境收束 · 验收报告（2026-11-16）
+
+> 分支 `feat/director-setup-consolidation`，基于 `origin/main@351f3a4`，本轮 17 个提交
+> （`7573dc7`…`a0be128`）。开发 worktree：`shine-video-studio-director-dev`；
+> 隔离数据目录 `.local-acceptance/dev-20261115/data`，端口 API 8040 / Web 5210 / 监督 8791。
+> 方案依据 `SHINE_DIRECTOR_SETUP_CONSOLIDATION_PLAN_20261115.md`（commit f64e4b5）。
+
+## 1. 工作包完成情况
+
+| 工作包 | 状态 | 关键提交 |
+|---|---|---|
+| 1 基线与调用关系 | 完成 | `7573dc7` 承接解阻轮+分镜链真跑轮未提交修复 |
+| 2 权威状态与导航 | 完成 | `ad25afb` 导演工作台唯一入口，专业配置迁入「高级设置」 |
+| 3 统一检索与资源闭包 | 完成 | `536e5db` 机器级深搜索引 + 可空项目安装计划（迁移 f180f0010001） |
+| 4 后台统一整备 | 完成 | `8174f1e` 一次点击持久任务；`9cc7555` 服务核验委托监督进程解互斥 |
+| 5 能力与业务接续 | 完成 | 出图全六模式统一验证；LLM 失败恢复（见 §4） |
+| 5b PDD8/精修/4步/RelayVSR | 完成 | `ee51667` 工作流与节点整备下载能力 |
+| 6 安装/升级/交付验证 | 完成 | 安装包构建+SHA 验证（见 §3） |
+
+用户追加三项需求亦完成：
+- 需求1 就绪状态持久化、切页不重检、全局一致进度条（`fe4eeba`）。
+- 需求2 清理高级设置与基础配置重叠项（`fe4eeba`、`a0be128`）。
+- 需求3 出图全能力（T2I/I2I/INPAINT/MULTIREF/WARDROBE/RGBA）归一化到基础配置验证登记核对
+  （`f487af5`、`85415ba`、`fc18016`）。
+- 能力状态归一为「①文件齐不齐 / ②跑不跑得通」两步，跑不通配一键修复按钮（`f487af5`、`cfa68f1`）。
+
+## 2. 自动化回归
+
+- **后端 8 分片全量**（`CODEBUDDY_SAFE_DELETE_ENABLED=0`，仓库根，按文件均分 8 片并行）：
+  共 **2149 例**。干净一轮（开发栈停止、无并发干扰）**7/8 分片 exit=0**；
+  chunk-aa 仅 1 例 `test_owned_process_group::test_managed_group_accepts_explicit_unicode_environment`
+  为 8 进程并发时序假失败，**单独复跑通过**。日志：`.local-acceptance/dev-20261115/shards/chunk-*.log`。
+- **前端全量** `npx vitest run --no-file-parallelism`：**78 文件 / 396 例全绿**（exit=0）。
+  日志：`.local-acceptance/dev-20261115/frontend-full-final2.log`。
+- **TypeScript** `tsc --noEmit` 通过；**生产构建** `npm run build` 通过。
+- **Ruff** 改动文件全部通过。
+- **Alembic**：空库升级至 head `f180f0010001`，`alembic check` 无 drift；
+  真实旧库（含 installation_plans/attempts 行）升级后逐行保留、`foreign_key_check` 干净。
+
+## 3. 安装包
+
+- `pwsh -File scripts/build_test_package.ps1 -OutDir releases -Verify` 通过。
+- 产物 `releases/ShineVideoStudio-20261116-a0be128-win64.zip`（7,723,840 B），
+  SHA-256 `6e999fd5f3a4f610ea2aacf3fa865a5d52ac531a328642fc7c9f0abf0a44be24`；
+  解压后 **1118 文件逐文件 SHA-256 校验一致**。
+
+## 4. 真机实证（RTX 5080 16GB，本机 ComfyUI F:\AIGC2026）
+
+- **一次点击整备**：浏览器点「确认并完成配置」→ 单个持久任务
+  `RECONCILE→DOWNLOAD→TARGET→RECIPE→IMAGE_BIND→PROFILES→VALIDATE→IMAGE_VERIFY→IMAGE_SAMPLES→IMAGE_EDIT_SAMPLES`。
+  已有权重零下载（`固定清单的文件都已在本机，无需下载`）。
+- **服务核验互斥解决**：VALIDATE 委托监督进程「停 Worker→真实渲染器核对节点→激活→自动恢复 Worker」，
+  判定 `READY`、`services_verified=True`。
+- **出图全六模式真实验证**：T2I 三类小样 + I2I/INPAINT/MULTIREF/WARDROBE/RGBA 均经
+  与素材中心同一台账真实渲染；素材中心 `QWEN_IMAGE_T2I/I2I/INPAINT/MULTIREF/WARDROBE` 均 `READY`。
+  RGBA 须输出含非零透明像素才算就绪（权威判定，不冒充）。
+- **出图中断治本**：受管渲染器无头运行 tqdm flush 已关闭 stdout 致 KSampler
+  `I/O operation on closed file`；启动脚本保持 stdout/stderr 引用存活 + `TQDM_DISABLE=1` 修复，
+  三类小样真实落盘（带 SHA-256）。
+- **失败恢复（A10）**：镜头拆解页对 `LLM_CONNECTION/UNKNOWN` 阻塞显示
+  「核对这次请求并重试」；点击后第 1 集由 `BLOCKED` 恢复为 `IN_PROGRESS` 并最终
+  **已确认（v2，23 镜）**，剧组链跑完全部 6 场。截图
+  `.local-acceptance/dev-20261115/a10-recovery-episode-confirmed.png`。
+
+## 5. A01–A12 验收矩阵
+
+| 编号 | 状态 | 证据 |
+|---|---|---|
+| A01 空库/安装器/旧书签 | 通过 | 导演唯一入口；`#setup`/`#v/…` 映射；高级设置可达（浏览器快照） |
+| A02 深目录/多盘/多 ComfyUI | 通过 | 深搜 7/7 盘，发现 1 套 ComfyUI、33 权重候选、23 工作流 |
+| A03 改名/缺分片 | 通过 | 按大小+SHA 匹配，已有文件零下载（后端回归 + 真机） |
+| A04 不可读/慢盘/重复链接 | 通过 | 覆盖报告具名 3 个不可读区域，分批继续 |
+| A05 一次准备/精确变体 | 通过 | 单任务贯穿，非默认端口/变体一致（真机） |
+| A06 断网/关页/重启/重复点击 | 通过 | 持久任务幂等复用，恢复点续跑（后端回归） |
+| A07 外部 ComfyUI/GPU 忙/遗留 | 通过 | 受管归属证明，验证等待安全时机（后端回归 + 真机） |
+| A08 只有图片能力 | 通过 | 六模式真实小样，H3 缺失不阻断图片（真机） |
+| A09 只有 H3/可选审核失败 | 通过 | 可选审片独立记录，不阻断（后端回归） |
+| A10 文本/修订/场次恢复 | 通过 | 失败场次浏览器恢复并落镜（真机，§4） |
+| A11 完整真实制作（约六镜成片） | **未完成** | 见 §6 阻塞 |
+| A12 状态一致/升级/重装 | 通过 | 三处同源判定；旧库升级保留；安装包复验 |
+
+## 6. A11 进展与剩余步骤
+
+整备与分镜恢复已真机通过，journey 已达 **4/7 阶段完成**（剧本/统筹/分镜/素材），
+素材清单已按 23 镜生成。**用户裁定的「一键整备含节点核对」已实现**：
+
+- **模型可用性矛盾——已修复**：`variant-availability` 原先每请求重哈希数 GB 权重
+  致超时、导演包误显「本机没有」。修复三处：① 台账证明安装即跳过目录扫描；
+  ② 核验回执回退哈希贯穿 `cache_dir`（sidecar 缓存生效）；③ 整体结果加项目级 60s
+  缓存（切页即返回）。
+- **一键整备自动核对本作品节点**：监督进程核验激活后逐方案
+  `validate_registered_workflow`（实测「已核对 6 个生成方案节点」）；VALIDATE 步
+  跳过条件改为「合同已激活且本作品方案均已核对」。修复后导演包 INT8 显示
+  `available=True`「本机已就绪」，按钮阻塞原因由「本机没有这套权重」变为「至少选择一集」。
+  截图 `a11-model-ready-after-oneclick.png`（快照存证）。
+
+**剩余步骤（A11 完整成片尚未产出）**：
+1. 角色主素材准备：清单派生出 32 条 `SHOT_CHARACTER_MASTER_MISSING` 提示
+   （沈砚/委托人/老陈/安娜等）。按产品规则缺图由 H3 自行生成、不硬阻断，但人物
+   主素材需生成候选并人工确认锁定（素材中心出图能力已就绪可直接生成）。
+2. 勾选第 1 集 → 冻结导演包 → 启动生产运行（H3 逐镜渲染 23 镜）→ 后期合成 →
+   可解码成片 + 人工验收。
+
+本轮未声称 A11 完整成片通过；真实推理与人工验收均按实际证据记录。
+
+## 7. 边界声明
+
+- 本轮未改 `worker.py`/`preproduction.py` 的 `client_review_identity` 钉住语义之外的
+  审片合同；历史 VLM 正负校准仍未完成，不声称已校准。
+- 所有真实产物、密钥、数据库、私有验收数据留在本机隔离目录，未进安装包。
+
+## 8. 唯一性原则全旅程审查轮（2026-11-16 续）
+
+用户要求按唯一性原则审查并修复：① 一点整备全部就绪；② 环境/依赖/模型只用一套
+后台检验链路、前端都挂载它、禁止多链路与硬编码前端阻滞；③ 每步操作后后台运行
+环节有前端动态进度；④ 全旅程清晰简单、不绕弯回头反复验证登记。浏览器实测发现
+并修复了以下真实矛盾（均已定向回归 + 真机浏览器复验）：
+
+- **顶部裁决与能力卡片自相矛盾（②的核心缺陷）**：`/setup/verdict` 报「真实制作
+  已就绪」（runtime ACTIVE + services_verified），但基础配置两步投影里 H3/出图
+  的「② 运行」却报「跑不通 · 资源尚未绑定…运行合同未核对」，并给出多余的
+  「一键绑定渲染器并核对运行合同」按钮。根因：裁决读 `runtime_report.services_verified`，
+  而两步投影各自从 `variant_readiness.workflow_validated`（H3）与
+  `runtime.readiness(object_info=None).graph_report.complete`（出图）独立推导，
+  空闲渲染器下后者恒假。修复：`summary()` 算一次权威 `runtime_report`，喂给 H3
+  两步投影（仅对已验收基线 SUPPORTED 生效，候选绝不借基线核验）；出图改读整备
+  落库的 `render_verified_families`（按指纹键控、不依赖活体探测，与出图门禁同一份
+  证据）。`_capability_verdict`/`_progress` 同步挂载同一信号。修复后 H3「可试镜 ·
+  已验证可运行」、出图「已真实验证 · 已验证可运行」，多余按钮消失，唯一下一步
+  「真实试镜一次」。回归 `test_two_step_and_edit_validation`（+3）。
+- **拍摄页硬编码「本机没有这套权重」**：`DirectorShootPanel` 在可用性未加载时
+  直接落硬编码拒绝文案。改为加载态显示「正在读取本机模型状态…」，加载完成后才
+  按服务端真实 reason 判定。
+- **连接状态多链路**：`useStudio.checkConnection` 归一到 `/system/status.api_online`
+  单一探针（此前另用 `/projects` 短探针，负载下误报失联）。
+- **变体可用性整体缓存报旧结论**：60s 整体结果缓存在权重核验完成后仍报
+  `installed=False`（`test_variant_availability_decouples_preparation_from_production`
+  红）。改为按 `(project_id, weight_evidence 函数身份)` 键控——计算函数被替换
+  （测试替身或台账刷新）即失效；并在整备任务 `_save` 每步主动失效缓存，核验即时
+  生效。暖切页 0.003s。
+- **冷加载超时假失联（③相关）**：`/system/status` 冷态 2.49s、verdict 3.42s，
+  并发冷加载下超过前端 8s 探针 → 「signal timed out / 制作状态暂不可用」。根因：
+  `configuration_identity` 每次重哈希全部钉住文件、`adopted_installation_blockers`
+  每次重走收编安装（解释器哈希 + 节点指纹），一页加载重复 6+ 次。修复：钉住文件
+  哈希按 `(路径, mtime_ns, size)` 键控（字节变即重哈希，漂移仍被发现）；收编核验
+  按 `(instance.sha256, catalog hash, capability, inspect 函数身份)` + 3s TTL 键控
+  （下游渲染仍独立核验权重与节点，此为显示延迟缓存非唯一门禁）。冷态 verdict
+  0.68s、system/status 1.69s、variant-availability 5.54s；浏览器复验顶部徽标稳定
+  「真实制作已就绪」，无超时通知。回归 `test_existing_comfy_adoption`、
+  `test_runtime_activation`、`test_runtime_control_hardening`、`test_service_validation`、
+  `test_resource_resolver_v2` 全绿。
+
+**浏览器复验快照（uid 快照存证，in-app Browser 面板隐藏故无截图）**：顶部「工作台
+后端在线 / 真实制作已就绪 开始制作」；H3「可试镜 · ① 文件已就绪并核验 · ② 已验证
+可运行」；出图「已真实验证 · ② 已验证可运行」；可选审片/语音/RelayVSR 如实「文件
+未就绪 · 下载安装缺文件」（不阻断生产）；唯一下一步「真实试镜一次」。四处显示
+（顶部徽标、基础配置、H3 卡、出图卡）结论一致，无硬编码阻滞、无多余验证按钮。
+
+**本轮提交**：`3400316`（拍摄页加载态）、`0783782`（两步投影挂载权威核验）、
+`5f49a75`（可用性缓存函数身份键控 + 整备失效）、`7cbfd63`（收编/钉住文件哈希缓存）。
+全量 8 分片回归后台执行中（`shards-r2/`），结果待回填。
+
+## 9. 全旅程拟人化穿测：素材链路唯一性（2026-11-16 续）
+
+从基础配置沿七阶段走到④拍摄素材准备、⑤导演包、⑥视频生产，逐页快照核对：
+
+- **④素材页曾有两条确认链路（唯一性缺陷，已修）**：主面板 `ShotMaterialsPanel`
+  的操作栏主按钮「确认决策并送素材中心」与高级折叠区 `MaterialPreparationPanel`
+  的「确认清单并补齐」**同时注册操作栏主按钮**，共用同一清单修订号 fencing。
+  实测点其中一个把清单推进一版，另一个立刻 `MATERIAL_PLAN_STALE`「清单在你阅读
+  之后又变了，请刷新后重新确认」——正是用户禁止的「多链路 + 回头反复确认」。
+  修复：高级面板加 `embedded` 标记，嵌入导演素材页时**不再注册竞争主按钮**，只在
+  展开的折叠区内用行内按钮；操作栏主操作由 `ShotMaterialsPanel` 唯一提供。
+  复验：刷新后操作栏只剩「确认决策并送素材中心」一个主按钮，STALE 提示消失。
+  回归 `materialPreparation.test.tsx`（21 项）通过。提交 `63f981d`。
+- **素材生成真实跑通**：点唯一主按钮「确认决策并送素材中心」→「已确认 9 项决策；
+  已排队 3 项 AI 候选」。后台 production run 真实推进：沈砚 `BRIEF_RUNNING`、
+  老陈 `QUEUED`、委托人 `NEEDS_REVIEW / LLM_CONNECTION`（allowed_actions=`reconcile`）。
+  委托人 Brief 的 LLM 连接中断按产品门禁判为结果未知 → 不自动重发、保留身份证据、
+  提供「核对」与用户授权一次性重发入口——这是正确的安全行为，不是缺陷。
+- **⑤导演包 / ⑥视频生产指引清晰**：模型版本 INT8 已选、候选 W6A8 如实「本机没有
+  这套权重：可选择后下载准备」、极速4步/RelayVSR「本机未就绪」禁用；第1集因 3 项
+  必需人物主素材未锁定而「等待备料」（人物主体缺位仍按规则拦住），页面明确指引
+  「到拍摄素材准备补齐必需素材」；⑥页「还没有在拍的运行 → 去导演包勾选集数并确认
+  方案」，逐集进度（6场·23镜·约118秒）与缺主素材提示如实显示。
+
+**A11 完整成片仍未产出**：需先核对/重发委托人 Brief、生成并人工确认锁定 3 项人物
+主素材，再冻结导演包 → H3 逐镜渲染 23 镜 → 后期合成 → 可解码成片 + 人工验收。
+本轮验证的是「链路唯一、状态一致、进度可见、失败可核对」，不声称整片已通过。
+
+## 10. 全量回归口径与既有失败说明（2026-11-16）
+
+- **前端全量**：`npx vitest run --no-file-parallelism` → **78 文件 / 396 项全绿**；
+  `tsc --noEmit` 通过；`npm run build` 通过（1651 模块）。
+- **本轮改动定向后端回归全绿**：`test_two_step_and_edit_validation`(9)、
+  `test_setup_capability_gates`(21)、`test_relayvsr_and_profiles`(6)、
+  `test_variant_binding_and_gate`(23)、`test_variant_aware_summary`(4)、
+  `test_summary_optional_review`(3)、`test_setup_one_stop_v41`(12)、
+  `test_setup_preparation_chain`(10)、`test_resource_resolver_v2`(19)、
+  `test_runtime_activation`(16)、`test_runtime_control_hardening`(40)、
+  `test_existing_comfy_adoption`(7)、`test_service_validation`(8) 均通过。
+- **后端 8 分片全量**（`shards-r2/`，`CODEBUDDY_SAFE_DELETE_ENABLED=0`、按文件
+  `split -n r/8`）：8 分片均退出，但日志含以下失败，**逐一核实的结论是「全部为既有
+  失败或环境假失败，本轮零新增」**：
+  - **既有失败（同一根因，已在本轮起点 `9c4b05d` 的独立 worktree 复现）**：
+    `test_repair_revisions`×4、`test_film_crew`×1、`test_comfy_completion_window`×4、
+    `test_v13_e2e`×1、`test_offline_e2e`×2。错误签名一致：
+    `acceptance_status='pending_review' / acceptance_final_gate=None`、
+    `REPAIR_PENDING != PASSED`。根因在验收/最终门禁逻辑（`worker.py`/`quality.py`），
+    **本轮未改动这两个文件**（`git diff 9c4b05d HEAD -- worker.py quality.py repair.py
+    preproduction.py` 为空）。在 `9c4b05d`（本轮任何后端改动之前）独立 worktree 复跑
+    同样失败，证明非本轮引入。
+  - **NO_PROXY 环境假失败**：`test_renderer_supervisor` 在本会话 `NO_PROXY` 含
+    `[::1]` 时 httpx 解析失败（`Invalid port ':1]'`）；`env -u NO_PROXY -u no_proxy`
+    复跑 47 项全绿（AGENTS.md 已记载此坑）。
+  - **端口占用环境假失败**：`test_image_managed_renderer::test_an_unmanaged_instance_is_refused`
+    报 `EXTERNAL_INSTANCE_ON_PORT port=8188`——验收 dev 栈/素材生成正占用 8188，
+    测试把活渲染器当成外部实例；停栈后该用例即恢复，非代码缺陷。
+- **判定**：本轮改动相关的定向用例与前端全量全绿；全量日志中的失败均属既有或环境
+  假失败，**不声称后端全量全绿**，既有验收门禁根因留待对应负责人处理（不在本轮范围）。

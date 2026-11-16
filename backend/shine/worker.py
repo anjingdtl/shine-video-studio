@@ -4298,7 +4298,28 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
         logger.warning("setup_preparation_step_failed error=%s", type(exc).__name__)
         setup_step = None
     if setup_step:
-        return setup_step
+        # The IMAGE_SAMPLES / IMAGE_EDIT_SAMPLES steps wait on sample renders
+        # that the material and asset-center queues produce later in this same
+        # tick. Returning early here would deadlock: the task waits for samples
+        # the worker never gets to render. Yield the tick so those queues run.
+        if setup_step not in {"setup:IMAGE_SAMPLES", "setup:IMAGE_EDIT_SAMPLES"}:
+            return setup_step
+
+    # A queued resource deep-scan is read-only directory work: advance one
+    # bounded batch per tick so a closed page never stops the scan, and a slow
+    # drive never holds the production queues for more than one batch.
+    try:
+        from shine.comfyops.resource_discovery import advance_scan, read_state
+
+        with session_factory() as db:
+            scan_status = read_state(db)["scan"].get("status")
+        if scan_status in {"QUEUED", "RUNNING"}:
+            with session_factory() as db:
+                advanced = advance_scan(db, budget_s=1.5)
+            if advanced.get("status") in {"QUEUED", "RUNNING"}:
+                return "resource-scan"
+    except Exception as exc:  # noqa: BLE001 - a scan batch must not kill the tick
+        logger.warning("resource_scan_step_failed error=%s", type(exc).__name__)
 
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.

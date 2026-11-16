@@ -189,29 +189,41 @@ def resolve_tool_executable(name: str, search_paths: list[str] | None = None, *,
     }
 
 
-def _windows_script_argv(executable: str, arguments: list[str]) -> list[str]:
-    """The only legal way to run a ``.cmd``/``.bat`` shim from Python.
+def _windows_script_command(executable: str, arguments: list[str]) -> str:
+    """The complete command line that runs a ``.cmd``/``.bat`` shim.
 
     ``subprocess`` with ``shell=False`` calls ``CreateProcess``, whose first
     argument must be a real executable image; a command script is not one.
     The script is therefore handed to the system command processor with fixed
     flags.  The extra outer quotes are required by ``cmd /s /c`` when the
     script path contains spaces (the managed directory usually does).
+
+    The whole line is returned as **one string**, not as an argument list.
+    ``subprocess`` quotes an argument list with ``list2cmdline``, which
+    escapes the inner double quotes as ``\\"``.  ``cmd.exe`` does not
+    understand that escaping: it tries to run the escaped path as a command
+    and reports "The network path was not found", so an installed ``npm.cmd``
+    looked missing forever.
     """
     comspec = (os.environ.get("COMSPEC") or os.environ.get("ComSpec")
                or str(Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "cmd.exe"))
     command = subprocess.list2cmdline([executable, *arguments])
-    return [comspec, "/d", "/s", "/c", f'"{command}"']
+    return f'{comspec} /d /s /c "{command}"'
 
 
-def executable_argv(resolution: dict, arguments: list[str], *,
-                    windows: bool | None = None) -> list[str]:
-    """The argv that runs a resolved tool, honouring the Windows script rule."""
+def executable_command(resolution: dict, arguments: list[str], *,
+                       windows: bool | None = None) -> str | list[str]:
+    """The command that runs a resolved tool, honouring the Windows script rule.
+
+    A Windows script shim is returned as one command-line string; every other
+    tool is returned as an argument list, which ``subprocess`` quotes
+    correctly on its own.
+    """
     if not resolution.get("resolved") or not resolution.get("path"):
         raise FileNotFoundError("TOOL_NOT_RESOLVED")
     executable = str(resolution["path"])
     if _is_windows_host(windows) and executable.lower().endswith(WINDOWS_SCRIPT_SUFFIXES):
-        return _windows_script_argv(executable, list(arguments))
+        return _windows_script_command(executable, list(arguments))
     return [executable, *arguments]
 
 
@@ -240,9 +252,9 @@ def _run_resolved(resolution: dict, name: str, search_paths: list[str] | None, *
         "ffprobe": ["-version"],
     }[name]
     try:
-        argv = executable_argv(resolution, arguments, windows=windows)
+        command = executable_command(resolution, arguments, windows=windows)
         result = subprocess.run(
-            argv, shell=False, capture_output=True, text=True, timeout=30,
+            command, shell=False, capture_output=True, text=True, timeout=30,
             errors="replace", env=_environment_with_search_paths(search_paths),
         )
     except (OSError, subprocess.TimeoutExpired, FileNotFoundError):

@@ -255,7 +255,7 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
       <div className="notice"><CircleHelp size={13} /><div>
         <p><b>四步做完一部作品：</b>①选择母本并确认分卷 → ②逐卷提取大纲并确认全局故事蓝图 →
           ③逐场生成并确认剧本 → ④逐场生成分镜草案、应用镜头并交付本卷。</p>
-        <p>每一步的「确认」都需要你亲自点击；任务详情、Token 与 JSON 收纳在专业模式。</p>
+        <p>每一步的「确认」都需要你亲自点击；任务详情、Token 与 JSON 收纳在下方各步的明细里。</p>
       </div></div>
 
       {activeTasks.length > 0 && (

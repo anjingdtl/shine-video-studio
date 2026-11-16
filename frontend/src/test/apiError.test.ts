@@ -58,4 +58,18 @@ describe('接口错误文案', () => {
       .catch((caught: unknown) => caught);
     expect((error as ApiError).message).toContain('一个名字只能对应一张人物素材');
   });
+
+  it('裸码也要带进 code，页面里的恢复入口才认得出来', async () => {
+    respond(409, { detail: 'STOP_WORKER_BEFORE_SERVICE_VALIDATION' });
+    const error = await api('/setup/services/validate', json('POST', {}))
+      .catch((caught: unknown) => caught);
+    expect((error as ApiError).code).toBe('STOP_WORKER_BEFORE_SERVICE_VALIDATION');
+  });
+
+  it('对象形式的 code 仍然照旧带出', async () => {
+    respond(409, { detail: { code: 'OUTPUT_DIRECTORY_BUSY', message: '还有任务在跑' } });
+    const error = await api('/settings/output-directory', json('PUT', {}))
+      .catch((caught: unknown) => caught);
+    expect((error as ApiError).code).toBe('OUTPUT_DIRECTORY_BUSY');
+  });
 });

@@ -39,11 +39,17 @@ from shine.comfy.workflow import graph_hash
 RELAYVSR_MERGE_COMMIT = "2f8943324e1eae89a5ee6c7db93602299246b5f1"
 RELAYVSR_HF_REPO = "Comfy-Org/RelayVSR"
 RELAYVSR_LICENSE = "Apache-2.0"
+#: The audited HF revision the weight digests were read from (paths-info lfs.oid).
+RELAYVSR_HF_REVISION = "202c35eb0a5bb64b7017d5a09ea9acea87b7a081"
 
 RELAYVSR_X2_MODEL = "relayvsr_x2_lightx2v_int8_convrot.safetensors"
 RELAYVSR_X2_FLASH_VAE = "relayvsr_flash_vae_x2_fp32.safetensors"
-RELAYVSR_X2_MODEL_SHA256: str | None = None   # pinned after a verified download
-RELAYVSR_X2_VAE_SHA256: str | None = None
+# Official digests recorded from Comfy-Org/RelayVSR@202c35eb (Apache-2.0):
+# the LFS oid is the file's SHA-256. Sizes match the published bytes.
+RELAYVSR_X2_MODEL_SHA256 = "240e75e0c17cf2845d559b25254a230ff7458f81449d7a8c5e7e3fb8275c7b3c"
+RELAYVSR_X2_MODEL_SIZE = 5163295248
+RELAYVSR_X2_VAE_SHA256 = "b5bb0339acb5b52545911ea29a51b4c5b805776a779222b5a14591571f42e21c"
+RELAYVSR_X2_VAE_SIZE = 127759464
 
 #: The exact node classes of the official core implementation.
 RELAYVSR_NODE_CLASSES = ("RelayVSRConditioning", "VSRDecode")
@@ -73,14 +79,18 @@ class RelayVSRUnavailable(RuntimeError):
 
 
 def relayvsr_weight_pins() -> list[dict]:
-    """The expected weight files; digests are None until a verified download."""
+    """The expected weight files with their official digests and sources."""
     return [
         {
             "role": "diffusion_model",
             "filename": RELAYVSR_X2_MODEL,
             "destination_family": "diffusion_models",
             "sha256": RELAYVSR_X2_MODEL_SHA256,
+            "size": RELAYVSR_X2_MODEL_SIZE,
             "source_repo": RELAYVSR_HF_REPO,
+            "source_revision": RELAYVSR_HF_REVISION,
+            "url": (f"https://huggingface.co/{RELAYVSR_HF_REPO}/resolve/"
+                    f"{RELAYVSR_HF_REVISION}/diffusion_models/{RELAYVSR_X2_MODEL}"),
             "license": RELAYVSR_LICENSE,
         },
         {
@@ -88,7 +98,11 @@ def relayvsr_weight_pins() -> list[dict]:
             "filename": RELAYVSR_X2_FLASH_VAE,
             "destination_family": "vae",
             "sha256": RELAYVSR_X2_VAE_SHA256,
+            "size": RELAYVSR_X2_VAE_SIZE,
             "source_repo": RELAYVSR_HF_REPO,
+            "source_revision": RELAYVSR_HF_REVISION,
+            "url": (f"https://huggingface.co/{RELAYVSR_HF_REPO}/resolve/"
+                    f"{RELAYVSR_HF_REVISION}/vae/{RELAYVSR_X2_FLASH_VAE}"),
             "license": RELAYVSR_LICENSE,
         },
     ]
@@ -129,6 +143,14 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
                 "missing_nodes": missing_nodes,
                 "detail": "本机 ComfyUI 不含 RelayVSR 核心节点（需要 2f89433 或更高）。",
             })
+    # Pinning the weights is a prerequisite, not proof of a runnable backend.
+    # Without either file evidence or a live node table the backend stays
+    # unverified: a caller that passes no evidence must never read AVAILABLE.
+    if object_info is None and model_root is None:
+        blockers.append({
+            "code": "RELAYVSR_RUNTIME_UNVERIFIED",
+            "detail": "权重清单已钉住，但还没有本机文件或真实节点表证据，不能启用。",
+        })
     if blockers:
         return {
             "engine": "relayvsr",

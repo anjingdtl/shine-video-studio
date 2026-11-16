@@ -37,16 +37,11 @@ async function clickSave(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: /保存分镜/ }));
 }
 
-async function switchToExpert(user: ReturnType<typeof userEvent.setup>) {
-  // 界面会记住上次的模式（localStorage）：已经在专业模式时再点一次是“回到导演模式”。
-  if (document.querySelector('.app-shell.ui-expert')) return;
-  const toggle = await waitFor(() => {
-    const node = document.querySelector('.ui-toggle');
-    expect(node).not.toBeNull();
-    return node as HTMLElement;
-  });
-  await user.click(toggle);
-  await waitFor(() => expect(document.querySelector('.app-shell.ui-expert')).not.toBeNull());
+async function openShotTools(user: ReturnType<typeof userEvent.setup>) {
+  // 手工分镜与单镜任务收在镜头拆解页的折叠区里,不再需要第二套界面。
+  window.location.hash = '#d/produce';
+  window.dispatchEvent(new HashChangeEvent('hashchange'));
+  await user.click(await screen.findByText('手工分镜草稿与单镜任务(高级)'));
 }
 
 describe('分镜提交失败必须保留输入', () => {
@@ -67,8 +62,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
+    await openShotTools(user);
     await fillBeat(user, '雨夜里两人交换账册线索');
     await user.clear(screen.getByLabelText(/时长（4–15 秒）/));
     await user.type(screen.getByLabelText(/时长（4–15 秒）/), '16');
@@ -108,8 +102,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
+    await openShotTools(user);
     await fillBeat(user, '第一次提交的内容');
     await user.clear(screen.getByLabelText(/时长（4–15 秒）/));
     await user.type(screen.getByLabelText(/时长（4–15 秒）/), '16');
@@ -146,8 +139,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
+    await openShotTools(user);
     await fillBeat(user, '慢请求期间的镜头');
     await clickSave(user);
     // The button reads 正在保存… and is disabled while the request is pending.
@@ -172,8 +164,7 @@ describe('分镜提交失败必须保留输入', () => {
     });
 
     render(<App />);
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
+    await openShotTools(user);
     await fillBeat(user, '直接命中服务端校验');
     // The client guard only covers 时长 itself; end_s beyond the target
     // duration is validated by the server, so this really reaches it.
@@ -204,8 +195,7 @@ describe('镜头选择器写入真实 ShotSpec（P01/P02）', () => {
       respond: (_url, init) => jsonResponse({ id: 'shot-new', name: '镜头 1', revision: 1, spec: JSON.parse(String(init?.body)).spec, bindings: [] }, 201),
     });
     render(<App />);
-    await switchToExpert(user);
-    await user.click(await screen.findByText('单镜头制作与任务明细（高级）'));
+    await openShotTools(user);
     const beat = await screen.findByLabelText(/镜头意图/);
     await waitFor(() => expect(beat).not.toBeDisabled());
     await user.type(beat, '林迟在雨夜里核对账册');

@@ -9,6 +9,13 @@ import re
 import sys
 from pathlib import Path
 
+#: ComfyUI replaces sys.stdout with a LogInterceptor that wraps the *buffer* of
+#: the stream installed here, without retaining the stream itself. If our fdopen
+#: object is then garbage-collected it closes fd 1, and the interceptor's flush()
+#: raises "I/O operation on closed file" mid-sampling (aborting the KSampler).
+#: Keep permanent references so the descriptors stay open for the process life.
+_STD_STREAM_KEEPALIVE: list = []
+
 
 def verify_before_listen(server, adapter_file, expected_sha256, modules):
     target = Path(adapter_file).resolve(strict=True)
@@ -51,6 +58,14 @@ def _redirect_output_to_log() -> None:
         os.close(handle)
     sys.stdout = os.fdopen(1, "w", buffering=1)
     sys.stderr = os.fdopen(2, "w", buffering=1)
+    # Retain the stream objects: ComfyUI's LogInterceptor keeps only their buffer,
+    # so without this reference GC would close fd 1/2 and break sampling flushes.
+    _STD_STREAM_KEEPALIVE.extend((sys.stdout, sys.stderr))
+    # Headless rendering has no interactive terminal: ComfyUI's sampling progress
+    # bar (tqdm) flushes a stdout wrapper that the redirected log handle can
+    # close mid-run ("I/O operation on closed file"), which aborts the KSampler.
+    # Disabling tqdm keeps the log readable and the render alive.
+    os.environ["TQDM_DISABLE"] = "1"
 
 
 def main():

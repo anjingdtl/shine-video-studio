@@ -39,10 +39,10 @@ describe('登记生成方案后当前页面模板即时更新', () => {
       }),
     });
     stub.add({
-      method: 'POST', pattern: /\/api\/v1\/setup\/profiles$/,
+      method: 'POST', pattern: /\/api\/v1\/workflow-profiles$/,
       respond: () => {
         registered = true;
-        return jsonResponse({ profiles: [{ name: PROFILE.name, status: 'REGISTERED', profile_id: PROFILE.id }] });
+        return jsonResponse(PROFILE, 201);
       },
     });
     stub.add({
@@ -54,20 +54,25 @@ describe('登记生成方案后当前页面模板即时更新', () => {
     // 顶部模式入口显示后端的 READY 状态，而不是前端默认的演示。
     expect((await screen.findAllByText('真实制作已就绪')).length).toBeGreaterThan(0);
 
-    // 在专业模式的设置板块登记生成方案。
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    await user.click(await screen.findByTitle('打开设置板块'));
-    await user.click(await screen.findByRole('button', { name: '登记工作流 Profile' }));
+    // 在高级设置的工作流 Profile 注册里登记生成方案。
+    window.location.hash = '#d/advanced';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await user.click(await screen.findByText(/展开 工作流 Profile 注册/));
+    await user.type(screen.getByPlaceholderText('Profile 名称'), PROFILE.name);
+    await user.selectOptions(screen.getByDisplayValue('T2VA'), 'Ref2VA');
+    await user.click(await screen.findByRole('button', { name: /注册工作流/ }));
     await waitFor(() => {
-      expect(screen.getByText(/REGISTERED/)).toBeInTheDocument();
+      expect(stub.callsOf('POST', /\/api\/v1\/workflow-profiles$/).length).toBeGreaterThan(0);
     }, { timeout: 4000 });
 
     // 登记刷新了共享的工作流列表状态。
     const before = stub.calls.filter((call) => call.method === 'GET' && /workflow-profiles/.test(call.url)).length;
     expect(before).toBeGreaterThan(0);
 
-    // 回到生产板块：真实生成已解锁，模板下拉立即出现新方案。
-    await user.click(await screen.findByTitle('打开生产板块'));
+    // 到高级设置的排产折叠区：真实生成已解锁，模板下拉立即出现新方案。
+    window.location.hash = '#d/advanced';
+    window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
     const provider = await screen.findByLabelText(/生成方式/);
     await user.selectOptions(provider, 'comfyui');
     await waitFor(() => {
@@ -77,9 +82,9 @@ describe('登记生成方案后当前页面模板即时更新', () => {
 
   it('演示模式下真实生成不可选：选择器被锁在演示体验', async () => {
     const user = userEvent.setup();
+    window.location.hash = '#d/advanced';
     render(<App />);
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    await user.click(await screen.findByTitle('打开生产板块'));
+    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
     const provider = await screen.findByLabelText(/生成方式/);
     expect((provider as HTMLSelectElement).disabled).toBe(true);
     expect((provider as HTMLSelectElement).value).toBe('mock');

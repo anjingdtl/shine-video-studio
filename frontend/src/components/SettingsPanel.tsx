@@ -29,6 +29,9 @@ type Props = {
   onBindStandardParameters?: (profileId: string) => void;
   /** Director setup places the same manager before its generation-profile section. */
   includeLlm?: boolean;
+  /** 高级设置精简模式：隐藏与基础配置重复的文本模型与输出目录面板，
+   *  只保留路由细调、工作流映射、项目策略、引擎连接与后台状态。 */
+  compact?: boolean;
 };
 
 const defaultGraph = '{}';
@@ -36,7 +39,7 @@ const defaultMap = '{}';
 
 export default function SettingsPanel({
   project, onRefresh, workflowProfiles, system, busy, onProjectSettings, onTestComfy, onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow,
-  onBindStandardParameters, includeLlm = true,
+  onBindStandardParameters, includeLlm = true, compact = false,
 }: Props) {
   const [comfyUrl, setComfyUrl] = useState('http://127.0.0.1:8188');
   const [comfyResult, setComfyResult] = useState<SystemHealth | null>(null);
@@ -75,11 +78,11 @@ export default function SettingsPanel({
         <div className="section-icon"><Server size={17} /></div>
       </div>
 
-      {includeLlm && <LLMSetupPanel onChanged={onRefresh} />}
+      {includeLlm && !compact && <LLMSetupPanel onChanged={onRefresh} />}
 
       <div className="settings-grid">
         <StorageSettings />
-        <OutputDirectoryPanel />
+        {!compact && <OutputDirectoryPanel />}
         <div className="settings-block">
           <h3><ShieldCheck size={14} /> 项目策略</h3>
           {project ? <>

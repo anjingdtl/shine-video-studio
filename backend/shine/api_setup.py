@@ -30,7 +30,7 @@ class InstallPlanRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     catalog: str = "h3-ref2va-windows-x64"
     components: list[str] = Field(min_length=1, max_length=14)
-    project_id: str
+    project_id: str | None = None
     disk_free: int = Field(ge=0)
     #: The variant this plan installs.  It is normally derived from the
     #: requested components; naming it makes the binding explicit.
@@ -194,22 +194,109 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
 
 
 @router.get('/existing-installations')
-def existing_installations(settings: SettingsDep, root: str | None = None):
-    """Bounded discovery inside declared roots, fixed drives and an optional root.
+def existing_installations(settings: SettingsDep, db: DBSession, root: str | None = None,
+                           rescan: bool = False):
+    """Installations this machine can use, from the durable index by default.
 
-    ``root`` is the directory the person already chose (for example the
-    deployment storage root).  It is searched several levels deep so a nested
-    download is not invisible just because it is not at a fixed depth.
+    Switching to the setup page must not re-walk the disk: once resources are
+    indexed (or an installation registered), the persisted facts are returned.
+    A bounded fresh discovery only runs on an explicit ``rescan=true`` (the
+    person pressed refresh) or on a truly empty machine that has nothing
+    indexed yet.  ``root`` adds a person-chosen directory to a fresh scan.
     """
     from pathlib import Path
 
     from shine.comfyops.existing_installation import discover
+    from shine.comfyops.resource_discovery import read_state
+    from shine.comfyops.setup_summary import candidate_installations
 
-    roots = [*settings.comfy_probe_roots]
-    # A stale/network path chosen earlier must not make the whole scan fail.
-    if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
-        roots.append(root)
-    return discover(roots)
+    state = read_state(db)
+    indexed = state["resources"]["comfy_roots"]
+    known = {str(row["root"]) for row in candidate_installations(db, settings)
+             if row.get("root")}
+    for row in indexed:
+        if Path(row["root"]).is_dir():
+            known.add(str(row["root"]))
+    coverage = "PERSISTED_INDEX"
+    scan_info: dict = {}
+    unreadable: list = []
+    if rescan or not known:
+        roots = [*settings.comfy_probe_roots]
+        # A stale/network path chosen earlier must not make the whole scan fail.
+        if root and Path(root).is_absolute() and not root.startswith(('\\\\', '//')):
+            roots.append(root)
+        result = discover(roots)
+        known.update(result["installations"])
+        coverage = result.get("coverage", "BOUNDED_RECURSIVE_SCAN")
+        scan_info = result.get("scan", {})
+        unreadable = result.get("unreadable", [])
+    return {
+        "installations": sorted(known),
+        "unreadable": unreadable,
+        "coverage": coverage,
+        "scan": scan_info,
+        "runtime_verified": False,
+        "deep_scan": {
+            "status": state["scan"].get("status"),
+            "indexed_comfy_roots": len(indexed),
+        },
+    }
+
+
+class SearchDirectoryRequest(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    path: str = Field(min_length=1, max_length=1024)
+
+
+@router.get('/search-directories')
+def search_directories(db: DBSession):
+    from shine.comfyops.resource_discovery import list_directories
+
+    return {"directories": list_directories(db)}
+
+
+@router.post('/search-directories')
+def add_search_directory(body: SearchDirectoryRequest, actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import add_directory
+
+    return add_directory(db, body.path, actor=actor)
+
+
+@router.post('/search-directories/select')
+def select_search_directory(actor: Operator):
+    """Open the OS folder dialog; the choice is returned, never saved."""
+    from shine.media.directory_picker import pick_directory
+
+    return pick_directory(None)
+
+
+@router.delete('/search-directories/{directory_id}')
+def remove_search_directory(directory_id: str, actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import remove_directory
+
+    return remove_directory(db, directory_id, actor=actor)
+
+
+@router.get('/resource-scan')
+def resource_scan_report(db: DBSession):
+    from shine.comfyops.resource_discovery import report
+
+    return report(db)
+
+
+@router.post('/resource-scan/start')
+def resource_scan_start(actor: Operator, db: DBSession):
+    from shine.comfyops.resource_discovery import start_scan
+
+    return start_scan(db, actor=actor)
+
+
+@router.post('/resource-scan/advance')
+def resource_scan_advance(actor: Operator, db: DBSession):
+    """One bounded batch, for immediate feedback; the Worker also advances it."""
+    from shine.comfyops.resource_discovery import advance_scan
+
+    return advance_scan(db)
 
 
 @router.post('/existing-installations/inspect')
@@ -541,6 +628,53 @@ def variant_recommendations(settings: SettingsDep):
     return recommend_variants(env)
 
 
+#: Short-lived cache of the (slow) models-directory scan, keyed by root+catalog.
+#: Switching pages must not re-walk the whole models tree every time; the durable
+#: verification ledger is the authority and this scan is only a fallback for
+#: variants the ledger has not proven yet.
+_INSPECT_CACHE: dict[tuple[str, str], tuple[float, set[str]]] = {}
+_INSPECT_CACHE_TTL = 120.0
+_INSPECT_CACHE_LOCK = threading.Lock()
+
+#: Short-lived cache of the whole per-project availability projection. The
+#: projection resolves the managed runtime identity (which revalidates the
+#: adopted installation) once per variant, so computing it cold takes seconds;
+#: switching pages must not repeat that every time. The key includes the
+#: identity of the weight-evidence callable: if the computation itself changes
+#: (a refreshed ledger reads differently, or a test substitutes it), the cached
+#: projection is no longer trusted and is recomputed.
+_VA_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
+_VA_CACHE_TTL = 30.0
+_VA_CACHE_LOCK = threading.Lock()
+
+
+def invalidate_variant_availability_cache() -> None:
+    """Drop cached availability projections after the ledger changes."""
+    with _VA_CACHE_LOCK:
+        _VA_CACHE.clear()
+
+
+def _cached_present_components(root: str, catalog: dict) -> set[str]:
+    import time
+
+    from shine.comfyops.existing_installation import inspect as inspect_installation
+
+    key = (root, str(catalog.get("catalog_id") or ""))
+    now = time.monotonic()
+    with _INSPECT_CACHE_LOCK:
+        hit = _INSPECT_CACHE.get(key)
+        if hit and now - hit[0] < _INSPECT_CACHE_TTL:
+            return hit[1]
+    try:
+        report = inspect_installation(root, catalog)
+        present = {row["component_id"] for row in report.get("matches") or []}
+    except Exception:  # noqa: BLE001 - an unreadable directory is a fact
+        present = set()
+    with _INSPECT_CACHE_LOCK:
+        _INSPECT_CACHE[key] = (now, present)
+    return present
+
+
 @router.get("/variant-availability")
 def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     """本机实际准备好的 H3 方案清单：有就是有，没有就是没有。
@@ -554,7 +688,7 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     """
     from sqlalchemy import select as _select
 
-    from shine.comfyops.existing_installation import inspect as inspect_installation
+    from shine.comfyops import variant_readiness as _vr_module
     from shine.comfyops.models import ComfyInstance
     from shine.comfyops.variant_binding import load_binding
     from shine.comfyops.variant_readiness import readiness as variant_readiness
@@ -563,6 +697,14 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     from shine.services import require_project
 
     require_project(db, project_id)
+    import time
+
+    now = time.monotonic()
+    cache_key = (project_id, id(_vr_module.weight_evidence))
+    with _VA_CACHE_LOCK:
+        hit = _VA_CACHE.get(cache_key)
+        if hit and now - hit[0] < _VA_CACHE_TTL:
+            return hit[1]
     adopted_root = None
     for row in db.scalars(_select(ComfyInstance)):
         payload = row.payload if isinstance(row.payload, dict) else {}
@@ -610,13 +752,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             rows.append(entry)
             continue
         required = set(manifest.get("required_component_ids") or [])
-        present: set[str] = set()
-        if adopted_root:
-            try:
-                report = inspect_installation(adopted_root, binding.catalog)
-                present = {row["component_id"] for row in report.get("matches") or []}
-            except Exception:  # noqa: BLE001 - an unreadable directory is a fact
-                present = set()
         try:
             readiness_report = variant_readiness(db, settings, binding, project_id)
         except Exception:  # noqa: BLE001 - the ledger may be unreadable
@@ -629,8 +764,16 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         # ``installed`` permanently false for such variants.
         weight_ids = {str(row.get("component_id")) for row in weights}
         required_ids = required or weight_ids
-        installed_by_scan = bool(required_ids) and required_ids <= present
         installed_by_evidence = bool(weights) and all(row.get("prepared") for row in weights)
+        # The durable verification ledger is the authority. Only fall back to a
+        # directory scan when the ledger does not already prove the weights are
+        # present: inspect_installation walks the whole models tree and is far
+        # too slow to run on every page switch (it timed out and made the page
+        # falsely report "本机没有"). A verified ledger skips the scan entirely.
+        present: set[str] = set()
+        if adopted_root and not installed_by_evidence:
+            present = _cached_present_components(adopted_root, binding.catalog)
+        installed_by_scan = bool(required_ids) and required_ids <= present
         entry["installed"] = installed_by_scan or installed_by_evidence
         entry["verified"] = bool(weights) and all(row.get("verified") for row in weights)
         # "Bound" is a separate fact from "verified": the bytes were checked,
@@ -702,7 +845,10 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
                              "message": f"验收状态是 {acceptance}，不能当作正式生产"})
         entry["blocking_reasons"] = blocking
         rows.append(entry)
-    return {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
+    result = {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
+    with _VA_CACHE_LOCK:
+        _VA_CACHE[cache_key] = (now, result)
+    return result
 
 
 @router.get("/connectivity")
@@ -1076,6 +1222,55 @@ def readiness(settings: SettingsDep, db: DBSession):
 def runtime_state(settings: SettingsDep, db: DBSession):
     from shine.comfyops.runtime_configuration import runtime_report
     return runtime_report(db, settings)
+
+
+@router.get('/verdict')
+def setup_verdict(settings: SettingsDep, db: DBSession):
+    """One answer to "can this machine make a film right now?".
+
+    The workbench has three places that talk about the same machine: the
+    top-right badge, the director's 基础配置 page and the expert's
+    设置 page.  When each of them derives its own conclusion from its own
+    endpoint, they disagree - one says the environment is fine while
+    another says it is not - and the person is left with no way to tell
+    which one to believe.
+
+    This endpoint is the single verdict every surface reads.  It reports the
+    same ``production_mode`` the badge shows, plus the one action that moves
+    the machine forward, so the badge and both configuration pages cannot
+    tell different stories.
+    """
+    from shine.comfyops.runtime_configuration import resolve_runtime, runtime_report
+    from shine.comfyops.service_validation import _worker_online
+    from shine.models import AppSetting
+    from shine.production_mode import summarize_production_mode
+
+    try:
+        effective = resolve_runtime(db, settings)
+    except HTTPException as exc:
+        effective, runtime_error = None, str(exc.detail)
+    else:
+        runtime_error = None
+    report = runtime_report(db, settings)
+    mode = summarize_production_mode(
+        db, settings,
+        effective=effective, runtime_error=runtime_error,
+        worker_online=_worker_online(db, settings),
+        renderer_online=False,
+    )
+    return {
+        "mode": mode["mode"],
+        "label": mode["label"],
+        "detail": mode["detail"],
+        "action": mode["action"],
+        "code": mode["code"],
+        "runtime_status": report.get("status"),
+        "runtime_error": report.get("error"),
+        "services_verified": bool(report.get("services_verified")),
+        "validation_blockers": list((report.get("service_validation") or {}).get("blockers") or []),
+        "has_active_runtime": db.get(AppSetting, "deployment-runtime-active") is not None,
+        "has_candidate_runtime": db.get(AppSetting, "deployment-runtime-candidate") is not None,
+    }
 
 
 @router.get('/managed-processes')
@@ -1605,14 +1800,17 @@ class InstallationChoiceRequest(BaseModel):
 
 class PrepareRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    project_id: str
-    capabilities: list[Literal["h3", "image", "vlm", "asr"]] = Field(min_length=1, max_length=4)
+    project_id: str | None = None
+    capabilities: list[Literal["h3", "image", "vlm", "asr", "relayvsr"]] = Field(min_length=1, max_length=5)
     installation_path: str | None = Field(default=None, max_length=1024)
     port: int | None = Field(default=None, ge=1024, le=65535)
     variant_id: str | None = Field(default=None, max_length=80)
     #: Runtime contract validation starts services for a moment.  It is part of
     #: the same authorization, but a person may decline it explicitly.
     verify_runtime: bool = True
+    #: Run the bounded deep scan before reconciling, so scattered resources on
+    #: other drives are part of the same preparation.
+    deep_scan: bool = False
 
 
 class PreparePlanRequest(PrepareRequest):
@@ -1757,7 +1955,8 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     from shine.comfyops.setup_summary import capability_report, resolve_installation, runtime_closure_gap
     from shine.services import require_project
 
-    require_project(db, body.project_id)
+    if body.project_id:
+        require_project(db, body.project_id)
     resolved = resolve_installation(db, settings, path=body.installation_path,
                                     discovered=_discovered_roots(settings, db))
     selected = resolved.get("selected") or {}
@@ -1817,11 +2016,12 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     from shine.comfyops.setup_preparation import enqueue
     from shine.services import require_project
 
-    require_project(db, body.project_id)
+    if body.project_id:
+        require_project(db, body.project_id)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
                     installation_path=body.installation_path, port=body.port,
                     variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,
-                    settings=settings)
+                    settings=settings, deep_scan=body.deep_scan)
     db.commit()
     return {"status": value.get("status"), "task_id": value.get("task_id"),
             "steps": [row["id"] for row in value.get("steps") or []],

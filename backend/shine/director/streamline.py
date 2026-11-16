@@ -606,6 +606,22 @@ def _carryover_facts(db, project_id: str, prior_section_id: str | None) -> list[
     return facts
 
 
+def _fault_code(exc: Exception) -> str:
+    """The named code of a unit fault, never the exception class name.
+
+    A gate refuses with a structured detail - ``{"code": "..."}`` - and
+    reporting ``HTTPException`` would hand the person a name that says nothing
+    about what refused or what to do.  An unnamed fault still falls back to its
+    class name, so the field is never empty.
+    """
+    if isinstance(exc, HTTPException):
+        if isinstance(exc.detail, str):
+            return exc.detail
+        if isinstance(exc.detail, dict) and isinstance(exc.detail.get("code"), str):
+            return exc.detail["code"]
+    return type(exc).__name__
+
+
 def run_pending_director_storyboard(factory, settings, worker_id, *, gateway=None, heartbeat_fn=None):
     """Advance one director storyboard unit per tick (claim -> crew -> land)."""
     from datetime import timedelta
@@ -638,8 +654,26 @@ def run_pending_director_storyboard(factory, settings, worker_id, *, gateway=Non
                                    worker_id, project_id, state)
         except Exception as exc:  # noqa: BLE001 - a unit fault must not kill the worker
             logger.exception("director_storyboard_fault task=%s", task_id)
-            code = exc.detail if isinstance(exc, HTTPException) and isinstance(exc.detail, str) else type(exc).__name__
-            _finish_step(factory, task_id, version, worker_id, state, "NEEDS_REVIEW", str(code)[:64])
+            code = _fault_code(exc)
+            cursor = int(state.get("cursor") or 0)
+            units = state.get("units") or []
+            # A gate refusal (e.g. STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION)
+            # must keep the current episode's blocked marker: losing it would
+            # strand the run in NEEDS_REVIEW with no episode entry left for the
+            # panel's retry / reconcile buttons.  The refusal itself is named on
+            # the marker, so the panel shows a reason and not an empty callout.
+            blocked = {**state.get("blocked_episodes", {})}
+            if cursor < len(units):
+                blocked[units[cursor]["episode_id"]] = {
+                    "unit_index": cursor, "status": "NEEDS_REVIEW",
+                    "failed_role": state.get("failed_role"),
+                    "failed_task_id": state.get("failed_task_id"),
+                    "rejections": [{"role": state.get("failed_role") or "director_storyboard",
+                                    "code": code}]}
+            _finish_step(factory, task_id, version, worker_id,
+                         {**state, "blocked_episodes": blocked,
+                          "failed_unit_index": cursor if cursor < len(units) else state.get("failed_unit_index")},
+                         "NEEDS_REVIEW", str(code)[:64])
     return True
 
 
@@ -687,10 +721,34 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         # UNKNOWN outcome never gets this: it has no replacement path but
         # reconciliation.
         retrying = state.get("failed_unit_index") == cursor
+        pending = state.get("pending_landing") or {}
+        # A landing gate refused the finished chain: the retry re-lands the very
+        # same five artifacts and makes no model call.  Re-running the chain for
+        # a gate refusal would buy five answers for a decision the model already
+        # made correctly.
+        landing_retry = bool(retrying and pending.get("unit_index") == cursor
+                             and isinstance(pending.get("result"), dict))
         authorize = None
+        lesson: dict | None = None
         if retrying and state.get("failed_task_id"):
             failed = db.get(AgentTaskRecord, state["failed_task_id"])
+            if failed is None or failed.status == "SUPERSEDED":
+                # The pointer names a request an earlier retry already replaced:
+                # its successor is the current truth, so there is no open
+                # refusal to replay and no unknown outcome to reconcile.  Live
+                # evidence (2026-11-15, scene 2): after a landing fault the run
+                # kept this predecessor and every retry died on the replay gate
+                # against a record it had superseded itself.
+                state = {**state, "failed_task_id": None, "failed_role": None}
+                failed = None
             failed_trace = (failed.trace or {}) if failed is not None else {}
+            if failed_trace.get("rejection_reason_code"):
+                # The refusal's name is prompt guidance, never an authorisation:
+                # every retry carries it so its first call does not buy the same
+                # refusal again.  Mock lanes are included — a mock retry that
+                # repeats a refusal is just as wasteful as a real one.
+                lesson = {key: failed_trace.get(key) for key in (
+                    "rejection_reason_code", "visual_field", "provider_finish_reason")}
             # A real provider's decided refusal needs the one-call replay
             # authorisation; a mock record never replays through that gate
             # (the API boundary refuses mock targets by design).
@@ -719,12 +777,14 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                     raise HTTPException(
                         409, "STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION")
         try:
-            result = generate_storyboard(project_id, StoryboardRequest(
+            result = (pending["result"] if landing_retry else
+                      generate_storyboard(project_id, StoryboardRequest(
                 text=document.text[unit["start_offset"]:unit["end_offset"]],
                 locked_story_facts=state["locked_facts"], allow_remote_text=True,
                 start_role=state.get("failed_role") if retrying else None,
                 resume_steps=state.get("resume_steps", {}) if retrying else {},
                 authorize_replay_task_id=authorize,
+                retry_lesson=lesson,
                 production_context={
                     "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                     "production_section_id": unit["production_section_id"], "source_offsets": unit,
@@ -735,7 +795,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                     "continuity": {"basis": "user_supplied_unverified"},
                     "previous_render_status": "PENDING_SERVER_VERIFICATION"},
                 consent_document_id=document.id, consent_document_sha256=document.sha256,
-            ), request_like, db, gateway)
+            ), request_like, db, gateway))
         except HTTPException as exc:
             # A gate refusal (consent, frozen contract, unreconciled UNKNOWN)
             # must keep the episode's blocked marker: losing it would strand
@@ -775,15 +835,44 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
     camera_id = steps["cinematographer"]["artifact_id"]
     continuity_id = steps["continuity_supervisor"]["artifact_id"]
     arbitration_id = (steps.get("director_arbitration") or {}).get("artifact_id")
-    with factory() as db:
-        applied = apply_camera(project_id, camera_id, ApplyCamera(
-            continuity_artifact_id=continuity_id,
-            arbitration_artifact_id=arbitration_id,
-            name_prefix=f"导演分镜-{unit['episode_id']}",
-        ), db)
+    try:
+        with factory() as db:
+            applied = apply_camera(project_id, camera_id, ApplyCamera(
+                continuity_artifact_id=continuity_id,
+                arbitration_artifact_id=arbitration_id,
+                name_prefix=f"导演分镜-{unit['episode_id']}",
+            ), db)
+    except Exception as exc:  # noqa: BLE001 - a landing gate must keep the finished chain
+        code = _fault_code(exc)
+        logger.exception("director_storyboard_landing_fault task=%s code=%s", task_id, code)
+        # The crew chain already succeeded, so this unit's reason is the landing
+        # gate itself: no crew failure stays behind as the retry's reason, and a
+        # retry reuses the five finished artifacts instead of buying them again.
+        # Keeping the old crew refusal here deadlocked the live scene-2 retry:
+        # its replay gate read a record the retry itself had superseded.
+        blocked = {**blocked, unit["episode_id"]: {
+            "unit_index": cursor, "status": "NEEDS_REVIEW",
+            "failed_role": None, "failed_task_id": None,
+            "rejections": [{"role": "landing", "code": code}]}}
+        resume = {role: step["artifact_id"] for role, step in steps.items()
+                  if isinstance(step, dict) and isinstance(step.get("artifact_id"), str)}
+        # A second landing refusal of the same chain means the finished artifacts
+        # no longer satisfy the gate (they went stale or the contract moved):
+        # the next retry asks the crew again instead of re-landing a refused
+        # plan forever.
+        keep_chain = not landing_retry
+        _finish_step(factory, task_id, version, worker_id,
+                     {**state, "cursor": cursor, "blocked_episodes": blocked,
+                      "failed_unit_index": cursor, "failed_role": None,
+                      "failed_task_id": None,
+                      "resume_steps": resume if keep_chain else {},
+                      "pending_landing": ({"unit_index": cursor, "result": result}
+                                          if keep_chain else None)},
+                     "NEEDS_REVIEW", code[:64])
+        return
     state = {**state, "cursor": cursor + 1, "failed_unit_index": None,
              "failed_role": None, "failed_task_id": None,
-             "resume_steps": {},
+             "resume_steps": {}, "pending_landing": None,
              "results": [*state.get("results", []),
                          {"unit": unit, "storyboard": result, "apply": applied}]}
     _finish_step(factory, task_id, version, worker_id, state)
@@ -859,6 +948,16 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
     units = trace.get("units", [])
     results = {(r.get("unit") or {}).get("start_offset"): r for r in trace.get("results", [])}
     blocked = trace.get("blocked_episodes", {})
+    # Name each unit's script section so a blocked episode tells the person
+    # which scene is stuck, not only that the episode failed.  The units were
+    # built from the confirmed outline's production sections, so that same
+    # payload is the authoritative name map (order + title travel together).
+    section_index: dict[str, dict] = {}
+    if trace.get("outline_artifact_id"):
+        outline = db.get(AgentArtifact, trace["outline_artifact_id"])
+        if outline is not None:
+            section_index = {str(s["production_section_id"]): s
+                             for s in (outline.payload_json or {}).get("production_sections", [])}
     episodes: dict[str, dict] = {}
     for index, unit in enumerate(units):
         ep = episodes.setdefault(unit["episode_id"], {
@@ -870,6 +969,7 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
         result = results.get(unit["start_offset"])
         applied = (result or {}).get("apply") or {}
         shot_ids = applied.get("shot_ids", [])
+        section = section_index.get(unit["production_section_id"])
         ep["shot_ids"].extend(shot_ids)
         ep["units"].append({
             "index": index, "production_section_id": unit["production_section_id"],
@@ -877,6 +977,8 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
             "state": "APPLIED" if result else ("BLOCKED" if unit["episode_id"] in blocked else "PENDING"),
             "shot_count": len(shot_ids),
             "material_notices": applied.get("material_notices", []),
+            **({"section_order": section["order"], "section_title": section["title"]}
+               if section is not None else {}),
         })
     for ep in episodes.values():
         if ep["status"] == "BLOCKED":

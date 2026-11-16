@@ -201,13 +201,23 @@ def apply_output_budget(config: ProviderConfig, budget: dict) -> ProviderConfig:
 
     The cap is the whole per-call completion budget (visible text, JSON
     overhead and any reasoning tokens the provider bills as completion).
+
+    ``reasoning_effort`` travels with the budget because the cap only makes
+    sense together with it: a reasoning model that deliberates for the whole
+    ceiling produces no visible answer at all.  Measured live on this
+    provider: with the ceiling alone the model spent the ceiling on thinking
+    and the answer arrived truncated; with ``low`` the same request used ~100
+    reasoning tokens and finished in seconds.
     """
     cap = budget.get("completion_cap")
     streaming = bool(budget.get("streaming"))
+    effort = str(budget.get("reasoning_effort") or "").strip()
     if isinstance(config.kind, str) and cap:
         if config.kind == "openai_compatible":
-            return replace(config, generation_options={
-                **config.generation_options, "max_completion_tokens": cap}, streaming=streaming)
+            options = {**config.generation_options, "max_completion_tokens": cap}
+            if effort:
+                options.setdefault("reasoning_effort", effort)
+            return replace(config, generation_options=options, streaming=streaming)
         if config.kind == "ollama":
             return replace(config, generation_options={
                 **config.generation_options, "max_tokens": cap}, streaming=streaming)

@@ -9,7 +9,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
-import { StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
+import { StudioStub, SYSTEM_STATUS, baseProject, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
@@ -28,28 +28,33 @@ afterEach(() => {
 
 describe('空数据库与两层界面入口', () => {
   it('中央重新连接显示检查进度、失联原因和恢复后的作品读取进度', async () => {
+    // 唯一性原则：连接探针归一到 /system/status（与制作模式同源），作品读取仍走
+    // /projects。本用例分别控制这两条请求的落定时刻，验证重连两段进度与失败原因。
     let online = false;
-    let probeNext = false;
-    let finishProbe: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
+    let hangStatus = false;
+    let hangProjects = false;
+    let finishStatus: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
     let finishProjects: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
-    const probe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProbe = resolve; });
-    const projects = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProjects = resolve; });
+    const statusProbe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishStatus = resolve; });
+    const projectsProbe = new Promise<ReturnType<typeof jsonResponse>>(resolve => { finishProjects = resolve; });
+    stub.add({ method: 'GET', pattern: /system\/status$/, respond: () => {
+      if (hangStatus) { hangStatus = false; return statusProbe; }
+      return jsonResponse({ ...SYSTEM_STATUS, api_online: online });
+    } });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => {
-      if (probeNext) {
-        probeNext = false;
-        return online ? jsonResponse([]) : probe;
-      }
-      return online ? projects : jsonResponse({}, 503);
+      if (hangProjects) { hangProjects = false; return projectsProbe; }
+      return online ? jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]) : jsonResponse({}, 503);
     } });
     render(<App />);
-    probeNext = true;
+    await screen.findByRole('button', { name: '重新连接' });
+    hangStatus = true;
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
     expect(screen.getByRole('progressbar', { name: '正在检查后端…' })).toBeInTheDocument();
-    finishProbe(jsonResponse({}, 503));
+    finishStatus(jsonResponse({ ...SYSTEM_STATUS, api_online: false }));
     expect(await screen.findByText(/后端未响应/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '重启后台' })).toBeInTheDocument();
     online = true;
-    probeNext = true;
+    hangProjects = true;
     await userEvent.click(screen.getByRole('button', { name: '重新连接' }));
     expect(await screen.findByRole('progressbar', { name: '后端已连接，正在读取作品…' })).toBeInTheDocument();
     finishProjects(jsonResponse([baseProject({ id: 'proj-1', title: '雾港夜账' })]));
@@ -62,6 +67,16 @@ describe('空数据库与两层界面入口', () => {
 
   it('无任何项目：首启卡片出现，基础配置在导演模式内即可进入', async () => {
     emptyDatabase();
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/storage$/, respond: () => jsonResponse({
+      root: 'D:\\Shine', free_bytes: 100 * 1024 ** 3, free_gb: 100, requires_selection: false,
+    }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-recommendations$/, respond: () => jsonResponse({
+      tier: 'standard', host: { gpu: 'NVIDIA GeForce RTX 5080', vram_mb: 16303, ram_mb: 32768 },
+      recommended: [{ variant_id: 'h3-ref2va-int8-convrot', title: 'H3 INT8', acceptance_status: 'SUPPORTED',
+        status: 'SUPPORTED', usable_in_production: true, auto_download_allowed: true,
+        catalog_id: 'h3-ref2va-windows-x64', total_bytes: 1024 }],
+      candidates: [], blocked: [],
+    }) });
     const user = userEvent.setup();
     render(<App />);
     // 首次使用体验：明确的第一步，而不是一堆面板。
@@ -71,23 +86,22 @@ describe('空数据库与两层界面入口', () => {
     await user.click(screen.getByRole('button', { name: '打开基础配置' }));
     expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
-    // 没有作品也能先看清本机能力；确认下载会明确要求先建作品。
-    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    // 完整整备收进导演页：没有作品时确认按钮禁用，并明确要求先建作品。
+    // 空库也能整备机器：作品是可选的,不再挡住确认按钮。
+    expect(screen.getByText('没有作品也可以先整备机器')).toBeInTheDocument();
     expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
     const confirms = screen.getAllByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
     expect(confirms.length).toBeGreaterThan(0);
-    for (const button of confirms) expect(button).toBeDisabled();
+    for (const button of confirms) expect(button).toBeEnabled();
   });
 
-  it('无项目时依赖项目的操作有明确说明', async () => {
+  it('无项目时整备仍可开始,作品绑定稍后自动完成', async () => {
     emptyDatabase();
     const user = userEvent.setup();
     render(<App />);
     await user.click(await screen.findByRole('button', { name: '打开基础配置' }));
     await screen.findByRole('heading', { name: '制作环境' });
-    expect(screen.getByText('还差一个作品')).toBeInTheDocument();
-    expect(screen.getByText(/安装、生成方案和素材都要绑定到一个作品/)).toBeInTheDocument();
+    expect(screen.getByText('没有作品也可以先整备机器')).toBeInTheDocument();
+    expect(screen.getByText(/建好作品后，已准备的能力会自动绑定到它/)).toBeInTheDocument();
   });
 
   it('建立第一个项目后导演流程完整出现', async () => {
@@ -135,20 +149,19 @@ describe('空数据库与两层界面入口', () => {
     expect(await screen.findByText(/这三项都不影响出片/)).toBeInTheDocument();
   });
 
-  it('已有项目时默认导演模式；专业模式保留完整四板块', async () => {
+  it('已有项目时默认导演工作台;专业切换已下线,高级设置可达', async () => {
     const user = userEvent.setup();
     render(<App />);
     // 默认进入导演模式（普通用户层）。
     await waitFor(() => {
       expect(screen.getAllByText('雾港夜账').length).toBeGreaterThan(0);
     });
-    expect(screen.queryByTitle('打开设置板块')).not.toBeInTheDocument();
-    // 切到专业模式：完整四板块布局仍在。
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    expect(await screen.findByTitle('打开设置板块')).toBeInTheDocument();
-    await waitFor(() => {
-      expect(document.querySelector('.date-chip')?.textContent).toContain('1 个');
-    });
+    expect(document.querySelector('.ui-toggle')).toBeNull();
+    expect(document.querySelector('.app-shell.ui-expert')).toBeNull();
+    // 细调与诊断收进左栏「高级设置」,不再是第二套界面。
+    await user.click(screen.getByRole('button', { name: /高级设置/ }));
+    await waitFor(() => expect(document.querySelector('#advanced')).not.toBeNull());
+    expect(screen.getByText('回到基础配置')).toBeInTheDocument();
   });
 
   it('首次读取作品遇到短暂 API 启动延迟时自动恢复已有作品', async () => {
@@ -166,13 +179,13 @@ describe('空数据库与两层界面入口', () => {
     expect(screen.queryByText('本机工作区暂时不可用')).not.toBeInTheDocument();
   });
 
-  it('全局刷新会重新读取设置页启动时失败的本机存储状态', async () => {
+  it('全局刷新会重新读取基础配置启动时失败的本机存储状态', async () => {
     let attempts = 0;
-    // 设置页现在有两处读同一份存储事实（制作环境卡 + 专业排查块），
-    // 所以「启动时读失败」要覆盖这一轮的两次读取，而不是只失败一次。
+    // 基础配置挂载即检测；存储读取首次失败时整轮检测报错。全局刷新是用户
+    // 主动动作，会重新检测（并重扫磁盘），这次存储成功，错误随之消失。
     stub.add({
       method: 'GET', pattern: /\/api\/v1\/setup\/storage$/,
-      respond: () => attempts++ < 2
+      respond: () => attempts++ < 1
         ? jsonResponse({ detail: 'API is starting' }, 500)
         : jsonResponse({ root: 'D:\\Shine', configured: true, system_drive: false,
           requires_selection: false, free_bytes: 1, free_gb: 100, paths: {}, drives: [] }),
@@ -180,12 +193,11 @@ describe('空数据库与两层界面入口', () => {
     const user = userEvent.setup();
     render(<App />);
     await screen.findAllByText('雾港夜账');
-    await user.click(screen.getByRole('button', { name: /专业模式/ }));
-    await user.click(await screen.findByTitle('打开设置板块'));
-    expect(await screen.findByText(/本机存储信息暂时不可用/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: /基础配置/ }));
+    expect(await screen.findByText(/检测没有完成/)).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: '刷新全部数据' }));
-    await waitFor(() => expect(screen.queryByText(/本机存储信息暂时不可用/)).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.queryByText(/检测没有完成/)).not.toBeInTheDocument());
     expect(attempts).toBeGreaterThanOrEqual(2);
   });
 });

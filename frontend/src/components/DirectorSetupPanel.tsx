@@ -56,9 +56,6 @@ type Props = {
   onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
   onBindStandardParameters: (profileId: string) => void;
-  onOpenExpert: () => void;
-  /** The complete preparation lives in 设置 → 制作环境; this only navigates. */
-  onOpenSettings: () => void;
 };
 
 function gib(bytes?: number | null): string {
@@ -108,6 +105,12 @@ export default function DirectorSetupPanel({
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
   const missingRoles = (llm?.roles ?? []).filter((row) => row.code);
+  /** The same verdict the top-right badge and the expert settings page read.
+   *  One machine, one answer: a card that says "ready" while the badge says
+   *  "not available" leaves the person with no way to tell which is true. */
+  const envLabel = ready
+    ? (system?.production_mode?.label ?? '已就绪')
+    : (system?.production_mode?.detail ?? '尚未检查');
 
   async function installAdvisory(kind: 'VLM' | 'ASR') {
     if (!projectId) return;
@@ -156,7 +159,7 @@ export default function DirectorSetupPanel({
     <section className="setup-status-grid">
       <div className={`setup-status ${ready ? 'ok' : 'pending'}`}>
         <div className="setup-status-icon"><Cpu size={16} /></div>
-        <div><b>本机生成环境</b><span>{ready ? system?.production_mode?.label ?? '已就绪' : system?.production_mode?.detail ?? '尚未检查'}</span></div>
+        <div><b>本机生成环境</b><span>{envLabel}</span></div>
         {ready ? <Check size={15} /> : <AlertTriangle size={15} />}
       </div>
       <div className={`setup-status ${llmReady ? 'ok' : 'pending'}`}>
@@ -180,14 +183,14 @@ export default function DirectorSetupPanel({
 
     {!projectId && <section className="setup-needs-project card">
       <div>
-        <b>还差一个作品</b>
-        <p>安装、生成方案和素材都要绑定到一个作品。先起个名字即可，之后可以改。</p>
+        <b>没有作品也可以先整备机器</b>
+        <p>检索、下载、登记和验证都是机器级的，现在就能开始。建好作品后，已准备的能力会自动绑定到它。</p>
       </div>
       <div className="create-project">
         <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)}
           placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
-        <button className="btn-secondary" title="创建作品后即可继续配置" disabled={!projectTitle.trim()} onClick={createProject}>创建并继续</button>
-        <GuideTip>建好作品后，这一页的按钮就会亮起来</GuideTip>
+        <button className="btn-secondary" title="也可以稍后再建" disabled={!projectTitle.trim()} onClick={createProject}>创建作品</button>
+        <GuideTip>也可以先点下面的「开始准备」，作品稍后再建</GuideTip>
       </div>
     </section>}
 

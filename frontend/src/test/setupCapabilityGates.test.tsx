@@ -27,7 +27,6 @@ const INT8 = {
   blockers: [{ code: 'VRAM_INSUFFICIENT', required: 15360, actual: 12282 }],
 };
 
-const IMAGE_COMPONENTS = ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 'qwen-image-2.1-vae'];
 const IMAGE_BYTES = 17_283_091_112;
 
 /** The 4070 sample: the three H3 weight files are already on disk. */
@@ -103,33 +102,13 @@ async function detect() {
   await screen.findByText(/上次检测/, undefined, { timeout: 20000 });
 }
 
-function planBodies(): Array<Record<string, unknown>> {
-  return stub.callsOf('POST', /setup\/install-plan/).map((call) => call.body as Record<string, unknown>);
-}
-
 describe('CASE-01：4070 只下载素材出图权重', () => {
-  it('不提交 H3 安装计划，只提交独立的图片计划并进入受控下载队列', async () => {
+  it('一次提交只包含勾选的能力,浏览器不再逐能力提交安装计划', async () => {
     stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
     stub.add({
-      method: 'POST', pattern: /setup\/install-plan$/,
-      respond: (_url, init) => {
-        const body = JSON.parse(String(init?.body ?? '{}')) as { catalog?: string };
-        if (body.catalog === 'qwen-image-2.1-windows-x64') {
-          return jsonResponse({
-            plan_id: 'plan-image', sha256: 'b'.repeat(64), status: 'AWAITING_APPROVAL',
-            download_bytes: IMAGE_BYTES, disk_required: 40 * 1024 ** 3, packages: IMAGE_COMPONENTS,
-            capability: 'image', variant_id: null,
-          });
-        }
-        // The H3 plan would be refused by the production admission gate.
-        return jsonResponse({
-          detail: {
-            code: 'HOST_NOT_QUALIFIED',
-            message: '这台电脑没有通过这套变体的硬件资格复核。',
-            blockers: [{ code: 'VRAM_INSUFFICIENT', required: 15360, actual: 12282 }],
-          },
-        }, 409);
-      },
+      method: 'POST', pattern: /setup\/prepare\/execute$/,
+      respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-1',
+        steps: ['RECONCILE', 'DOWNLOAD', 'INSTANCE', 'TARGET', 'RECIPE', 'IMAGE_BIND', 'IMAGE_VERIFY'] }),
     });
 
     const user = userEvent.setup();
@@ -144,34 +123,22 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
-    await waitFor(() => expect(stub.callsOf('POST', /comfyops\/install-plans\/[^/]+\/execute/)).toHaveLength(1), { timeout: 20000 });
-
-    // 1. 没有提交 H3 INT8 安装计划；2. 提交了独立的图片计划。
-    const plans = planBodies();
-    expect(plans).toHaveLength(1);
-    expect(plans[0].catalog).toBe('qwen-image-2.1-windows-x64');
-    expect(plans[0].components).toEqual(IMAGE_COMPONENTS);
-    expect(plans[0].variant_id).toBeUndefined();
-
-    // 3. 进入了受控下载队列；4. 没有 H3 的 HOST_NOT_QUALIFIED 阻断。
-    expect(stub.callsOf('POST', /comfyops\/install-plans\/[^/]+\/execute/)).toHaveLength(1);
+    await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1), { timeout: 20000 });
+    const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[] };
+    // 任务只带勾选的能力;H3 的硬件门禁由后端在下载步骤按能力各自判定。
+    expect(body.capabilities).toEqual(['image']);
+    // 浏览器不再串行驱动安装计划/审批/执行。
+    expect(stub.callsOf('POST', /setup\/install-plan/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /comfyops\/install-plans\/[^/]+\/execute/)).toHaveLength(0);
     expect(screen.queryByText(/HOST_NOT_QUALIFIED/)).toBeNull();
-
-    // 5. 没有自动触发 H3 生产激活。
-    expect(stub.callsOf('POST', /setup\/profiles/)).toHaveLength(0);
-    expect(stub.callsOf('POST', /setup\/runtime\/activate/)).toHaveLength(0);
-    expect(stub.callsOf('POST', /setup\/next-instance-plan/)).toHaveLength(0);
   });
 
-  it('图片资源完成后显示整备成功，不把整个任务误报为失败', async () => {
+  it('提交后显示已交给后台,不替安装器下终态结论', async () => {
     stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
     stub.add({
-      method: 'POST', pattern: /setup\/install-plan$/,
-      respond: () => jsonResponse({
-        plan_id: 'plan-image', sha256: 'b'.repeat(64), status: 'AWAITING_APPROVAL',
-        download_bytes: IMAGE_BYTES, disk_required: 40 * 1024 ** 3, packages: IMAGE_COMPONENTS,
-        capability: 'image', variant_id: null,
-      }),
+      method: 'POST', pattern: /setup\/prepare\/execute$/,
+      respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-1',
+        steps: ['RECONCILE', 'DOWNLOAD', 'TARGET', 'RECIPE', 'IMAGE_BIND', 'IMAGE_VERIFY'] }),
     });
 
     const user = userEvent.setup();
@@ -182,71 +149,39 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
     await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
-    const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
-    expect(outcomes).toHaveTextContent('素材出图');
-    // 下载交给后台后，界面只报「已排队」：它拿不到终态就不替安装器下结论，
-    // 更不能把「文件已下载」写成「资源已就绪」。
-    expect(outcomes).toHaveTextContent('已排队，后台继续');
-    expect(outcomes).not.toHaveTextContent('资源已就绪');
+    expect(screen.getByText(/可以离开这个页面/)).toBeTruthy();
     expect(screen.queryByRole('alert')).toBeNull();
   });
 });
 
 describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法能力', () => {
-  it('H3 被硬件门禁挡住时，素材出图仍然完成', async () => {
+  it('H3 与素材出图同时勾选时,同一个任务带上两项能力', async () => {
     stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
-    // 本机这套权重没有通过逐字节核验：按固定清单重新准备，于是走到
-    // H3 的生产准入门禁。
     stub.add({
-      method: 'POST', pattern: /setup\/existing-installations\/verify$/,
-      respond: () => jsonResponse({
-        status: 'DONE', verified: [], rejected: [{ component_id: 'minimax-h3-diffusion' }],
-      }),
-    });
-    stub.add({
-      method: 'POST', pattern: /setup\/install-plan$/,
-      respond: (_url, init) => {
-        const body = JSON.parse(String(init?.body ?? '{}')) as { catalog?: string };
-        if (body.catalog === 'qwen-image-2.1-windows-x64') {
-          return jsonResponse({
-            plan_id: 'plan-image', sha256: 'b'.repeat(64), status: 'AWAITING_APPROVAL',
-            download_bytes: IMAGE_BYTES, disk_required: 40 * 1024 ** 3, packages: IMAGE_COMPONENTS,
-            capability: 'image', variant_id: null,
-          });
-        }
-        return jsonResponse({
-          detail: {
-            code: 'HOST_NOT_QUALIFIED', capability: 'h3',
-            message: '这台电脑没有通过这套变体的硬件资格复核。',
-            blockers: [{ code: 'VRAM_INSUFFICIENT', required: 15360, actual: 12282 }],
-          },
-        }, 409);
-      },
+      method: 'POST', pattern: /setup\/prepare\/execute$/,
+      respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-2',
+        steps: ['RECONCILE', 'DOWNLOAD', 'INSTANCE', 'TARGET', 'RECIPE', 'IMAGE_BIND', 'PROFILES', 'VALIDATE', 'IMAGE_VERIFY'] }),
     });
 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
     await detect();
 
-    // H3 与素材出图同时勾选。
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
     await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
-    const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
-    expect(outcomes).toHaveTextContent('H3 视频生成');
-    expect(outcomes).toHaveTextContent('未完成');
-    expect(outcomes).toHaveTextContent('VRAM_INSUFFICIENT');
-    expect(outcomes).toHaveTextContent('已排队，后台继续');
-    // 两份计划都提交了：合法的能力没有被连带拒绝。
-    expect(planBodies()).toHaveLength(2);
+    const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[] };
+    // 两项能力都交给同一个任务；哪项被自己的条件挡住由后端具名报告,
+    // 合法的能力不会被浏览器连带拒绝。
+    expect(body.capabilities.sort()).toEqual(['h3', 'image']);
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1);
   });
 
-  it('本机已有的权重不会因为核验没做完就被重新下载', async () => {
+  it('已有文件的复用判断在后端,浏览器不预先下载也不重复提交', async () => {
     stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
-    // 本机已经有一套 ComfyUI（所以有可以核验的目录）。
     stub.add({
       method: 'GET', pattern: /setup\/summary/,
       respond: () => jsonResponse(setupSummary({
@@ -257,24 +192,10 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
         },
       })),
     });
-    // 核验正在进行中：几十 GB 的权重不该被重新下载一遍。
     stub.add({
-      method: 'POST', pattern: /setup\/reconcile$/,
-      respond: (_url, init) => {
-        const body = JSON.parse(String(init?.body ?? '{}')) as { capability?: string };
-        // H3 的核验正在进行；图片文件本来就不在本机。
-        return jsonResponse(body.capability === 'h3'
-          ? { status: 'IN_PROGRESS', verified: 0, rejected: 0, registered: [], complete: false }
-          : { status: 'RECONCILED', verified: 0, rejected: 0, registered: [], complete: false });
-      },
-    });
-    stub.add({
-      method: 'POST', pattern: /setup\/install-plan$/,
-      respond: () => jsonResponse({
-        plan_id: 'plan-image', sha256: 'b'.repeat(64), status: 'AWAITING_APPROVAL',
-        download_bytes: IMAGE_BYTES, disk_required: 40 * 1024 ** 3, packages: IMAGE_COMPONENTS,
-        capability: 'image', variant_id: null,
-      }),
+      method: 'POST', pattern: /setup\/prepare\/execute$/,
+      respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-3',
+        steps: ['RECONCILE', 'DOWNLOAD', 'TARGET', 'RECIPE'] }),
     });
 
     const user = userEvent.setup();
@@ -284,12 +205,10 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
     await waitFor(() => expect(screen.getByText(/已交给后台准备/)).toBeTruthy(), { timeout: 20000 });
-    // 只提交了图片计划：H3 权重没有重新下载。
-    const plans = planBodies();
-    expect(plans).toHaveLength(1);
-    expect(plans[0].catalog).toBe('qwen-image-2.1-windows-x64');
-    const outcomes = screen.getByRole('list', { name: '各项能力的准备结论' });
-    expect(outcomes).toHaveTextContent('没有重复下载');
+    // 核验与「要不要下载」都由后台任务决定;浏览器没有提交任何安装计划,
+    // 也没有重复提交第二个任务。
+    expect(stub.callsOf('POST', /setup\/install-plan/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1);
   });
 });
 

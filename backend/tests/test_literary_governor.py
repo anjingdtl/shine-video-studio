@@ -243,3 +243,42 @@ def test_the_gateway_double_detection_keeps_legacy_doubles_working():
 
     assert accepts_precompiled(Legacy().complete_for_role) is False
     assert accepts_precompiled(ScriptedGateway([]).complete_for_role) is True
+
+
+def test_a_structured_call_carries_its_ceiling_and_transport():
+    """The planned budget must reach the provider, or the model runs free.
+
+    Without the ceiling the provider was free to deliberate for minutes on a
+    long idle connection; the gateway cut it and the call ended as
+    ``LLM_CONNECTION`` with an unknown outcome.  The ceiling is only usable
+    together with a bounded reasoning effort: a reasoning model that may think
+    for the whole ceiling produces no visible answer at all.
+    """
+    gateway = ScriptedGateway([{"text": "正文"}])
+    governor = CallGovernor(gateway, _config(), role="r", unit_id="u")
+    governor.execute(system=BASE_SYSTEM, context=BASE_CONTEXT,
+                     schema=SceneDraft.model_json_schema(), contract=SceneDraft,
+                     purpose="scene", task_category="default",
+                     session_factory=contextlib.nullcontext)
+    sent = gateway.sent[0]
+    assert sent["budget"] is not None, "a structured call must carry its budget"
+    assert sent["budget"]["completion_cap"] > 0
+    assert sent["budget"]["streaming"] is True
+    assert sent["budget"]["reasoning_effort"] == "low"
+
+
+def test_a_creative_call_keeps_the_models_own_deliberation_budget():
+    """Creative writing is not a structured extraction.
+
+    It keeps the model's own deliberation budget, but it still gets the
+    streaming transport so a long answer is not cut mid-stream.
+    """
+    gateway = ScriptedGateway([{"text": "正文"}])
+    governor = CallGovernor(gateway, _config(), role="r", unit_id="u")
+    governor.execute(system=BASE_SYSTEM, context=BASE_CONTEXT,
+                     schema=SceneDraft.model_json_schema(), contract=SceneDraft,
+                     purpose="scene", task_category="creative",
+                     session_factory=contextlib.nullcontext)
+    sent = gateway.sent[0]
+    assert sent["budget"] == {"streaming": True}
+    assert "completion_cap" not in sent["budget"]

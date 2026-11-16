@@ -73,3 +73,69 @@ def test_a_finished_series_does_not_block_a_runtime_revalidation(studio):
 
     with factory() as db:
         require_idle_configuration(db)  # must not raise
+
+
+def _attempt(factory, project_id: str, *, status: str, packages: list[str],
+             lease_owner: str | None = None) -> str:
+    with factory.begin() as db:
+        plan = InstallationPlan(project_id=project_id, status="APPROVED", sha256="plan",
+                                payload={"packages": [{"id": item} for item in packages]})
+        db.add(plan)
+        db.flush()
+        attempt = InstallationAttempt(plan_id=plan.id, status=status, sha256="attempt",
+                                      error_code="UNTRUSTED_DOWNLOAD_URL",
+                                      lease_owner=lease_owner)
+        db.add(attempt)
+        db.flush()
+        return attempt.id
+
+
+def test_a_failed_advisory_review_download_does_not_block_the_whole_workbench(studio):
+    """A failed *advisory* download must not freeze real production.
+
+    The review models (画面审片 / 语音核对) only give suggestions.  When their
+    download failed, the attempt was still counted as live work: service
+    validation, runtime activation and the production badge refused forever,
+    and nothing in the workbench could clear it.
+    """
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "审片模型下载失败")
+    _attempt(factory, project_id, status="FAILED_RECONCILE_REQUIRED",
+             packages=["qwen3-asr-0.6b"])
+
+    with factory() as db:
+        require_idle_configuration(db)  # must not raise
+
+
+def test_a_failed_production_download_still_blocks_until_it_is_reconciled(studio):
+    """A failed production component is a real half-finished installation."""
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "生产组件下载失败")
+    _attempt(factory, project_id, status="FAILED_RECONCILE_REQUIRED",
+             packages=["minimax-h3-diffusion"])
+
+    with factory() as db, pytest.raises(HTTPException) as excinfo:
+        require_idle_configuration(db)
+    assert excinfo.value.detail == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK"
+
+
+def test_a_failed_download_that_still_owns_a_lease_blocks(studio):
+    """A failure that still holds a lease can still hold the machine."""
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "还占着资源的失败下载")
+    _attempt(factory, project_id, status="FAILED_RECONCILE_REQUIRED",
+             packages=["qwen3-asr-0.6b"], lease_owner="worker-x")
+
+    with factory() as db, pytest.raises(HTTPException) as excinfo:
+        require_idle_configuration(db)
+    assert excinfo.value.detail == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK"
+
+
+def test_a_running_install_still_blocks(studio):
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "正在安装")
+    _attempt(factory, project_id, status="INSTALLING", packages=["minimax-h3-diffusion"])
+
+    with factory() as db, pytest.raises(HTTPException) as excinfo:
+        require_idle_configuration(db)
+    assert excinfo.value.detail == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK"

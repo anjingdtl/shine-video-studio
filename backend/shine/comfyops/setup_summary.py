@@ -36,6 +36,11 @@ SNAPSHOT_VERSION = 1
 IMAGE_CATALOG = "qwen-image-2.1-windows-x64"
 IMAGE_COMPONENTS = ("qwen-image-2.1-unet", "qwen-image-2.1-text-encoder", "qwen-image-2.1-vae")
 REVIEW_COMPONENTS = {"vlm": "qwen3-vl-8b-fp8", "asr": "qwen3-asr-0.6b"}
+RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
+RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
+#: capability -> catalog file stem (the name load_deployment_catalog accepts).
+#: The catalog's own ``catalog_id`` (shine-…) is an identity, not a file name.
+CATALOG_FILE_BY_CAPABILITY = {"image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG}
 H3_CATALOG = "h3-ref2va-windows-x64"
 
 CAPABILITY_LABELS = {
@@ -43,9 +48,10 @@ CAPABILITY_LABELS = {
     "image": "素材出图",
     "vlm": "画面审片",
     "asr": "语音核对",
+    "relayvsr": "RelayVSR 2X 精修",
 }
 
-CAPABILITIES = ("h3", "image", "vlm", "asr")
+CAPABILITIES = ("h3", "image", "vlm", "asr", "relayvsr")
 
 
 # --- installation selection -------------------------------------------------
@@ -280,8 +286,8 @@ def resolve_installation(db, settings, *, path: str | None = None,
 
 def _catalog_for(capability: str) -> dict | None:
     try:
-        if capability == "image":
-            return deployment.load_deployment_catalog(IMAGE_CATALOG)
+        if capability in CATALOG_FILE_BY_CAPABILITY:
+            return deployment.load_deployment_catalog(CATALOG_FILE_BY_CAPABILITY[capability])
         return deployment.load_default_catalog()
     except (OSError, ValueError, FileNotFoundError):
         return None
@@ -290,6 +296,8 @@ def _catalog_for(capability: str) -> dict | None:
 def _component_ids_for(capability: str, catalog: dict) -> set[str]:
     if capability == "image":
         return set(IMAGE_COMPONENTS)
+    if capability == "relayvsr":
+        return set(RELAYVSR_COMPONENTS)
     if capability in REVIEW_COMPONENTS:
         return {REVIEW_COMPONENTS[capability]}
     components = _catalog_components(catalog)
@@ -344,7 +352,8 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
 
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,
-                      project_id: str | None, variant_id: str | None = None) -> dict[str, Any]:
+                      project_id: str | None, variant_id: str | None = None,
+                      runtime_verified: bool = False) -> dict[str, Any]:
     """One capability, as a ladder of facts that never impersonate each other.
 
     ``variant_id`` names the H3 stack the person actually chose.  Without it
@@ -370,7 +379,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     if catalog is None:
         return {
             "key": capability, "label": CAPABILITY_LABELS[capability], "state": "UNKNOWN",
-            "optional": capability in ("vlm", "asr"),
+            "optional": capability in ("vlm", "asr", "relayvsr"),
             "facts": {}, "summary": "这个能力的资源清单读不出来。",
             "next_step": {"code": "CATALOG_UNAVAILABLE", "label": "检查安装清单",
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
@@ -404,13 +413,17 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             from shine.comfyops.variant_readiness import readiness as variant_readiness
             from shine.comfyops.variants import list_variant_manifests
 
+            h3_acceptance: str | None = None
             if binding is None:
                 manifest = next((row for row in list_variant_manifests()
                                  if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
-                if manifest and project_id:
-                    binding = load_binding(str(manifest["variant_id"]), fresh=False)
+                if manifest:
+                    h3_acceptance = str(manifest.get("acceptance_status"))
+                    if project_id:
+                        binding = load_binding(str(manifest["variant_id"]), fresh=False)
             if binding is not None and project_id:
                 report = variant_readiness(db, settings, binding, project_id)
+                h3_acceptance = str(report.get("acceptance_status"))
                 weights = report.get("weights") or []
                 # ``FILES_FOUND`` is never taken from the ledger: its "prepared"
                 # bit also requires a package row, so borrowing it made the same
@@ -425,6 +438,10 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                     "PRODUCTION_READY": bool(report.get("production_ready")),
                 })
                 advisories.extend(report.get("blocking_reasons") or [])
+            # 唯一检验链路：机器级运行合同已核对（与顶部裁决同一个 runtime_report）
+            # 就是「② 运行」的权威答案，无论是否已绑定到具体作品。只对已验收基线
+            # 生效——候选变体不是当前激活的运行配置，绝不能借基线核验冒充就绪。
+            facts["RUNTIME_SERVICES_VERIFIED"] = bool(runtime_verified and h3_acceptance == "SUPPORTED")
         elif capability == "image":
             binding = _image_binding_state(settings)
             from shine.materialprep import runtime
@@ -433,11 +450,29 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             facts["BINDING_STATE"] = binding["binding_state"]
             facts["RECIPE_READY"] = binding["recipe"]["state"] == "READY"
             facts["INSTANCE_BOUND"] = binding["binding_state"] == "READY"
-            facts["WORKFLOW_VALIDATED"] = bool(report.get("graph_report") or {}) and bool(
+            graph_complete = bool(report.get("graph_report") or {}) and bool(
                 (report.get("graph_report") or {}).get("complete"))
-            facts["RENDER_VERIFIED"] = report.get("layer") == "RENDER_VERIFIED"
+            # 唯一检验链路：读整备任务落库的真实小样证据（与出图门禁同一份
+            # render_verified_families，按指纹键控）。指纹不依赖活体 object_info，
+            # 所以空闲渲染器下也能读到已验证事实——一次真实成功出图本身就证明
+            # 运行合同在该指纹下跑通过，不必每次切页都重新活体探测一遍。
+            persisted_verified = bool(runtime.render_verified_families(
+                db, str(report.get("fingerprint") or "")))
+            facts["WORKFLOW_VALIDATED"] = graph_complete or persisted_verified
+            facts["RENDER_VERIFIED"] = report.get("layer") == "RENDER_VERIFIED" or persisted_verified
             facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and facts["INSTANCE_BOUND"]
                                              and facts["WORKFLOW_VALIDATED"])
+            advisories.extend(report.get("blockers") or [])
+        elif capability == "relayvsr":
+            from shine.comfyops import relayvsr
+
+            models_root = _effective_models_root(settings, capability, installation)
+            report = relayvsr.relayvsr_readiness(
+                model_root=Path(models_root) / "diffusion_models" if models_root else None,
+                vae_root=Path(models_root) / "vae" if models_root else None)
+            facts["RELAYVSR_AVAILABLE"] = report.get("available", False)
+            facts["INSTANCE_BOUND"] = report.get("available", False)
+            facts["WORKFLOW_VALIDATED"] = report.get("available", False)
             advisories.extend(report.get("blockers") or [])
         else:
             from shine.comfyops.deployment import advisory_review_readiness
@@ -459,10 +494,11 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "key": capability,
         "label": CAPABILITY_LABELS[capability],
         "catalog": catalog.get("catalog_id"),
+        "catalog_file": CATALOG_FILE_BY_CAPABILITY.get(capability, "h3-ref2va-windows-x64"),
         "state": state,
         # 审片是可选增强：没有它照样能真实出片，只是语义验收留给人工。
         # 机器级「下一步」不得把可选能力报成必做。
-        "optional": capability in ("vlm", "asr"),
+        "optional": capability in ("vlm", "asr", "relayvsr"),
         "facts": facts,
         "summary": summary,
         "next_step": next_step,
@@ -471,7 +507,40 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
+        "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
+                                         missing_files=presence["missing"], advisories=advisories),
     }
+
+
+def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
+                         missing_files: list, advisories: list) -> dict[str, Any]:
+    """The user-facing model: two questions, not a dozen engineering steps.
+
+    ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
+    调整）。内部的核验/绑定/登记/核对仍是必要的工程事实，但用户只需读这两行。
+    """
+    if facts.get("FILES_VERIFIED"):
+        files = {"state": "READY", "label": "文件已就绪并核验"}
+    elif facts.get("FILES_FOUND"):
+        files = {"state": "UNVERIFIED", "label": "文件已找到，待核验"}
+    else:
+        files = {
+            "state": "MISSING",
+            "label": f"缺 {len(missing_files)} 个文件（约 {missing_bytes / 1024 ** 3:.1f} GiB）",
+            "missing_count": len(missing_files), "missing_bytes": missing_bytes,
+        }
+    reason = next((str(a.get("message") or a.get("detail")) for a in advisories
+                   if a.get("message") or a.get("detail")), None)
+    if facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY") or facts.get("RUNTIME_SERVICES_VERIFIED"):
+        run = {"state": "READY", "label": "已验证可运行"}
+    elif facts.get("WORKFLOW_VALIDATED"):
+        run = {"state": "UNVERIFIED", "label": "运行合同已核对，待真实试镜"}
+    else:
+        if files["state"] == "MISSING":
+            reason = "文件未就绪，先补齐文件"
+        run = {"state": "BLOCKED", "label": "跑不通",
+               "reason": reason or "资源尚未绑定到本机渲染器或运行合同未核对"}
+    return {"files": files, "run": run}
 
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
@@ -506,7 +575,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "code": "FILES_NOT_VERIFIED", "label": "核验已有文件",
             "reason": "文件已在本机，还没有逐字节核验。", "action": "RECONCILE",
         }
-    if not facts.get("INSTANCE_BOUND"):
+    if not (facts.get("INSTANCE_BOUND") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         if capability == "image":
             return "VERIFIED", "已经找到出图资源，正在完善本机运行配置。", {
                 "code": "PENDING_RECIPE", "label": "完善本机运行配置",
@@ -516,7 +585,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "code": "INSTANCE_NOT_BOUND", "label": "绑定已核验的资源",
             "reason": "当前实例的模型目录里读不到已核验的文件。", "action": "RECONCILE",
         }
-    if not facts.get("WORKFLOW_VALIDATED"):
+    if not (facts.get("WORKFLOW_VALIDATED") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         return "BOUND", "资源与实例都已就位，还没核对运行合同。", {
             "code": "WORKFLOW_NOT_VALIDATED", "label": "核对运行合同",
             "reason": "还没有在本机真实服务上核对节点与输入。", "action": "PREPARE_ENVIRONMENT",
@@ -544,7 +613,8 @@ def _progress(capabilities: dict[str, dict]) -> list[dict[str, str]]:
     any_found = any(row.get("FILES_FOUND") for row in facts)
     all_verified = bool(facts) and all(row.get("FILES_VERIFIED") for row in facts)
     all_bound = bool(facts) and all(row.get("INSTANCE_BOUND") for row in facts)
-    all_validated = bool(facts) and all(row.get("WORKFLOW_VALIDATED") for row in facts)
+    all_validated = bool(facts) and all(
+        row.get("WORKFLOW_VALIDATED") or row.get("RUNTIME_SERVICES_VERIFIED") for row in facts)
     any_render = any(row.get("RENDER_VERIFIED") for row in facts)
     phases = [
         ("DETECT", "检测本机", any_found),
@@ -577,9 +647,19 @@ def summary(db, settings, *, project_id: str | None = None,
 
     installation = resolve_installation(db, settings, discovered=discovered)
     selected = installation["selected"]
+    # 唯一检验链路：顶部裁决、基础配置与高级设置都读同一个 runtime_report。
+    # 这里算一次机器级运行核验，喂给 h3 的「② 运行」投影，避免各卡片各自推导
+    # 出互相矛盾的结论（裁决说已就绪、卡片却说跑不通）。
+    from shine.comfyops.runtime_configuration import runtime_report
+
+    try:
+        runtime_verified = bool(runtime_report(db, settings).get("services_verified"))
+    except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
+        runtime_verified = False
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
-                               variant_id=variant_id if key == "h3" else None)
+                               variant_id=variant_id if key == "h3" else None,
+                               runtime_verified=runtime_verified if key == "h3" else False)
         for key in CAPABILITIES
     }
     progress = _progress(capabilities)
@@ -623,7 +703,8 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             "reason": "环境可以现在就准备；真实试镜要绑定到一个作品。",
             "action": "SELECT_PROJECT",
         }
-    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr")]
+    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")
+               if key in capabilities]
     for row in ordered:
         # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
         # 没有审片模型照样能真实出片，语义验收留给人工。
@@ -708,7 +789,7 @@ def missing_files(db, settings, *, capabilities: list[str] | None = None) -> dic
     """Exactly the files that are absent, with the fixed source for each."""
     manual_root = Path(settings.comfyops_dir) / "manual-downloads"
     groups = []
-    for capability in capabilities or ["h3", "image", "vlm", "asr"]:
+    for capability in capabilities or ["h3", "image", "vlm", "asr", "relayvsr"]:
         catalog = _catalog_for(capability)
         if catalog is None:
             continue
