@@ -108,3 +108,54 @@
 - 本轮未改 `worker.py`/`preproduction.py` 的 `client_review_identity` 钉住语义之外的
   审片合同；历史 VLM 正负校准仍未完成，不声称已校准。
 - 所有真实产物、密钥、数据库、私有验收数据留在本机隔离目录，未进安装包。
+
+## 8. 唯一性原则全旅程审查轮（2026-11-16 续）
+
+用户要求按唯一性原则审查并修复：① 一点整备全部就绪；② 环境/依赖/模型只用一套
+后台检验链路、前端都挂载它、禁止多链路与硬编码前端阻滞；③ 每步操作后后台运行
+环节有前端动态进度；④ 全旅程清晰简单、不绕弯回头反复验证登记。浏览器实测发现
+并修复了以下真实矛盾（均已定向回归 + 真机浏览器复验）：
+
+- **顶部裁决与能力卡片自相矛盾（②的核心缺陷）**：`/setup/verdict` 报「真实制作
+  已就绪」（runtime ACTIVE + services_verified），但基础配置两步投影里 H3/出图
+  的「② 运行」却报「跑不通 · 资源尚未绑定…运行合同未核对」，并给出多余的
+  「一键绑定渲染器并核对运行合同」按钮。根因：裁决读 `runtime_report.services_verified`，
+  而两步投影各自从 `variant_readiness.workflow_validated`（H3）与
+  `runtime.readiness(object_info=None).graph_report.complete`（出图）独立推导，
+  空闲渲染器下后者恒假。修复：`summary()` 算一次权威 `runtime_report`，喂给 H3
+  两步投影（仅对已验收基线 SUPPORTED 生效，候选绝不借基线核验）；出图改读整备
+  落库的 `render_verified_families`（按指纹键控、不依赖活体探测，与出图门禁同一份
+  证据）。`_capability_verdict`/`_progress` 同步挂载同一信号。修复后 H3「可试镜 ·
+  已验证可运行」、出图「已真实验证 · 已验证可运行」，多余按钮消失，唯一下一步
+  「真实试镜一次」。回归 `test_two_step_and_edit_validation`（+3）。
+- **拍摄页硬编码「本机没有这套权重」**：`DirectorShootPanel` 在可用性未加载时
+  直接落硬编码拒绝文案。改为加载态显示「正在读取本机模型状态…」，加载完成后才
+  按服务端真实 reason 判定。
+- **连接状态多链路**：`useStudio.checkConnection` 归一到 `/system/status.api_online`
+  单一探针（此前另用 `/projects` 短探针，负载下误报失联）。
+- **变体可用性整体缓存报旧结论**：60s 整体结果缓存在权重核验完成后仍报
+  `installed=False`（`test_variant_availability_decouples_preparation_from_production`
+  红）。改为按 `(project_id, weight_evidence 函数身份)` 键控——计算函数被替换
+  （测试替身或台账刷新）即失效；并在整备任务 `_save` 每步主动失效缓存，核验即时
+  生效。暖切页 0.003s。
+- **冷加载超时假失联（③相关）**：`/system/status` 冷态 2.49s、verdict 3.42s，
+  并发冷加载下超过前端 8s 探针 → 「signal timed out / 制作状态暂不可用」。根因：
+  `configuration_identity` 每次重哈希全部钉住文件、`adopted_installation_blockers`
+  每次重走收编安装（解释器哈希 + 节点指纹），一页加载重复 6+ 次。修复：钉住文件
+  哈希按 `(路径, mtime_ns, size)` 键控（字节变即重哈希，漂移仍被发现）；收编核验
+  按 `(instance.sha256, catalog hash, capability, inspect 函数身份)` + 3s TTL 键控
+  （下游渲染仍独立核验权重与节点，此为显示延迟缓存非唯一门禁）。冷态 verdict
+  0.68s、system/status 1.69s、variant-availability 5.54s；浏览器复验顶部徽标稳定
+  「真实制作已就绪」，无超时通知。回归 `test_existing_comfy_adoption`、
+  `test_runtime_activation`、`test_runtime_control_hardening`、`test_service_validation`、
+  `test_resource_resolver_v2` 全绿。
+
+**浏览器复验快照（uid 快照存证，in-app Browser 面板隐藏故无截图）**：顶部「工作台
+后端在线 / 真实制作已就绪 开始制作」；H3「可试镜 · ① 文件已就绪并核验 · ② 已验证
+可运行」；出图「已真实验证 · ② 已验证可运行」；可选审片/语音/RelayVSR 如实「文件
+未就绪 · 下载安装缺文件」（不阻断生产）；唯一下一步「真实试镜一次」。四处显示
+（顶部徽标、基础配置、H3 卡、出图卡）结论一致，无硬编码阻滞、无多余验证按钮。
+
+**本轮提交**：`3400316`（拍摄页加载态）、`0783782`（两步投影挂载权威核验）、
+`5f49a75`（可用性缓存函数身份键控 + 整备失效）、`7cbfd63`（收编/钉住文件哈希缓存）。
+全量 8 分片回归后台执行中（`shards-r2/`），结果待回填。
