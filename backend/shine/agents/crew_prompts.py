@@ -111,6 +111,13 @@ def arbiter_prompt() -> str:
         "binds the authoritative issue text, so the index decides which issue a ruling answers. "
         "Every ruling cites exactly one rule_id taken from arbitration_subject.rule_ids, and a "
         "rationale in English. "
+        "The crew reviews one section at a time. The whole work's structure - its number of "
+        "sections, beats, shots or total duration - belongs to the episode plan and is enforced "
+        "when the person confirms the episode, not by a single section's continuity review. An "
+        "issue that demands this one section contain the whole work's other sections, beats, "
+        "shots or total duration is not_a_conflict: no single section can satisfy the whole "
+        "film's structure, and the official criteria do not require it of one section. Rule such "
+        "a whole-work-structure demand not_a_conflict. "
         "A verdict of not_a_conflict means the issue is not a conflict under those official "
         "criteria: a style suggestion, a reference-set opinion, a risk note, or a demand for "
         "something the official criteria do not require of this plan. A verdict of conflict means "
@@ -466,6 +473,22 @@ def crew_prompt(
                 "server rejects."
             )
     if role == "continuity_supervisor":
+        parts.append(
+            "You review ONE section's shots at a time, exactly as the scriptwriter breaks down "
+            "only this section's brief. Your authority is the internal continuity of THIS "
+            "section's own beats and shots, plus the carry-over from the preceding section's end "
+            "state when the context supplies it. The whole work's structure - how many sections, "
+            "beats, shots or total seconds the episode plan targets - is the plan's own fact, "
+            "enforced when the person confirms the episode; it is NOT a constraint this single "
+            "section must satisfy on its own. A locked story fact that states the whole work's "
+            "structure (for example 'the whole film has six scenes and six shots') is background "
+            "telling you where this section sits, never a demand that this section contain the "
+            "whole work. NEVER report 'this section is missing the other scenes, beats or shots "
+            "of the whole work' as a conflict: no single section can or should hold the whole "
+            "film, and the official criteria do not require it of one section. When this "
+            "section's own shots are internally consistent and renderable, return an empty "
+            "issues array with proceed_to_preflight even if the whole work is not yet complete."
+        )
         parts.append(
             "The issues array is for concrete continuity CONFLICTS only: contradictions between "
             "the shots, the script and the locked story facts that make a shot unrenderable or "

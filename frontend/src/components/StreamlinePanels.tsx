@@ -362,7 +362,10 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   onGoStage?: (target: ErrorActionTarget) => void;
 }) {
   const [state, setState] = useState<EpisodeStoryboardState | null>(null);
-  const [tables, setTables] = useState<Record<string, { shots: EpisodeShotRow[]; total: number }>>({});
+  const [tables, setTables] = useState<Record<string, {
+    shots: EpisodeShotRow[]; total: number;
+    stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number;
+  }>>({});
   const [editing, setEditing] = useState<{ shotId: string; duration: string } | null>(null);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
@@ -383,11 +386,16 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     const rows = await fetchDirectorStoryboardState(projectId);
     setState(rows);
     if (rows.episodes.length) {
-      const next: Record<string, { shots: EpisodeShotRow[]; total: number }> = {};
+      const next: Record<string, { shots: EpisodeShotRow[]; total: number;
+        stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number }> = {};
       await Promise.all(rows.episodes.map(async (episode) => {
         try {
           const table = await fetchEpisodeShots(projectId, episode.episode_id);
-          next[episode.episode_id] = { shots: table.shots, total: table.total_editorial_seconds };
+          next[episode.episode_id] = {
+            shots: table.shots, total: table.total_editorial_seconds,
+            stale: table.confirmation_stale, confirmedVersion: table.confirmed_version,
+            confirmedCount: table.confirmed_shot_ids?.length,
+          };
         } catch { next[episode.episode_id] = { shots: [], total: 0 }; }
       }));
       setTables(next);
@@ -511,10 +519,17 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   const episodes = state?.episodes ?? [];
   const railPresent = useRailPresent();
   const readyCount = episodes.filter((row) => confirmedEpisodes[row.episode_id]).length;
+  // 操作栏必须名实一致：全部集都已确认且没有待重新确认的新拆镜时，没有「未确认
+  // 的场次」可再跑，主操作应是去旅程的下一步（拍摄素材准备），而不是挂一个空跑
+  // 的再跑按钮，也不能跳过素材准备直接去导演包。
+  const allConfirmed = episodes.length > 0 && readyCount === episodes.length
+    && !episodes.some((row) => tables[row.episode_id]?.stale);
   const primary: RailAction | null = running
     ? null
-    : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
-        loading: busy === 'generate', icon: <Sparkles size={14} /> };
+    : allConfirmed
+      ? { label: '去素材准备', onClick: () => onGoStage?.('assets-stage'), icon: <Film size={14} /> }
+      : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
+          loading: busy === 'generate', icon: <Sparkles size={14} /> };
   useStageRail('episode-storyboard', {
     priority: 1,
     primary,
@@ -523,7 +538,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
         sum + row.units.filter((unit) => unit.state === 'APPLIED').length, 0),
       total: episodes.reduce((sum, row) => sum + row.units.length, 0) || undefined,
     } : null,
-  }, [state, busy, running]);
+  }, [state, busy, running, tables, confirmedEpisodes, allConfirmed]);
 
   return <section className="card section-card" id="episode-storyboard">
     <div className="section-heading">
@@ -542,8 +557,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
 
     <div className="episode-actions">
       {!railPresent && <button type="button" className="btn-primary" disabled={busy !== '' || running}
-        onClick={generate}>
-        <Play size={13} /> {running ? '分镜生成中…' : (state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜')}
+        onClick={allConfirmed ? () => onGoStage?.('assets-stage') : generate}>
+        <Play size={13} /> {running ? '分镜生成中…' : allConfirmed ? '去素材准备' : (state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜')}
       </button>}
       {state?.status === 'NEEDS_REVIEW' && <span className="run-hint">
         <TriangleAlert size={12} /> 有集被阻塞；每一集可单独重试，其余集不受影响。
@@ -583,11 +598,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
       const confirmedVersion = confirmedEpisodes[episode.episode_id];
       const applied = episode.status === 'APPLIED';
       const blocked = episode.status === 'BLOCKED';
-      return <details key={episode.episode_id} className="stage-dock episode-dock" open={!confirmedVersion}>
+      return <details key={episode.episode_id} className="stage-dock episode-dock" open={!confirmedVersion || !!table?.stale}>
         <summary className="produce-focus-summary">
           <span className="focus-summary-label">
             {confirmedVersion
-              ? <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.shots.length ?? 0} 镜）</>
+              ? table?.stale
+                ? <><RefreshCw size={13} /> 第 {episode.order ?? episode.episode_id} 集 · 最新拆镜 {table.shots.length} 镜 · 待重新确认</>
+                : <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.shots.length ?? 0} 镜）</>
               : blocked
                 ? <><TriangleAlert size={13} /> 第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}</>
                 : <>第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}{table?.shots.length ? `（${table.shots.length} 镜）` : ''}</>}
@@ -668,7 +685,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                       : shot.duration_target_s}
                   </td>
                   <td>
-                    <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
+                    <button type="button" className="btn-text" disabled={busy !== '' || (!!confirmedVersion && !table?.stale)}
                       title="点击切换衔接：接拍延续上一镜末帧（画面连贯），切开为独立镜头"
                       onClick={() => void toggleContinuity(shot)}>
                       {shot.continuity_mode === 'last_frame' ? '接拍' : '切开'}
@@ -694,7 +711,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                     {editing?.shotId === shot.shot_id
                       ? <button type="button" className="btn-text" disabled={busy !== ''}
                           onClick={() => void saveDuration(shot)}>保存</button>
-                      : <button type="button" className="btn-text" disabled={busy !== '' || !!confirmedVersion}
+                      : <button type="button" className="btn-text" disabled={busy !== '' || (!!confirmedVersion && !table?.stale)}
                           onClick={() => setEditing({ shotId: shot.shot_id, duration: String(shot.duration_target_s) })}>
                           改时长</button>}
                     <button type="button" className="btn-text" disabled={busy !== ''}
@@ -729,6 +746,14 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
             onClick={() => confirmEpisode(episode.episode_id)}>
             <Check size={13} /> 确认本集镜头（{table?.shots.length ?? 0} 镜）
           </button>}
+          {confirmedVersion && table?.stale && <div className="notice" role="alert">
+            <p>最新拆镜落了 {table.shots.length} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
+              重新确认本集才会用新镜头替换旧确认；旧镜头与已出片产物作为历史保留，不会被改写。</p>
+            <button type="button" className="btn-primary" disabled={busy !== '' || !table.shots.length}
+              onClick={() => confirmEpisode(episode.episode_id)}>
+              <Check size={13} /> 重新确认本集（采用最新 {table.shots.length} 镜）
+            </button>
+          </div>}
           {durationDeviation?.episodeId === episode.episode_id && <div className="notice" role="alert">
             <p>{durationDeviation.text} 可用每镜「改时长」把总时长调进目标窗，或显式接受当前偏差。</p>
             <button type="button" className="btn-secondary" disabled={busy !== ''}

@@ -1275,19 +1275,35 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
     plan = _latest_plan(db, project_id)
     shot_ids: list[str] = []
     section_of: dict[str, str] = {}
+    confirmed_shot_ids: list[str] = []
+    confirmed_version: int | None = None
     if plan is not None:
         from shine.director.contracts import EpisodePlanPayload
 
         payload = EpisodePlanPayload.model_validate(plan.payload)
         target = next((e for e in payload.episodes if e.episode_id == episode_id), None)
         if target is not None:
-            if target.shot_ids:
-                shot_ids = list(target.shot_ids)
-            else:
-                for section_id in target.section_ids:
-                    for sid in section_storyboard_shot_ids(db, project_id, section_id)["shot_ids"]:
-                        shot_ids.append(sid)
-                        section_of[sid] = section_id
+            confirmed_shot_ids = list(target.shot_ids or [])
+            if plan.status == "CONFIRMED":
+                confirmed_version = plan.version
+            # The table is the LIVE storyboard: the newest applied shots of each
+            # section, the same source confirmation reads. The confirmed plan's
+            # shot_ids are a frozen production snapshot, not the current
+            # storyboard fact; preferring them hid every re-run's new shots
+            # behind the old confirmed set (live 2026-11-16: v6/17 stayed on
+            # screen after a fresh six-shot run, so re-running looked like it
+            # only piled records up instead of replacing the failed scenes).
+            for section_id in target.section_ids:
+                resolved = section_storyboard_shot_ids(db, project_id, section_id)
+                if resolved.get("merged_into"):
+                    continue
+                for sid in resolved["shot_ids"]:
+                    shot_ids.append(sid)
+                    section_of[sid] = section_id
+            if not shot_ids and confirmed_shot_ids:
+                # No run evidence for any section yet (legacy plan): the frozen
+                # snapshot is the only readable fact.
+                shot_ids = list(confirmed_shot_ids)
     from shine.director.models import ShotPromptRevision, ShotSubtitle
     from shine.director.prompt_revisions import manual_status_for
 
@@ -1357,8 +1373,14 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
                 "line_count": len(subtitle_row.lines or []) if subtitle_row is not None else 0,
             },
         })
+    live_ids = [row["shot_id"] for row in rows]
     return {"episode_id": episode_id, "shots": rows,
-            "total_editorial_seconds": round(total, 3), "shot_count": len(rows)}
+            "total_editorial_seconds": round(total, 3), "shot_count": len(rows),
+            "confirmed_shot_ids": confirmed_shot_ids,
+            "confirmed_version": confirmed_version,
+            "confirmation_stale": bool(confirmed_version is not None
+                                       and confirmed_shot_ids
+                                       and live_ids != confirmed_shot_ids)}
 
 
 # ---------------------------------------------------------------------------

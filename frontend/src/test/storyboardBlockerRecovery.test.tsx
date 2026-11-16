@@ -230,3 +230,80 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(screen.getByRole('button', { name: '核对这次请求并重试' })).toBeEnabled();
   });
 });
+
+describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确认方案', () => {
+  // 活缺陷（2026-11-16）：确认过 v6（17 镜）后重跑拆镜落了 6 镜，页面仍显示
+  // 「已确认 v6，17 镜」，重跑看起来只是在叠加记录。镜头表必须读最新落镜，
+  // 徽章区分「已确认 17 镜」与「最新 6 镜待重新确认」，并给出重新确认入口。
+  function liveShot(id: string, position: number) {
+    return {
+      shot_id: id, position, name: id, revision: 1, section_id: 'sec-1',
+      story_beat: '阿远走在雨街上。', characters: ['阿远'], dialogue: [],
+      duration_target_s: 10, editorial_seconds: 10, h3_segment_count: 1,
+      h3_generation_seconds: 10, internal_cuts: [], continuity_mode: 'cut',
+      previous_shot_id: null, required_asset_ids: [],
+      prompt: { status: 'compiled', revision: null, mode: null, chars: null, frozen_at: null },
+      subtitle: { status: 'EMPTY', revision: 0, line_count: 0 },
+    };
+  }
+
+  it('确认快照与最新落镜不同时，徽章如实区分并给出重新确认入口', async () => {
+    const confirmed = vi.fn();
+    const oldIds = Array.from({ length: 17 }, (_, i) => `old-${i + 1}`);
+    const newShots = Array.from({ length: 6 }, (_, i) => liveShot(`new-${i + 1}`, i + 1));
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/state$/,
+      respond: () => jsonResponse({
+        task_id: 'run-1', status: 'SUCCEEDED', state_version: 7, cursor: 6, total_units: 6,
+        episodes: [{ episode_id: 'ep-01', order: 1, units: [],
+          shot_ids: newShots.map((s) => s.shot_id), status: 'APPLIED' }],
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/shots$/,
+      respond: () => jsonResponse({
+        episode_id: 'ep-01', shots: newShots, total_editorial_seconds: 60, shot_count: 6,
+        confirmed_shot_ids: oldIds, confirmed_version: 6, confirmation_stale: true,
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/episode-plans$/,
+      respond: () => jsonResponse([{ version: 6, status: 'CONFIRMED',
+        payload: { episodes: [{ episode_id: 'ep-01', shot_ids: oldIds }] } }]) });
+    stub.add({ method: 'POST', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/confirm$/,
+      respond: () => { confirmed(); return jsonResponse({ plan_version: 7, episode_id: 'ep-01', shot_ids: newShots.map((s) => s.shot_id) }); } });
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    const summary = await screen.findByText(/最新拆镜 6 镜 · 待重新确认/);
+    // 徽章主数字与下方镜头表一致（都是最新 6 镜）；旧确认 17 镜只在重新确认说明里。
+    expect(summary.textContent).not.toContain('17 镜');
+    const hint = await screen.findByText(/每镜由 6 个 4–15 秒/);
+    expect(hint.textContent).toContain('60 秒');
+    expect(document.querySelectorAll('.shot-table-row').length).toBe(6);
+    expect(screen.getByText(/与已确认的 v6（17 镜）不同/)).toBeTruthy();
+    const reconfirm = screen.getByRole('button', { name: '重新确认本集（采用最新 6 镜）' });
+    await userEvent.setup().click(reconfirm);
+    await waitFor(() => expect(confirmed).toHaveBeenCalledTimes(1));
+  });
+
+  it('全部场次已确认且无新拆镜时，主操作是去素材准备，而不是空跑的再跑按钮', async () => {
+    // 三原则（2026-11-16）：操作栏名实一致，且遵循旅程顺序。6 场全确认（v7）后
+    // 没有「未确认的场次」，再挂「再跑一遍」就是名实不符；下一步是拍摄素材准备
+    // （第④阶段），不能跳过素材直接去导演包。
+    const ids = Array.from({ length: 6 }, (_, i) => `s-${i + 1}`);
+    const shots = ids.map((id, i) => liveShot(id, i + 1));
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/state$/,
+      respond: () => jsonResponse({
+        task_id: 'run-1', status: 'SUCCEEDED', state_version: 8, cursor: 6, total_units: 6,
+        episodes: [{ episode_id: 'ep-01', order: 1, units: [], shot_ids: ids, status: 'APPLIED' }],
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/shots$/,
+      respond: () => jsonResponse({
+        episode_id: 'ep-01', shots, total_editorial_seconds: 60, shot_count: 6,
+        confirmed_shot_ids: ids, confirmed_version: 7, confirmation_stale: false,
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/episode-plans$/,
+      respond: () => jsonResponse([{ version: 7, status: 'CONFIRMED',
+        payload: { episodes: [{ episode_id: 'ep-01', shot_ids: ids }] } }]) });
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    expect(await screen.findByRole('button', { name: '去素材准备' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /再跑一遍（未确认的场次）/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: '去导演包' })).toBeNull();
+  });
+});

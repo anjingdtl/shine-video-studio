@@ -378,7 +378,11 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     return evidence
 
 
-def _profile_rows(db: Session, project_id: str, names: list[str]) -> list[dict[str, Any]]:
+def _profile_rows(db: Session, project_id: str, names: list[str],
+                  machine_validated: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    # 机器级运行激活已校验的规范方案，项目直接继承其「已登记+已校验」事实，
+    # 不再要求每个项目把同一套规范图重新登记+重新校验（一个裁决，下级继承上级）。
+    machine_validated = machine_validated or {}
     rows = db.scalars(select(WorkflowProfile).where(
         WorkflowProfile.project_id == project_id,
         WorkflowProfile.name.in_(names),
@@ -387,12 +391,15 @@ def _profile_rows(db: Session, project_id: str, names: list[str]) -> list[dict[s
     result: list[dict[str, Any]] = []
     for name in names:
         row = by_name.get(name)
+        inherited = machine_validated.get(name)
         identity = (row.model_identity or {}) if row is not None else {}
         validated = (row.validated_against or {}) if row is not None else {}
+        if row is None and inherited:
+            validated = dict(inherited)
         result.append({
             "name": name,
             "profile_id": row.id if row is not None else None,
-            "registered": row is not None,
+            "registered": row is not None or bool(inherited),
             "graph_sha256": row.graph_sha256 if row is not None else None,
             "checkpoint_id": row.checkpoint_id if row is not None else None,
             "parameter_map_keys": sorted((row.parameter_map or {}).keys()) if row is not None else [],
@@ -471,7 +478,17 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
     """The five layers of one variant on this machine, plus one next step."""
     weights = weight_evidence(db, settings, binding)
     instance_binding = current_instance(db, settings)
-    profiles = _profile_rows(db, project_id, binding.profile_names)
+    from shine.comfyops.runtime_configuration import service_evidence_status
+
+    machine_validation = service_evidence_status(db, settings)
+    machine_validated: dict[str, Any] = {}
+    if machine_validation.get("status") == "READY":
+        evidence = {"source": "machine_service_validation",
+                    "node_inventory_sha256": machine_validation.get("node_inventory_sha256"),
+                    "validated_at": machine_validation.get("validated_at")}
+        machine_validated = {name: evidence
+                             for name in (machine_validation.get("workflow_profiles") or [])}
+    profiles = _profile_rows(db, project_id, binding.profile_names, machine_validated)
     profile_ids = [row["profile_id"] for row in profiles if row["profile_id"]]
     render = _real_render(db, project_id, profile_ids)
 

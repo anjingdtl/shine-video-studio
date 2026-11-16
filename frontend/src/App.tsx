@@ -1065,6 +1065,7 @@ function App() {
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}
                 onNavigate={(page) => goToDirectorPage(page)}
+                onGoSetup={() => goToDirectorSetup('models')}
               />}
               {directorPage === 'package' && <StageDock id="preproduction" title="制片准备与语义审片校准(高级)">
                 <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
@@ -1088,6 +1089,7 @@ function App() {
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}
                 onNavigate={(page) => goToDirectorPage(page)}
+                onGoSetup={() => goToDirectorSetup('models')}
               />}
               <details className="stage-dock" id="production-monitor" open={false}>
                 <summary className="produce-focus-summary">

@@ -346,7 +346,7 @@ describe('⑦ 逐集成片', () => {
 });
 
 describe('⑤ 模型版本选择与资源准备解耦', () => {
-  it('未安装的 W6A8 仍可选中并进入资源整备，但开拍闸门保持关闭', async () => {
+  it('未安装的 W6A8 仍可选中，下载归一到基础配置（本页无第二套下载入口），开拍闸门保持关闭', async () => {
     stubOverview(overviewBody([episode({})]));
     stubRef2vaProfile();
     stubStrategyOptions();
@@ -364,9 +364,6 @@ describe('⑤ 模型版本选择与资源准备解耦', () => {
       ] }) });
     stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
       ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/setup\/resources\/resolve$/,
-      respond: () => jsonResponse({ components: [], missing_download_bytes: 0, snapshot_sha256: 'a'.repeat(64),
-        download_eligible: true, blockers: [], managed_installations: [] }) });
 
     const user = userEvent.setup();
     render(<App />);
@@ -377,8 +374,12 @@ describe('⑤ 模型版本选择与资源准备解耦', () => {
     const w6a8 = await screen.findByRole('radio', { name: /低显存候选 · W6A8/ });
     expect(w6a8).toBeEnabled();
     await user.click(w6a8);
-    // 选中后出现资源整备卡，引导扫描/下载/校验。
-    expect(await screen.findByText('模型资源检测')).toBeInTheDocument();
+    // 三原则归一：本页只把未就绪变体导航到基础配置，不嵌第二套下载卡
+    // （下载来源/检测所需资源/确认并下载都不再出现在导演包页）。
+    expect(await screen.findByRole('button', { name: '去基础配置准备模型' })).toBeInTheDocument();
+    expect(screen.queryByText('模型资源检测')).toBeNull();
+    expect(screen.queryByText('下载来源')).toBeNull();
+    expect(screen.queryByRole('button', { name: '检测所需资源' })).toBeNull();
     // 开拍闸门仍然关闭：候选未通过真实生产验收。
     const [start] = await screen.findAllByRole('button', { name: /确认拍摄方案并开始真实制作/ });
     await waitFor(() => expect(start).toBeDisabled());

@@ -184,3 +184,24 @@ def test_a_renamed_weight_verified_by_reconcile_is_not_downloaded_again(prep, tw
     assert h3["missing_bytes"] == 0
     assert h3["facts"]["FILES_FOUND"] is True
     assert h3["facts"]["FILES_VERIFIED"] is True
+
+
+def test_a_machine_validated_canonical_profile_is_inherited_without_project_rows(prep):
+    # 三原则（2026-11-16）：机器级运行激活已按真实渲染器校验过的规范方案，项目
+    # 直接继承其「已登记+已校验」事实，不再要求每个项目把同一套规范图重新登记+
+    # 重新校验一遍（下级闸卡上级，违反一个裁决）。没有机器校验也没有项目行时，
+    # 仍如实报未登记，绝不凭空就绪。
+    from shine.comfyops.variant_readiness import _profile_rows
+    client, factory, _settings = prep
+    project = create_project(client)
+    name = "local-h3-ref2va-pdd8-2img-1aud"
+    evidence = {"source": "machine_service_validation", "node_inventory_sha256": "n" * 64}
+    with factory() as db:
+        rows = _profile_rows(db, project, [name], {name: evidence})
+    assert rows[0]["registered"] is True
+    assert rows[0]["validated"] is True
+    assert rows[0]["validated_against"]["source"] == "machine_service_validation"
+    with factory() as db:
+        bare = _profile_rows(db, project, [name])
+    assert bare[0]["registered"] is False
+    assert bare[0]["validated"] is False

@@ -1653,7 +1653,8 @@ export const queueDirectorStoryboard = (projectId: string) =>
     `/projects/${projectId}/director/storyboard/generate`, json('POST', {}));
 
 export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
-  api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number }>(
+  api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number;
+        confirmed_shot_ids?: string[]; confirmed_version?: number | null; confirmation_stale?: boolean }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
 
 export const confirmEpisodeShots = (projectId: string, episodeId: string,
