@@ -187,3 +187,34 @@
 **A11 完整成片仍未产出**：需先核对/重发委托人 Brief、生成并人工确认锁定 3 项人物
 主素材，再冻结导演包 → H3 逐镜渲染 23 镜 → 后期合成 → 可解码成片 + 人工验收。
 本轮验证的是「链路唯一、状态一致、进度可见、失败可核对」，不声称整片已通过。
+
+## 10. 全量回归口径与既有失败说明（2026-11-16）
+
+- **前端全量**：`npx vitest run --no-file-parallelism` → **78 文件 / 396 项全绿**；
+  `tsc --noEmit` 通过；`npm run build` 通过（1651 模块）。
+- **本轮改动定向后端回归全绿**：`test_two_step_and_edit_validation`(9)、
+  `test_setup_capability_gates`(21)、`test_relayvsr_and_profiles`(6)、
+  `test_variant_binding_and_gate`(23)、`test_variant_aware_summary`(4)、
+  `test_summary_optional_review`(3)、`test_setup_one_stop_v41`(12)、
+  `test_setup_preparation_chain`(10)、`test_resource_resolver_v2`(19)、
+  `test_runtime_activation`(16)、`test_runtime_control_hardening`(40)、
+  `test_existing_comfy_adoption`(7)、`test_service_validation`(8) 均通过。
+- **后端 8 分片全量**（`shards-r2/`，`CODEBUDDY_SAFE_DELETE_ENABLED=0`、按文件
+  `split -n r/8`）：8 分片均退出，但日志含以下失败，**逐一核实的结论是「全部为既有
+  失败或环境假失败，本轮零新增」**：
+  - **既有失败（同一根因，已在本轮起点 `9c4b05d` 的独立 worktree 复现）**：
+    `test_repair_revisions`×4、`test_film_crew`×1、`test_comfy_completion_window`×4、
+    `test_v13_e2e`×1、`test_offline_e2e`×2。错误签名一致：
+    `acceptance_status='pending_review' / acceptance_final_gate=None`、
+    `REPAIR_PENDING != PASSED`。根因在验收/最终门禁逻辑（`worker.py`/`quality.py`），
+    **本轮未改动这两个文件**（`git diff 9c4b05d HEAD -- worker.py quality.py repair.py
+    preproduction.py` 为空）。在 `9c4b05d`（本轮任何后端改动之前）独立 worktree 复跑
+    同样失败，证明非本轮引入。
+  - **NO_PROXY 环境假失败**：`test_renderer_supervisor` 在本会话 `NO_PROXY` 含
+    `[::1]` 时 httpx 解析失败（`Invalid port ':1]'`）；`env -u NO_PROXY -u no_proxy`
+    复跑 47 项全绿（AGENTS.md 已记载此坑）。
+  - **端口占用环境假失败**：`test_image_managed_renderer::test_an_unmanaged_instance_is_refused`
+    报 `EXTERNAL_INSTANCE_ON_PORT port=8188`——验收 dev 栈/素材生成正占用 8188，
+    测试把活渲染器当成外部实例；停栈后该用例即恢复，非代码缺陷。
+- **判定**：本轮改动相关的定向用例与前端全量全绿；全量日志中的失败均属既有或环境
+  假失败，**不声称后端全量全绿**，既有验收门禁根因留待对应负责人处理（不在本轮范围）。
