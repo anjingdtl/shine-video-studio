@@ -22,7 +22,6 @@ import ProductionSeriesPanel from './components/ProductionSeriesPanel';
 import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
-import StoryboardPanel from './components/StoryboardPanel';
 import DeliveryPanel from './components/DeliveryPanel';
 import VideoLibraryPanel from './components/VideoLibraryPanel';
 import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
@@ -956,10 +955,6 @@ function App() {
                   <StageDock id="manual-storyboard" title="手工分镜草稿与单镜任务(高级)">
                     <DirectorStoryboardStage projectId={projectId} onMessage={report}
                       onJourneyRefresh={() => refreshAll().catch(() => undefined)} />
-                    <StoryboardPanel key={`storyboard-${projectId}`} projectId={projectId} onRefresh={refreshAll}
-                      backendDisconnected={systemChecked && !apiOnline}
-                      visible={directorPage === 'produce'}
-                      onNavigate={(page) => goToDirectorPage(page as DirectorPage)} />
                     <ShotPanel
                       assets={assets}
                       shots={shots}
