@@ -334,12 +334,21 @@ const REFUSAL_LABELS: Record<string, string> = {
 };
 
 function refusalReason(rejection: { code?: string; rejection_reason_code?: string;
-                                    provider_finish_reason?: string | null }): string {
+                                    provider_finish_reason?: string | null;
+                                    external_outcome?: string | null;
+                                    network_timeout_s?: number | null }): string {
   const code = rejection.rejection_reason_code ?? rejection.code ?? '';
   if (code === 'LLM_FORMAT') {
     return rejection.provider_finish_reason === 'length'
       ? '模型输出被截断，格式解析失败（LLM_FORMAT）'
       : '模型返回的格式无法解析（LLM_FORMAT）';
+  }
+  // 超时/流中断且结果未知：用记录自带的死线事实说清「超过 N 秒无回应」，
+  // 而不是笼统的「连不上远端模型」（连接其实已建立，是模型迟迟不应答）。
+  if (['LLM_TIMEOUT', 'LLM_CONNECTION', 'LLM_SERVER'].includes(code)
+      && rejection.external_outcome === 'UNKNOWN'
+      && typeof rejection.network_timeout_s === 'number' && rejection.network_timeout_s > 0) {
+    return `模型超过 ${Math.round(rejection.network_timeout_s)} 秒无回应，结果未知（${code}）`;
   }
   const label = REFUSAL_LABELS[code];
   return label ? `${label}（${code}）` : (code || '分镜被拒绝');

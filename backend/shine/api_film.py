@@ -1542,6 +1542,16 @@ def generate_storyboard(
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:
                 rejection["external_outcome"] = outcome
+            # The deadline the call ran under and the phase it reached are the
+            # facts that let the panel say "the model did not answer within N
+            # seconds" rather than a generic connection label. They are read
+            # from this same record, never invented by the display layer.
+            timeout_s = task.trace.get("network_timeout_s")
+            if isinstance(timeout_s, (int, float)) and not isinstance(timeout_s, bool) and timeout_s > 0:
+                rejection["network_timeout_s"] = timeout_s
+            phase = task.trace.get("phase")
+            if isinstance(phase, str) and phase:
+                rejection["phase"] = phase
         return rejection
 
     try:

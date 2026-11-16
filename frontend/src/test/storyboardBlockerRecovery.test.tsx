@@ -188,4 +188,45 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(callout.textContent).toContain('UNAPPROVED_ASSET_OR_UNKNOWN_BEAT');
     expect(screen.getByRole('button', { name: '重试这一场' })).toBeEnabled();
   });
+
+  it('LLM 超时无回应：报出具体秒数与未知结果，并给出核对重试入口', async () => {
+    // 实障：摄影 streaming 拿到 200 后 600s 无首事件 → LLM_CONNECTION/UNKNOWN。
+    // 旧文案「连不上远端模型」与事实不符（连接已建立）；须用记录自带的死线事实
+    // 说清「超过 600 秒无回应」，重试仍走唯一的核对+授权重发入口。
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/state$/,
+      respond: () => jsonResponse({
+        task_id: 'run-1', status: 'NEEDS_REVIEW', state_version: 8,
+        error_code: 'DIRECTOR_STORYBOARD_EPISODE_BLOCKED', cursor: 4, total_units: 7,
+        episodes: [{
+          episode_id: 'ep-01', order: 1,
+          units: [
+            { index: 3, production_section_id: 'sec-4', state: 'APPLIED', shot_count: 2,
+              material_notices: [], section_order: 4, section_title: '第4场·雨夜独行' },
+            { index: 4, production_section_id: 'sec-5', state: 'BLOCKED', shot_count: 0,
+              material_notices: [], section_order: 5, section_title: '第5场·伞下停留' },
+          ],
+          shot_ids: ['s1'], status: 'BLOCKED',
+          blocker: {
+            unit_index: 4, status: 'NEEDS_REVIEW', failed_role: 'cinematographer',
+            failed_task_id: FAILED_TASK,
+            rejections: [{
+              role: 'cinematographer', code: 'LLM_CONNECTION',
+              rejection_reason_code: 'LLM_CONNECTION', task_id: FAILED_TASK, state_version: 1,
+              external_outcome: 'UNKNOWN', network_timeout_s: 600, phase: 'WAITING_PROVIDER',
+            }],
+          },
+        }],
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/shots$/,
+      respond: () => jsonResponse({ episode_id: 'ep-01', shots: [], total_editorial_seconds: 0, shot_count: 0 }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/episode-plans$/,
+      respond: () => jsonResponse([]) });
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    const callout = await screen.findByText(/第 5 场/);
+    expect(callout.textContent).toContain('模型超过 600 秒无回应');
+    expect(callout.textContent).toContain('结果未知');
+    expect(callout.textContent).not.toContain('连不上远端模型');
+    expect(screen.getByRole('button', { name: '核对这次请求并重试' })).toBeEnabled();
+  });
 });

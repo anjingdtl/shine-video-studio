@@ -1639,7 +1639,8 @@ export type EpisodeStoryboardState = {
       unit_index?: number; status: string; failed_role: string | null; failed_task_id: string | null;
       rejections: Array<{ role: string; code: string; rejection_reason_code?: string;
                           external_outcome?: string; task_id?: string | null; state_version?: number;
-                          provider_finish_reason?: string | null; provider_text_chars?: number | null }>;
+                          provider_finish_reason?: string | null; provider_text_chars?: number | null;
+                          network_timeout_s?: number | null; phase?: string | null }>;
     } | null;
   }>;
 };
