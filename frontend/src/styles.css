@@ -2468,6 +2468,20 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-evidence dd{margin:0;font-size:var(--fs-caption);color:var(--ink-2);word-break:break-word}
 .copilot-evidence small{display:block;margin-top:2px;font-family:var(--mono);color:var(--faint-2);font-size:10px}
 .copilot-offline{margin:7px 0 0;padding:6px 8px;border-radius:6px;background:var(--sand-bg);color:var(--sand-ink);font-size:var(--fs-caption);line-height:1.55}
+.copilot-knowledge{margin-top:9px;padding-top:9px;border-top:1px dashed var(--line-2);display:flex;flex-direction:column;gap:6px}
+.copilot-knowledge-row{display:flex;flex-wrap:wrap;align-items:center;gap:5px;font-size:var(--fs-caption);color:var(--ink-2);line-height:1.55}
+.copilot-knowledge-row small{flex-basis:100%;font-family:var(--mono);font-size:10px;color:var(--faint-2);word-break:break-all}
+.copilot-plan{margin-top:9px;padding:9px;border:1px solid var(--line-2);border-radius:9px;background:var(--surface-2);font-size:var(--fs-caption)}
+.copilot-plan-head{display:flex;align-items:baseline;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.copilot-plan-head b{color:var(--olive-dark)}
+.copilot-plan-head span{color:var(--muted)}
+.copilot-plan-steps{margin:0;padding-left:16px;line-height:1.6;display:flex;flex-direction:column;gap:6px}
+.copilot-plan-steps li{display:flex;flex-wrap:wrap;align-items:center;gap:5px;color:var(--ink-2)}
+.copilot-plan-steps li b{color:var(--ink)}
+.copilot-plan-steps li small,.copilot-plan-steps li em{flex-basis:100%;font-style:normal;color:var(--faint);font-size:10px;line-height:1.5}
+.copilot-chip.plan-blocked,.copilot-chip.plan-not_supported{background:var(--danger-bg);color:var(--danger-deep)}
+.copilot-chip.plan-human_required{background:var(--sand-bg);color:var(--sand-ink)}
+.copilot-chip.plan-ready{background:var(--mint-2);color:var(--ok-ink-2)}
 .copilot-actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
 .copilot-action{display:inline-flex;align-items:center;gap:5px;min-height:32px;padding:0 10px;border:1px solid var(--olive-line);border-radius:7px;background:var(--olive-bg);color:var(--olive-dark);font-size:var(--fs-caption);font-weight:600}
 .copilot-action:hover{background:var(--olive-bg-2)}

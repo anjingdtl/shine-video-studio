@@ -28,6 +28,7 @@ from shine.models import (
     Job,
     JobDependency,
     Project,
+    ProjectDocument,
     ProjectTerminology,
     Shot,
     ShotAssetBinding,
@@ -130,6 +131,138 @@ def require_project(db: Session, project_id: str) -> Project:
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
     return project
+
+
+#: One hard limit for imported scripts, shared by the upload route and the
+#: copilot's controlled import action.
+MAX_SCRIPT_BYTES = 20 * 1024 * 1024
+
+
+def canonical_project_language(value: str) -> str:
+    """The project language in the one form the H3 prompt may use."""
+    from shine.h3.spoken_language import SPOKEN_LANGUAGES, canonical_spoken_language
+
+    canonical = canonical_spoken_language(value)
+    if canonical is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Project language must be written in English so it can be stated in the H3 prompt; "
+                f"allowed values are {', '.join(SPOKEN_LANGUAGES)}"
+            ),
+        )
+    return canonical
+
+
+def create_project(
+    db: Session,
+    *,
+    title: str,
+    description: str = "",
+    language: str = "Chinese",
+    actor: str = "user",
+) -> Project:
+    """Create one empty project (the only executor of ``POST /projects``)."""
+    project = Project(
+        title=(title or "").strip(),
+        description=description,
+        language=canonical_project_language(language),
+    )
+    if not project.title:
+        raise HTTPException(status_code=422, detail="Project title cannot be blank")
+    db.add(project)
+    db.flush()
+    add_audit(db, actor, "PROJECT_CREATED", "project", project.id, project_id=project.id)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+def update_project_settings(
+    db: Session,
+    project: Project,
+    updates: dict[str, Any],
+    *,
+    actor: str = "user",
+) -> Project:
+    """Apply user-level project settings (one executor for the PATCH route)."""
+    clean = {key: value for key, value in updates.items() if value is not None}
+    if "language" in clean:
+        clean["language"] = canonical_project_language(clean["language"])
+    for key, value in clean.items():
+        setattr(project, key, value)
+    add_audit(
+        db,
+        actor,
+        "PROJECT_SETTINGS_UPDATED",
+        "project",
+        project.id,
+        {"fields": sorted(clean)},
+        project_id=project.id,
+    )
+    db.commit()
+    db.refresh(project)
+    return project
+
+
+def import_project_document(
+    db: Session,
+    project: Project,
+    *,
+    filename: str,
+    content: bytes,
+    content_type: str | None = None,
+    actor: str = "user",
+) -> tuple[ProjectDocument, bool]:
+    """Parse, deduplicate and store one imported document.
+
+    This is the single executor of both the upload route and the copilot action,
+    so an imported document is byte-for-byte the same fact regardless of how
+    the person supplied it.  Returns ``(document, created)``.
+    """
+    from shine.agents.script import parse_document
+    from shine.security import safe_filename
+
+    if len(content) > MAX_SCRIPT_BYTES:
+        raise HTTPException(status_code=413, detail="Script documents are limited to 20 MiB")
+    leaf = safe_filename(filename)
+    parsed = parse_document(leaf, content)
+    digest = sha256_bytes(content)
+    duplicate = db.scalar(
+        select(ProjectDocument).where(
+            ProjectDocument.project_id == project.id, ProjectDocument.sha256 == digest
+        )
+    )
+    if duplicate:
+        return duplicate, False
+    document = ProjectDocument(
+        project_id=project.id,
+        filename=leaf,
+        content_type=content_type or "application/octet-stream",
+        sha256=digest,
+        source_format=parsed.source_format,
+        text=parsed.text,
+        parsed=parsed.parsed or None,
+    )
+    db.add(document)
+    db.flush()
+    # The first script in an empty project is naturally its basis.  A later
+    # upload only becomes a candidate; switching the production source stays
+    # an explicit action.
+    if not project.current_document_id:
+        project.current_document_id = document.id
+    add_audit(
+        db,
+        actor,
+        "SCRIPT_DOCUMENT_IMPORTED",
+        "project_document",
+        document.id,
+        {"source_format": parsed.source_format, "sha256": digest, "text_length": len(parsed.text)},
+        project_id=project.id,
+    )
+    db.commit()
+    db.refresh(document)
+    return document, True
 
 
 def require_shot(db: Session, project_id: str, shot_id: str) -> Shot:

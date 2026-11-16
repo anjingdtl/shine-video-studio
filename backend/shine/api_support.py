@@ -20,6 +20,9 @@ from shine.api_operator import Operator
 from shine.config import Settings
 from shine.support import actions as action_service
 from shine.support import agent as agent_service
+from shine.support import capability_catalog, official_docs, project_knowledge
+from shine.support import parameters as parameter_service
+from shine.support import planner as planner_service
 from shine.support import reports as report_service
 from shine.support.context import build_evidence_snapshot
 from shine.support.diagnostics import diagnose_snapshot, suggested_questions
@@ -52,11 +55,45 @@ class MessageCreate(BaseModel):
 class ActionPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     kind: Literal[
-        "setup_repair", "setup_reconcile", "managed_release", "workflow_user_copy"
+        "setup_repair",
+        "setup_reconcile",
+        "managed_release",
+        "workflow_user_copy",
+        "project_create",
+        "document_import_text",
+        "project_settings_update",
+        "story_outline_generate",
+        "storyboard_generate",
+        "production_start",
     ]
     params: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=36)
     project_id: str | None = Field(default=None, max_length=36)
+
+
+class PlanPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request: str = Field(min_length=1, max_length=4000)
+    project_id: str | None = Field(default=None, max_length=36)
+    episode_ids: list[str] = Field(default_factory=list, max_length=32)
+    session_id: str | None = Field(default=None, max_length=36)
+
+
+class ParameterPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target: str = Field(min_length=1, max_length=120)
+    values: dict = Field(default_factory=dict)
+    project_id: str | None = Field(default=None, max_length=36)
+    name: str | None = Field(default=None, max_length=120)
+    episode_ids: list[str] = Field(default_factory=list, max_length=32)
+    session_id: str | None = Field(default=None, max_length=36)
+
+
+class ParameterConfirmRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    action_id: str = Field(min_length=1, max_length=36)
+    preview_hash: str = Field(min_length=16, max_length=64)
+    confirm: bool = False
 
 
 class ActionApproveRequest(BaseModel):
@@ -106,6 +143,163 @@ def support_capabilities():
             "bypass_gate",
         ],
     }
+
+
+@router.get("/knowledge/project")
+def support_project_knowledge(
+    q: str = "",
+    limit: int = 5,
+    build: str | None = None,
+):
+    """Versioned project knowledge with citations and an explicit freshness state."""
+    limit = max(1, min(int(limit), 10))
+    result = project_knowledge.search(q, limit=limit, build_commit=build)
+    return {
+        **result,
+        "answer": project_knowledge.answer(q, limit=limit, build_commit=build),
+    }
+
+
+@router.get("/knowledge/sources")
+def support_knowledge_sources():
+    """Every knowledge source, its version binding and its licence policy."""
+    return {
+        "project": {
+            "metadata": project_knowledge.index_metadata(),
+            "coverage": project_knowledge.coverage(),
+        },
+        "official": official_docs.sources_payload(),
+        "h3_boundary": official_docs.h3_boundary(),
+        "evidence_levels": list(project_knowledge.EVIDENCE_LEVELS),
+        "notice": "项目百科只描述当前构建；官方资料仅作参考，不代表本机已支持。",
+    }
+
+
+@router.get("/capabilities/actions")
+def support_capability_actions():
+    return capability_catalog.catalog_payload()
+
+
+@router.post("/plans/preview")
+def support_plan_preview(
+    body: PlanPreviewRequest,
+    actor: Operator,
+    settings: SettingsDep,
+    db: DBSession,
+):
+    """Bounded read-only plan; no executor is called here."""
+    try:
+        plan = planner_service.build_plan(
+            db,
+            settings,
+            request=body.request,
+            project_id=body.project_id,
+            episode_ids=body.episode_ids or None,
+        )
+    except ValueError as exc:
+        raise _http(str(exc), "计划缺少项目或分集范围。", 400) from exc
+    if plan is None:
+        raise _http(
+            "NO_PLAN",
+            "这句话没有匹配到可执行计划；可以直接提问，管家会先诊断或检索项目百科。",
+            409,
+        )
+    return {
+        "plan": plan,
+        "capabilities": {
+            "version": capability_catalog.CATALOG_VERSION,
+            "coverage": capability_catalog.catalog_payload()["matrix_totals"],
+        },
+        "notice": "计划是只读建议；每个可执行步骤仍要预览并明确确认。",
+    }
+
+
+@router.get("/parameters/contracts")
+def support_parameter_contracts(db: DBSession, project_id: str | None = None):
+    try:
+        return parameter_service.contracts(db, project_id)
+    except parameter_service.ParameterError as exc:
+        raise _http(exc.code, exc.message, 422) from exc
+
+
+@router.post("/parameters/preview")
+def support_parameter_preview(
+    body: ParameterPreviewRequest,
+    actor: Operator,
+    settings: SettingsDep,
+    db: DBSession,
+):
+    """Validate a tuning request and create the real action preview (no write)."""
+    project_id = body.project_id
+    if body.session_id:
+        session = _require_session(db, body.session_id)
+        project_id = project_id or session.project_id
+    try:
+        result = parameter_service.preview_change(
+            db,
+            settings,
+            target=body.target,
+            values=body.values,
+            project_id=project_id,
+            name=body.name,
+            episode_ids=body.episode_ids or None,
+        )
+    except parameter_service.ParameterError as exc:
+        raise _http(exc.code, exc.message, 422) from exc
+    proposed = result["preview"].get("proposed_action")
+    action = None
+    reused = False
+    if proposed:
+        try:
+            action, reused = action_service.preview_action(
+                db,
+                settings,
+                kind=proposed["kind"],
+                params=proposed["params"],
+                actor=actor,
+                session_id=body.session_id,
+                project_id=project_id,
+            )
+        except action_service.ActionInvalid as exc:
+            raise _http(exc.code, exc.message, 400) from exc
+        except ToolDenied as exc:
+            raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
+    return {
+        "parameter": result,
+        "action": action,
+        "reused": reused,
+        "notice": result["notice"],
+    }
+
+
+@router.post("/parameters/confirm")
+def support_parameter_confirm(
+    body: ParameterConfirmRequest,
+    request: Request,
+    actor: Operator,
+    settings: SettingsDep,
+    db: DBSession,
+    gateway: GatewayDep,
+):
+    if not body.confirm:
+        raise _http("CONFIRMATION_REQUIRED", "必须明确确认后才会执行参数调整。", 400)
+    try:
+        action, reused = action_service.approve_action(
+            db,
+            settings,
+            request.app.state.session_factory,
+            action_id=body.action_id,
+            preview_hash=body.preview_hash,
+            actor=actor,
+            gateway=gateway,
+        )
+    except action_service.ActionUnknown as exc:
+        raise _http(exc.code, exc.message, 404) from exc
+    except action_service.ActionStale as exc:
+        raise _http(exc.code, exc.message, 409) from exc
+    except action_service.ActionBlocked as exc:
+        raise _http(exc.code, exc.message, 423) from exc
+    return {"action": action, "reused": reused}
 
 
 @router.get("/context")
@@ -281,6 +475,7 @@ def support_action_approve(
     actor: Operator,
     settings: SettingsDep,
     db: DBSession,
+    gateway: GatewayDep,
 ):
     if not body.confirm:
         raise _http("CONFIRMATION_REQUIRED", "必须明确确认后才会执行配置动作。", 400)
@@ -292,6 +487,7 @@ def support_action_approve(
             action_id=action_id,
             preview_hash=body.preview_hash,
             actor=actor,
+            gateway=gateway,
         )
     except action_service.ActionUnknown as exc:
         raise _http(exc.code, exc.message, 404) from exc

@@ -9,11 +9,48 @@ import { currentCopilotFault, faultKey, faultLabel, subscribeCopilotFault, type 
 type Fact = { key: string; value: string; source: string };
 
 type RecommendedAction = {
-  kind: 'setup_repair' | 'setup_reconcile' | 'managed_release';
+  kind: string;
   label: string;
   reason: string;
   requires_authorization: boolean;
   params: Record<string, unknown>;
+};
+
+type PlanStep = {
+  order: number;
+  title: string;
+  capability_id: string | null;
+  state: 'READY' | 'READ_ONLY' | 'BLOCKED' | 'HUMAN_REQUIRED' | 'NOT_SUPPORTED';
+  state_label: string;
+  evidence?: string[];
+  reason?: string;
+  action?: { kind: string; params: Record<string, unknown> } | null;
+  readback?: string;
+};
+
+type CopilotPlan = {
+  intent: string;
+  summary: string;
+  steps: PlanStep[];
+  requires_input: string[];
+  notice: string;
+  bounded: boolean;
+};
+
+type KnowledgeCitation = {
+  title: string;
+  status: string;
+  summary: string;
+  sources: string[];
+  apis?: string[];
+  verification?: string;
+};
+
+type KnowledgeAnswer = {
+  answered: boolean;
+  citations: KnowledgeCitation[];
+  metadata: { state: string; notice: string; build_commit?: string | null; source_commit?: string | null };
+  unknown_reason?: string | null;
 };
 
 type Diagnosis = {
@@ -39,7 +76,15 @@ type CopilotMessage = {
   role: 'user' | 'assistant' | 'system';
   kind: string;
   content: string;
-  payload: { diagnosis?: Diagnosis; tool_trace?: { tool: string; status: string }[]; llm?: { status: string } };
+  payload: {
+    diagnosis?: Diagnosis;
+    tool_trace?: { tool: string; status: string }[];
+    llm?: { status: string };
+    intent?: string | null;
+    plan?: CopilotPlan | null;
+    project_knowledge?: KnowledgeAnswer | null;
+    plan_error?: string | null;
+  };
   created_at: string;
 };
 
@@ -75,6 +120,13 @@ type ActionState = {
     authorization_summary?: string;
     processes?: { id: string; kind: string; state: string }[];
     active_production?: { jobs: number; series: number };
+    will_create_project?: boolean;
+    episodes?: { episode_id: string; title?: string; state?: string; state_label?: string }[];
+    blocked_episodes?: { episode_id: string; title?: string; state?: string; state_label?: string }[];
+    document?: { filename?: string; source_format?: string; text_length?: number };
+    parameter_diff?: { key: string; before: unknown; after: unknown }[];
+    blockers?: string[];
+    llm_role?: { configured?: boolean; model?: string | null };
   };
   original_task_id: string | null;
   verification?: { outcome?: string; task_status?: string; mode?: string; authority?: string };
@@ -505,6 +557,65 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     );
   };
 
+  const renderPlan = (message: CopilotMessage) => {
+    const plan = message.payload?.plan;
+    if (!plan || !plan.steps?.length) return null;
+    return (
+      <div className="copilot-plan" aria-label="操作计划">
+        <div className="copilot-plan-head">
+          <b>操作计划</b>
+          <span>{plan.summary}</span>
+        </div>
+        <ol className="copilot-plan-steps">
+          {plan.steps.map((step) => (
+            <li key={`${message.id}-${step.order}`}>
+              <span className={`copilot-chip plan-${step.state.toLowerCase()}`}>{step.state_label}</span>
+              <b>{step.title}</b>
+              {step.reason && <small>{step.reason}</small>}
+              {step.evidence && step.evidence.length > 0 && <em>{step.evidence.slice(0, 2).join(' · ')}</em>}
+              {step.action && step.state === 'READY' && (
+                <button
+                  type="button"
+                  className="copilot-link"
+                  onClick={() => void previewAction({
+                    kind: step.action!.kind,
+                    label: step.title,
+                    reason: step.reason || '来自只读计划；仍需预览并确认。',
+                    requires_authorization: true,
+                    params: step.action!.params,
+                  })}
+                >
+                  预览这一步
+                </button>
+              )}
+            </li>
+          ))}
+        </ol>
+        <p className="copilot-authorization">{plan.notice}</p>
+      </div>
+    );
+  };
+
+  const renderKnowledge = (message: CopilotMessage) => {
+    const knowledge = message.payload?.project_knowledge;
+    if (!knowledge || !knowledge.citations?.length) return null;
+    return (
+      <div className="copilot-knowledge" aria-label="项目百科依据">
+        {knowledge.citations.map((row) => (
+          <div key={row.title} className="copilot-knowledge-row">
+            <span className="copilot-chip">{row.status}</span>
+            <b>{row.title}</b>
+            <span>{row.summary}</span>
+            <small>{row.sources?.[0]}{row.verification ? ` · ${row.verification}` : ''}</small>
+          </div>
+        ))}
+        {knowledge.metadata?.state !== 'FRESH' && (
+          <p className="copilot-offline">{knowledge.metadata?.notice}</p>
+        )}
+      </div>
+    );
+  };
+
   return (
     <>
       <button
@@ -575,6 +686,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
               ) : (
                 <article key={message.id} className="copilot-answer">
                   <pre>{message.content}</pre>
+                  {renderKnowledge(message)}
+                  {renderPlan(message)}
                   {renderDiagnosis(message)}
                   <div className="copilot-tools">
                     {(message.payload?.tool_trace || []).map((tool) => (
@@ -588,8 +701,11 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                                     : tool.tool === 'read_gpu_occupancy' ? 'GPU 占用'
                                       : tool.tool === 'read_resource_inventory' ? '资源清单'
                                         : tool.tool === 'search_local_knowledge' ? '本地知识库'
-                                          : tool.tool === 'search_official_web' ? '官方参考'
-                                            : '本页面事实'}
+                                          : tool.tool === 'search_project_knowledge' ? '项目百科'
+                                            : tool.tool === 'search_official_docs' ? '官方摘要'
+                                              : tool.tool === 'read_project_journey' ? '项目旅程'
+                                                : tool.tool === 'search_official_web' ? '官方参考'
+                                                  : '本页面事实'}
                       </span>
                     ))}
                   </div>
@@ -616,8 +732,31 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                     <li>修改你的 ComfyUI：{preview.preview.will_modify_user_comfyui ? '会' : '不会'}</li>
                   )}
                   {preview.preview.processes && <li>涉及受管服务：{preview.preview.processes.length} 个</li>}
+                  {preview.preview.will_create_project && <li>将创建一个空项目；不会覆盖现有项目</li>}
+                  {preview.preview.document && (
+                    <li>导入原文：{preview.preview.document.filename || '文本'}（{preview.preview.document.text_length || 0} 字）</li>
+                  )}
+                  {preview.preview.episodes && (
+                    <li>涉及集数：{preview.preview.episodes.length}（{preview.preview.episodes.map((row) => row.state_label || row.state).join('、')}）</li>
+                  )}
+                  {preview.preview.parameter_diff && preview.preview.parameter_diff.length > 0 && (
+                    <li>
+                      参数变化：{preview.preview.parameter_diff.map((row) => `${row.key} ${String(row.before)} → ${String(row.after)}`).join('；')}
+                    </li>
+                  )}
+                  {preview.preview.blockers && preview.preview.blockers.length > 0 && (
+                    <li className="danger">原业务门禁未满足：{preview.preview.blockers.join('、')}</li>
+                  )}
+                  {preview.preview.blocked_episodes && preview.preview.blocked_episodes.length > 0 && (
+                    <li className="danger">
+                      这些集还不能开拍：{preview.preview.blocked_episodes.map((row) => row.title || row.episode_id).join('、')}
+                    </li>
+                  )}
                   {preview.preview.blocked && (
                     <li className="danger">当前有生产任务或 GPU 占用，执行会被拒绝。</li>
+                  )}
+                  {preview.preview.llm_role && !preview.preview.llm_role.configured && (
+                    <li className="danger">「故事大纲」角色还没有配置；这一步会被原门禁拒绝。</li>
                   )}
                 </ul>
                 <p className="copilot-authorization">{preview.preview.authorization_summary}</p>

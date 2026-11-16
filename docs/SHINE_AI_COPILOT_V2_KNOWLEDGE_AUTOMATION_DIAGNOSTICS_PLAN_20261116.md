@@ -219,3 +219,28 @@ V231 错误任务可自动带入原始 job/attempt/error_code；V232 按需读�
 - 运行时 Agent **不能编辑源码、不能拥有 shell/git/任意 API 能力**；开发者 Codex 负责真正的工程建设。
 
 **产品总目标：用户只用自然语言就能理解 Shine、操作 Shine、修复合法范围内的问题；底层仍然只有 Shine 现有的一套真实业务事实、一套业务裁决体系、一套执行链路。**
+
+## 12. 实施状态（2026-11-16 本轮建设）
+
+| 方案条目 | 实施位置 | 状态 |
+| --- | --- | --- |
+| A1 项目百科与主题盘点 | `backend/shine/support/project_knowledge.py`（19 个模块条目，状态与来源/API/测试证据） | 已实现 |
+| A2 知识版本绑定与离线检索 | 同上 + `support/knowledge_manifest.json` + `scripts/generate_copilot_knowledge.py`（FRESH/STALE/UNKNOWN） | 已实现（发布时需重新生成清单以绑定提交号） |
+| A3 ComfyUI 官方知识 | `support/official_docs.py`（许可策略 + 自编摘要 + 官方链接） | 已实现（不整库复制） |
+| A4 MiniMax-H3 官方知识与本机边界 | 同上（Ref2VA / FL2VA / 2K / IR / 提示词规范边界表） | 已实现 |
+| A5 有证据的百科回答 | `project_knowledge.answer` + `/api/v1/support/knowledge/project`；答案含状态、摘要、来源、版本提示 | 已实现 |
+| B1 全界面操作盘点 | `support/capability_catalog.py` 的 41 项矩阵 + `docs/SHINE_AI_COPILOT_V2_OPERATION_MATRIX_20261116.md` | 已实现（455 条路由统计，未覆盖项附原因） |
+| B2 能力注册中心 | 同上；action_id + schema + 原执行者 + 权限 + 回读 + 恢复 | 已实现 |
+| B3 导演模式代操作 | `project_create`、`document_import_text`、`story_outline_generate`、`storyboard_generate`、`production_start`；确认类保持人工 | 已实现（确认/备料/审片仍为人工） |
+| B4 素材中心 | 缺失清单只读 + 候选图/主资产人工；批量生成标 NOT_SUPPORTED | 只读 + 人工，未实现批量代提交 |
+| B5 设置与环境 | `setup_repair`、`setup_reconcile`、`managed_release`、`workflow_user_copy`、`project_settings_update`；LLM 路由人工 | 已实现（LLM 路由未代理） |
+| B6 多步骤规划 | `support/planner.py`（≤8 步、只读、逐步骤授权） | 已实现 |
+| B7 授权分级 | `tools.ToolTier` + 能力目录 `PREVIEW/EXECUTE_GUARDED/HUMAN_REQUIRED/FORBIDDEN` | 已实现 |
+| B8 防重复执行 | 复用 V1 `request_key/attempt_no/preview_hash/target_fingerprint/atomic claim/original_task_id` | 已实现 |
+| C1 全链路诊断 | V1 诊断 + V2 意图路由与证据分层；`REFUSED` 保留原错误码 | 已实现 |
+| C2 用户级参数调校 | `support/parameters.py`：语言、工作流映射副本、生产策略；预览/校验/确认/回读 | 已实现（数值节点级改写不支持） |
+| C3 工程 MD 移交 | V1 `support/reports.py` 原样复用；报告含构建提交/证据/验收建议 | 已实现 |
+| 前端 | 既有 ShineCopilot 浮窗新增百科引用、操作计划、计划步骤预览、门禁缺项与参数差异 | 已实现 |
+| W5 全量验收 | V1 S01–S32 回归 + V201–V240 + 八分片 + Ruff + Vitest + tsc/build | 见 V2 验收报告；真机 NOT_RUN |
+
+未实施/受阻：S29 启动器离线诊断（独立依赖，未重构）；镜头逐字编辑、字幕逐句编辑、候选图批量生成、暂停/取消生产的自然语言合同；货币级预算。

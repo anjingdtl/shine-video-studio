@@ -35,7 +35,21 @@ def _session(client, **body):
 
 def test_tool_registry_has_no_shell_or_source_write_capability():
     names = {name for name in ACTION_SPECS}
-    assert names == {"setup_repair", "setup_reconcile", "managed_release", "workflow_user_copy"}
+    # V2 extends the whitelist with user-level operations, but every one of them
+    # still delegates to an existing executor and none of them is a shell,
+    # source-write, git or arbitrary-HTTP capability.
+    assert names == {
+        "setup_repair",
+        "setup_reconcile",
+        "managed_release",
+        "workflow_user_copy",
+        "project_create",
+        "document_import_text",
+        "project_settings_update",
+        "story_outline_generate",
+        "storyboard_generate",
+        "production_start",
+    }
     with pytest.raises(ToolDenied):
         tool_spec("run_shell")
     with pytest.raises(ToolDenied):
