@@ -65,7 +65,9 @@ from shine.materialprep.states import (
 from shine.models import Project, ProjectDocument, utcnow
 from shine.services import add_audit, require_project
 
-RESUMABLE_ITEM_STATES = frozenset({ITEM_FAILED})
+# NEEDS_REVIEW 也可重试：brief/前置阶段失败（无 UNKNOWN image attempt）属可证明
+# 未发送或已获答复，应能重排；下方 UNKNOWN image attempt 守卫仍挡住未知提交重发。
+RESUMABLE_ITEM_STATES = frozenset({ITEM_FAILED, ITEM_NEEDS_REVIEW})
 """What a user may resume.
 
 ``NEEDS_REVIEW`` is deliberately absent: an unknown external submission is

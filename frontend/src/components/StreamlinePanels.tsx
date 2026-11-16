@@ -832,10 +832,15 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
   const apply = useCallback((body: DirectorMaterialsView) => {
     setView(body);
     setDecisions((current) => {
-      // 已经做过的选择不会被一次刷新覆盖；新条目按其真实状态取默认值。
+      // 已经做过的选择不会被一次刷新覆盖；但当裁决变化使旧选择失效（必需项不能
+      // 跳过、缺主素材不能复用）时回到默认，避免提交被服务端拒绝（三原则：决策
+      // 跟随同一份裁决）。
       const next: Record<string, Decision> = {};
       for (const row of body.requirements) {
-        next[row.requirement_id] = current[row.requirement_id] ?? defaultDecision(row);
+        const prev = current[row.requirement_id];
+        const stale = prev === 'skip' && row.critical
+          || prev === 'reuse_master' && !row.matched_master;
+        next[row.requirement_id] = prev && !stale ? prev : defaultDecision(row);
       }
       return next;
     });
