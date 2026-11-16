@@ -65,7 +65,13 @@ def policy_for(config: ProviderConfig, *, streaming: bool | None = None) -> Tran
     return TransportPolicy(
         connect_s=max(MIN_CONNECT_TIMEOUT_S, min(base / 4, 30.0)),
         first_event_s=max(MIN_FIRST_EVENT_S, base),
-        idle_s=max(MIN_IDLE_S, base / 2),
+        # A reasoning model may deliberate silently between streamed events for
+        # as long as it needs to produce the first token. Giving the inter-event
+        # gap the same headroom as the first event (base, not base/2) keeps a
+        # long-but-live thought from being cut into an UNKNOWN outcome that a
+        # person would then have to reconcile by hand. The total deadline still
+        # bounds the whole call.
+        idle_s=max(MIN_IDLE_S, base),
         total_s=max(base * TOTAL_TIMEOUT_MULTIPLE, 180.0),
         streaming=enabled,
     )
