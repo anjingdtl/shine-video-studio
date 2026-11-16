@@ -1036,6 +1036,7 @@ function App() {
                       onMessage={report}
                       frozenStyle={currentStyle}
                       storyboardReady={!!stageDone.storyboard}
+                      embedded
                       onPromoted={() => { refreshAll().catch(() => undefined); }}
                     />
                   </StageDock>
