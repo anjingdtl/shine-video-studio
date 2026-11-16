@@ -530,3 +530,53 @@ def test_binding_adoption_never_revises_a_frozen_shot(api):
         assert master_a in bound_ids, "冻结镜头保留打包时的绑定"
         assert master_b["id"] not in bound_ids, "冻结镜头不被素材改选重写"
     assert result["bound_shots"] == 0
+
+
+def test_a_narrator_shot_is_carried_by_its_scene_plate_minimum_reference(api):
+    """最小参考素材：旁白镜没有人物主体，由确认的场景图承载 Ref2VA 参考。
+
+    一套事实（shot.bindings）、一个裁决（_shot_material_problems 与 package
+    readiness 都要求 cut 镜至少一个参考）、一个执行者（bind_adopted 同时绑人物
+    主体与场景图）。无场景图时裁决如实报 SHOT_REFERENCE_MISSING；确认场景图后
+    同一执行者把它绑成 picture 参考，裁决就绪，不再出现「素材就绪却开不了机」。
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement, PreProductionPlan
+    from shine.director.journey import _shot_material_problems
+    from shine.materialprep.service import bind_adopted_masters_to_shots
+    from shine.models import Shot
+    from tests.conftest import PNG, approve_lock, create_project, create_shot, freeze_style, upload_asset
+
+    client, factory, _settings = api
+    project = create_project(client, "最小参考")
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"], title="旁白镜", characters=["旁白"])
+    scene = upload_asset(client, project, content=PNG + b"-scene-plate",
+                         filename="场景.png", role="scene", entity_id="旧物修复铺")
+    approve_lock(client, scene["id"])
+
+    with factory() as db:
+        s = db.get(Shot, shot["id"])
+        assert "SHOT_REFERENCE_MISSING" in _shot_material_problems(db, s), \
+            "无参考的旁白镜必须被裁决报缺参考，而不是假装就绪"
+
+    with factory.begin() as db:
+        plan = PreProductionPlan(project_id=project, purpose="asset_preparation",
+                                 status="CONFIRMED", payload={}, sha256=graph_hash({}))
+        db.add(plan)
+        db.flush()
+        req = {"family": "scene", "entity_id": "旧物修复铺", "strategy": "reuse_master",
+               "bound_asset_id": scene["id"], "bound_asset_sha256": scene["sha256"],
+               "used_shot_ids": [shot["id"]]}
+        db.add(AssetRequirement(project_id=project, plan_id=plan.id, status="CONFIRMED",
+                                payload=req, sha256=graph_hash(req)))
+        plan_id = plan.id
+
+    with factory.begin() as db:
+        bound = bind_adopted_masters_to_shots(db, project, plan_id, "local-user")
+    assert bound >= 1
+    with factory() as db:
+        s = db.get(Shot, shot["id"])
+        assert any(link.asset_id == scene["id"] and link.use_as == "picture"
+                   for link in s.bindings), "场景图必须绑成旁白镜的 picture 参考"
+        assert _shot_material_problems(db, s) == [], "最小参考满足后裁决就绪"

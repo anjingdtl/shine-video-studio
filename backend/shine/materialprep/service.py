@@ -1199,7 +1199,7 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
     touched = sorted({
         shot_id for row in rows
         if (row.payload or {}).get("strategy") == "reuse_master"
-        and (row.payload or {}).get("family") == "character"
+        and (row.payload or {}).get("family") in {"character", "scene"}
         for shot_id in (row.payload or {}).get("used_shot_ids") or []
     })
     protected = protected_shot_ids(db, project_id, touched)
@@ -1263,6 +1263,46 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
                     if aid not in replaced
                 ]
                 shot.spec = spec_payload
+            set_shot_bindings(db, project, shot, inputs, actor=actor)
+            bound += 1
+    # The minimum reference material: a confirmed scene plate is the environment
+    # image a shot renders from.  Ref2VA needs at least one reference, so a
+    # narrator-only shot (no character subject) is carried by its scene plate
+    # instead of refusing to start.  The same executor binds it as a picture
+    # reference; the material verdict and the package readiness both read the
+    # resulting shot.bindings, so "has a reference" is one fact, one verdict.
+    for requirement in rows:
+        payload = dict(requirement.payload or {})
+        if payload.get("strategy") != "reuse_master" or payload.get("family") != "scene":
+            continue
+        asset_id = payload.get("bound_asset_id")
+        if not asset_id:
+            continue
+        asset = db.get(Asset, asset_id)
+        if asset is None or not asset.approved or not asset.locked:
+            continue
+        for shot_id in payload.get("used_shot_ids") or []:
+            if shot_id in protected:
+                continue
+            shot = db.get(Shot, shot_id)
+            if shot is None or shot.project_id != project_id:
+                continue
+            passed = db.scalar(sa_select(Job).where(
+                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
+                Job.shot_revision == shot.revision,
+            ))
+            if passed is not None:
+                continue
+            current = list(shot.bindings)
+            if any(link.asset_id == asset.id for link in current):
+                continue
+            inputs = [
+                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
+                                 role=link.role, frame_role=link.frame_role, ordinal=index)
+                for index, link in enumerate(current)
+            ]
+            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.PICTURE,
+                                           ordinal=len(inputs)))
             set_shot_bindings(db, project, shot, inputs, actor=actor)
             bound += 1
     return bound

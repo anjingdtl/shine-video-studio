@@ -22,6 +22,7 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   PROFILE_NOT_VALIDATED: { reason: '生成方案还没在本机验证节点', action: { label: '去验证本机节点', target: 'setup-models' } },
   H3_CHARACTER_REFERENCE_MISSING: { reason: '有出场人物没有主素材', action: { label: '去准备素材', target: 'assets-stage' } },
   SHOT_CHARACTER_MASTER_MISSING: { reason: '镜头点名的人物缺主素材', action: { label: '去准备素材', target: 'assets-stage' } },
+  SHOT_REFERENCE_MISSING: { reason: '镜头至少需要一张参考图（人物或场景）才能 Ref2VA 开拍', action: { label: '去准备场景图', target: 'assets-stage' } },
   SCRIPT_TEXT_CONSENT_REQUIRED: { reason: '首次发送剧本到云端需同意', action: { label: '查看说明并同意', target: 'consent' } },
   REMOTE_AGENT_CONSENT_REQUIRED: { reason: '首次发送剧本到云端需同意', action: { label: '查看说明并同意', target: 'consent' } },
   SHOT_REVISION_CHANGED: { reason: '镜头已升版，需要新导演包', action: { label: '重新生成导演包', target: 'package-stage' } },

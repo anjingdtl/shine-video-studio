@@ -98,6 +98,33 @@
   前端 `setupCenter.test.tsx`「不再有空点的真实试镜一次」「出图验证交给后台一键准备」
   （断言无 `image-runtime/start`、`image-runtime/validate` 直连，prepare/execute capabilities=['image']）。
 
+### 追加：开拍 500 崩溃 + 最小参考素材（用户报障与裁定）
+
+- **开拍崩溃根因**：`package.py::_compiled_shot_blockers` 在 `except PromptCompilationError`
+  里裸读 `profile.mode`。策略包（`binding.strategy` 存在、`workflow_profile_id` 为空 →
+  `profile is None`）下任一镜编译失败即 `AttributeError` → 500，把真实具名阻断掩盖成
+  「项目没反应」。修复：模式取唯一有效来源 `effective_mode`（静态方案用 `profile.mode`，
+  策略包用 `strategy_contract.generation_mode`），崩溃改为具名 blocker。
+  复现：正式项目 `cef9e171` 开拍由 500 变为 409 `DIRECTOR_PACKAGE_NOT_READY` 具名阻断。
+- **重连失败根因**：监督进程分裂——`supervisor.json` 记录 8790（前端重连读它），
+  早前误经 8791 重启。经记录的 8790 重启后 API 8040/Web 5210 恢复、重连可用。
+- **真实阻断**：正式项目 23 镜中旁白镜 `shot_beat_2`（characters=['旁白']、cut、零绑定、
+  场景需求全 skip）没有任何视觉参考 → Ref2VA「至少一个参考」拒绝。其余 22 镜（6img 方案）均通过。
+- **最小参考素材设计（用户裁定，遵循三原则）**：
+  - **一套事实**：`shot.bindings` 是镜头参考的唯一事实。
+  - **一个裁决**：`journey._shot_material_problems` 增 `SHOT_REFERENCE_MISSING`——cut 镜
+    零绑定即缺参考，与 `package_readiness` 的 Ref2VA 判定读同一事实，消除「素材裁决说就绪、
+    开拍裁决说缺参考」的分裂（旁白被排除人物需求导致 missing_count=0 的假就绪）。
+  - **一个执行者**：`bind_adopted_masters_to_shots` 在人物主体替换之外，**同一执行者**把已确认
+    场景需求（family=scene、reuse_master）绑成镜头的 picture 参考——场景图即该镜的环境/最小
+    参考素材。旁白镜无人物主体时由场景图承载 Ref2VA，不再开不了机。保护冻结/在途/PASSED 镜头。
+  - 前端 `errorActions.ts` 补 `SHOT_REFERENCE_MISSING`「去准备场景图」恢复指引。
+- **回归**：`test_director_material_commit.py::test_a_narrator_shot_is_carried_by_its_scene_plate_minimum_reference`
+  （无场景图裁决报 SHOT_REFERENCE_MISSING；确认场景图后同一执行者绑 picture、裁决就绪）；
+  `test_director_overview`（6）、`test_director_long_form`（27）、`test_material_director_flow`（16）均通过。
+- **正式项目当前状态**：旁白镜仍需用户为「第2场：旧物修复铺」确认一张场景图（生成/上传/复用），
+  确认后同一执行者自动绑入该镜 → 最小参考满足 → 可开拍。本轮未擅自改动正式项目数据。
+
 ## 删掉/合并的重复路径
 
 | 重复路径 | 收敛到 |

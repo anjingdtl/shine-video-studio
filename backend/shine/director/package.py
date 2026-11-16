@@ -544,6 +544,14 @@ def _compiled_shot_blockers(
             return [_blocker("PACKAGE_GENERATION_MODE_INVALID",
                              "导演包记录的生片模式无效", mode=binding["generation_mode"])]
 
+    # One effective mode for blocker metadata: a static profile carries its own
+    # mode, a dynamic strategy package has no profile row and carries the
+    # strategy's mode.  Reading profile.mode unconditionally crashed a strategy
+    # package into a 500 the moment any shot failed compilation, hiding the real
+    # named blocker.
+    effective_mode = profile.mode if profile is not None else (
+        strategy_contract.generation_mode if strategy_contract is not None else None)
+
     compiler = H3PromptCompiler()
     problems: list[dict[str, Any]] = []
     for episode in episodes:
@@ -593,7 +601,7 @@ def _compiled_shot_blockers(
                     exc.code,
                     f"镜头「{shot.name}」按当前生成方案无法执行：{exc}",
                     shot_id=shot.id,
-                    mode=profile.mode,
+                    mode=effective_mode,
                     details=exc.details,
                 ))
                 continue

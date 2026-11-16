@@ -171,6 +171,14 @@ def _shot_material_problems(db: Session, shot: Shot) -> list[str]:
                                    if not is_narrator_speaker(name)):
         if reference not in bound_roles and resolve_character_asset(reference, bound) is None:
             problems.append("SHOT_CHARACTER_MASTER_MISSING:" + reference)
+    # One verdict with the production readiness: Ref2VA renders every
+    # independent (cut) shot from a reference.  A cut shot carrying no binding
+    # at all — e.g. a narrator-only shot whose visual reference was never bound
+    # — cannot render, so the material list must owe it a reference exactly as
+    # the package readiness refuses it, instead of saying "ready" here while the
+    # shoot action there reports a missing reference.
+    if spec.continuity.mode.value == "cut" and not list(shot.bindings):
+        problems.append("SHOT_REFERENCE_MISSING")
     return problems
 
 
