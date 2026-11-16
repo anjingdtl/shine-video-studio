@@ -234,12 +234,9 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     )}
     <ScriptTextConsent projectId={projectId} documentId={documentId}
       expanded={!scriptwriterAllowed} onScriptwriterState={applyScriptwriterState} />
-    <details className="advanced-fold">
-      <summary>锁定事实（高级：每行一条；变更会创建新的大纲输入并重新提取）</summary>
-      <label className="material-field"><span>补充锁定事实</span>
-        <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
-      </label>
-    </details>
+    <label className="material-field"><span>补充锁定事实（每行一条，AI 不得改动；变更会创建新的大纲输入并重新提取）</span>
+      <textarea value={facts} rows={3} onChange={(event) => setFacts(event.target.value)} />
+    </label>
     <fieldset className="pacing-picker">
       <legend>剧情节奏（决定大纲的叙事密度，切换后重新提取才生效）</legend>
       {pacingOptions.map(([value, label, hint]) => (
