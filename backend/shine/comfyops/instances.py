@@ -46,7 +46,7 @@ from shine.services import add_audit, require_project
 
 class InstanceOperation(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    project_id: str
+    project_id: str | None = None
     name: str = Field(pattern=r"^[a-zA-Z][a-zA-Z0-9_-]{0,60}$")
     action: str = Field(pattern=r"^(CREATE|INSTALL_NODE|BIND_MODELS|START|STOP|SNAPSHOT|RESTORE|ROLLBACK)$")
     mode: str = Field(default="fake", pattern=r"^(fake|local)$")
@@ -94,7 +94,9 @@ def tree_manifest(root):
 
 
 def plan_operation(db, settings, body):
-    require_project(db, body.project_id)
+    # 机器级实例计划允许没有关联作品（空库整备）；有作品时仍核验归属。
+    if body.project_id is not None:
+        require_project(db, body.project_id)
     if body.mode == 'local':
         from shine.comfyops.storage import require_storage
         require_storage(settings)

@@ -101,8 +101,6 @@ type ImageReadiness = {
   families: Record<string, { can_generate: boolean; layer: string }>;
 };
 
-const IMAGE_CATALOG = 'qwen-image-2.1-windows-x64';
-const IMAGE_COMPONENTS = ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 'qwen-image-2.1-vae'];
 const IMAGE_BYTES = 17.3 * 1024 ** 3;
 const REVIEW_COMPONENTS = { vlm: 'qwen3-vl-8b-fp8', asr: 'qwen3-asr-0.6b' };
 const REVIEW_BYTES = { vlm: 10.6 * 1024 ** 3, asr: 1.9 * 1024 ** 3 };
@@ -164,7 +162,7 @@ const SNAPSHOT_KEY = 'shine-setup-center-snapshot-v1';
 type DetectionSnapshot = {
   detectedAt: string;
   env: EnvReport; storage: Storage; runtime: RuntimeState; readiness: Readiness;
-  scan: ExistingScan | null; imageScan: ExistingScan | null;
+  scan: ExistingScan | null;
   variants: VariantRecommendation; image: ImageReadiness | null;
   catalog: CatalogSummary | null; adoptedRoot: string | null;
   variantId: string; caps: { h3: boolean; image: boolean; vlm: boolean; asr: boolean; relayvsr: boolean };
@@ -233,7 +231,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   /** The one verdict the badge and both configuration pages read. */
   const [setupVerdict, setSetupVerdict] = useState<SetupVerdict | null>(null);
   const [scan, setScan] = useState<ExistingScan | null>(restored?.scan ?? null);
-  const [imageScan, setImageScan] = useState<ExistingScan | null>(restored?.imageScan ?? null);
   const [variants, setVariants] = useState<VariantRecommendation | null>(restored?.variants ?? null);
   const [image, setImage] = useState<ImageReadiness | null>(restored?.image ?? null);
   const [catalog, setCatalog] = useState<CatalogSummary | null>(restored?.catalog ?? null);
@@ -254,7 +251,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const [result, setResult] = useState('');
   /** 每项能力各自的结论：一项没准备好，不影响其它项。 */
   const [outcomes, setOutcomes] = useState<CapabilityOutcome[]>([]);
-  const [imageTesting, setImageTesting] = useState('');
   /** 服务端唯一事实视图；界面的资格判定只读它。 */
   const [summary, setSummary] = useState<SetupSummary | null>(null);
   /** 二次确认就在卡片里完成，不弹系统对话框：看到体积与目录，再点一次开始。 */
@@ -300,15 +296,14 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       setAvailabilityRows(availability?.variants ?? null);
       const root = existing.installations?.[0];
       let main: ExistingScan | null = null;
-      let imageInstall: ExistingScan | null = null;
       if (root) {
-        const post = (body: unknown) => api<ExistingScan>('/setup/existing-installations/inspect',
-          json('POST', body));
-        main = await post({ path: root });
-        imageInstall = await post({ path: root, catalog: IMAGE_CATALOG }).catch(() => null);
+        // 只读展示用的检测明细；缺件与下载判定读后端 summary.capabilities，
+        // 不在浏览器另算一套，也不再为出图重复 inspect 第二遍。
+        main = await api<ExistingScan>('/setup/existing-installations/inspect',
+          json('POST', { path: root }));
       }
       if (!mounted.current) return;
-      setScan(main); setImageScan(imageInstall);
+      setScan(main);
       const preferred = variantRows.recommended.find((row) => row.auto_download_allowed)
         ?? variantRows.recommended[0] ?? variantRows.candidates[0];
       setVariantId((current) => current || preferred?.variant_id || '');
@@ -316,7 +311,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       setDetectedAt(stamp);
       writeSnapshot({
         detectedAt: stamp, env: environment, storage: disk, runtime: state, readiness: ready,
-        scan: main, imageScan: imageInstall, variants: variantRows, image: imageState,
+        scan: main, variants: variantRows, image: imageState,
         catalog: catalogRows, adoptedRoot: availability?.adopted_root ?? null,
       });
       setPhase('ready');
@@ -372,11 +367,13 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const selectedAvailability = availabilityOf(selectedVariant?.variant_id);
   const selectedPresence = selectedVariant ? variantPresence(selectedVariant, scan) : { found: 0, required: 0 };
   const comfyInstalled = !!scan?.software?.installed;
-  // 生产事实以后端台账为准：扫描只说明「目录里有这些文件」。
-  // 只有后端也读不到时才退回扫描计数，且扫描结果永远不等于「已核验」。
+  // 缺件与下载量以后端同一份能力结论为准（summary.capabilities 就是后台整备
+  // 任务读的 capability_report）。浏览器不再按自查的第一套 ComfyUI 另算一套
+  // 缺件判定；扫描只作为「检测明细」的只读展示。
+  const capFacts = (key: CapabilityKey) => summary?.capabilities?.[key]?.facts;
   const h3Complete = selectedAvailability
     ? selectedAvailability.installed
-    : selectedPresence.required > 0 && selectedPresence.found === selectedPresence.required;
+    : !!capFacts('h3')?.FILES_FOUND;
 
   const componentFiles = useMemo(() => Object.fromEntries(
     (catalog?.components ?? []).map((row) => [row.component_id, row.files]),
@@ -389,8 +386,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     : { found: 0 };
   const vlmTotal = componentFiles[REVIEW_COMPONENTS.vlm] || 13;
   const asrTotal = componentFiles[REVIEW_COMPONENTS.asr] || 10;
-  const vlmReady = vlmPresence.found >= vlmTotal;
-  const asrReady = asrPresence.found >= asrTotal;
+  const vlmReady = !!capFacts('vlm')?.FILES_FOUND;
+  const asrReady = !!capFacts('asr')?.FILES_FOUND;
 
   // Only conditions that really block resource preparation count here.  A
   // repairable missing tool, a low-end GPU or an occupied port must not stop
@@ -404,9 +401,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const servicePort = env?.port?.selected ?? env?.port?.port ?? null;
   const portAdjusted = !!env?.port?.identity && env.port.identity !== 'FREE';
   const imageBytes = image?.upstream?.required_bytes || IMAGE_BYTES;
-  // 出图权重可能已经由受管运行时装好（文件已核验），不能因为「已有 ComfyUI 里没找到」就再下载一遍。
-  const imagePresent = (!!image?.configured && image.layer !== 'NOT_CONFIGURED')
-    || (!!imageScan && IMAGE_COMPONENTS.every((id) => imageScan.matches.some((row) => row.component_id === id)));
+  // 出图权重是否已有，读后端能力结论与受管运行时 readiness，不再自查第二套扫描。
+  const imagePresent = !!capFacts('image')?.FILES_FOUND
+    || (!!image?.configured && image.layer !== 'NOT_CONFIGURED');
   // 勾选且（缺权重 或 用户确认重复下载）才计入下载体积。
   // H3 是一个和素材出图、审片一样独立的能力：勾不勾由人决定，综合就绪状态
   // 不再替人做决定。
@@ -418,22 +415,29 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const relayvsrWant = caps.relayvsr && (!relayvsrPresent || force.relayvsr);
 
   const h3Bytes = selectedVariant?.total_bytes ?? 0;
-  const downloadBytes = (h3Want ? h3Bytes : 0)
-    + (imageWant ? imageBytes : 0)
-    + (vlmWant ? REVIEW_BYTES.vlm : 0)
-    + (asrWant ? REVIEW_BYTES.asr : 0)
-    + (relayvsrWant ? RELAYVSR_BYTES : 0);
+  // 下载量读后端同一结论里的「实际缺项」字节；只有用户明确重复下载时才按整档
+  // 体积计。后端读不到时退回整档估算，不在浏览器另算一套缺件。
+  const capDownloadBytes = (key: CapabilityKey, fullBytes: number) => {
+    if (force[key]) return fullBytes;
+    const missing = summary?.capabilities?.[key]?.missing_bytes;
+    return missing && missing > 0 ? missing : fullBytes;
+  };
+  const downloadBytes = (h3Want ? capDownloadBytes('h3', h3Bytes) : 0)
+    + (imageWant ? capDownloadBytes('image', imageBytes) : 0)
+    + (vlmWant ? capDownloadBytes('vlm', REVIEW_BYTES.vlm) : 0)
+    + (asrWant ? capDownloadBytes('asr', REVIEW_BYTES.asr) : 0)
+    + (relayvsrWant ? capDownloadBytes('relayvsr', RELAYVSR_BYTES) : 0);
 
   /** 这次真正要准备的能力，按各自的分项体积列出。 */
   const capabilityRows = useMemo(() => {
     const rows: Array<{ key: CapabilityKey; label: string; bytes: number }> = [];
-    if (h3Want) rows.push({ key: 'h3', label: selectedVariant && !selectedVariant.auto_download_allowed ? 'H3 候选模型' : 'H3 视频权重', bytes: h3Bytes });
-    if (imageWant) rows.push({ key: 'image', label: '素材出图权重', bytes: imageBytes });
-    if (vlmWant) rows.push({ key: 'vlm', label: '画面审片权重', bytes: REVIEW_BYTES.vlm });
-    if (asrWant) rows.push({ key: 'asr', label: '语音核对权重', bytes: REVIEW_BYTES.asr });
-    if (relayvsrWant) rows.push({ key: 'relayvsr', label: 'RelayVSR 2X 精修权重', bytes: RELAYVSR_BYTES });
+    if (h3Want) rows.push({ key: 'h3', label: selectedVariant && !selectedVariant.auto_download_allowed ? 'H3 候选模型' : 'H3 视频权重', bytes: capDownloadBytes('h3', h3Bytes) });
+    if (imageWant) rows.push({ key: 'image', label: '素材出图权重', bytes: capDownloadBytes('image', imageBytes) });
+    if (vlmWant) rows.push({ key: 'vlm', label: '画面审片权重', bytes: capDownloadBytes('vlm', REVIEW_BYTES.vlm) });
+    if (asrWant) rows.push({ key: 'asr', label: '语音核对权重', bytes: capDownloadBytes('asr', REVIEW_BYTES.asr) });
+    if (relayvsrWant) rows.push({ key: 'relayvsr', label: 'RelayVSR 2X 精修权重', bytes: capDownloadBytes('relayvsr', RELAYVSR_BYTES) });
     return rows;
-  }, [h3Want, imageWant, vlmWant, asrWant, relayvsrWant, h3Bytes, imageBytes, selectedVariant]);
+  }, [h3Want, imageWant, vlmWant, asrWant, relayvsrWant, h3Bytes, imageBytes, selectedVariant, summary, force]);
 
   /**
    * The button says what will actually happen.
@@ -509,59 +513,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     }
   }
 
-  /** 只读检测出的补装计划在这里一次确认；不做任意命令、不装驱动。 */
-  async function repairTools() {
-    const plan = env?.repair_plan;
-    if (!plan) return;
-    setProblem(''); setResult('');
-    setRunning({ label: '正在补装基础工具…', note: '固定清单 + SHA-256；已下载的部分会保留，Node/npm/uv 不会重复安装' });
-    try {
-      const result = await api<{ status: string; message?: string; unsatisfied_packages?: string[] }>(
-        '/setup/tool-repair/execute', {
-          ...json('POST', { plan_id: plan.plan_id }),
-          signal: timeoutSignal(3_600_000),
-        });
-      if (result.status !== 'SUCCEEDED') {
-        throw new Error(`补装未完成：${result.status}`
-          + (result.message ? `（${result.message}）` : '')
-          + (result.unsatisfied_packages?.length ? `，仍需处理：${result.unsatisfied_packages.join('、')}` : '')
-          + '。已下载的数据会保留，可以重试。');
-      }
-      setResult('基础工具已补装并通过复查。');
-      await detect();
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (mounted.current) setRunning(null);
-    }
-  }
-
-  /** 检测到出图权重后，直接在这里验证一次真实出图。 */
-  async function testImage() {
-    setImageTesting('启动本机出图渲染器…');
-    try {
-      if (image?.renderer.state !== 'RUNNING') {
-        await api('/setup/image-runtime/start', json('POST', {}));
-        for (let tick = 0; tick < 40; tick += 1) {
-          await new Promise((resolve) => setTimeout(resolve, 3000));
-          const state = await api<ImageReadiness>('/setup/image-readiness');
-          setImage(state);
-          if (state.renderer.state === 'RUNNING') break;
-        }
-      }
-      setImageTesting('验证三类真实小样…');
-      const run = await api<{ run_id: string }>('/setup/image-runtime/validate', json('POST', {
-        project_id: projectId,
-        idempotency_key: `image-validate-${projectId}-${image?.renderer.state ?? 'unknown'}`,
-        families: ['character', 'scene', 'prop'],
-      }));
-      setImageTesting(`已排队（批次 ${run.run_id.slice(0, 8)}…），后台出图完成后这里会更新结果。`);
-      await loadImage();
-    } catch (error) {
-      setImageTesting(error instanceof Error ? error.message : String(error));
-    }
-  }
-
   /** 已有权重时勾选能力：先二次确认「重复下载 / 仅复用」，不静默重下。 */
   function toggleCap(key: CapabilityKey, present: boolean, checked: boolean) {
     if (checked && present) { setRedownloadPrompt(key); return; }
@@ -604,7 +555,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
         }), signal: timeoutSignal(3_600_000) });
         await detect();
       }}
-      onTrial={(capability) => (capability === 'image' ? void testImage() : undefined)}
     />
 
     <ResourceScanCard />
@@ -634,10 +584,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       {pendingRepair && <div className="setup-repair" role="group" aria-label="基础工具补装">
         <div>
           <b>缺少 {(env?.repair_plan?.packages ?? []).map((pkg) => pkg.label).join('、')}</b>
-          <span>已固定下载源与哈希，约 {gib(env?.repair_plan?.download_bytes ?? 0)}；使用 Windows 自带 PowerShell 5.1 补装，完成后自动复查。</span>
+          <span>已固定下载源与哈希，约 {gib(env?.repair_plan?.download_bytes ?? 0)}；补装是「一键准备」的第一步，由后台任务用 Windows 自带 PowerShell 5.1 完成并自动复查。</span>
         </div>
-        <button type="button" className="btn-secondary" disabled={!!running} onClick={() => void repairTools()}>
-          自动补装
+        <button type="button" className="btn-secondary" disabled={!!running} onClick={() => void prepare()}>
+          交给一键准备补装
         </button>
       </div>}
 
@@ -818,11 +768,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
             : image.layer === 'GRAPH_VERIFIED' ? '节点已核对，可以验证真实出图'
               : image.renderer.state === 'RUNNING' ? '渲染器运行中' : '权重已就位'}</em>
         </div>
-        <button type="button" className="btn-secondary" disabled={!!imageTesting} onClick={() => void testImage()}>
-          {imageTesting ? <Loader2 size={13} className="spin" /> : <ImageIcon size={13} />}
-          测试出图
+        <button type="button" className="btn-secondary" disabled={!!running} onClick={() => void prepare(['image'])}>
+          <ImageIcon size={13} /> 交给后台验证出图
         </button>
-        {imageTesting && <p className="run-hint" role="status">{imageTesting}</p>}
       </div>}
 
       <details className="setup-details">

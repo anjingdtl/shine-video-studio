@@ -359,8 +359,15 @@ def confirmation_snapshot_hash(plan: PreProductionPlan) -> str:
     return graph_hash(confirmation_snapshot(plan))
 
 
-def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict[str, Any]:
-    """Record the human confirmation as a NEW immutable plan revision."""
+def confirm(db, actor: str, project_id: str, body: MaterialConfirmation, *,
+            commit: bool = True) -> dict[str, Any]:
+    """Record the human confirmation as a NEW immutable plan revision.
+
+    ``commit=False`` lets a caller fold this confirmation, the generation batch
+    and the commit receipt into one SQLite transaction: an interruption before
+    that single commit leaves nothing behind, so the same request can be
+    resubmitted cleanly instead of hitting a half-applied ``MATERIAL_PLAN_STALE``.
+    """
     require_project(db, project_id)
     source = db.get(PreProductionPlan, body.plan_revision_id)
     if source is None or source.project_id != project_id:
@@ -494,7 +501,8 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation) -> dict
                "generate": sum(1 for d in decisions if d["strategy"] == "generate"),
                "bound_shots": bound_shots},
               project_id=project_id)
-    db.commit()
+    if commit:
+        db.commit()
     return {"plan_revision_id": plan.id, "confirmation_id": confirmation_id,
             "confirmation_hash": graph_hash(confirmation_payload), "decisions": decisions,
             "identity_notes": identity_notes, "bound_shots": bound_shots,
@@ -527,6 +535,7 @@ def create_batch(
     briefs: dict[str, dict[str, Any]] | None = None,
     new_revision: bool = False,
     trust_current_list: bool = False,
+    commit: bool = True,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
 
@@ -534,6 +543,9 @@ def create_batch(
     revision 1 and is therefore refused when an item already exists.  Only the
     explicit regenerate route passes True, because silently bumping a revision
     would let a second browser tab queue a second GPU run for one confirmation.
+
+    ``commit=False`` joins the caller's transaction (the director commit folds
+    confirmation + batch + receipt into one atomic submit).
     """
     require_project(db, project_id)
     plan = _plan_for_confirmation(db, project_id, confirmation_id)
@@ -659,7 +671,8 @@ def create_batch(
     add_audit(db, "local-user", "MATERIAL_BATCH_CREATED", "material_run", run.id,
               {"items": len(created), "refused": len(refused), "kind": kind, "mode": EXECUTION_MODE_REAL},
               project_id=project_id)
-    db.commit()
+    if commit:
+        db.commit()
     return {"run_id": run.id, "status": run.status, "replayed": False, "items": created, "refused": refused}
 
 
@@ -1158,30 +1171,39 @@ def bind_material_master(db, requirement, asset, actor: str, *, canonical_entity
 
 
 def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str) -> int:
-    """Bind every confirmed "reuse this master" onto the shots that asked for it.
+    """Adopt every confirmed "reuse this master" into the shots that asked for it.
 
     A confirmed requirement is not yet a shot binding: the shot table, the
     journey, the overview and the package readiness all read ``shot.bindings``,
-    not the material list.  Without this step a person who just confirmed a
-    master still sees the package report "missing material" — two states for one
-    fact.  This is the single executor every confirmation path runs, so the
-    material list and the package always agree.  Idempotent: a replayed
-    confirmation repairs a half-finished hand-off.  Shots that already own a
-    current passed take are never touched.
+    not the material list.  This is the single executor every confirmation path
+    runs, so the material list and the package always agree.
+
+    Confirming master B for a character that previously used A **replaces** A's
+    subject slot with B and drops A from the shot's ``required_asset_ids``; it
+    never leaves both A and B bound to one person.  Idempotent: a replayed
+    confirmation repairs a half-finished hand-off.  Frozen versions, live shoots
+    and shots that already own a current passed take are never touched.
     """
     from sqlalchemy import select as sa_select
 
     from shine.comfyops.models import AssetRequirement
     from shine.models import Asset, Job, Shot
     from shine.schemas import ReferenceUse, ShotBindingInput
-    from shine.services import require_project, set_shot_bindings
+    from shine.services import protected_shot_ids, require_project, set_shot_bindings
 
     project = require_project(db, project_id)
-    bound = 0
     rows = db.scalars(sa_select(AssetRequirement).where(
         AssetRequirement.plan_id == plan_id,
         AssetRequirement.project_id == project_id,
     )).all()
+    touched = sorted({
+        shot_id for row in rows
+        if (row.payload or {}).get("strategy") == "reuse_master"
+        and (row.payload or {}).get("family") == "character"
+        for shot_id in (row.payload or {}).get("used_shot_ids") or []
+    })
+    protected = protected_shot_ids(db, project_id, touched)
+    bound = 0
     for requirement in rows:
         payload = dict(requirement.payload or {})
         if payload.get("strategy") != "reuse_master" or payload.get("family") != "character":
@@ -1193,13 +1215,24 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         asset = db.get(Asset, asset_id)
         if asset is None or not asset.approved or not asset.locked:
             continue
+
+        def is_entity_subject(link, entity=entity) -> bool:
+            if link.use_as != "subject":
+                return False
+            if link.role == entity:
+                return True
+            if link.role:
+                return False
+            old = db.get(Asset, link.asset_id)
+            return old is not None and old.entity_id == entity
+
         for shot_id in payload.get("used_shot_ids") or []:
+            if shot_id in protected:
+                continue
             shot = db.get(Shot, shot_id)
             if shot is None or shot.project_id != project_id:
                 continue
             if entity not in list((shot.spec or {}).get("characters") or []):
-                continue
-            if any(link.asset_id == asset.id for link in shot.bindings):
                 continue
             passed = db.scalar(sa_select(Job).where(
                 Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
@@ -1207,13 +1240,29 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             ))
             if passed is not None:
                 continue
+            current = list(shot.bindings)
+            entity_links = [link for link in current if is_entity_subject(link)]
+            if len(entity_links) == 1 and entity_links[0].asset_id == asset.id:
+                continue
+            keep = [link for link in current if not is_entity_subject(link)]
             inputs = [
                 ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
-                                 role=link.role, ordinal=index)
-                for index, link in enumerate(shot.bindings)
+                                 role=link.role, frame_role=link.frame_role, ordinal=index)
+                for index, link in enumerate(keep)
             ]
             inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.SUBJECT,
                                            role=entity, ordinal=len(inputs)))
+            # The shot's declaration follows the replacement: drop the master
+            # being swapped out so the binding write does not refuse a required
+            # asset it no longer binds.  set_shot_bindings re-merges what stays.
+            replaced = {link.asset_id for link in entity_links if link.asset_id != asset.id}
+            if replaced:
+                spec_payload = dict(shot.spec or {})
+                spec_payload["required_asset_ids"] = [
+                    aid for aid in (spec_payload.get("required_asset_ids") or [])
+                    if aid not in replaced
+                ]
+                shot.spec = spec_payload
             set_shot_bindings(db, project, shot, inputs, actor=actor)
             bound += 1
     return bound

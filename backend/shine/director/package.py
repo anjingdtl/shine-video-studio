@@ -200,14 +200,14 @@ def build_package(
     creative_lineage: dict[str, Any] | None = None,
     created_by: str = "user",
     settings=None,
-    fill_missing_character_bindings: bool = False,
     strategy: dict[str, Any] | None = None,
 ) -> DirectorPackageVersion:
     """Snapshot the current confirmed project state into a new package revision.
 
     An incomplete package is still built so the person can see what is missing.
-    The interactive entry may explicitly fill unbound cast slots before the
-    new package snapshots the resulting shot revisions.
+    The package reads the shot bindings the material confirmation flow already
+    wrote; it never re-derives or auto-fills cast slots at packaging time, so a
+    master the person swapped (A→B) is not silently re-added by a second chain.
 
     ``episode_ids`` scopes the package to a subset of the plan's episodes
     (streamline plan §9): a project whose second episode is still being fixed
@@ -358,15 +358,6 @@ def build_package(
         "validated_against": profile.validated_against or {},
     }
     resolved_policy = {**DEFAULT_POLICY, **validate_policy(policy).model_dump(mode="json")}
-    scoped_shot_order = [shot_id for e in selected_episodes for shot_id in e.shot_ids] \
-        if plan_payload.mode == "sections" else plan_payload.shot_order()
-    if fill_missing_character_bindings and (
-            profile is None or profile.mode.lower() == "ref2va"):
-        from shine.services import apply_missing_character_bindings
-
-        apply_missing_character_bindings(
-            db, project, [by_id[shot_id] for shot_id in scoped_shot_order], actor=created_by,
-        )
 
     revision = (db.scalars(
         select(DirectorPackageVersion.revision)

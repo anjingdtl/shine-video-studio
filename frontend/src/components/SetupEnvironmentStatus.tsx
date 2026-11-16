@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, MonitorCheck, RefreshCw, X,
+  AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, RefreshCw, X,
 } from 'lucide-react';
 import { api, json } from '../api';
 
@@ -151,14 +151,13 @@ type Props = {
   /** 用户选定的 H3 变体：h3 能力的事实必须跟着它走，而不是默认那套。 */
   variantId?: string | null;
   onPrepare?: (capability: CapabilityKey, summary: SetupSummary) => void | Promise<void>;
-  onTrial?: (capability: CapabilityKey) => void | Promise<void>;
   onReconcile?: (capability: CapabilityKey) => void | Promise<void>;
   onGoSettings?: () => void;
   onSummary?: (summary: SetupSummary | null) => void;
 };
 
 export function SetupEnvironmentStatus({
-  projectId, readOnly = false, refreshEpoch = 0, variantId = null, onPrepare, onTrial, onReconcile,
+  projectId, readOnly = false, refreshEpoch = 0, variantId = null, onPrepare, onReconcile,
   onGoSettings, onSummary,
 }: Props) {
   const [summary, setSummary] = useState<SetupSummary | null>(null);
@@ -214,11 +213,9 @@ export function SetupEnvironmentStatus({
       if (onReconcile && action.capability) { await onReconcile(action.capability); await load(); }
       return;
     }
-    if (action.action === 'TRIAL') {
-      if (onTrial && action.capability) await onTrial(action.capability);
-      return;
-    }
-    if (action.action === 'PREPARE_ENVIRONMENT') {
+    if (action.action === 'TRIAL' || action.action === 'PREPARE_ENVIRONMENT') {
+      // 试镜不再是一个独立入口：运行核验交给同一个「一键准备」后台任务，
+      // 首次真实 H3 运行走「开拍」。
       if (onPrepare && action.capability) await onPrepare(action.capability, summary as SetupSummary);
       return;
     }
@@ -323,12 +320,8 @@ export function SetupEnvironmentStatus({
                   <Download size={12} /> 下载安装缺文件
                 </button>;
               }
-              if (run === 'UNVERIFIED') {
-                return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
-                  onClick={() => onTrial?.(key)}>
-                  <MonitorCheck size={12} /> 真实试镜一次
-                </button>;
-              }
+              // 文件已齐但运行未核验：交给同一个「一键准备」后台任务核对运行
+              // 合同 / 真实出图小样。首次真实 H3 运行走「开拍」，不在这里空点试镜。
               return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
                 onClick={() => onPrepare?.(key, summary as SetupSummary)}>
                 <Check size={12} /> 一键绑定渲染器并核对运行合同

@@ -1547,7 +1547,6 @@ def start_director_production(
                 episode_ids=requested,
                 generation_mode="Ref2VA",
                 policy=None,
-                fill_missing_character_bindings=True,
                 created_by=actor,
                 settings=settings,
             )
@@ -1573,7 +1572,6 @@ def start_director_production(
                 episode_ids=requested,
                 generation_mode=profile.mode,
                 policy=None,
-                fill_missing_character_bindings=(profile.mode or "").lower() == "ref2va",
                 created_by=actor,
                 settings=settings,
             )

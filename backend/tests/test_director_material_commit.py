@@ -335,6 +335,67 @@ def test_promoting_a_candidate_adopts_it_into_requirement_and_shots(api):
         assert bound, "晋升必须把主素材回绑到需要它的镜头"
 
 
+def test_an_interrupt_before_commit_leaves_nothing_and_resubmits_cleanly(api, monkeypatch):
+    """确认+入队+回执是一次事务：提交前中断不留半态，重试不撞 MATERIAL_PLAN_STALE。
+
+    旧链路里 confirm 先单独 commit，入队前中断会留下「确认已落库、批次与回执
+    都没有」的半态；重试对着已迁移的需求行报 MATERIAL_PLAN_STALE，库里永远没有
+    生成任务。原子提交后，中断什么都不留，同一意图可以干净重提。
+    """
+    from fastapi import HTTPException
+
+    from shine.comfyops.models import PreProductionPlan
+    from shine.materialprep import service
+    from shine.materialprep.models import MaterialRun
+    from shine.models import AuditEvent
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    body = {
+        "plan_revision_id": derived["plan_revision_id"],
+        "expected_snapshot": derived["expected_snapshot"],
+        "decisions": _decisions_for(derived),
+    }
+    with factory() as db:
+        plans_before = db.query(PreProductionPlan).filter(
+            PreProductionPlan.project_id == project).count()
+
+    real_create_batch = service.create_batch
+
+    def interrupted(*_args, **_kwargs):
+        raise HTTPException(409, "SIMULATED_INTERRUPT_BEFORE_COMMIT")
+
+    monkeypatch.setattr(service, "create_batch", interrupted)
+    failed = client.post(f"/api/v1/projects/{project}/director/materials/commit",
+                         json=body, headers=LOCAL)
+    assert failed.status_code == 409
+    monkeypatch.setattr(service, "create_batch", real_create_batch)
+
+    with factory() as db:
+        plans_after = db.query(PreProductionPlan).filter(
+            PreProductionPlan.project_id == project).count()
+        runs = db.query(MaterialRun).filter(MaterialRun.project_id == project).count()
+        receipts = db.query(AuditEvent).filter(
+            AuditEvent.project_id == project,
+            AuditEvent.event_type == "DIRECTOR_MATERIALS_COMMITTED").count()
+    assert plans_after == plans_before, "确认不得在批次之前单独落库"
+    assert runs == 0
+    assert receipts == 0
+
+    ok = client.post(f"/api/v1/projects/{project}/director/materials/commit",
+                     json=body, headers=LOCAL)
+    assert ok.status_code == 201, ok.text
+    assert ok.json()["replayed"] is False
+    again = client.post(f"/api/v1/projects/{project}/director/materials/commit",
+                        json=body, headers=LOCAL)
+    assert again.status_code == 201, again.text
+    assert again.json()["replayed"] is True
+    assert again.json()["confirmation"]["confirmation_id"] == ok.json()["confirmation"]["confirmation_id"]
+    with factory() as db:
+        runs = db.query(MaterialRun).filter(MaterialRun.project_id == project).count()
+    assert runs == 1, "全程最多生成一个批次"
+
+
 def test_generation_progress_reads_the_same_run_ledger_as_the_material_page(api):
     """进度条读的是同一份 public_run 台账，不是第二套判定。"""
     client, _factory, settings = api
@@ -357,3 +418,115 @@ def test_generation_progress_reads_the_same_run_ledger_as_the_material_page(api)
     for row in progress_runs:
         assert row["kind"] == "production"
         assert {"total", "candidate_ready", "queued", "running", "failed", "needs_review"} <= set(row["counts"])
+
+
+def _confirm_reuse(client, project, plan_id, snapshot, requirements, target_id, asset_id):
+    decisions = []
+    for row in requirements:
+        if row["requirement_id"] == target_id:
+            strategy, aid = "reuse_master", asset_id
+        elif row["family"] == "character":
+            strategy, aid = "generate", None
+        else:
+            strategy, aid = "skip", None
+        decisions.append({"requirement_id": row["requirement_id"], "strategy": strategy,
+                          "entity_id": row["entity_id"], "asset_id": aid})
+    response = client.post(
+        f"/api/v1/projects/{project}/material-preparation/confirm",
+        json={"plan_revision_id": plan_id, "expected_snapshot": snapshot,
+              "decisions": decisions}, headers=LOCAL)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+def test_reconfirming_a_different_master_replaces_the_old_shot_reference(api):
+    """同一人物主素材 A→B：镜头只保留 B，不再同时绑 A 和 B。
+
+    旧执行者只“追加”确认的主素材：需求清单改选 B 后，镜头仍留着 A，于是
+    一个人物绑了两份主体参考。确认流程必须替换该需求对应的旧主体引用，并同步
+    镜头的 required_asset_ids，导演包读取这份已确认绑定。
+    """
+
+    from shine.models import Shot
+    from tests.conftest import PNG, approve_lock, upload_asset
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    target = next(row for row in derived["requirements"]
+                  if row["family"] == "character" and row["used_shot_ids"] and row["matched_master"])
+    entity = target.get("canonical_entity_id") or target["entity_id"]
+    master_a = target["matched_master"]["asset_id"]
+
+    _confirm_reuse(client, project, derived["plan_revision_id"], derived["expected_snapshot"],
+                   derived["requirements"], target["requirement_id"], master_a)
+    with factory() as db:
+        shot = db.get(Shot, target["used_shot_ids"][0])
+        assert any(link.asset_id == master_a for link in shot.bindings)
+
+    master_b = upload_asset(client, project, content=PNG + b"-replacement-B",
+                            filename="替换乙.png", role="character", entity_id=entity)
+    approve_lock(client, master_b["id"])
+
+    listed = client.get(f"/api/v1/projects/{project}/director/materials/requirements").json()
+    _confirm_reuse(client, project, listed["plan_revision_id"], listed["expected_snapshot"],
+                   listed["requirements"], target["requirement_id"], master_b["id"])
+
+    with factory() as db:
+        for shot_id in target["used_shot_ids"]:
+            shot = db.get(Shot, shot_id)
+            if entity not in list((shot.spec or {}).get("characters") or []):
+                continue
+            bound_ids = {link.asset_id for link in shot.bindings}
+            assert master_b["id"] in bound_ids, "改选 B 后镜头必须绑定 B"
+            assert master_a not in bound_ids, "改选 B 后镜头不得再保留旧主素材 A"
+            subjects = [link for link in shot.bindings
+                        if link.use_as == "subject" and link.role == entity]
+            assert len(subjects) == 1 and subjects[0].asset_id == master_b["id"]
+            required = set((shot.spec or {}).get("required_asset_ids") or [])
+            assert master_b["id"] in required
+            assert master_a not in required, "required_asset_ids 必须同步替换"
+
+
+def test_binding_adoption_never_revises_a_frozen_shot(api):
+    """已冻结进确认导演包的镜头，素材改选也不重写它的绑定。
+
+    保护规则只有一个：冻结版本与在途任务不被任何绑定执行者改写。改选 B 时
+    冻结镜头仍保留打包时的 A，bound_shots 不为它计数。
+    """
+
+    from shine.models import Shot
+    from tests.conftest import PNG, approve_lock, upload_asset
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    target = next(row for row in derived["requirements"]
+                  if row["family"] == "character" and row["used_shot_ids"] and row["matched_master"])
+    entity = target.get("canonical_entity_id") or target["entity_id"]
+    master_a = target["matched_master"]["asset_id"]
+    _confirm_reuse(client, project, derived["plan_revision_id"], derived["expected_snapshot"],
+                   derived["requirements"], target["requirement_id"], master_a)
+
+    profiles = client.get("/api/v1/workflow-profiles").json()
+    profile = next(row for row in profiles if (row.get("mode") or "").lower() == "ref2va")
+    built = client.post(f"/api/v1/projects/{project}/director-packages",
+                        json={"workflow_profile_id": profile["id"], "generation_mode": "Ref2VA",
+                              "episode_ids": ["ep-01"]}, headers=LOCAL)
+    assert built.status_code == 201, built.text
+    package = built.json()
+    confirmed = client.post(f"/api/v1/director-packages/{package['id']}/confirm",
+                            json={"expected_manifest_sha256": package["manifest_sha256"]}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+
+    master_b = upload_asset(client, project, content=PNG + b"-frozen-B",
+                            filename="冻结乙.png", role="character", entity_id=entity)
+    approve_lock(client, master_b["id"])
+    listed = client.get(f"/api/v1/projects/{project}/director/materials/requirements").json()
+    result = _confirm_reuse(client, project, listed["plan_revision_id"], listed["expected_snapshot"],
+                            listed["requirements"], target["requirement_id"], master_b["id"])
+
+    with factory() as db:
+        shot = db.get(Shot, target["used_shot_ids"][0])
+        bound_ids = {link.asset_id for link in shot.bindings}
+        assert master_a in bound_ids, "冻结镜头保留打包时的绑定"
+        assert master_b["id"] not in bound_ids, "冻结镜头不被素材改选重写"
+    assert result["bound_shots"] == 0

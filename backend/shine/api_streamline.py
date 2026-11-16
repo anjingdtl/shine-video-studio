@@ -554,12 +554,12 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     """Record the decisions and queue exactly the selected candidates, once.
 
     The request identity is derived from what the person confirmed (plan
-    revision + the exact decision set), never from a clock.  A dropped response
-    therefore retries into the same receipt: the same batch, the same
-    confirmation, no second round of images.  The confirmation and the batch are
-    two steps of one intent; if the batch cannot be queued the confirmation is
-    still reported as committed, because it really is, and the response names the
-    step that failed.
+    revision + the exact decision set), never from a clock.  Confirmation,
+    generation batch and commit receipt are written in ONE SQLite transaction:
+    an interruption before that commit leaves nothing behind, so the same
+    request resubmits cleanly instead of hitting a half-applied
+    ``MATERIAL_PLAN_STALE``; a lost response after the commit replays the same
+    receipt.  At most one batch is ever generated for the intent.
     """
     from shine.comfy.workflow import graph_hash
     from shine.materialprep import service
@@ -596,13 +596,12 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         ],
         "notes": body.notes,
     })
-    confirmation = service.confirm(db, actor, project_id, confirmation_body)
-    generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
-                    if row["strategy"] == "generate"]
-    batch = None
-    batch_error = None
-    if body.queue_generation and generate_ids:
-        try:
+    try:
+        confirmation = service.confirm(db, actor, project_id, confirmation_body, commit=False)
+        generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
+                        if row["strategy"] == "generate"]
+        batch = None
+        if body.queue_generation and generate_ids:
             batch = service.create_batch(
                 db,
                 project_id,
@@ -611,36 +610,36 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                 requirement_ids=generate_ids,
                 idempotency_key=request_key + ":" + graph_hash(sorted(generate_ids)),
                 rights_id=None,
+                commit=False,
             )
-        except HTTPException as exc:
-            batch_error = {
-                "code": "MATERIAL_BATCH_REFUSED",
-                "message": "决策已确认，但候选生成没有排队；按下面的原因处理后重试",
-                "detail": exc.detail,
-            }
-    result = {
-        "confirmation": confirmation,
-        "generate_count": len(generate_ids),
-        "batch": batch,
-        "batch_error": batch_error,
-        "request_key": request_key,
-        "replayed": False,
-    }
-    # service.confirm already adopted the masters into the shots (the one
-    # executor); quote its count rather than binding a second time.
-    bound_shots = confirmation.get("bound_shots", 0)
-    add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
-              confirmation["plan_revision_id"],
-              {"request_key": request_key,
-               "bound_shot_count": bound_shots,
-               "confirmation_id": confirmation["confirmation_id"],
-               "confirmation_hash": confirmation["confirmation_hash"],
-               "generate_count": len(generate_ids),
-               "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
-                         if batch else None),
-               **({"batch_error": batch_error} if batch_error else {})},
-              project_id=project_id)
-    db.commit()
+        result = {
+            "confirmation": confirmation,
+            "generate_count": len(generate_ids),
+            "batch": batch,
+            "batch_error": None,
+            "request_key": request_key,
+            "replayed": False,
+        }
+        # service.confirm already adopted the masters into the shots (the one
+        # executor); quote its count rather than binding a second time.
+        bound_shots = confirmation.get("bound_shots", 0)
+        add_audit(db, actor, "DIRECTOR_MATERIALS_COMMITTED", "preproduction_plan",
+                  confirmation["plan_revision_id"],
+                  {"request_key": request_key,
+                   "bound_shot_count": bound_shots,
+                   "confirmation_id": confirmation["confirmation_id"],
+                   "confirmation_hash": confirmation["confirmation_hash"],
+                   "generate_count": len(generate_ids),
+                   "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
+                             if batch else None)},
+                  project_id=project_id)
+        db.commit()
+    except HTTPException:
+        # One transaction: a refused batch rolls the confirmation back too, so
+        # the person retries the whole intent against an unchanged plan rather
+        # than a half-committed revision that no decision can match.
+        db.rollback()
+        raise
     return result
 
 

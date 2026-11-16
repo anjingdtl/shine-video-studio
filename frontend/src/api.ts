@@ -936,7 +936,7 @@ export const listDirectorPackages = (projectId: string) =>
 export const createDirectorPackage = (
   projectId: string,
   body: { workflow_profile_id: string; generation_mode?: string | null; output?: Record<string, unknown> | null;
-    policy?: Record<string, unknown> | null; fill_missing_character_bindings?: boolean;
+    policy?: Record<string, unknown> | null;
     episode_ids?: string[] | null },
 ) => api<DirectorPackage>(`/projects/${projectId}/director-packages`, json('POST', body));
 

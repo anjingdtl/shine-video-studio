@@ -297,7 +297,6 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     return act('package', () => createDirectorPackage(projectId, {
       workflow_profile_id: profileId,
       generation_mode: profileMode,
-      fill_missing_character_bindings: profileMode === 'Ref2VA',
       policy: { batch_shot_limit: 6, max_repairs_per_shot: 2 },
       episode_ids: effectiveScope.length ? effectiveScope : null,
     }), '导演包已生成，请查看就绪检查后确认');

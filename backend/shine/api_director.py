@@ -449,7 +449,6 @@ class PackageBody(APIModel):
     generation_mode: Literal["T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA"] | None = None
     output: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None
-    fill_missing_character_bindings: bool = False
     # A whole-plan build stays the default; a streamline build may freeze only
     # the episodes that are really ready (plan §9) while another episode is
     # still being fixed.
@@ -480,7 +479,6 @@ def create_package(project_id: str, body: PackageBody, request: Request,
         generation_mode=body.generation_mode,
         output=body.output,
         policy=body.policy,
-        fill_missing_character_bindings=body.fill_missing_character_bindings,
         episode_ids=body.episode_ids,
         created_by=actor,
     )
