@@ -8,7 +8,7 @@
 """
 import pytest
 
-from shine.literary.budget import default_visible_goal, plan_call_budget
+from shine.literary.budget import PURPOSE_MAX_GOAL, default_visible_goal, plan_call_budget
 from shine.literary.requests import compile_request
 from shine.llm.base import ProviderConfig
 
@@ -86,3 +86,16 @@ def test_a_truncation_retry_still_escalates_to_the_hard_cap():
                                  output_ceiling=32_000, output_floor_tokens=32_000)
     assert escalated.output_request_tokens > normal.output_request_tokens
     assert escalated.output_request_tokens == escalated.output_cap_tokens
+
+
+def test_a_huge_input_does_not_explode_the_goal():
+    # A 500,000-character whole-script call (entity catalog, top-level merge) must
+    # not demand a six-figure completion: the visible goal is bounded by the task,
+    # not the input length. Length-driven segmentation keeps each unit small, and
+    # the per-purpose ceiling identifies the bounded output need.
+    request = compile_request(system="s", user="浪" * 500_000, schema={"type": "object"})
+    config = _config(context_window_tokens=1_000_000, max_output_tokens=131_072)
+    for purpose in ("outline", "structured", "scene_prep", "entity_catalog"):
+        budget = plan_call_budget(config, request, purpose=purpose)
+        assert budget.visible_goal_tokens <= PURPOSE_MAX_GOAL[purpose]
+        assert budget.output_request_tokens < 100_000

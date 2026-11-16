@@ -73,6 +73,10 @@ PURPOSE_GOAL_MULTIPLIER = {
     # allowance deliberating instead of answering - the outline stalled on a
     # silent stream. Size it like the structured task it is.
     "scene_prep": 0.30,
+    # The whole-project entity catalog is structured extraction (one cast/scene/
+    # prop list), not creative writing; its answer grows with the cast, so it has
+    # its own wider goal ceiling below rather than the creative fallback.
+    "entity_catalog": 0.30,
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
@@ -87,6 +91,7 @@ PURPOSE_MIN_GOAL = {
     # small low-effort reserve this keeps the completion cap at the proven ~5.4k
     # rather than flooring at 4k and returning an empty completion.
     "scene_prep": 4_096,
+    "entity_catalog": 2_048,
 }
 
 # The reasoning reserve is decided here, by purpose, for every caller — one
@@ -101,8 +106,28 @@ PURPOSE_REASONING_RESERVE = {
     "structured": LOW_EFFORT_REASONING_RESERVE,
     "scene_prep": LOW_EFFORT_REASONING_RESERVE,
     "outline": LOW_EFFORT_REASONING_RESERVE,
+    "entity_catalog": LOW_EFFORT_REASONING_RESERVE,
     "observation": 512,
     "qa": 512,
+}
+
+# The visible-output ceiling per purpose: the largest answer the task itself
+# produces, independent of how long the source is. This is the budget-usage
+# identification that lets a 500,000-character script be processed without a
+# single call demanding a six-figure completion. A narrative outline / scene plan
+# is a few thousand tokens; the entity catalog grows with the cast, so it gets a
+# wider ceiling. A genuine truncation retry escalates past the goal via the
+# verified hard cap, so a ceiling never silently caps a answer that really needs
+# more room — it only stops the input-proportional explosion.
+PURPOSE_MAX_GOAL = {
+    "scene": 6_144,
+    "creative": 12_288,
+    "outline": 6_144,
+    "observation": 2_048,
+    "qa": 2_048,
+    "structured": 6_144,
+    "scene_prep": 6_144,
+    "entity_catalog": 16_384,
 }
 
 
@@ -170,10 +195,22 @@ def _positive(value: Any) -> int | None:
 
 
 def default_visible_goal(input_tokens: int, purpose: str) -> int:
-    """A defensible visible-output target from the input size and the task."""
+    """A defensible visible-output target from the input size and the task.
+
+    The output need is bounded by the *task*, not the input length: a outline or
+    a scene plan is a few thousand tokens whether the script is 500 or 500,000
+    characters (the length-driven segmentation already keeps each unit small).
+    Scaling the goal with the input alone let a whole-script call (entity catalog,
+    top-level merge) demand a six-figure completion and deliberate until the
+    transport wall. The per-purpose ceiling identifies that bounded need; the
+    floor keeps a small unit from being starved, and a truncation retry still
+    escalates toward the verified hard cap.
+    """
     multiplier = PURPOSE_GOAL_MULTIPLIER.get(purpose, PURPOSE_GOAL_MULTIPLIER["creative"])
     floor = PURPOSE_MIN_GOAL.get(purpose, PURPOSE_MIN_GOAL["creative"])
-    return max(floor, int(math.ceil(input_tokens * multiplier)))
+    ceiling = PURPOSE_MAX_GOAL.get(purpose, PURPOSE_MAX_GOAL["creative"])
+    scaled = int(math.ceil(input_tokens * multiplier))
+    return max(floor, min(ceiling, scaled))
 
 
 def plan_call_budget(

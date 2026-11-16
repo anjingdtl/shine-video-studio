@@ -163,41 +163,40 @@ def estimate_tokens(text: str) -> int:
 
 
 def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt: str, config,
-                  *, input_share: float = 1.0) -> dict[str, Any]:
+                  *, input_share: float = 1.0, purpose: str = "structured") -> dict[str, Any]:
     """Prove the request fits the window before it is sent.
 
-    ``input_share`` lets a long-running chain spend only a fraction of the same
-    window on one unit (a third, for the outline/storyboard chunks).  The
-    input estimate, output reserve and margin stay in one controller so a
-    smaller chunk is a scheduling decision, not a second budget model.
+    The output need is identified by the SAME shared mechanism the actual call
+    uses (``plan_call_budget``) — one verdict, not a second output model with a
+    six-figure reserve. ``input_share`` lets a long-running chain spend only a
+    fraction of the same window on one unit (a third, for the outline/storyboard
+    chunks); that is a scheduling decision applied to the one budget, not a
+    second budget model.
     """
-    input_tokens = sum(
-        estimate_tokens(part)
-        for part in (
-            json.dumps(context, ensure_ascii=False),
-            json.dumps(schema, ensure_ascii=False),
-            system_prompt,
-        )
+    from shine.literary.budget import plan_call_budget
+    from shine.literary.requests import compile_request
+
+    request = compile_request(
+        system=system_prompt,
+        user=json.dumps(context, ensure_ascii=False, separators=(",", ":")),
+        schema=schema or {"type": "object"},
     )
-    declared_window = config.context_window_tokens
-    window = declared_window or CONSERVATIVE_CONTEXT_WINDOW
-    source = config.context_window_source if declared_window else "conservative_default"
-    output_reserve = min(
-        MAX_OUTPUT_RESERVE_TOKENS,
-        max(MIN_OUTPUT_RESERVE_TOKENS, int(config.max_output_tokens or 0)),
-    )
-    total = input_tokens + output_reserve + CONTEXT_MARGIN_TOKENS
+    budget = plan_call_budget(config, request, purpose=purpose)
+    window = budget.context_window_tokens or CONSERVATIVE_CONTEXT_WINDOW
     available = int(window * input_share)
+    total = budget.input_tokens + budget.output_request_tokens + budget.margin_tokens
     return {
-        "input_tokens_estimated": input_tokens,
-        "output_reserve_tokens": output_reserve,
-        "margin_tokens": CONTEXT_MARGIN_TOKENS,
+        "input_tokens_estimated": budget.input_tokens,
+        "output_reserve_tokens": budget.output_request_tokens,
+        "completion_cap": budget.output_request_tokens,
+        "margin_tokens": budget.margin_tokens,
         "total_tokens_estimated": total,
         "context_window_tokens": window,
-        "context_window_source": source,
+        "context_window_source": budget.window_source,
         "input_share": input_share,
         "available_tokens": available,
         "fits": total <= available,
+        "purpose": purpose,
     }
 
 
