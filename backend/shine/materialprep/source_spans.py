@@ -115,8 +115,14 @@ def segment_document(text: str, *, max_scene_chars: int = MAX_SCENE_CHARS) -> li
     """Partition all original bytes-as-text, including whitespace and preamble.
 
     Offsets are Python Unicode character offsets into the immutable document.
-    Every chunk is bounded, even a single line or a heading scene; reaching the
-    span limit starts another chunk instead of dropping the tail.
+    Segmentation is length-driven: a heading is a *candidate* break point, not a
+    mandatory split. Consecutive heading intervals are packed into one extraction
+    unit until the unit would exceed ``max_scene_chars``; only then does the next
+    heading start a new unit. A short script is therefore read once instead of once
+    per heading (a 487-character six-scene script used to become eight requests,
+    two of them a title and a setting line with no plot). A single interval longer
+    than the ceiling is still subdivided, and reaching the span limit starts another
+    chunk instead of dropping the tail.
     """
     if max_scene_chars < 1:
         raise ValueError("max_scene_chars must be positive")
@@ -125,8 +131,17 @@ def segment_document(text: str, *, max_scene_chars: int = MAX_SCENE_CHARS) -> li
     lines = list(re.finditer(r"[^\n]*\n|[^\n]+$", text))
     headings = [line.start() for line in lines if HEADING.match(line.group())]
     boundaries = sorted({0, *headings, len(text)})
+    intervals = list(zip(boundaries, boundaries[1:], strict=False))
     scenes: list[Scene] = []
-    for start, end in zip(boundaries, boundaries[1:], strict=False):
+    index = 0
+    while index < len(intervals):
+        start = intervals[index][0]
+        end = intervals[index][1]
+        # Pack following intervals into this unit while the whole stays bounded.
+        following = index + 1
+        while following < len(intervals) and intervals[following][1] - start <= max_scene_chars:
+            end = intervals[following][1]
+            following += 1
         cursor = start
         while cursor < end:
             chunk_end = cursor
@@ -149,6 +164,7 @@ def segment_document(text: str, *, max_scene_chars: int = MAX_SCENE_CHARS) -> li
             title = next((line.strip()[:80] for line in body.splitlines() if line.strip()), "空白来源")
             scenes.append(Scene(key=key, title=title, text=body, spans=spans))
             cursor = chunk_end
+        index = following
     return scenes
 
 

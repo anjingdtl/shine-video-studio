@@ -240,7 +240,7 @@ def scene_status(db, project_id: str, document) -> dict:
     the page only learns the outcome when that request returns, and a refresh
     loses it entirely.  The ledger is the source of truth, not the response.
     """
-    scenes = segment_document(document.text or "")
+    scenes = segment_document(document.text or "", max_scene_chars=MAX_SCENE_CHARS)
     latest: dict[str, AgentTaskRecord] = {}
     for row in db.scalars(select(AgentTaskRecord).where(
         AgentTaskRecord.project_id == project_id,
