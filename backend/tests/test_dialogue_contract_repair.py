@@ -73,3 +73,38 @@ def test_unset_ratio_still_refuses_a_speaker_outside_the_beat():
 def test_normalisation_keeps_content_distinct():
     assert _normalised_dialogue("……好吃。") == _normalised_dialogue("… 好吃。")
     assert _normalised_dialogue("好吃。") != _normalised_dialogue("不好吃。")
+
+
+def test_cast_character_named_only_by_pronoun_in_the_brief_passes():
+    # The live run refused a real cast member's adapted line because the source
+    # segment referred to him by pronoun throughout, so his name was not a literal
+    # substring of the brief. The resolved production_context cast is the one
+    # character fact source: a named cast member is not an invention.
+    body = SimpleNamespace(brief="他站在雨里，没有说话。", locked_story_facts=[])
+    proposal = ScriptBreakdown.model_validate({
+        "beats": [{
+            "id": "B1", "description": "A-Yuan waits in the rain.",
+            "characters": ["阿远"],
+            "dialogue": [{"speaker_id": "阿远", "text": "这雨一时停不了。", "start_s": 1, "end_s": 2}],
+        }],
+    })
+    context = {"production_context": {"characters": [{"name": "阿远", "entity_id": "阿远"}]}}
+    validate_output("scriptwriter", proposal, body, [], context)
+
+
+def test_speaker_outside_both_cast_and_brief_is_still_refused():
+    # Relaxing the substring check must not open the door to invention: a speaker
+    # the beat lists but neither the resolved cast nor the brief names is refused.
+    body = SimpleNamespace(brief="他站在雨里。", locked_story_facts=[])
+    proposal = ScriptBreakdown.model_validate({
+        "beats": [{
+            "id": "B1", "description": "A stranger speaks.",
+            "characters": ["阿远", "陌生人"],
+            "dialogue": [{"speaker_id": "陌生人", "text": "借个火。", "start_s": 1, "end_s": 2}],
+        }],
+    })
+    context = {"production_context": {"characters": [{"name": "阿远", "entity_id": "阿远"}]}}
+    with pytest.raises(ValueError) as excinfo:
+        validate_output("scriptwriter", proposal, body, [], context)
+    assert str(excinfo.value) == "ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT"
+    assert excinfo.value.details["speaker"] == "陌生人"

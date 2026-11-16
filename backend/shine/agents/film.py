@@ -477,6 +477,18 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         ratio = context.get("dialogue_ratio_percent")
         narration_level = context.get("narration_level")
         timing = (context.get("editorial_timing_plan") or {}).get("editorial_shot_lengths_s") or []
+        # The source cast is the one character fact source for this unit (the
+        # resolved production_context characters), not a substring of the brief:
+        # a segment may refer to an established character by pronoun throughout,
+        # so requiring the literal name in the brief refused a real cast member's
+        # adapted line. The brief stays a fallback for a name the cast list omits.
+        source_cast: set[str] = set()
+        for character in (context.get("production_context") or {}).get("characters") or []:
+            if isinstance(character, dict):
+                for key in ("name", "entity_id"):
+                    value = character.get(key)
+                    if isinstance(value, str) and value.strip():
+                        source_cast.add(value.strip())
         for index, beat in enumerate(proposal.beats):
             lines = sorted(beat.dialogue, key=lambda line: line.start_s)
             for position, line in enumerate(lines):
@@ -515,10 +527,17 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                     error.details = {"offending_line": line.text, "speaker": line.speaker_id}
                     raise error
                 # With no ratio stated (or a positive one) an adapted line is
-                # allowed, but its speaker must belong to the beat and the
-                # source, and its timecodes must stay inside the beat window.
-                if not speakers or any(name not in beat.characters or name not in body.brief for name in speakers):
-                    raise ValueError("ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT")
+                # allowed, but its speaker must belong to the beat and to the
+                # source cast, and its timecodes must stay inside the beat window.
+                if not speakers or any(
+                    name not in beat.characters
+                    or (name not in source_cast and name not in body.brief)
+                    for name in speakers
+                ):
+                    error = ValueError("ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT")
+                    error.details = {"offending_line": line.text, "speaker": line.speaker_id,
+                                     "beat_characters": list(beat.characters)}
+                    raise error
                 window = timing[index] if index < len(timing) else 15
                 if (not line.text.strip() or line.end_s > window
                         or position > 0 and line.start_s < lines[position - 1].end_s
@@ -1080,8 +1099,16 @@ class FilmAgentDispatcher:
                 user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
                 schema=wire_contract.model_json_schema(),
             )
+            # The role's task nature selects the budget purpose; the one verdict
+            # still comes from plan_call_budget. The three plan roles write a
+            # beats/shots/camera plan (structured); the continuity supervisor only
+            # reviews the sequence and returns a small issues list, so sizing it
+            # like a plan (6k goal ceiling) let it deliberate until the transport
+            # wall (measured 323s) while an observation-sized budget answers in
+            # seconds. This is a role classification, not a per-call reserve hack.
+            crew_purpose = "observation" if role == "continuity_supervisor" else "structured"
             crew_budget = plan_call_budget(
-                bounded_config, crew_request, purpose="structured",
+                bounded_config, crew_request, purpose=crew_purpose,
                 output_ceiling=agent_output_limit,
                 output_floor_tokens=agent_output_limit if escalate_output_budget else None,
             )
