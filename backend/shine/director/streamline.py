@@ -490,8 +490,12 @@ def _allocate_unit_targets(units: list[dict], target_seconds: float) -> None:
     One fact (the episode plan target) becomes one per-unit goal the crew aims
     for; the units of an episode sum back to the target. A unit's goal is its
     total screen time, not a single shot's — the per-shot ceiling still applies
-    to every shot the director plans inside the unit.
+    to every shot the director plans inside the unit. A unit produces at least
+    one H3 segment, so its goal never sits below the renderer's 4s floor; a
+    short fragment is bumped up to it (the episode total keeps its tolerance).
     """
+    from shine.agents.editorial_timing import MIN_SEGMENT_S
+
     by_episode: dict[str, list[dict]] = {}
     for unit in units:
         by_episode.setdefault(unit["episode_id"], []).append(unit)
@@ -499,11 +503,11 @@ def _allocate_unit_targets(units: list[dict], target_seconds: float) -> None:
         total_chars = sum(max(0, u["end_offset"] - u["start_offset"]) for u in episode_units)
         if total_chars <= 0:
             for u in episode_units:
-                u["target_seconds"] = round(target_seconds / len(episode_units), 1)
+                u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds / len(episode_units)), 1)
             continue
         for u in episode_units:
             share = max(0, u["end_offset"] - u["start_offset"]) / total_chars
-            u["target_seconds"] = round(target_seconds * share, 1)
+            u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds * share), 1)
 
 
 def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: int | None = None) -> dict:

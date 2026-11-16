@@ -51,6 +51,17 @@ def test_unit_targets_allocate_the_episode_goal_by_source_length():
     assert ep2 == [60.0]
 
 
+def test_unit_target_never_below_the_h3_segment_floor():
+    units = [
+        {"episode_id": "ep-01", "start_offset": 0, "end_offset": 10},
+        {"episode_id": "ep-01", "start_offset": 10, "end_offset": 1000},
+    ]
+    streamline._allocate_unit_targets(units, 60.0)
+    # A 1% fragment would allocate 0.6s, below the renderer's 4s minimum: it is
+    # bumped to the floor so the crew is never asked for an impossible segment.
+    assert units[0]["target_seconds"] >= 4.0
+
+
 def test_director_prompt_carries_the_unit_goal_and_prefers_continuity():
     targeted = crew_prompt("director", tool="storyboard", max_shot_seconds=10,
                            unit_target_seconds=20)
