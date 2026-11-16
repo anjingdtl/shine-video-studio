@@ -84,6 +84,22 @@ PURPOSE_MIN_GOAL = {
     "scene_prep": 1_024,
 }
 
+# The reasoning reserve is decided here, by purpose, for every caller — one
+# verdict, not a per-call override. These purposes run under the governor's
+# non-creative transport (completion_cap + reasoning_effort=low), where private
+# deliberation is bounded to tens of tokens (measured live), so the reserve is a
+# known small margin rather than the conservative deliberation budget that let a
+# capped call deliberate until the transport wall. Creative purposes keep the
+# conservative reserve below because they keep the model's own thinking budget.
+LOW_EFFORT_REASONING_RESERVE = 1_024
+PURPOSE_REASONING_RESERVE = {
+    "structured": LOW_EFFORT_REASONING_RESERVE,
+    "scene_prep": LOW_EFFORT_REASONING_RESERVE,
+    "outline": LOW_EFFORT_REASONING_RESERVE,
+    "observation": 512,
+    "qa": 512,
+}
+
 
 @dataclass(frozen=True)
 class CallBudget:
@@ -187,11 +203,14 @@ def plan_call_budget(
     goal = min(goal, hard_cap)
 
     configured_reserve = _positive(config.generation_options.get("reasoning_reserve_tokens"))
-    reserve_known = reasoning_reserve_tokens is not None or configured_reserve is not None
+    purpose_reserve = PURPOSE_REASONING_RESERVE.get(purpose)
+    reserve_known = (reasoning_reserve_tokens is not None or configured_reserve is not None
+                     or purpose_reserve is not None)
     # A reasoning model's private deliberation is proportional to the task, not
-    # a rounding error: reserve at least twice the visible goal, never less than
-    # 4k, and cap it so one call still fits a generous window.
-    reserve = reasoning_reserve_tokens or configured_reserve or \
+    # a rounding error: low-effort purposes use the known small reserve decided
+    # above; creative purposes reserve at least twice the visible goal, never
+    # less than 4k, capped so one call still fits a generous window.
+    reserve = reasoning_reserve_tokens or configured_reserve or purpose_reserve or \
         max(4_096, min(16_384, int(math.ceil(goal * 2.0))))
     if not reserve_known:
         warnings.append("REASONING_RESERVE_CONSERVATIVE")

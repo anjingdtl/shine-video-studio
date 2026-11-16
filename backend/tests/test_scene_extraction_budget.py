@@ -43,7 +43,7 @@ def test_scene_prep_asks_for_a_smaller_completion_than_creative():
     scene_prep = plan_call_budget(_config(), request, purpose="scene_prep")
     creative = plan_call_budget(_config(), request, purpose="creative")
     assert scene_prep.visible_goal_tokens == 1_024
-    assert scene_prep.reasoning_reserve_tokens == 4_096
+    assert scene_prep.reasoning_reserve_tokens == 1_024
     assert scene_prep.output_request_tokens < creative.output_request_tokens
     assert scene_prep.output_request_tokens <= scene_prep.output_cap_tokens
 
@@ -55,27 +55,28 @@ def test_a_large_scene_still_scales_but_stays_below_creative():
     assert scene_prep.output_request_tokens < creative.output_request_tokens
 
 
-def test_crew_structured_call_uses_a_known_small_reserve_under_low_effort():
-    # The gateway forces reasoning_effort=low on capped crew calls, so private
-    # deliberation is tiny. The conservative max(4096, 2*goal) reserve let the
-    # model deliberate until the 600s wall; a known small reserve right-sizes it.
+def test_low_effort_purposes_share_one_small_reserve_in_the_mechanism():
+    # The reserve is decided by purpose inside plan_call_budget — the same rule
+    # for crew (structured), scene extraction (scene_prep) and outline. Callers
+    # do not inject their own reserve; that would fork the one verdict.
     request = compile_request(system="s", user="浪" * 6_000, schema={"type": "object"})
-    conservative = plan_call_budget(_config(), request, purpose="structured")
-    low_effort = plan_call_budget(_config(), request, purpose="structured",
-                                  reasoning_reserve_tokens=1024)
-    assert conservative.reasoning_reserve_tokens >= 4096
-    assert "REASONING_RESERVE_CONSERVATIVE" in conservative.warnings
-    assert low_effort.reasoning_reserve_tokens == 1024
-    assert "REASONING_RESERVE_CONSERVATIVE" not in low_effort.warnings
-    assert low_effort.output_request_tokens < conservative.output_request_tokens
+    structured = plan_call_budget(_config(), request, purpose="structured")
+    scene_prep = plan_call_budget(_config(), request, purpose="scene_prep")
+    outline = plan_call_budget(_config(), request, purpose="outline")
+    creative = plan_call_budget(_config(), request, purpose="creative")
+    for budget in (structured, scene_prep, outline):
+        assert budget.reasoning_reserve_tokens == 1_024
+        assert "REASONING_RESERVE_CONSERVATIVE" not in budget.warnings
+    # Creative keeps the model's own deliberation budget.
+    assert creative.reasoning_reserve_tokens >= 4_096
+    assert "REASONING_RESERVE_CONSERVATIVE" in creative.warnings
+    assert structured.output_request_tokens < creative.output_request_tokens
 
 
 def test_a_truncation_retry_still_escalates_to_the_hard_cap():
     request = compile_request(system="s", user="浪" * 6_000, schema={"type": "object"})
-    low_effort = plan_call_budget(_config(), request, purpose="structured",
-                                  reasoning_reserve_tokens=1024)
+    normal = plan_call_budget(_config(), request, purpose="structured")
     escalated = plan_call_budget(_config(), request, purpose="structured",
-                                 reasoning_reserve_tokens=1024,
                                  output_ceiling=32_000, output_floor_tokens=32_000)
-    assert escalated.output_request_tokens > low_effort.output_request_tokens
+    assert escalated.output_request_tokens > normal.output_request_tokens
     assert escalated.output_request_tokens == escalated.output_cap_tokens
