@@ -34,15 +34,21 @@ def _request():
 
 
 def test_scene_prep_uses_the_structured_goal_not_the_creative_fallback():
-    assert default_visible_goal(1_800, "scene_prep") == 1_024
+    # scene_prep covers a whole multi-scene segment (goal floor 4096) but keeps
+    # the small low-effort reserve, unlike creative's deliberation budget.
+    assert default_visible_goal(1_800, "scene_prep") == 4_096
     assert default_visible_goal(1_800, "creative") == 4_096
+    prep = plan_call_budget(_config(), _request(), purpose="scene_prep")
+    creative = plan_call_budget(_config(), _request(), purpose="creative")
+    assert prep.reasoning_reserve_tokens == 1_024
+    assert creative.reasoning_reserve_tokens >= 4_096
 
 
 def test_scene_prep_asks_for_a_smaller_completion_than_creative():
     request = _request()
     scene_prep = plan_call_budget(_config(), request, purpose="scene_prep")
     creative = plan_call_budget(_config(), request, purpose="creative")
-    assert scene_prep.visible_goal_tokens == 1_024
+    assert scene_prep.visible_goal_tokens == 4_096
     assert scene_prep.reasoning_reserve_tokens == 1_024
     assert scene_prep.output_request_tokens < creative.output_request_tokens
     assert scene_prep.output_request_tokens <= scene_prep.output_cap_tokens

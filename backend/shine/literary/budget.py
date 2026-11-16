@@ -81,7 +81,12 @@ PURPOSE_MIN_GOAL = {
     "observation": 1_024,
     "qa": 768,
     "structured": 1_024,
-    "scene_prep": 1_024,
+    # A scene-preparation segment can carry the whole short script (length-driven
+    # segmentation packs it into one unit), so its visible answer is several
+    # scenes' facts — not a 1k snippet. The goal must cover that answer; with the
+    # small low-effort reserve this keeps the completion cap at the proven ~5.4k
+    # rather than flooring at 4k and returning an empty completion.
+    "scene_prep": 4_096,
 }
 
 # The reasoning reserve is decided here, by purpose, for every caller — one
