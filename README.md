@@ -33,12 +33,12 @@
 抽帧目检：人物跨镜一致、雨夜实拍光效与冻结风格一致、影片类型 live-action 固定句进入
 H3 提示词。**技术 QC 通过 ≠ 艺术验收**：成片仍待人工「观看并确认」（0 集已确认）。
 
-## 最新 tester 安装包（2026-11-14 · H3 资源自整备 V2.0 收尾）
+## 最新 tester 安装包（2026-11-17 · 三原则收口 + 真实六镜出片）
 
-**下载**：[GitHub Release v0.1.0-test.20261114](https://github.com/anjingdtl/shine-video-studio/releases/tag/v0.1.0-test.20261114)
-（`ShineVideoStudio-20261114-5926239-win64.zip` + 同名 `.sha256`）。
+**下载**：[GitHub Release v0.1.0-test.20261117](https://github.com/anjingdtl/shine-video-studio/releases/tag/v0.1.0-test.20261117)
+（`ShineVideoStudio-20261117-26ce859-win64.zip` + 同名 `.sha256`）。
 
-- 源码提交 `5926239`，`TEST_BUILD / PARTIAL`，由 `scripts/build_test_package.ps1 -Verify` 从已提交树构建并逐文件 SHA-256 校验。
+- 源码提交 `26ce859`（main `3cabdb1` 合并 PR #54），`TEST_BUILD / PARTIAL`，由 `scripts/build_test_package.ps1 -Verify` 从已提交树构建并逐文件 SHA-256 校验（1128 文件）。
 - 包内**不含**模型权重、数据库、密钥、生成视频与验收证据；完整目录约 60.8 GB 需在向导中经明确确认后从固定上游下载。
 - 解压后双击 `一键安装并启动.cmd`（文件名乱码时用 `SETUP.cmd`）；支持 Windows 10/11 x64 · NVIDIA ≥15.3 GiB 显存 · ≥30 GiB 内存 · 非系统盘 ≥180 GiB 空闲。
 - 本轮收口：低显存候选 **W6A8 可选择并准备资源**（可选择准备 ≠ 可开拍）、新装机离线整备不再要求先有受管 ComfyUI（阶段 A/B 拆分）、W6A8 动态图锁定完整模型栈、旧 Edge WebView 不再误报断线、最新 CI 失败修复。
