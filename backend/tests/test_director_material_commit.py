@@ -580,3 +580,25 @@ def test_a_narrator_shot_is_carried_by_its_scene_plate_minimum_reference(api):
         assert any(link.asset_id == scene["id"] and link.use_as == "picture"
                    for link in s.bindings), "场景图必须绑成旁白镜的 picture 参考"
         assert _shot_material_problems(db, s) == [], "最小参考满足后裁决就绪"
+
+
+def test_material_criticality_is_the_journey_verdict_not_profile_slots():
+    """2026-11-17 用户裁定：Ref2VA 每镜至少一个参考，journey 的判断是对的，
+    素材准备页必须用同一个裁决，不能按方案槽位另判一套（三原则：一个裁决）。"""
+    from shine.director.requirements import _critical_from_verdict
+
+    entry = {"shot_ids": ["s1"], "cited_by_shot": True}
+    # 人物：journey 报「点名主体缺主素材」→ 必需，与有没有方案/槽位无关。
+    assert _critical_from_verdict(
+        "character", "阿远", entry, {"s1": ["SHOT_CHARACTER_MASTER_MISSING:阿远"]}, {}) is True
+    # 主体已满足（无缺口）→ 不强制生成。
+    assert _critical_from_verdict("character", "阿远", entry, {"s1": []}, {}) is False
+    # 场景：切镜缺参考 → 必需（Ref2VA 每镜至少一个参考）。
+    assert _critical_from_verdict(
+        "scene", "第一场", entry, {"s1": ["SHOT_REFERENCE_MISSING"]}, {}) is True
+    # 场景：无缺口且未被镜头点名 → 可选。
+    assert _critical_from_verdict(
+        "scene", "第一场", {"shot_ids": ["s1"], "cited_by_shot": False}, {"s1": []}, {}) is False
+    # 被镜头按 id 点名的素材无论_family_都是必需。
+    assert _critical_from_verdict(
+        "prop", "怀表", entry, {"s1": []}, {}) is True
