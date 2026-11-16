@@ -224,22 +224,10 @@ def _blocked_production(db) -> bool:
     if db is None:
         return False
     try:
-        from sqlalchemy import func, select
+        from shine.support.occupancy import resource_occupancy
 
-        from shine.models import Job, ProductionSeries
-
-        running = db.scalar(
-            select(func.count(Job.id)).where(
-                Job.status.in_(("SUBMITTING", "RUNNING", "QC_PENDING")), Job.provider == "comfyui"
-            )
-        )
-        series = db.scalar(
-            select(func.count(ProductionSeries.id)).where(
-                ProductionSeries.status.in_(("QUEUED", "RUNNING"))
-            )
-        )
-        return bool(running or series)
-    except Exception:  # noqa: BLE001 - an unreadable counter must not authorise a repair
+        return bool(resource_occupancy(db)["busy"])
+    except Exception:  # noqa: BLE001 - an unreadable occupancy must not authorise a repair
         return True
 
 

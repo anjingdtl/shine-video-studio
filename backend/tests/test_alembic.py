@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180f0010002"
+HEAD_REVISION = "f180f0010003"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -111,6 +111,42 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
             "support_actions",
             "support_reports",
         }.issubset(tables)
+        action_columns = {row[1] for row in connection.execute("PRAGMA table_info(support_actions)")}
+        assert {"request_key", "attempt_no", "request_identity", "original_task_id"}.issubset(
+            action_columns
+        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
+    finally:
+        connection.close()
+
+
+def test_support_action_attempts_upgrade_keeps_existing_authorizations(tmp_path, monkeypatch):
+    db_path = tmp_path / "actions.db"
+    monkeypatch.setenv("SHINE_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
+    config = alembic_config(db_path)
+    command.upgrade(config, "f180f0010002")
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO support_actions (id, session_id, project_id, kind, status, request_identity, "
+            "preview_hash, snapshot_revision, params, preview, actor, approved_at, original_task_id, "
+            "verification, last_error, created_at, updated_at) "
+            "VALUES ('sa-old', NULL, NULL, 'setup_repair', 'FAILED', 'legacy-key', ?, ?, '{}', '{}', "
+            "'local-user', NULL, 'setup-old', '{}', 'old failure', ?, ?)",
+            ("a" * 64, "b" * 64, now, now),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    command.upgrade(config, "head")
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            "SELECT request_key, attempt_no, status, original_task_id FROM support_actions WHERE id = 'sa-old'"
+        ).fetchone()
+        assert row == ("legacy-key", 1, "FAILED", "setup-old")
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
     finally:
         connection.close()

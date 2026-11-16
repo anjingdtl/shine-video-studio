@@ -16,12 +16,15 @@ from sqlalchemy import select
 from shine.models import AppSetting, new_id, utcnow
 from shine.support.context import build_evidence_snapshot, normalise_page_id
 from shine.support.diagnostics import diagnose_snapshot
-from shine.support.knowledge import search_local, search_official_web
+from shine.support.investigation import investigate
+from shine.support.knowledge import local_version_facts, search_local, search_official_web
 from shine.support.models import SupportMessage, SupportSession
 from shine.support.privacy import private_roots_for, redact_text
 
 SESSION_TTL = timedelta(days=30)
 MAX_MESSAGE_CHARS = 4000
+MAX_LLM_PROMPT_CHARS = 12_000
+LLM_COMPLETION_CAP = 700
 WEB_SEARCH_KEY = "support_agent_web_search"
 
 SYSTEM_PROMPT = (
@@ -166,9 +169,85 @@ def set_web_search(db, *, enabled: bool, actor: str = "local-user") -> dict[str,
     return {"web_search": bool(enabled)}
 
 
-def _compose_answer(diagnosis: dict[str, Any], advisory: str | None) -> str:
+def _needs_llm(question: str, diagnosis: dict[str, Any], gateway) -> bool:
+    """Local evidence is enough unless the person asks for an explanation.
+
+    The deterministic rules always run; the model is an optional narrator.
+    """
+    if gateway is None:
+        return False
+    if diagnosis.get("category") == "UNDETERMINED" or diagnosis.get("confidence") == "LOW":
+        return True
+    lowered = (question or "").casefold()
+    return any(
+        token in lowered
+        for token in ("为什么", "原因", "解释", "怎么回事", "怎么办", "如何", "why", "explain")
+    )
+
+
+def _investigation_highlights(investigation: dict[str, Any]) -> list[str]:
+    """At most three named findings, each with its evidence level."""
+    highlights: list[str] = []
+    for step in investigation.get("steps") or []:
+        payload = step.get("payload") or {}
+        tool = step.get("tool")
+        if step.get("status") != "OK":
+            continue
+        if tool == "read_quality_gates":
+            for gate in (payload.get("gates") or [])[:2]:
+                if gate.get("error_code"):
+                    highlights.append(
+                        f"质检门 {gate.get('gate')}：{gate.get('error_code')}（本地质检台账）"
+                    )
+        elif tool == "read_task_failure":
+            attempt = (payload.get("attempt") or {})
+            if attempt.get("repair_root_cause"):
+                highlights.append(f"返工根因：{attempt['repair_root_cause']}（本地任务台账）")
+            elif attempt.get("reconciliation_state"):
+                highlights.append(
+                    f"外部结果状态：{attempt['reconciliation_state']}（本地任务台账）"
+                )
+        elif tool == "read_workflow_contract":
+            profile = payload.get("profile") or {}
+            if profile.get("id") and not profile.get("validated_against_present"):
+                highlights.append(
+                    f"工作流「{profile.get('name') or profile.get('id')}」没有本机验证回执（本地合同台账）"
+                )
+        elif tool == "read_installation_receipts":
+            failures = [
+                row for row in (payload.get("attempts") or [])
+                if row.get("failure_code") or str(row.get("status") or "").startswith("FAILED")
+            ]
+            if failures:
+                highlights.append(
+                    f"安装尝试 {failures[0].get('attempt_id')}："
+                    f"{failures[0].get('failure_code') or failures[0].get('status')}（本地安装回执）"
+                )
+        elif tool == "read_gpu_occupancy":
+            occupancy = payload.get("occupancy") or {}
+            if occupancy.get("busy"):
+                highlights.append(f"{occupancy.get('label')}（本地 GPU 租约台账）")
+        elif tool == "search_local_knowledge":
+            for entry in (payload.get("entries") or [])[:1]:
+                highlights.append(f"{entry.get('title')}（本地知识库 {entry.get('knowledge_version')}）")
+        if len(highlights) >= 3:
+            break
+    return highlights[:3]
+
+
+def _compose_answer(
+    diagnosis: dict[str, Any],
+    advisory: str | None,
+    investigation: dict[str, Any] | None = None,
+    references: list[dict[str, Any]] | None = None,
+) -> str:
     facts = diagnosis.get("facts") or []
     lines = [f"【结论】{diagnosis.get('category_label')}：{diagnosis.get('symptom')}"]
+    highlights = _investigation_highlights(investigation or {})
+    if highlights:
+        lines.append("【补充证据】")
+        for item in highlights:
+            lines.append(f"- {item}")
     if facts:
         lines.append("【依据】")
         for fact in facts[:4]:
@@ -177,6 +256,15 @@ def _compose_answer(diagnosis: dict[str, Any], advisory: str | None) -> str:
     if diagnosis.get("policy_refusal"):
         blocked = "、".join(diagnosis["policy_refusal"].get("blocked") or [])
         lines.append(f"【权限】已拒绝越权操作（{blocked}）；不会执行任何命令或修改源码。")
+    external = [
+        row for row in (references or []) if isinstance(row, dict) and row.get("url")
+    ][:2]
+    if external:
+        lines.append("【外部参考（仅参考，不是修复指令）】")
+        for row in external:
+            applicability = (row.get("applicability") or {}).get("state")
+            suffix = f" · {applicability}" if applicability else ""
+            lines.append(f"- {row.get('title')}：{row.get('url')}{suffix}")
     if advisory:
         lines.append("【智能解释】")
         lines.append(advisory)
@@ -211,28 +299,59 @@ def handle_message(
         error_code=session.error_code,
     )
     diagnosis = diagnose_snapshot(snapshot, question=content, db=db)
+    readiness_code = (diagnosis.get("readiness_reference") or {}).get("code")
+    investigation = investigate(db, settings, snapshot, content, code=readiness_code)
 
     tool_trace: list[dict[str, Any]] = [
-        {"tool": "read_setup_verdict", "status": "OK"},
-        {"tool": "read_comfy_runtime", "status": "OK" if snapshot.get("runtime") else "UNAVAILABLE"},
-        {"tool": "read_support_context", "status": "OK"},
+        {"tool": "read_setup_verdict", "status": "OK", "evidence_level": "LOCAL_AUTHORITY"},
+        {
+            "tool": "read_comfy_runtime",
+            "status": "OK" if snapshot.get("runtime") else "UNAVAILABLE",
+            "evidence_level": "LOCAL_LEDGER",
+        },
+        {"tool": "read_support_context", "status": "OK", "evidence_level": "LOCAL_LEDGER"},
     ]
-    if snapshot.get("task"):
-        tool_trace.append({"tool": "read_task_failure", "status": "OK"})
-    if (snapshot.get("setup") or {}).get("summary"):
-        tool_trace.append({"tool": "read_resource_inventory", "status": "OK"})
+    for step in investigation.get("steps") or []:
+        tool_trace.append(
+            {
+                "tool": step.get("tool"),
+                "status": step.get("status"),
+                "evidence_level": step.get("evidence_level"),
+                "ms": step.get("ms"),
+            }
+        )
+    # The trace is a bounded list; the same tool never appears twice.
+    seen: set[str] = set()
+    unique_trace: list[dict[str, Any]] = []
+    for row in tool_trace:
+        tool = str(row.get("tool"))
+        if tool in seen:
+            continue
+        seen.add(tool)
+        unique_trace.append(row)
+    tool_trace = unique_trace[:8]
+
     knowledge = search_local(content, limit=knowledge_limit)
-    if knowledge:
-        tool_trace.append({"tool": "search_local_knowledge", "status": "OK"})
-    web = {"enabled": False, "results": []}
+    web: dict[str, Any] = {"enabled": False, "results": []}
     if web_search_enabled(db):
-        web = search_official_web(content, enabled=True)
-        tool_trace.append({"tool": "search_official_web", "status": "OK" if web.get("results") else "UNAVAILABLE"})
-    tool_trace = tool_trace[:8]
+        web = search_official_web(
+            content,
+            enabled=True,
+            error_code=readiness_code or (snapshot.get("page_context") or {}).get("error_code"),
+            versions=local_version_facts(db, settings),
+        )
+        tool_trace.append(
+            {
+                "tool": "search_official_web",
+                "status": "OK" if web.get("results") else "UNAVAILABLE",
+                "evidence_level": "EXTERNAL_REFERENCE",
+            }
+        )
+        tool_trace = tool_trace[:8]
 
     llm_info: dict[str, Any] = {"used": False, "status": "NOT_CONFIGURED"}
     advisory: str | None = None
-    if gateway is not None:
+    if _needs_llm(content, diagnosis, gateway):
         try:
             prompt_payload = {
                 "question": content,
@@ -249,9 +368,22 @@ def handle_message(
                     "facts": diagnosis.get("facts"),
                     "next_step": diagnosis.get("next_step"),
                 },
+                "investigation": [
+                    {
+                        "tool": step.get("tool"),
+                        "status": step.get("status"),
+                        "evidence_level": step.get("evidence_level"),
+                        "payload": step.get("payload"),
+                    }
+                    for step in investigation.get("steps") or []
+                ][:8],
                 "local_knowledge": [row.get("title") for row in knowledge],
                 "official_references": [
-                    {"title": row.get("title"), "url": row.get("url")}
+                    {
+                        "title": row.get("title"),
+                        "url": row.get("url"),
+                        "applicability": row.get("applicability"),
+                    }
                     for row in (web.get("results") or [])
                 ],
             }
@@ -261,7 +393,8 @@ def handle_message(
                 db,
                 "support_agent",
                 system=SYSTEM_PROMPT,
-                user=_json.dumps(prompt_payload, ensure_ascii=False)[:12000],
+                user=_json.dumps(prompt_payload, ensure_ascii=False)[:MAX_LLM_PROMPT_CHARS],
+                budget={"completion_cap": LLM_COMPLETION_CAP},
             )
             advisory = redact_text(response.text, limit=3000).strip() or None
             llm_info = {
@@ -291,9 +424,37 @@ def handle_message(
             }
 
     diagnosis["llm"] = llm_info
-    answer = _compose_answer(diagnosis, advisory)
+    diagnosis["investigation"] = {
+        "steps_used": investigation.get("steps_used"),
+        "max_steps": investigation.get("max_steps"),
+        "elapsed_ms": investigation.get("elapsed_ms"),
+        "truncated": investigation.get("truncated"),
+        "evidence_levels": sorted(
+            {
+                str(step.get("evidence_level"))
+                for step in investigation.get("steps") or []
+                if step.get("evidence_level")
+            }
+        ),
+    }
+    answer = _compose_answer(diagnosis, advisory, investigation, web.get("results"))
     payload = {
         "diagnosis": diagnosis,
+        "investigation": {
+            "steps": [
+                {
+                    "tool": step.get("tool"),
+                    "status": step.get("status"),
+                    "evidence_level": step.get("evidence_level"),
+                    "ms": step.get("ms"),
+                    "payload": step.get("payload"),
+                }
+                for step in investigation.get("steps") or []
+            ],
+            "steps_used": investigation.get("steps_used"),
+            "truncated": investigation.get("truncated"),
+            "elapsed_ms": investigation.get("elapsed_ms"),
+        },
         "knowledge": [
             {
                 "id": row.get("id"),
@@ -324,6 +485,8 @@ def handle_message(
         "snapshot": snapshot,
         "last_diagnosis": diagnosis,
         "last_evidence_id": snapshot.get("evidence_id"),
+        "last_investigation": payload["investigation"],
+        "last_references": payload["official_references"],
     }
     session.updated_at = utcnow()
     from shine.services import add_audit
@@ -354,6 +517,17 @@ def latest_diagnosis(session: SupportSession) -> dict[str, Any]:
 def latest_snapshot(session: SupportSession) -> dict[str, Any]:
     context = session.context_json if isinstance(session.context_json, dict) else {}
     return context.get("snapshot") or {}
+
+
+def latest_investigation(session: SupportSession) -> dict[str, Any]:
+    context = session.context_json if isinstance(session.context_json, dict) else {}
+    return context.get("last_investigation") or {}
+
+
+def latest_references(session: SupportSession) -> list[dict[str, Any]]:
+    context = session.context_json if isinstance(session.context_json, dict) else {}
+    rows = context.get("last_references") or []
+    return [row for row in rows if isinstance(row, dict)]
 
 
 def attempt_actions(db, session_id: str) -> list[dict[str, Any]]:

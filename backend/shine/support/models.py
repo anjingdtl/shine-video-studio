@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shine.db import Base
@@ -61,7 +61,12 @@ class SupportAction(Base):
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(48), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="PREVIEWED", nullable=False)
-    request_identity: Mapped[str] = mapped_column(String(80), nullable=False)
+    #: Stable identity of the requested change (kind + params + actor + project).
+    request_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    #: Monotonic attempt for that request key.  A terminal action never blocks a
+    #: new legal attempt, while a live one is reused idempotently.
+    attempt_no: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    request_identity: Mapped[str] = mapped_column(String(96), nullable=False)
     preview_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot_revision: Mapped[str] = mapped_column(String(64), nullable=False)
     params: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)

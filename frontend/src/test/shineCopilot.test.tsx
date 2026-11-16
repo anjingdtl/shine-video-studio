@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { ShineCopilot } from '../components/ShineCopilot';
+import { clearCopilotFault, reportCopilotFault } from '../copilotContext';
 import { StudioStub, jsonResponse, type Route } from './studioStub';
 
 const verdict = { mode: 'SETUP_REQUIRED', label: '需要配置真实制作', code: 'REAL_RUNTIME_NOT_ACTIVATED' };
@@ -75,6 +76,7 @@ const routeBase = (extra: Route[] = []) => new StudioStub([
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  clearCopilotFault();
   window.localStorage.clear();
 });
 
@@ -238,7 +240,7 @@ describe('ShineCopilot', () => {
   });
 
   it('persists and restores the session after a refresh', async () => {
-    window.localStorage.setItem('shine.copilot.session.setup.none', 's1');
+    window.localStorage.setItem('shine.copilot.session.none.none.none.none', 's1');
     stub = new StudioStub([
       { method: 'GET', pattern: /\/support\/context/, respond: () => context() },
       { method: 'GET', pattern: /\/support\/sessions\/s1$/, respond: () => jsonResponse(session()) },
@@ -248,6 +250,50 @@ describe('ShineCopilot', () => {
     await user.click(screen.getByLabelText('打开 AI 管家'));
     expect(await screen.findByText(/【结论】本机配置尚未就绪/)).toBeTruthy();
     expect(screen.getByText('帮我检查环境')).toBeTruthy();
+  });
+
+  it('opens from a real failure card, binds the task and keeps the diagnosis across stages', async () => {
+    stub = routeBase([
+      { method: 'GET', pattern: /\/support\/sessions\/s1$/, respond: () => jsonResponse(session()) },
+    ]);
+    const user = userEvent.setup();
+    reportCopilotFault({
+      projectId: 'p1', jobId: 'job-1', attemptId: 'att-1', errorCode: 'OOM', label: '显存不足',
+    });
+    const first = render(<ShineCopilot pageId="produce" pageLabel="生产" projectId="p1" />);
+    expect(await screen.findByText(/【结论】本机配置尚未就绪/)).toBeTruthy();
+    const post = stub.callsOf('POST', /\/support\/sessions$/)[0];
+    expect(post.body).toMatchObject({
+      page_id: 'produce', project_id: 'p1', job_id: 'job-1', attempt_id: 'att-1', error_code: 'OOM',
+    });
+    expect(post.body).toMatchObject({ question: /显存不足/ });
+    expect(window.localStorage.getItem('shine.copilot.session.p1.job-1.att-1.OOM')).toBe('s1');
+    expect(screen.getByText(/已绑定/)).toBeTruthy();
+
+    first.unmount();
+    render(<ShineCopilot pageId="run" pageLabel="成片" projectId="p1" />);
+    const fab = screen.queryByLabelText('打开 AI 管家');
+    if (fab) await user.click(fab);
+    expect(await screen.findByText(/【结论】本机配置尚未就绪/)).toBeTruthy();
+    // Same failure, same session: switching the seven stages must not submit again.
+    expect(stub.callsOf('POST', /\/support\/sessions$/)).toHaveLength(1);
+    expect(stub.callsOf('GET', /\/support\/sessions\/s1$/).length).toBeGreaterThan(0);
+  });
+
+  it('keeps separate sessions for two different failures', async () => {
+    stub = routeBase();
+    reportCopilotFault({ projectId: 'p1', jobId: 'job-a', errorCode: 'OOM', label: '显存不足' });
+    render(<ShineCopilot pageId="produce" pageLabel="生产" projectId="p1" />);
+    expect(await screen.findByText(/【结论】/)).toBeTruthy();
+    reportCopilotFault({ projectId: 'p1', jobId: 'job-b', errorCode: 'NODE_MISSING', label: '缺节点' });
+    await waitFor(() => expect(stub.callsOf('POST', /\/support\/sessions$/).length).toBeGreaterThanOrEqual(2));
+    const posts = stub.callsOf('POST', /\/support\/sessions$/);
+    expect(posts.length).toBeGreaterThanOrEqual(2);
+    const keys = posts.map((call) => (call.body as { job_id?: string }).job_id);
+    expect(keys).toContain('job-a');
+    expect(keys).toContain('job-b');
+    expect(window.localStorage.getItem('shine.copilot.session.p1.job-a.none.OOM')).toBe('s1');
+    expect(window.localStorage.getItem('shine.copilot.session.p1.job-b.none.NODE_MISSING')).toBe('s1');
   });
 
   it('toggles optional official-document search through the API', async () => {

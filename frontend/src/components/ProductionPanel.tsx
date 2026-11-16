@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Activity, AlertTriangle, ClipboardCheck, Play, Pause, ShieldCheck, Sparkles, Wrench } from 'lucide-react';
 import type { Job, JobAttempt, QCReport, QualityGate, RepairSuggestion, SystemStatus } from '../api';
+import { reportCopilotFault } from '../copilotContext';
 import {
   acceptanceLabels, advisoryReviewKindLabels, advisoryReviewLabels, checkStatusLabels, coverageLabels,
   failureLabels, gateLabels, gateStatusLabels, label, modeLabels, providerLabels, qcResultLabels,
@@ -163,6 +164,22 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
           <div><b>{selectedJob.shot_name}</b><span>编号 {selectedJob.id.slice(0, 12)}… · 状态版本 {selectedJob.state_version}{selectedJob.acceptance_note ? ` · ${selectedJob.acceptance_note}` : ''}</span></div>
           <div className="detail-actions">
             {selectedJob.provider === 'comfyui' && selectedJob.status === 'NEEDS_REVIEW' && selectedJob.failure_code === 'QC_NEEDS_REVIEW' && <button className="btn-secondary" disabled={busy || detailBusy} onClick={() => onRecheck(selectedJob)}>只重跑机器审片（保留视频）</button>}
+            {(selectedJob.failure_code || ['FAILED', 'NEEDS_REVIEW'].includes(selectedJob.status)) && (
+              <button
+                className="btn-secondary"
+                onClick={() => reportCopilotFault({
+                  projectId: selectedJob.project_id,
+                  jobId: selectedJob.id,
+                  attemptId: selectedJob.attempts[selectedJob.attempts.length - 1]?.id,
+                  errorCode: selectedJob.failure_code || undefined,
+                  label: selectedJob.failure_code
+                    ? label(failureLabels, selectedJob.failure_code)
+                    : label(statusLabels, selectedJob.status),
+                })}
+              >
+                <Sparkles size={12} /> 交给 AI 管家诊断
+              </button>
+            )}
             <button className="btn-secondary" disabled={busy || detailBusy} onClick={() => suggest(selectedJob)}><Wrench size={12} /> 给修复建议</button>
           </div>
         </div>

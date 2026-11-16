@@ -5,6 +5,7 @@ import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { ScriptTextConsent } from './ScriptTextConsent';
 import { API, api, ApiError, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
+import { reportCopilotFault } from '../copilotContext';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
 import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
@@ -1006,6 +1007,12 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                       <span>{scene.scene_key}{scene.title ? ` · ${scene.title}` : ''}</span>
                       <span>{sceneStatusLabel(scene)}</span>
                       {scene.error_code && <em>{reasonText(scene.error_code)}</em>}
+                      {scene.error_code && <button type="button" className="btn-text"
+                        onClick={() => reportCopilotFault({
+                          taskId: scene.task_id || undefined,
+                          errorCode: scene.error_code || undefined,
+                          label: reasonText(scene.error_code),
+                        })}>交给 AI 管家诊断</button>}
                       {scene.task_id && scene.state_version !== null
                         && (scene.status === 'NEEDS_REVIEW'
                           || ['UNKNOWN', 'NOT_SENT'].includes(scene.external_outcome ?? ''))

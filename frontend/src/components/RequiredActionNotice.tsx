@@ -1,4 +1,5 @@
 import { ApiError } from '../api';
+import { reportCopilotFault } from '../copilotContext';
 import { describeBlocker, type ErrorActionTarget } from '../errorActions';
 import { RequiredAction } from './RequiredAction';
 
@@ -37,6 +38,15 @@ export function RequiredActionNotice({ error, onGoStage }: {
       what={described.reason}
       why={described.why}
       action={{ label: action.label, go: () => onGoStage(action.target) }}
+      extra={
+        <button
+          type="button"
+          className="btn-text"
+          onClick={() => reportCopilotFault({ errorCode: code, label: described.reason })}
+        >
+          交给 AI 管家诊断
+        </button>
+      }
     />
   );
 }

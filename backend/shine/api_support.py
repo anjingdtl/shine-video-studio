@@ -23,7 +23,7 @@ from shine.support import agent as agent_service
 from shine.support import reports as report_service
 from shine.support.context import build_evidence_snapshot
 from shine.support.diagnostics import diagnose_snapshot, suggested_questions
-from shine.support.knowledge import search_local, search_official_web
+from shine.support.knowledge import local_version_facts, search_local, search_official_web
 from shine.support.models import SupportAction, SupportReport
 from shine.support.tools import ToolDenied, read_tool_names
 
@@ -140,10 +140,12 @@ def support_context(
 
 @router.get("/knowledge")
 def support_knowledge(
+    settings: SettingsDep,
     db: DBSession,
     q: str = "",
     limit: int = 5,
     web: bool = False,
+    code: str | None = None,
 ):
     limit = max(1, min(int(limit), 10))
     local = search_local(q, limit=limit)
@@ -152,7 +154,12 @@ def support_knowledge(
         enabled = agent_service.web_search_enabled(db)
         if not enabled:
             raise _http("WEB_SEARCH_DISABLED", "联网检索已关闭；请先在 AI 管家中开启。", 409)
-        web_result = search_official_web(q, enabled=True)
+        web_result = search_official_web(
+            q,
+            enabled=True,
+            error_code=code,
+            versions=local_version_facts(db, settings),
+        )
     return {"version": local[0]["knowledge_version"] if local else None, "local": local, "web": web_result}
 
 
@@ -332,11 +339,15 @@ def support_report_create(
     diagnosis = None
     session = None
     attempted: list[dict] = []
+    investigation: dict = {}
+    references: list[dict] = []
     if body.session_id:
         session = _require_session(db, body.session_id)
         snapshot = agent_service.latest_snapshot(session)
         diagnosis = agent_service.latest_diagnosis(session)
         attempted = agent_service.attempt_actions(db, session.id)
+        investigation = agent_service.latest_investigation(session)
+        references = agent_service.latest_references(session)
     if not snapshot:
         snapshot = build_evidence_snapshot(db, settings, page_id="unknown")
     if not diagnosis:
@@ -354,6 +365,8 @@ def support_report_create(
             project_id=(snapshot.get("page_context") or {}).get("project_id"),
             attempted_actions=attempted,
             notes=body.notes,
+            investigation=investigation,
+            references=references,
         )
     except ValueError as exc:
         raise _http("REPORT_REJECTED", str(exc), 400) from exc

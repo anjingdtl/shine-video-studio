@@ -2,13 +2,24 @@
 
 Local entries are bound to a build and describe this product's own contracts.
 They are evidence for explanations, never executable repair instructions.
-Web retrieval is opt-in (default off), allow-listed to official sources and
-returned as references with a URL and date.  No embedding model and no GPU are
-used, so a diagnosis never competes with a render for VRAM.
+
+Web retrieval is opt-in (default off) and has two layers:
+
+* curated official references, and
+* a GitHub Issues search limited to a small allow-list of upstream repositories.
+
+Only a redacted, generic query leaves the machine: an error code, a topic word
+from a fixed vocabulary and sanitised local version numbers.  Project text,
+paths, prompts, models and keys are never part of it.  Results are references
+with a source, an applicability hint and an uncertainty note; an issue body that
+looks like an instruction is withheld instead of shown.  No embedding model and
+no GPU are used, so a diagnosis never competes with a render for VRAM.
 """
 from __future__ import annotations
 
 import json
+import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,10 +32,35 @@ KNOWLEDGE_VERSION = "shine-support-kb-2026.11.16"
 OFFICIAL_HOSTS: tuple[str, ...] = (
     "docs.comfy.org",
     "github.com",
+    "api.github.com",
     "pytorch.org",
     "docs.nvidia.com",
     "developer.nvidia.com",
 )
+
+#: Upstream repositories whose public issues may be searched.  Nothing else is
+#: queried, and the repository list is not user-controlled.
+GITHUB_ISSUE_REPOS: tuple[str, ...] = (
+    "comfyanonymous/ComfyUI",
+    "Comfy-Org/ComfyUI-Manager",
+    "pytorch/pytorch",
+)
+
+#: Fixed vocabulary.  A user question never contributes free-form words to the
+#: outbound query beyond these topics and a sanitised error code.
+_TOPIC_WORDS: dict[str, str] = {
+    "nodes": "node custom node",
+    "cuda": "cuda driver",
+    "pytorch": "pytorch torch cuda",
+    "comfyui": "comfyui",
+    "gpu": "out of memory vram",
+}
+
+_WEB_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_WEB_CACHE_TTL_SECONDS = 600.0
+_WEB_CACHE_MAX = 32
+_VERSION_RE = re.compile(r"^[0-9][0-9A-Za-z._-]{0,15}$")
+_ERROR_CODE_RE = re.compile(r"[^A-Z0-9_]+")
 
 #: Curated official references per topic.  These are documentation pointers,
 #: not fetched pages: the agent links the person to the official text and never
@@ -220,43 +256,204 @@ def _allowed(url: str) -> bool:
     return host in OFFICIAL_HOSTS
 
 
-def search_official_web(query: str, *, enabled: bool = False, timeout_s: float = 4.0) -> dict[str, Any]:
+def _safe_error_code(error_code: str | None) -> str:
+    code = _ERROR_CODE_RE.sub("_", (error_code or "").upper()).strip("_")
+    return code[:40]
+
+
+def _safe_version(value: Any) -> str | None:
+    text = str(value or "").strip()
+    return text if _VERSION_RE.match(text) else None
+
+
+def _outbound_query(error_code: str | None, topic: str, versions: dict[str, str] | None) -> str:
+    """Only allow-listed words leave the machine."""
+    parts: list[str] = []
+    code = _safe_error_code(error_code)
+    if code:
+        parts.append(code)
+    parts.append(_TOPIC_WORDS.get(topic, _TOPIC_WORDS["comfyui"]))
+    for value in (versions or {}).values():
+        safe = _safe_version(value)
+        if safe:
+            parts.append(safe)
+    return " ".join(dict.fromkeys(parts))[:160]
+
+
+def _github_issue_url_allowed(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.hostname != "github.com":
+        return False
+    path = parsed.path.strip("/").split("/")
+    if len(path) < 4 or path[2] != "issues":
+        return False
+    repo = f"{path[0]}/{path[1]}"
+    return repo in GITHUB_ISSUE_REPOS
+
+
+def _applicability(title: str, excerpt: str, local_version: str | None) -> dict[str, str]:
+    if not local_version:
+        return {"state": "UNKNOWN", "reason": "本机版本未观测到，无法判断资料是否适用。"}
+    found = re.findall(r"\b(?:v)?([0-9]+(?:\.[0-9]+){1,3})\b", f"{title} {excerpt}")
+    if not found:
+        return {"state": "UNKNOWN", "reason": "资料没有写明版本，仅可作为参考。"}
+    if any(version == local_version or local_version.startswith(version + ".") for version in found):
+        return {"state": "LIKELY_APPLICABLE", "reason": f"资料提到与本机一致的版本 {local_version}。"}
+    return {
+        "state": "POSSIBLY_NOT_APPLICABLE",
+        "reason": f"资料提到 {found[0]}，本机观测到 {local_version}；请以上游说明为准。",
+    }
+
+
+def _search_github_issues(
+    query: str,
+    *,
+    error_code: str | None,
+    local_version: str | None,
+    timeout_s: float,
+) -> list[dict[str, Any]]:
+    from shine.support.tools import forbidden_intent
+
+    repo_query = " ".join(f"repo:{repo}" for repo in GITHUB_ISSUE_REPOS)
+    url = (
+        "https://api.github.com/search/issues?"
+        + urllib.parse.urlencode(
+            {"q": f"{query} is:issue {repo_query}", "per_page": "3", "sort": "updated"}
+        )
+    )
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Shine-Copilot/1.0 (+local diagnosis)",
+            "Accept": "application/vnd.github+json",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - allow-listed host
+        payload = json.loads(response.read(1_000_000).decode("utf-8", "replace"))
+    results: list[dict[str, Any]] = []
+    for item in (payload.get("items") or [])[:3]:
+        if not isinstance(item, dict):
+            continue
+        url_value = str(item.get("html_url") or "")
+        if not _github_issue_url_allowed(url_value):
+            continue
+        title = redact_text(item.get("title"), limit=160)
+        body = redact_text(item.get("body"), limit=240)
+        instruction_like = bool(forbidden_intent(body)) or bool(forbidden_intent(title))
+        results.append(
+            {
+                "title": title,
+                "url": url_value,
+                "source": "GitHub Issues",
+                "kind": "ISSUE",
+                "state": item.get("state"),
+                "updated_at": item.get("updated_at"),
+                "excerpt": "" if instruction_like else body,
+                "instruction_like": instruction_like,
+                "applicability": _applicability(title, body, local_version),
+                "availability": "REFERENCE_ONLY",
+                "evidence_level": "EXTERNAL_REFERENCE",
+            }
+        )
+    return results
+
+
+def search_official_web(
+    query: str,
+    *,
+    enabled: bool = False,
+    error_code: str | None = None,
+    versions: dict[str, str] | None = None,
+    timeout_s: float = 4.0,
+) -> dict[str, Any]:
     """Official-source references, disabled unless the person opted in.
 
-    The query is redacted before it can leave the machine.  Results are marked
-    ``REFERENCE_ONLY``: they cannot change local facts or grant a tool.
+    ``query`` selects a *topic*; it is never sent verbatim.  When the network is
+    unavailable the curated pointers are still returned and the answer falls
+    back to local diagnosis.
     """
-    safe_query = redact_text(query, limit=200)
+    del query  # free-form text never leaves the machine
+    topic = _topic_for(error_code or "")
+    safe_query = _outbound_query(error_code, topic, versions)
     if not enabled:
         return {
             "enabled": False,
             "query": safe_query,
             "results": [],
+            "offline": False,
             "notice": "联网检索默认关闭；打开后只查询官方文档与上游仓库。",
         }
-    references = OFFICIAL_REFERENCES.get(_topic_for(query), OFFICIAL_REFERENCES["comfyui"])
-    results = []
-    for reference in references:
+    cache_key = f"{safe_query}|{sorted((versions or {}).items())}"
+    cached = _WEB_CACHE.get(cache_key)
+    now = time.monotonic()
+    if cached and now - cached[0] < _WEB_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    local_version = _safe_version((versions or {}).get("comfyui"))
+    results: list[dict[str, Any]] = []
+    offline = False
+    try:
+        results.extend(
+            _search_github_issues(
+                safe_query,
+                error_code=error_code,
+                local_version=local_version,
+                timeout_s=timeout_s,
+            )
+        )
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError, json.JSONDecodeError):
+        offline = True
+
+    # Curated pointers always travel with the answer; they cost no request.
+    for reference in OFFICIAL_REFERENCES.get(topic, OFFICIAL_REFERENCES["comfyui"]):
         if not _allowed(reference["url"]):
             continue
-        item = {**reference, "retrieved_at": None, "availability": "REFERENCE_ONLY"}
-        try:
-            request = urllib.request.Request(
-                reference["url"],
-                method="HEAD",
-                headers={"User-Agent": "Shine-Copilot/1.0 (+local diagnosis)"},
-            )
-            with urllib.request.urlopen(request, timeout=timeout_s) as response:  # noqa: S310 - allow-listed hosts
-                item["availability"] = f"HTTP_{response.status}"
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
-            item["availability"] = "UNREACHABLE"
-        results.append(item)
-    return {
+        results.append(
+            {
+                **reference,
+                "kind": "DOC",
+                "availability": "REFERENCE_ONLY",
+                "evidence_level": "EXTERNAL_REFERENCE",
+                "applicability": {
+                    "state": "UNKNOWN",
+                    "reason": "官方文档入口，需按本机版本自行核对。",
+                },
+            }
+        )
+    payload = {
         "enabled": True,
         "query": safe_query,
-        "results": results,
-        "notice": "外部资料只作为参考证据，不能作为本机修复指令。",
+        "results": results[:6],
+        "offline": offline,
+        "local_versions": {key: _safe_version(value) for key, value in (versions or {}).items()},
+        "notice": "外部资料只作为参考证据，不能作为本机修复指令；断网时自动回到离线诊断。",
     }
+    if len(_WEB_CACHE) >= _WEB_CACHE_MAX:
+        _WEB_CACHE.pop(next(iter(_WEB_CACHE)))
+    _WEB_CACHE[cache_key] = (now, payload)
+    return payload
+
+
+def local_version_facts(db, settings) -> dict[str, str]:
+    """Observed local versions, from existing receipts only (never probed here)."""
+    versions: dict[str, str] = {}
+    try:
+        from shine.comfyops.models import ComfyInstance
+        from shine.comfyops.setup_summary import resolve_installation
+
+        selected = resolve_installation(db, settings, discovered=[]).get("selected") or {}
+        instance_id = selected.get("instance_id")
+        if instance_id:
+            instance = db.get(ComfyInstance, str(instance_id))
+            payload = getattr(instance, "payload", {}) or {}
+            service = payload.get("service_identity") or {}
+            value = service.get("version") or payload.get("actual_version")
+            safe = _safe_version(value)
+            if safe:
+                versions["comfyui"] = safe
+    except Exception:  # noqa: BLE001 - an unobserved version stays unobserved
+        pass
+    return versions
 
 
 def dump_local_index() -> str:

@@ -4,6 +4,7 @@ import {
   RefreshCw, RotateCcw, Send, ShieldCheck, Sparkles, Wrench, X,
 } from 'lucide-react';
 import { API, api } from '../api';
+import { currentCopilotFault, faultKey, faultLabel, subscribeCopilotFault, type CopilotFault } from '../copilotContext';
 
 type Fact = { key: string; value: string; source: string };
 
@@ -101,8 +102,9 @@ export type ShineCopilotProps = {
 const SESSION_PREFIX = 'shine.copilot.session.';
 const MAX_INPUT = 2000;
 
-function sessionKey(pageId: string, projectId?: string) {
-  return `${SESSION_PREFIX}${pageId}.${projectId || 'none'}`;
+/** 会话按「项目 + 关联故障」绑定：切换页面/七阶段仍延续，换项目或换任务则分开。 */
+function sessionKey(projectId: string | undefined, fault: CopilotFault | null) {
+  return `${SESSION_PREFIX}${projectId || 'none'}.${faultKey(fault)}`;
 }
 
 function formatBytes(value: number | undefined) {
@@ -125,6 +127,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [draft, setDraft] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [fault, setFault] = useState<CopilotFault | null>(() => currentCopilotFault());
   const [preview, setPreview] = useState<ActionState | null>(null);
   const [approving, setApproving] = useState(false);
   const [report, setReport] = useState<ReportMeta | null>(null);
@@ -134,6 +137,25 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [showEvidence, setShowEvidence] = useState<Record<string, boolean>>({});
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const sessionRef = useRef<CopilotSession | null>(null);
+  const handledFaultRef = useRef<number>(0);
+
+  const applySession = useCallback((next: CopilotSession | null) => {
+    sessionRef.current = next;
+    setSession(next);
+  }, []);
+
+  // The active association: a concrete failure (job/attempt/error code) wins
+  // over the generic page context.  Switching pages never changes it, so the
+  // same diagnosis continues across the seven stages.
+  const active = {
+    pageId,
+    projectId: fault?.projectId || projectId,
+    jobId: fault?.jobId || jobId,
+    attemptId: fault?.attemptId,
+    taskId: fault?.taskId,
+    errorCode: fault?.errorCode || errorCode,
+  };
 
   useEffect(() => {
     if (!open) return;
@@ -157,12 +179,24 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     else node.scrollTop = node.scrollHeight;
   }, [open, session]);
 
-  const loadContext = useCallback(async () => {
+  useEffect(
+    () =>
+      subscribeCopilotFault((next) => {
+        if (!next) return;
+        setFault(next);
+        setOpen(true);
+      }),
+    [],
+  );
+
+  const loadContext = useCallback(async (ctx = active) => {
     try {
-      const params = new URLSearchParams({ page_id: pageId });
-      if (projectId) params.set('project_id', projectId);
-      if (jobId) params.set('job_id', jobId);
-      if (errorCode) params.set('error_code', errorCode);
+      const params = new URLSearchParams({ page_id: ctx.pageId });
+      if (ctx.projectId) params.set('project_id', ctx.projectId);
+      if (ctx.jobId) params.set('job_id', ctx.jobId);
+      if (ctx.attemptId) params.set('attempt_id', ctx.attemptId);
+      if (ctx.taskId) params.set('task_id', ctx.taskId);
+      if (ctx.errorCode) params.set('error_code', ctx.errorCode);
       const data = await api<ContextResponse>(`/support/context?${params.toString()}`);
       setContext(data);
       setSuggestions(data.suggested_questions);
@@ -170,27 +204,55 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     } catch (err) {
       setError(err instanceof Error ? err.message : '无法读取本机环境状态。');
     }
-  }, [pageId, projectId, jobId, errorCode]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ctx is derived from the same props/fault
+  }, [pageId, projectId, fault]);
 
-  const restore = useCallback(async () => {
-    const stored = window.localStorage.getItem(sessionKey(pageId, projectId));
+  const restore = useCallback(async (ctx = active) => {
+    const key = sessionKey(ctx.projectId, fault);
+    const stored = window.localStorage.getItem(key);
     if (!stored) {
-      await loadContext();
-      return;
+      applySession(null);
+      await loadContext(ctx);
+      return null;
     }
     try {
       const restored = await api<CopilotSession>(`/support/sessions/${stored}`);
-      setSession(restored);
-      await loadContext();
+      applySession(restored);
+      await loadContext(ctx);
+      return restored;
     } catch {
-      window.localStorage.removeItem(sessionKey(pageId, projectId));
-      await loadContext();
+      window.localStorage.removeItem(key);
+      applySession(null);
+      await loadContext(ctx);
+      return null;
     }
-  }, [loadContext, pageId, projectId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadContext, fault, applySession]);
 
   useEffect(() => {
     if (open) void restore();
   }, [open, restore]);
+
+  /** 从失败卡片进入：绑定真实任务/错误码，并只诊断一次。 */
+  useEffect(() => {
+    if (!fault || fault.at === handledFaultRef.current) return;
+    // A second failure can arrive while the first diagnosis is still running.
+    // Wait for the current turn to finish instead of dropping the new binding.
+    if (busy) return;
+    handledFaultRef.current = fault.at;
+    setOpen(true);
+    setPreview(null);
+    setReport(null);
+    setError('');
+    setNotice('');
+    void (async () => {
+      const restored = await restore();
+      if (restored) return;
+      const question = `帮我诊断这个失败${fault.label ? `：${fault.label}` : fault.errorCode ? `：${fault.errorCode}` : ''}`;
+      await ask(question);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fault, busy]);
 
   const ask = async (question: string) => {
     const content = question.trim();
@@ -200,27 +262,30 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     setNotice('');
     setPreview(null);
     try {
-      if (!session) {
+      const current = sessionRef.current;
+      if (!current) {
         const created = await api<{ session: CopilotSession }>('/support/sessions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            page_id: pageId,
-            project_id: projectId || null,
-            job_id: jobId || null,
-            error_code: errorCode || null,
+            page_id: active.pageId,
+            project_id: active.projectId || null,
+            job_id: active.jobId || null,
+            attempt_id: active.attemptId || null,
+            task_id: active.taskId || null,
+            error_code: active.errorCode || null,
             question: content,
           }),
         });
-        setSession(created.session);
-        window.localStorage.setItem(sessionKey(pageId, projectId), created.session.id);
+        applySession(created.session);
+        window.localStorage.setItem(sessionKey(active.projectId, fault), created.session.id);
       } else {
-        const result = await api<{ session: CopilotSession }>(`/support/sessions/${session.id}/messages`, {
+        const result = await api<{ session: CopilotSession }>(`/support/sessions/${current.id}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content }),
         });
-        setSession(result.session);
+        applySession(result.session);
       }
       setDraft('');
     } catch (err) {
@@ -240,9 +305,9 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kind: action.kind,
-          params: { ...action.params, project_id: projectId || undefined },
+          params: { ...action.params, project_id: active.projectId || undefined },
           session_id: session?.id || null,
-          project_id: projectId || null,
+          project_id: active.projectId || null,
         }),
       });
       setPreview(result.action);
@@ -346,8 +411,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   };
 
   const resetSession = () => {
-    if (session) window.localStorage.removeItem(sessionKey(pageId, projectId));
-    setSession(null);
+    if (session) window.localStorage.removeItem(sessionKey(projectId, fault));
+    applySession(null);
     setPreview(null);
     setReport(null);
     setError('');
@@ -434,7 +499,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
           <header className="copilot-head">
             <div>
               <b><Sparkles size={14} aria-hidden="true" /> SHINE AI 管家</b>
-              <span>{pageLabel} · 只读诊断</span>
+              <span>{pageLabel} · 只读诊断{faultLabel(fault) ? ` · 已绑定 ${faultLabel(fault)}` : ''}</span>
             </div>
             <div className="copilot-head-tools">
               <button
@@ -492,10 +557,14 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                         {tool.tool === 'read_setup_verdict' ? '唯一裁决'
                           : tool.tool === 'read_comfy_runtime' ? '运行合同'
                             : tool.tool === 'read_task_failure' ? '任务失败事实'
-                              : tool.tool === 'read_resource_inventory' ? '资源清单'
-                                : tool.tool === 'search_local_knowledge' ? '本地知识库'
-                                  : tool.tool === 'search_official_web' ? '官方文档'
-                                    : '本页面事实'}
+                              : tool.tool === 'read_quality_gates' ? '质检门'
+                                : tool.tool === 'read_workflow_contract' ? '工作流合同'
+                                  : tool.tool === 'read_installation_receipts' ? '安装回执'
+                                    : tool.tool === 'read_gpu_occupancy' ? 'GPU 占用'
+                                      : tool.tool === 'read_resource_inventory' ? '资源清单'
+                                        : tool.tool === 'search_local_knowledge' ? '本地知识库'
+                                          : tool.tool === 'search_official_web' ? '官方参考'
+                                            : '本页面事实'}
                       </span>
                     ))}
                   </div>

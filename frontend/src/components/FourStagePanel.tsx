@@ -13,6 +13,7 @@ import {
   type WorkflowProfileLite,
 } from '../api';
 import { failureLabels } from '../constants';
+import { reportCopilotFault } from '../copilotContext';
 import { Meter } from './Meter';
 import { StoryboardDraftSection } from './StoryboardDraftSection';
 
@@ -289,6 +290,13 @@ export function FourStagePanel({ projectId, documentsVersion, workflowProfiles, 
                   {task.reconciliation?.outcome ? ' · 核对结论：' + task.reconciliation.outcome : ''}
                 </span>
                 {errorReason && <span className="progress-detail">{errorReason}</span>}
+                {errorReason && (
+                  <button type="button" className="btn-text" onClick={() => reportCopilotFault({
+                    taskId: task.task_id,
+                    errorCode: task.error_code || undefined,
+                    label: errorReason,
+                  })}>交给 AI 管家诊断</button>
+                )}
                 {consentBlocked && (
                   <button type="button" className="btn-secondary" disabled={busy}
                     onClick={() => authorizeAndContinue(task)}>

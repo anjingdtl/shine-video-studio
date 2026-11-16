@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { HelpCircle } from 'lucide-react';
 import { API, api, json, type Job } from '../api';
+import { reportCopilotFault } from '../copilotContext';
 import { failureLabels, label } from '../constants';
 import GenerationSegmentsPanel, { LazyVideo } from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
@@ -206,6 +207,13 @@ export default function DeliveryPanel({ projectId, jobs, active, refreshEpoch }:
         );
         const body = <>
           {order.status === 'FAILED' && <button type="button" className="btn-secondary" disabled={busy} onClick={() => retryOrder(order.id)}>重新排队装配</button>}
+          {order.failure_code && (
+            <button type="button" className="btn-text" onClick={() => reportCopilotFault({
+              taskId: order.id,
+              errorCode: order.failure_code || undefined,
+              label: label(failureLabels, order.failure_code),
+            })}>交给 AI 管家诊断</button>
+          )}
           {order.status === 'DELIVERED' && order.artifact_id && (order.artifact_deleted
             ? <p className="failure">这份历史成片的文件已在「成片库」删除；交付回执仍保留，但不能再播放。</p>
             : <LazyVideo src={`${API}/deliveries/${order.artifact_id}/media`} label={`完整成片 v${order.version}`} />)}

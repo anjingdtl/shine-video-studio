@@ -28,7 +28,14 @@ _DEDUP_WINDOW = timedelta(hours=24)
 
 
 def report_root(settings) -> Path:
-    return (Path(settings.data_dir) / REPORT_DIRNAME).resolve()
+    base = Path(settings.data_dir).resolve()
+    root = base / REPORT_DIRNAME
+    if root.is_symlink():
+        raise ValueError("report directory must not be a symlink")
+    resolved = root.resolve()
+    if resolved.parent != base or resolved.name != REPORT_DIRNAME:
+        raise ValueError("report directory escaped the controlled data dir")
+    return resolved
 
 
 def _fingerprint(kind: str, diagnosis: dict[str, Any], page: dict[str, Any]) -> str:
@@ -61,11 +68,14 @@ def render_markdown(
     snapshot: dict[str, Any],
     attempted_actions: list[dict[str, Any]],
     notes: str = "",
+    investigation: dict[str, Any] | None = None,
+    references: list[dict[str, Any]] | None = None,
 ) -> str:
     page = snapshot.get("page_context") or {}
     verdict = (snapshot.get("setup") or {}).get("verdict") or {}
     runtime = snapshot.get("runtime") or {}
     task = snapshot.get("task") or {}
+    attempt = task.get("attempt") or {}
     facts = diagnosis.get("facts") or []
     hypotheses = diagnosis.get("hypotheses") or []
     actions = diagnosis.get("recommended_actions") or []
@@ -82,7 +92,10 @@ def render_markdown(
         f"- 构建提交：{_md_escape(os.environ.get('SHINE_BUILD_COMMIT') or '本机构建（未注入提交号）')}",
         f"- 页面：{page.get('screen') or 'unknown'}",
         f"- 项目：{page.get('project_id') or '未指定'}",
-        f"- 任务：{page.get('job_id') or '未指定'}",
+        f"- 任务：{page.get('job_id') or task.get('job_id') or '未指定'}",
+        f"- 尝试：{page.get('attempt_id') or attempt.get('attempt_id') or '未指定'}",
+        f"- 失败阶段：{attempt.get('status') or task.get('status') or '未指定'}"
+        f" / 外部核对状态 {attempt.get('reconciliation_state') or '无'}",
         "",
         "> 本报告由本机 AI 管家生成，仅用于向开发者说明问题；不包含自动修复、补丁或 Issue 提交。",
         "",
@@ -150,33 +163,68 @@ def render_markdown(
     )
     if attempted_actions:
         for row in attempted_actions:
-            lines.append(
-                f"- `{_md_escape(row.get('kind'))}`：{_md_escape(row.get('status'))}"
-                f"；原始执行器任务 {_md_escape(row.get('original_task_id') or '无')}"
-                f"；复核 {_md_escape((row.get('verification') or {}).get('outcome') or '未完成')}"
+            verification = row.get("verification") or {}
+            executor_state = (
+                verification.get("executor_status") or verification.get("task_status") or "未知"
             )
+            lines.append(
+                f"- `{_md_escape(row.get('kind'))}`：授权动作状态 {_md_escape(row.get('status'))}"
+                f"；原执行器任务 {_md_escape(row.get('original_task_id') or '无')}"
+                f"；执行器状态 {_md_escape(executor_state)}"
+                f"；复核结论 {_md_escape(verification.get('outcome') or '未完成')}"
+                f"（权威 {_md_escape(verification.get('authority') or '未记录')}）"
+            )
+            if row.get("last_error"):
+                lines.append(f"  - 当时的失败说明：{_md_escape(row.get('last_error'))}")
     else:
         lines.append("- 未执行任何自动化修复。")
-    lines.extend(["", "## 6. 疑似根因", ""])
-    if diagnosis.get("root_cause"):
-        lines.append(_md_escape(diagnosis["root_cause"]))
-    elif hypotheses:
+    lines.extend(["", "## 6. 根因判断（已确认与疑似严格分开）", "", "### 已确认事实", ""])
+    confirmed = diagnosis.get("root_cause") if diagnosis.get("root_cause_confirmed") else None
+    if confirmed:
+        lines.append(_md_escape(confirmed))
+    else:
+        lines.append(
+            "- 现有证据只能确认上述「现象」与「环境事实」，尚不能确认代码级根因。"
+        )
+    lines.extend(["", "### 疑似原因（未经证实）", ""])
+    if hypotheses:
         for row in hypotheses:
             lines.append(
-                f"- {_md_escape(row.get('cause'))}（置信度 {_md_escape(row.get('confidence'))}）"
+                f"- {_md_escape(row.get('cause'))}（置信度 {_md_escape(row.get('confidence'))}，"
+                "需要开发者用日志或复现确认）"
             )
     else:
-        lines.append("现有证据不足，暂不能确定根因；请开发者结合下方证据进一步定位。")
+        lines.append("- 没有足够证据提出疑似原因，请开发者结合证据区定位。")
+    lines.extend(["", "## 7. 证据来源与等级", "", "| 工具 | 状态 | 等级 |", "| --- | --- | --- |"])
+    steps = (investigation or {}).get("steps") or []
+    if steps:
+        for step in steps:
+            lines.append(
+                f"| {_md_escape(step.get('tool'))} | {_md_escape(step.get('status'))} "
+                f"| {_md_escape(step.get('evidence_level') or 'LOCAL_LEDGER')} |"
+            )
+    else:
+        lines.append("| read_support_context | OK | LOCAL_LEDGER |")
+    if references:
+        lines.extend(["", "外部参考（仅作证据，不是可执行修复指令）：", ""])
+        for row in references[:5]:
+            if not isinstance(row, dict):
+                continue
+            applicability = (row.get("applicability") or {}).get("state")
+            lines.append(
+                f"- {_md_escape(row.get('title'))}：{_md_escape(row.get('url'))}"
+                f"（{_md_escape(applicability or 'UNKNOWN')}）"
+            )
     lines.extend(
         [
             "",
-            "## 7. 影响面",
+            "## 8. 影响面",
             "",
             f"- 是否阻断真实生产：{'是' if verdict.get('mode') not in {'READY', 'RUNNING'} else '当前裁决未阻断'}",
             "- 是否涉及生产门禁：如涉及，AI 管家未修改任何门禁、镜头或人工确认资产。",
             "- 是否涉及用户素材/成片：报告不包含素材内容，仅包含脱敏状态事实。",
             "",
-            "## 8. 开发验收建议",
+            "## 9. 开发验收建议",
             "",
         ]
     )
@@ -187,9 +235,10 @@ def render_markdown(
             "- 修复后请在原权威裁决 `/api/v1/setup/verdict` 下复核，不接受由 AI 或前端自行宣布 READY。",
             "- 若修复涉及源码，请附回归测试与既有八分片回归结果。",
             "",
-            "## 9. 隐私与附件",
+            "## 10. 隐私与附件",
             "",
             "- 密钥、令牌、用户目录与私人数据根路径已脱敏。",
+            "- 外部资料仅作为参考证据，未被当作可执行修复指令。",
             "- 本报告不会自动修改代码、创建 Git 补丁、提交 Issue 或 PR。",
         ]
     )
@@ -210,6 +259,8 @@ def generate_report(
     project_id: str | None = None,
     attempted_actions: list[dict[str, Any]] | None = None,
     notes: str = "",
+    investigation: dict[str, Any] | None = None,
+    references: list[dict[str, Any]] | None = None,
 ) -> tuple[SupportReport, bool]:
     """Write (or de-duplicate) one report.  Returns (row, deduplicated)."""
     kind = (kind or "BLOCKER").upper()
@@ -236,6 +287,8 @@ def generate_report(
         raise ValueError("internal report filename invariant violated")
     root = report_root(settings)
     root.mkdir(parents=True, exist_ok=True)
+    if root.is_symlink():
+        raise ValueError("report directory must not be a symlink")
     target = (root / filename).resolve()
     if target.parent != root:
         raise ValueError("report path escaped its controlled directory")
@@ -248,6 +301,8 @@ def generate_report(
         snapshot=snapshot,
         attempted_actions=attempted_actions or [],
         notes=notes,
+        investigation=investigation,
+        references=references,
     )
     tmp = root / f".{uuid4().hex}.tmp"
     try:
@@ -278,6 +333,8 @@ def generate_report(
                 "page": snapshot.get("page_context") or {},
                 "evidence_id": snapshot.get("evidence_id"),
                 "attempted_actions": attempted_actions or [],
+                "investigation": investigation or {},
+                "external_references": references or [],
             },
             private_roots=private_roots_for(settings),
         ),
@@ -289,10 +346,13 @@ def generate_report(
 
 def read_report(settings, row: SupportReport) -> dict[str, Any]:
     root = report_root(settings)
-    target = Path(row.path).resolve()
-    if target.parent != root or not _FILENAME_RE.match(target.name):
+    target = Path(row.path)
+    if target.is_symlink():
+        raise ValueError("report file must not be a symlink")
+    resolved = target.resolve()
+    if resolved.parent != root or not _FILENAME_RE.match(resolved.name):
         raise ValueError("report path rejected")
-    content = target.read_text(encoding="utf-8") if target.is_file() else ""
+    content = resolved.read_text(encoding="utf-8") if resolved.is_file() else ""
     return {
         "id": row.id,
         "kind": row.kind,
