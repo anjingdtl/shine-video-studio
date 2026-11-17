@@ -261,6 +261,18 @@ def _default_for(row: CapabilityDeclaration, spec: ParamSpec) -> tuple[Any, bool
     return None, False
 
 
+def _is_required(row: CapabilityDeclaration, spec: ParamSpec) -> bool:
+    if spec.derive:
+        return spec.required
+    if spec.required:
+        return True
+    if spec.binding in _BODY_BINDINGS:
+        field = _field_for(row, spec.name)
+        if field is not None:
+            return bool(field.is_required())
+    return False
+
+
 def validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
     """Validate one action's parameters against the one resolved contract.
 
@@ -282,20 +294,21 @@ def validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
 
     clean: dict[str, Any] = {}
     for spec in row.params:
+        required = _is_required(row, spec)
         if spec.name in params:
             value = params[spec.name]
             if value is None:
-                if spec.required:
+                if required:
                     raise ParamError(f"{spec.name} 不能为空。")
                 clean[spec.name] = None
                 continue
             clean[spec.name] = _value_for(row, spec, value)
             continue
         default, has_default = _default_for(row, spec)
-        if has_default and not spec.required:
+        if has_default and not required:
             clean[spec.name] = default
             continue
-        if spec.required and not (spec.name == "project_id" and spec.binding == "path"):
+        if required and not (spec.name == "project_id" and spec.binding == "path"):
             raise ParamError(f"缺少必填参数：{spec.name}")
     return clean
 
@@ -314,7 +327,9 @@ def field_contract(row: CapabilityDeclaration, spec: ParamSpec) -> dict[str, Any
                 {
                     "source": row.request_schema,
                     "type": _type_name(annotation),
-                    "required": bool(spec.required or field.is_required()),
+                    "required": bool(
+                        spec.required or (field.is_required() and not spec.derive)
+                    ),
                     "max_length": metadata.get("max_length", spec.max_length),
                     "enum": enum or list(spec.enum),
                 }

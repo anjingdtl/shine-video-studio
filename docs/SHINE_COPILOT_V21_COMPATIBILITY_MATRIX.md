@@ -17,7 +17,7 @@
 | `project_create` | `POST /api/v1/projects` | `shine.schemas:CreateProject` | `GET /api/v1/projects/{project_id}` | PREVIEW | r2 | GUARDED | web-workbench |
 | `document_import_text` | `POST /api/v1/projects/{project_id}/documents` | 多部分表单 | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r2 | GUARDED | novel-import |
 | `project_settings_update` | `PATCH /api/v1/projects/{project_id}/settings` | `shine.schemas:ProjectSettings` | `GET /api/v1/projects/{project_id}` | PREVIEW | r2 | GUARDED | web-workbench |
-| `story_outline_generate` | `POST /api/v1/projects/{project_id}/story-preparation/outlines` | `shine.api_story:OutlineRequest` | `GET /api/v1/projects/{project_id}/story-preparation` | EXECUTE_GUARDED | r2 | GUARDED | literary-four-stages |
+| `story_outline_generate` | `POST /api/v1/projects/{project_id}/story-preparation/outlines` | `shine.api_story:OutlineRequest` | `GET /api/v1/projects/{project_id}/story-preparation` | EXECUTE_GUARDED | r3 | GUARDED | literary-four-stages |
 | `storyboard_generate` | `POST /api/v1/projects/{project_id}/director/storyboard/generate` | `shine.api_streamline:DirectorStoryboardBody` | `GET /api/v1/projects/{project_id}/director/storyboard/state` | EXECUTE_GUARDED | r2 | GUARDED | storyboard-agents |
 | `production_start` | `POST /api/v1/projects/{project_id}/director/production/start` | `shine.api_streamline:ShootBody` | `GET /api/v1/production-runs/{run_id}` | EXECUTE_GUARDED | r2 | GUARDED | production-qc-delivery |
 | `document_switch_basis` | `POST /api/v1/projects/{project_id}/script-basis` | `shine.api_story:ScriptBasisRequest` | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r2 | GUARDED | novel-import |
@@ -123,4 +123,4 @@
 | Windows 实机安装包完整流程 | NOT_RUN | 本环境无 Windows |
 | 真实 ComfyUI / GPU 租约 / MiniMax-H3 出片 | NOT_RUN | 本环境无 GPU/H3 |
 | 启动器 S29 离线诊断 | BLOCKED | 未实现，独立依赖 |
-| 旧库迁移 | 通过（V2 无新迁移，`f180f0010004`） | 八分片包含迁移测试 |
+| 旧库迁移 | 通过：新增 `f180f0010005`，旧库升级保留授权/委托数据 | `test_alembic.py`、`test_migrations_windows.py` |

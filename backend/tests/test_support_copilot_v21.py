@@ -1201,3 +1201,27 @@ def test_all_delegation_states_are_readable_from_a_new_session(api):
             payload = delegation_service.get(db, session_row)
             assert payload is not None
             assert payload["status"] == status
+
+
+def test_preview_blocks_incompatible_live_request_schema(api, monkeypatch):
+    client, _, _ = api
+    tampered = copy.deepcopy(client.app.openapi())
+    tampered["components"]["schemas"]["CreateProject"]["properties"]["title"]["type"] = "integer"
+    monkeypatch.setattr(client.app, "openapi", lambda: tampered)
+    response = _preview(client, "project_create", {"title": "类型变化"})
+    assert response.status_code == 423
+    assert response.json()["detail"]["code"] == "CONTRACT_STALE"
+
+
+def test_preview_allows_a_compatible_live_request_schema_addition(api, monkeypatch):
+    client, _, _ = api
+    tampered = copy.deepcopy(client.app.openapi())
+    tampered["components"]["schemas"]["CreateProject"]["properties"]["subtitle"] = {
+        "type": "string",
+        "maxLength": 80,
+        "title": "Subtitle",
+    }
+    monkeypatch.setattr(client.app, "openapi", lambda: tampered)
+    response = _preview(client, "project_create", {"title": "兼容新增"})
+    assert response.status_code == 200, response.text
+    assert response.json()["action"]["status"] == "PREVIEWED"

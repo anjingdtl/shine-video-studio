@@ -94,6 +94,10 @@ class ParamSpec:
     max_length: int | None = None
     enum: tuple[str, ...] = ()
     description: str = ""
+    #: The original executor derives this value (for example the current script
+    #: basis), so an explicit adapter contract may keep it optional even when
+    #: the HTTP request model marks it required.
+    derive: bool = False
 
     def contract(self) -> dict[str, Any]:
         return {

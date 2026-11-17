@@ -101,7 +101,7 @@ API 合同指纹只保留请求语义，排除标题/描述/示例/标签/展示
 1. 完成原业务实现与测试。
 2. 维护原 Pydantic Schema / 服务签名。
 3. 在 `declarations.py` 声明一次（新动作还需在 `support/actions.py` 绑定分派器）。
-4. 运行 `python -m scripts.generate_shine_copilot_contracts --write`。
+4. 运行 `python -m scripts.generate_shine_copilot_contracts`。
 5. 运行 `--check`（CI 也会运行）。
 6. 若声明合同变更：提升 `contract_revision`；BREAKING 需显式 `--allow-breaking` 并在 PR 中说明。仅 API Schema 的兼容变更不要求提升动作版本，但产物必须重新生成。
 7. 新增可选参数时，不需要修改 `actions.py` 的任何固定字段判断：预览校验与执行器转发都按同一解析合同工作。
@@ -112,7 +112,7 @@ API 合同指纹只保留请求语义，排除标题/描述/示例/标签/展示
 
 ```bash
 # 生成（发布构建由 build_test_package.ps1 在 staging 内自动执行）
-PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --write --commit "$(git rev-parse HEAD)"
+PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --commit "$(git rev-parse HEAD)"
 
 # CI / 本地校验
 PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --check

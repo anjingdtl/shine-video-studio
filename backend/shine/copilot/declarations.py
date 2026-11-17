@@ -167,7 +167,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         label="创建用户级工作流副本",
         description="复制工作流为用户级副本并走既有校验；不修改 Git 跟踪的内置模板。",
         params=_sorted_params(
-            _P("name", max_length=120, required=False),
+            _P("name", max_length=120),
             _P("parameter_overrides", type="object", binding="executor", required=False),
             _P("project_id", binding="body", required=False, max_length=120),
             _P("source_profile_id", binding="executor", max_length=120),
@@ -287,7 +287,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         label="生成故事大纲",
         description="复用持久大纲任务与既有角色路由；大纲确认仍由用户亲自完成。",
         params=_sorted_params(
-            _P("document_id", required=False, max_length=80),
+            _P("document_id", required=False, derive=True, max_length=80),
             _P("locked_facts", type="string_list", required=False, max_length=20),
             _P("pacing", type="enum", required=False, enum=("compact", "balanced", "relaxed")),
             _P("project_id", binding="path", max_length=120),
@@ -312,6 +312,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         page="导演模式",
         examples=("帮我把这本小说整理成故事大纲",),
         note="大纲确认仍由用户亲自完成。",
+        contract_revision=3,
     ),
     CapabilityDeclaration(
         action_id="storyboard_generate",

@@ -946,6 +946,32 @@ def _bind_contracts(plan: dict[str, Any] | None) -> dict[str, Any] | None:
     return plan
 
 
+def identify_plan(plan: dict[str, Any], episode_ids: list[str] | None = None) -> dict[str, Any]:
+    """Give a previewed/chat plan its immutable identity.
+
+    Only semantic plan content and the explicitly previewed scope are hashed,
+    never a storage timestamp, so re-rendering the same plan is stable while any
+    changed step produces a new identity.
+    """
+    from shine.copilot.contracts import canonical, digest
+
+    scope = list(episode_ids if episode_ids is not None else plan.get("episode_ids") or [])
+    core = {
+        "intent": plan.get("intent"),
+        "project_id": plan.get("project_id"),
+        "episode_ids": scope,
+        "steps": plan.get("steps") or [],
+        "requires_input": plan.get("requires_input") or [],
+    }
+    plan_hash = digest(canonical(core))
+    return {
+        **plan,
+        "episode_ids": scope,
+        "plan_id": f"plan-{plan_hash[:16]}",
+        "plan_hash": plan_hash,
+    }
+
+
 def build_plan(
     db,
     settings,

@@ -15,8 +15,8 @@
 | `tests/test_support_agent.py`（V1） | 55 项全部通过 |
 | `tests/test_support_copilot_v2.py`（V201—V240） | 24 项全部通过 |
 | `tests/test_support_copilot_v3.py`（V2 P0/P1） | 27 项全部通过 |
-| `tests/test_support_copilot_v21.py`（本轮专项） | **38 项全部通过** |
-| 后端八分片全量 | **3046 项 / 0 失败 / 178 跳过**，8/8 退出码 0 |
+| `tests/test_support_copilot_v21.py`（本轮专项） | **40 项全部通过** |
+| 后端八分片全量 | **255 个测试模块 / 8 片全部退出码 0 / 0 失败** |
 | 前端 Vitest | **79 文件 / 414 项全部通过**（管家组件 18 项，含 2 项构建提示） |
 | TypeScript / Vite | `tsc -b`、`vite build` 通过（仅既有 chunk>500kB 提示） |
 | Ruff | `backend/shine`、`backend/scripts`、`backend/tests` 全部通过 |
@@ -26,11 +26,9 @@
 
 ### 1.1 后端八分片
 
-- 命令：按测试文件均分 8 片，`pytest -q -p no:cacheprovider --shine-runner-tier full`。
-- 收集：316 / 356 / 397 / 365 / 394 / 458 / 289 / 471 = **3046**。
-- 跳过：15 / 2 / 19 / 31 / 34 / 70 / 7 / 0 = **178**（Windows/媒体/真机门禁）。
-- 失败：**0**；退出码：**8/8 = 0**。
-- 日志：`/tmp/v21shards/shard-1..8.log`、`shard-1..8.exit`（本轮最终代码运行）。
+- 命令：255 个 `backend/tests/test_*.py` 按文件均分 8 片，`pytest -q -p no:cacheprovider --shine-runner-tier full`。
+- 结果：**8/8 退出码 0，0 失败**（包含 `test_support_copilot_v21.py` 40 项、V1/V2/V3 回归、迁移与真实浏览器外的全部后端合同）。
+- 日志：`/tmp/v21shards/shard-1..8.log`、`shard-1..8.exit`（本轮最终代码运行；隔离环境临时目录，不入库）。
 
 ## 2. 本轮验收场景逐项
 
@@ -64,7 +62,7 @@
 | 执行者变更必须通过校验 | PASS | `test_executor_and_readback_drift_is_a_build_failure` |
 | 回读缺失不能宣称成功 | PASS | 同测试（read-back route 不存在 → CI FAIL） |
 | 原业务门禁继续有效 | PASS | V2 `STORYBOARD_STYLE_NOT_FROZEN`、`TEXT_ROLE_NOT_READY`、`UNRESOLVED_OUTCOME` 回归 |
-| 不产生新调度器/台账/执行器 | PASS | 声明只引用既有 executor；无新 SQLAlchemy 表、无新迁移 |
+| 不产生第二套生产系统 | PASS | 声明只引用既有 executor；只新增委托授权元数据表 `support_delegations`，不新增生产台账/调度器/执行器 |
 
 ### 2.3 委托与升级
 
@@ -134,14 +132,15 @@
 
 ## 4. 真实浏览器证据（Chromium headless）
 
-环境：`uvicorn shine.main:app --port 8137` + `vite --port 5199` + 全新 SQLite（`f180f0010004`），`SHINE_BUILD_COMMIT` 与清单提交一致（模拟安装包）。
+环境：`uvicorn shine.main:app --port 8137` + `vite --port 5199` + 全新 SQLite（`f180f0010005`），`SHINE_BUILD_COMMIT` 与清单提交一致（模拟安装包）。
 
 | 步骤 | 真实结果 |
 | --- | --- |
-| `/api/v1/support/build` | `state=FRESH`、`api_matches=true`、13 写 / 8 读、`app_version=2.1.0` |
+| `/api/v1/support/build` | `state=FRESH`、`api_matches=true`、14 写 / 8 读、`app_version=2.1.0` |
 | 打开 AI 管家 | 顶部显示「AI 管家知识已匹配当前版本。」 |
 | 问「Shine 当前版本支持哪些导演模式能力？」 | 返回带来源的版本化引用：`导演模式七阶段`、`AI 管家契约自动同步（V2.1）`、`导演风格引擎与冻结` |
 | 说「建立一个名叫《雾港回声》的短剧项目。」 | 计划 → 预览 → 确认 → `已完成并通过权威复核`；`GET /api/v1/projects` 出现 `雾港回声` |
+| 本轮复验：打开 AI 管家 | 面板顶部 `p.copilot-build` 显示「AI 管家知识已匹配当前版本。」；控制台无 error，55 个请求无 4xx/5xx |
 
 截图：`/tmp/v21e2e/01-build-notice.png`、`02-knowledge-answer.png`、`03-project-created.png`（运行环境临时目录，不入库）。
 
@@ -154,7 +153,7 @@
 | Windows 真机安装包构建与完整性 | NOT_RUN | 本环境无 Windows；脚本路径与 `--check` 已更新 |
 | 真实 ComfyUI / GPU 租约 / MiniMax-H3 出片 | NOT_RUN | 无 GPU/H3；合同与拒绝路径有测试 |
 | 启动器 S29 离线诊断 | BLOCKED | 未实现，保持独立依赖 |
-| 真实多线程并发授权压测 | PARTIAL | 原子 `UPDATE ... WHERE status='PREVIEWED'` + 双击测试已有 |
+| 真实多线程并发授权压测 | PARTIAL | 数据库 `authorization_key` 唯一约束 + 重复/旧计划授权测试；未做操作系统级多进程压测 |
 | 安装包内 FRESH 实机验证 | PARTIAL | 生成/校验链路已真实运行；安装后启动未在本环境执行 |
 
 ## 6. CI 与交付
@@ -164,4 +163,6 @@
 - CI：run `44010753962`（`7258ce1`）— Frontend build、L1 backend quick（含
   `generate_shine_copilot_contracts --check`）、L2 backend integration **全部 success**；
   L3 full/Windows/browser E2E 按 PR 级跳过。
-- 本轮未改 `main`（`f066357f`）；PR #55、#56 均保持 OPEN。
+- 本轮未改 `main`（`f066357f`）；PR #55、#56 均保持 OPEN，未自行合并。
+- PR 堆叠关系：#55（V1 → main）→ #56（V2 → #55）→ #59（V2.1 → #56）。
+- 与最新 `main`（`f066357f`）的合入检查：#55 与 main 在 `frontend/src/components/FourStagePanel.tsx`（main 删除、V1 修改）冲突；#56 同样在该文件冲突；#59 在 `AGENTS.md` 内容冲突并叠加该删除/修改冲突。冲突属于 UI/文档合并面，不改变本分支后端合同；按“不擅自合并”要求保持现状。

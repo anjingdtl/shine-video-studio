@@ -18,7 +18,6 @@ from sqlalchemy import select
 from shine.api_common import DBSession, app_settings, llm_gateway
 from shine.api_operator import Operator
 from shine.config import Settings
-from shine.copilot.contracts import canonical, digest
 from shine.models import utcnow
 from shine.support import actions as action_service
 from shine.support import agent as agent_service
@@ -132,26 +131,7 @@ def _http(code: str, message: str, status: int = 400) -> HTTPException:
 
 
 def _identify_plan(plan: dict, episode_ids: list[str]) -> dict:
-    """Give each previewed plan an immutable identity.
-
-    The hash covers only semantic plan content and the explicitly previewed
-    scope, never the storage timestamp, so re-previewing the same plan is stable
-    while any changed step produces a new identity.
-    """
-    core = {
-        "intent": plan.get("intent"),
-        "project_id": plan.get("project_id"),
-        "episode_ids": list(episode_ids),
-        "steps": plan.get("steps") or [],
-        "requires_input": plan.get("requires_input") or [],
-    }
-    plan_hash = digest(canonical(core))
-    return {
-        **plan,
-        "episode_ids": list(episode_ids),
-        "plan_id": f"plan-{plan_hash[:16]}",
-        "plan_hash": plan_hash,
-    }
+    return planner_service.identify_plan(plan, episode_ids)
 
 
 def _require_session(db, session_id: str):
@@ -417,6 +397,8 @@ def support_parameter_preview(
             )
         except action_service.ActionInvalid as exc:
             raise _http(exc.code, exc.message, 400) from exc
+        except action_service.ActionBlocked as exc:
+            raise _http(exc.code, exc.message, 423) from exc
         except ToolDenied as exc:
             raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
     return {
@@ -620,6 +602,8 @@ def support_action_preview(
         )
     except action_service.ActionInvalid as exc:
         raise _http(exc.code, exc.message, 400) from exc
+    except action_service.ActionBlocked as exc:
+        raise _http(exc.code, exc.message, 423) from exc
     except ToolDenied as exc:
         raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
     return {"action": preview, "reused": reused}

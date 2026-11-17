@@ -2388,8 +2388,8 @@
       "authority": "GET /api/v1/projects/{project_id}/story-preparation",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示将用哪份底稿与风格，确认后排队。",
-      "contract_digest": "394ea0ea0564253f90826cb61c8082d8c0a925c80cd88e065f1d8043249ea4f7",
-      "contract_revision": 2,
+      "contract_digest": "0071ff942ab9685e08789bc72c466ef8e0664c4b92e75aa1a1a98c8f9e553dfb",
+      "contract_revision": 3,
       "description": "复用持久大纲任务与既有角色路由；大纲确认仍由用户亲自完成。",
       "dispatch": "story_outline_generate",
       "examples": [
@@ -2419,7 +2419,7 @@
           "max_length": 80,
           "name": "document_id",
           "nullable": false,
-          "required": true,
+          "required": false,
           "source": "shine.api_story:OutlineRequest",
           "type": "string"
         },
@@ -2919,7 +2919,7 @@
   "digests": {
     "api_contract": "abcc4ef5f4565028e19d2d28c81f6e7244e2f4b7643745d6de15f6f2848214a0",
     "api_schema": "bb2d7cd29d26e7c1c5065c75ccdc5ba587c415006387e9a2e7d3d13299c2d29e",
-    "contracts": "d30bd45dc93d258992b63fc790293d5e5949226884d67fa3d4db5bbed7247818"
+    "contracts": "b5d7f058886ee7ee4640cc950651062e582ef90eca544d0492406a05ac16cc63"
   },
   "discovered": [
     {
@@ -5599,7 +5599,7 @@
           "frontend/src/useStudio.ts",
           "backend/shine/main.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "frontend/src/App.tsx",
           "frontend/src/useStudio.ts",
@@ -5655,7 +5655,7 @@
           "backend/shine/api_director.py",
           "backend/shine/director/overview.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_streamline.py",
           "backend/shine/api_director.py",
@@ -5713,7 +5713,7 @@
           "backend/shine/api_pipeline.py",
           "backend/shine/api_story.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_agent.py",
           "backend/shine/api_pipeline.py",
@@ -5767,7 +5767,7 @@
           "backend/shine/literary",
           "backend/shine/materialprep/story.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/literary",
           "backend/shine/materialprep/story.py"
@@ -5823,7 +5823,7 @@
           "backend/shine/api_freezes.py",
           "backend/shine/models.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_director_styles.py",
           "backend/shine/api_freezes.py",
@@ -5877,7 +5877,7 @@
           "backend/shine/director/streamline.py",
           "backend/shine/api_film.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/agents",
           "backend/shine/director/streamline.py",
@@ -5933,7 +5933,7 @@
           "backend/shine/asset_center",
           "backend/shine/comfyops/assets.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_asset_center.py",
           "backend/shine/asset_center",
@@ -5988,7 +5988,7 @@
           "backend/shine/comfyops/capability.py",
           "backend/shine/materialprep"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/comfyops/setup_summary.py",
           "backend/shine/comfyops/capability.py",
@@ -6043,7 +6043,7 @@
           "backend/shine/h3/compiler.py",
           "backend/shine/comfy/graph_compiler.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/h3/mode_policy.py",
           "backend/shine/h3/compiler.py",
@@ -6096,7 +6096,7 @@
           "backend/shine/strategy.py",
           "backend/shine/comfy/graph_compiler.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/comfyops/variants.py",
           "backend/shine/strategy.py",
@@ -6153,7 +6153,7 @@
           "backend/shine/comfy/graph_compiler.py",
           "backend/shine/api_comfy.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/comfy/workflow.py",
           "backend/shine/comfy/graph_compiler.py",
@@ -6205,7 +6205,7 @@
           "backend/shine/strategy.py",
           "backend/shine/comfy/graph_compiler.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/strategy.py",
           "backend/shine/comfy/graph_compiler.py"
@@ -6259,7 +6259,7 @@
           "backend/shine/production/runner.py",
           "backend/shine/comfyops/renderer_release.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/comfyops",
           "backend/shine/production/runner.py",
@@ -6315,7 +6315,7 @@
           "backend/shine/comfyops/setup_reconcile.py",
           "backend/shine/comfyops/installer.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/comfyops/setup_preparation.py",
           "backend/shine/comfyops/setup_reconcile.py",
@@ -6372,7 +6372,7 @@
           "backend/shine/api_llm.py",
           "backend/shine/llm/role_catalog.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/llm",
           "backend/shine/api_llm.py",
@@ -6429,7 +6429,7 @@
           "backend/shine/api_delivery.py",
           "backend/shine/api_library.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/production",
           "backend/shine/media",
@@ -6480,7 +6480,7 @@
           "scripts/build_test_package.ps1",
           "ShineLauncher-build-info.json"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "launcher",
           "scripts/build_test_package.ps1",
@@ -6536,7 +6536,7 @@
           "backend/shine/api_setup.py",
           "backend/shine/comfyops/setup_summary.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_setup.py",
           "backend/shine/comfyops/setup_summary.py"
@@ -6591,7 +6591,7 @@
           "backend/shine/api_support.py",
           "frontend/src/components/ShineCopilot.tsx"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/support",
           "backend/shine/api_support.py",
@@ -6642,7 +6642,7 @@
           "backend/shine/api_library.py",
           "backend/shine/media/video_layout.py"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/api_library.py",
           "backend/shine/media/video_layout.py"
@@ -6701,7 +6701,7 @@
           "backend/scripts/generate_shine_copilot_contracts.py",
           "backend/shine/support/knowledge_manifest.json"
         ],
-        "source_revision": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+        "source_revision": "",
         "sources": [
           "backend/shine/copilot",
           "backend/shine/support/contracts.py",
@@ -7616,7 +7616,7 @@
       "tier": "READ"
     }
   ],
-  "source_commit": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec",
+  "source_commit": "",
   "version": "shine-copilot-contracts-2026.11.17-v21",
   "vocabulary": {
     "ai_statuses": {

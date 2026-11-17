@@ -5,10 +5,10 @@
   "app_version": "2.1.0",
   "capability_count": 14,
   "content_sha256": "fc8beceacbaca9d7eabf470b111e277029946c18de7711a9c7896495b98e2e0e",
-  "contracts_digest": "d30bd45dc93d258992b63fc790293d5e5949226884d67fa3d4db5bbed7247818",
+  "contracts_digest": "b5d7f058886ee7ee4640cc950651062e582ef90eca544d0492406a05ac16cc63",
   "entry_count": 21,
   "generator": "backend/scripts/generate_shine_copilot_contracts.py",
   "knowledge_version": "shine-project-kb-2.1.0",
   "read_capability_count": 8,
-  "source_commit": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec"
+  "source_commit": ""
 }
