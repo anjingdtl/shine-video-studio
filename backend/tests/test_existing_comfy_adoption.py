@@ -155,7 +155,9 @@ def test_adoption_blocks_incomplete_h3_hash_evidence_without_creating_an_instanc
     project = create_project(client, "incomplete existing-Comfy adoption")
     catalog = deployment.load_default_catalog()
     root, report, verified_files = _install_fixture(tmp_path, catalog)
-    _seed_verification(factory, catalog, report, verified_files[:-1])
+    required = adoption._required_capability_files(catalog, "h3")
+    missing = next(item for item in verified_files if adoption._verified_key(item) in required)
+    _seed_verification(factory, catalog, report, [item for item in verified_files if item is not missing])
     monkeypatch.setattr(adoption, "inspect", lambda _path, _catalog: report)
     monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: report)
 

@@ -18,7 +18,7 @@ from shine.comfyops.runtime_configuration import (
     runtime_report,
     service_evidence_status,
 )
-from shine.models import AgentRoute, AppSetting, ProviderProfile
+from shine.models import AgentRoute, AppSetting, ProviderProfile, WorkflowProfile
 from tests.conftest import make_studio
 from tests.test_new_machine_setup import test_configuration_generation_and_recipe_validation as exercise_configuration
 from tests.test_v13_preparation import HEADERS, TOKEN, post
@@ -66,6 +66,23 @@ def _fake_review(role, spec):
             "review_decoder_sha256": "c" * 64,
         },
     }
+
+
+@WINDOWS_ONLY
+def test_machine_service_validation_needs_no_project(prep, monkeypatch):
+    client, factory, settings = prep
+    exercise_configuration(prep, monkeypatch)
+    with factory.begin() as db:
+        candidate = db.get(AppSetting, CANDIDATE_KEY)
+        candidate.value = {**candidate.value, "project_id": None}
+        digest = candidate.value["identity"]["recipe_sha256"]
+    monkeypatch.setattr(service_validation, "_probe_renderer",
+                        lambda recipe: {"port": recipe["renderer"]["port"], "object_info": _fake_object_info()})
+    with factory() as db:
+        result = service_validation.validate_services(db, settings, None, digest, actor="local-user")
+    assert result["status"] == "READY"
+    with factory() as db:
+        assert service_evidence_status(db, settings)["status"] == "READY"
 
 
 @pytest.mark.skipif(__import__('os').name != 'nt', reason='managed renderer probing is Windows-only')
@@ -183,7 +200,6 @@ def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_rendere
         candidate = db.get(AppSetting, CANDIDATE_KEY)
         project_id = candidate.value["project_id"]
         recipe_sha256 = candidate.value["identity"]["recipe_sha256"]
-    post(client, "/setup/profiles", {"project_id": project_id})
     started = []
     monkeypatch.setattr(service_validation, "_probe_renderer", lambda recipe: (
         started.append(True) or {"object_info": _fake_object_info(), "port": recipe["renderer"]["port"]}
@@ -197,10 +213,14 @@ def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_rendere
     result = response.json()
     assert result["status"] == "READY"
     assert started == [True]
+    assert result["auto_registered_profiles"]
     assert result["advisory_reviews"]["VLM"]["status"] == "NOT_READY"
     assert result["advisory_reviews"]["ASR"]["status"] == "NOT_READY"
     assert not result["review_models"]
     with factory() as db:
+        registered = db.scalars(select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)).all()
+        assert {profile.name for profile in registered} == set(result["workflow_profiles"])
+        assert all(profile.validated_against for profile in registered)
         status = service_evidence_status(db, settings)
         assert status["status"] == "READY", status
         assert status["advisory_reviews"]["VLM"]["status"] == "NOT_READY"

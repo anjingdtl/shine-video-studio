@@ -819,10 +819,11 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
 
     if capability not in {'h3', 'image'}:
         raise HTTPException(409, 'RUNTIME_CAPABILITY_UNKNOWN')
+    env_path = runtime_settings_path(settings)
     # The variant contract is resolved before any transaction: an undetermined
     # startup (unknown render-time floors) is refused by name here and never
     # written into the recipe with the baseline's numbers.
-    if variant_id is None:
+    if capability == 'image' or variant_id is None:
         requirements = default_variant_requirements()
     else:
         from shine.comfyops.variant_recipe import build_startup_contract
@@ -872,25 +873,6 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     venv_python = str(python.resolve())
     # 1) Prepare the handoff adapter. Adoption only validates existing bytes;
     # it never writes into the user's ComfyUI tree.
-    adapter_dir = root / "custom_nodes" / "shine_comfy_handoff"
-    sampling_node = root / "custom_nodes" / "shine_h3_sampling_mode.py"
-    results = []
-    if adopted:
-        if managed_recipe_adapter_identity(adapter_dir) != managed_recipe_adapter_identity(ADAPTER_DIR):
-            raise HTTPException(409, "EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH")
-        results.append({"status": "REUSED_EXISTING", "kind": "HANDOFF_ADAPTER"})
-        if capability == 'h3' and not sampling_node.is_file():
-            # The H3 sampling mode is part of the H3 render contract.  An
-            # image-only installation never needed it, so its absence must not
-            # block an image recipe - and it is never written into the user's
-            # tree to make a check pass.
-            raise HTTPException(409, "EXISTING_COMFY_SAMPLING_NODE_MISSING")
-        if sampling_node.is_file():
-            results.append({"status": "REUSED_EXISTING", "kind": "SAMPLING_NODE"})
-    else:
-        for name in ("__init__.py", "barrier.py"):
-            results.append(_deploy_repo_file(ADAPTER_DIR / name, adapter_dir / name, what="HANDOFF_ADAPTER"))
-        results.append(_deploy_repo_file(SAMPLING_NODE, sampling_node, what="SAMPLING_NODE"))
     # 2) GPU identity from the live probe — a generated recipe without the real
     # UUID would fail the renderer admission check at first production start.
     from shine.comfyops.host_env import probe_gpu
@@ -901,9 +883,9 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     setup_dir = settings.comfyops_dir / "setup"
     (setup_dir / "manifests").mkdir(parents=True, exist_ok=True)
     (setup_dir / "review-runtime").mkdir(parents=True, exist_ok=True)
-    runtime_data_root = (settings.comfyops_dir / "adopted-runtime" / graph_hash({
-        "root": str(root), "instance_id": instance.id,
-    })[:24]) if adopted else root
+    from shine.comfyops.adoption import runtime_root
+
+    runtime_data_root = runtime_root(settings, root, instance.id) if adopted else root
     if adopted:
         for folder in ("user/default/ComfyUI-Manager", "input", "output", "temp"):
             (runtime_data_root / folder).mkdir(parents=True, exist_ok=True)
@@ -913,11 +895,35 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         if not manager_config.exists():
             manager_config.write_text("[default]\nnetwork_mode=offline\nbypass_ssl=false\nsecurity_level=strong\n",
                                      encoding="utf-8")
-    recipe_path = setup_dir / "managed_recipe.json"
+    from shine.comfyops.managed_recipe import recipe_path as managed_recipe_path
+
+    recipe_path = managed_recipe_path(settings)
+    # For adopted installations add our nodes only to the Shine process. New
+    # names avoid loading a same-named stale copy from the external checkout.
+    node_root = (runtime_data_root if adopted else root) / "custom_nodes"
+    adapter_dir = node_root / ("shine_managed_comfy_handoff" if adopted else "shine_comfy_handoff")
+    sampling_node = node_root / ("shine_managed_h3_sampling_mode.py" if adopted else SAMPLING_NODE.name)
+    results = [_deploy_repo_file(ADAPTER_DIR / name, adapter_dir / name, what="HANDOFF_ADAPTER")
+               for name in ("__init__.py", "barrier.py")]
+    results.append(_deploy_repo_file(SAMPLING_NODE, sampling_node, what="SAMPLING_NODE"))
+    paths_config = runtime_data_root / "shine-node-paths.yaml"
+    if adopted:
+        from shine.comfyops.installer import durable_json
+        from shine.comfyops.verification_receipts import installed_directory
+
+        bound_paths: dict = {"custom_nodes": str(node_root), "is_default": True}
+        # The installer owns placement in the package store. Expose only
+        # canonical directories already placed there, for this one process.
+        for evidence_catalog in (load_default_catalog(), load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)):
+            for component in evidence_catalog["components"]:
+                family = component.get("destination_family")
+                directory = installed_directory(settings, component)
+                if family and directory and directory.is_dir():
+                    previous = bound_paths.get(family)
+                    bound_paths[family] = str(directory) + ("\n" + previous if previous else "")
+        durable_json(paths_config, {"shine": bound_paths})
     adapter_identity = managed_recipe_adapter_identity(adapter_dir)
-    whitelist = ["shine_comfy_handoff"]
-    if sampling_node.is_file() or capability == 'h3':
-        whitelist.append("shine_h3_sampling_mode.py")
+    whitelist = [adapter_dir.name, sampling_node.name]
     # ComfyUI matches the whitelist against on-disk directory names; an adopted
     # installation keeps upstream defaults, so catalog repo ids must resolve to
     # the directories that really exist before they can be whitelisted.
@@ -950,6 +956,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
             "--input-directory", "{runtime_data_root}" + SEP + "input",
             "--output-directory", "{runtime_data_root}" + SEP + "output",
             "--temp-directory", "{runtime_data_root}" + SEP + "temp",
+            "--extra-model-paths-config", "{runtime_data_root}" + SEP + paths_config.name,
         ])
     argv.extend([
         "--disable-async-offload", "--disable-pinned-memory",
@@ -981,8 +988,8 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         "pinned_files": [
             "{python}", "{root}" + SEP + "main.py", "{adapter_dir}" + SEP + "__init__.py",
             "{adapter_dir}" + SEP + "barrier.py", "{bootstrap}",
-            *(["{root}" + SEP + "custom_nodes" + SEP + "shine_h3_sampling_mode.py"]
-              if (sampling_node.is_file() or capability == 'h3') else []),
+            ("{runtime_data_root}" if adopted else "{root}") + SEP + "custom_nodes" + SEP + sampling_node.name,
+            *(["{runtime_data_root}" + SEP + paths_config.name] if adopted else []),
         ],
     }
     reviews = {}
@@ -1043,7 +1050,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
             "SHINE_SETUP_RECIPE": str(recipe_path),
             "SHINE_ENABLE_LOCAL_EXECUTION": "1",
         }
-        env_written = _update_env_file(ENV_PATH, env_updates)
+        env_written = persist_env(env_updates, env_path)
     add_audit(db, "comfyops", "DEPLOYMENT_CONFIGURATION_GENERATED", "comfy_instance", instance.id, {
         "recipe": str(recipe_path), "adapter_sha256": adapter_identity, "capability": capability,
         "gpu_uuid": gpu["uuid"], "env_keys": sorted(env_updates),
@@ -1059,12 +1066,20 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         "activation_required": capability == 'h3',
         "adapter_sha256": adapter_identity,
         "gpu_uuid": gpu["uuid"],
-        "env_file": str(ENV_PATH),
+        "env_file": str(env_path),
         "env_keys": sorted(env_written),
         "deployed_files": results,
         "review_manifests": {role: str(setup_dir / "manifests" / (role.lower() + ".json")) for role in reviews},
         "node_pack_notes": node_pack_notes,
     }
+
+
+def runtime_settings_path(settings) -> Path:
+    override = os.getenv("SHINE_RUNTIME_ENV_PATH")
+    path = Path(override).resolve() if override else ENV_PATH
+    if override and not path.is_relative_to(settings.data_dir.resolve()):
+        raise HTTPException(409, "RUNTIME_SETTINGS_PATH_OUTSIDE_DATA_DIR")
+    return path
 
 
 def persist_env(updates: dict, env_path: Path | None = None) -> list:

@@ -268,3 +268,13 @@ def test_candidate_stack_uses_pinned_recipe_and_refuses_unverified_combinations(
                 image_count=2, variant_id="ref2va-lowend-candidate",
                 accelerator_id=accelerator, second_pass=second,
             )
+
+
+def test_pdd8_leaves_the_sage_attention_patch_out():
+    compiled = compile_ref2va_workflow(accelerator_id="pdd8", image_count=1)
+    assert "MiniMaxH3MemoryEfficientSageAttentionPatch" not in compiled.required_nodes
+    assert not any(node["class_type"] == "MiniMaxH3MemoryEfficientSageAttentionPatch"
+                   for node in compiled.graph.values())
+    assert compiled.graph["15"]["inputs"]["model"] == ["13", 0]
+    native = compile_ref2va_workflow(accelerator_id="native20", image_count=1)
+    assert native.graph["15"]["inputs"]["model"] == ["14", 0]

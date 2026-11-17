@@ -300,7 +300,7 @@ def _probe_review(role: str, spec: dict) -> dict:
     return result
 
 
-def _workflow_contracts(db: Session, project_id: str) -> tuple[dict, dict, dict]:
+def _workflow_contracts(db: Session, project_id: str | None) -> tuple[dict, dict, dict]:
     """Classify baseline templates; drift and gaps are advisory, not a block.
 
     The mode-level contract replaced the byte-exact startup check: a renderer
@@ -312,6 +312,20 @@ def _workflow_contracts(db: Session, project_id: str) -> tuple[dict, dict, dict]
     """
     from shine.comfyops.mode_capabilities import classify_baseline_profiles
 
+    if project_id is None:
+        from types import SimpleNamespace
+
+        from shine.comfyops.deployment import load_default_catalog
+        from shine.comfyops.variant_binding import binding_for_catalog
+
+        binding = binding_for_catalog(load_default_catalog())
+        templates = {row["name"]: row for row in binding.profiles}
+        contracts = {name: SimpleNamespace(
+            id=None, name=name, graph=row["graph"], parameter_map=row["parameter_map"],
+            media_transfers=row.get("media_transfers") or {}, required_nodes=row.get("required_nodes") or [],
+            mode=row["mode"], checkpoint_id=row.get("checkpoint_id"),
+        ) for name, row in templates.items()}
+        return templates, contracts, {"drifted": [], "missing": []}
     state = classify_baseline_profiles(db, project_id)
     return state["templates"], state["contracts"], {
         "drifted": state["drifted"],
@@ -563,7 +577,7 @@ def _upsert_reviewer(db: Session, probe: dict) -> tuple[ProviderProfile, AgentRo
     return profile, route
 
 
-def validate_services(db: Session, settings: Settings, project_id: str, recipe_sha256: str,
+def validate_services(db: Session, settings: Settings, project_id: str | None, recipe_sha256: str,
                       *, actor: str) -> dict:
     """Validate installed services and persist binding evidence.
 
@@ -580,7 +594,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     identity = configuration_identity(db, settings, recipe_path(settings))
     if not same_configuration(candidate.value["identity"], identity, settings=settings):
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
-    require_project(db, project_id)
+    if project_id is not None:
+        require_project(db, project_id)
     require_idle_configuration(db)
     if db.get(AppSetting, ACTIVE_KEY) is not None and _worker_online(db, settings):
         raise HTTPException(409, "STOP_WORKER_BEFORE_SERVICE_VALIDATION")
@@ -588,10 +603,20 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     if instance is None or instance.status != "STOPPED" or instance.payload.get("process"):
         raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_VALIDATION")
     _files, contracts, template_advisory = _workflow_contracts(db, project_id)
-    auto_registered = auto_register_missing_baseline_profiles(db, project_id, actor=actor)
+    auto_registered = auto_register_missing_baseline_profiles(db, project_id, actor=actor) if project_id else []
     if auto_registered:
         _files, contracts, template_advisory = _workflow_contracts(db, project_id)
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    contracts = {name: SimpleNamespace(
+        id=profile.id, name=name, graph=deepcopy(profile.graph),
+        parameter_map=deepcopy(profile.parameter_map), media_transfers=deepcopy(profile.media_transfers),
+        required_nodes=list(profile.required_nodes), mode=profile.mode, checkpoint_id=profile.checkpoint_id,
+    ) for name, profile in contracts.items()}
+    contract_hashes = {name: workflow_contract_sha256(profile) for name, profile in contracts.items()}
     recipe, _sha = load_runtime_recipe(settings, expected_sha256=identity["recipe_sha256"])
+    db.commit()
     missing_resources = _review_resource_blockers(recipe)
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
@@ -643,6 +668,12 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
             configuration_identity(db, settings, recipe_path(settings)),
             settings=settings):
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
+    for name, expected in contracts.items():
+        if expected.id is None:
+            continue
+        current_profile = db.get(WorkflowProfile, expected.id)
+        if current_profile is None or workflow_contract_sha256(current_profile) != contract_hashes[name]:
+            raise HTTPException(409, "WORKFLOW_PROFILE_CHANGED_DURING_VALIDATION")
     # A reviewer that cannot import its executor must not stay routed into a
     # production handoff; its optional failure is recorded, not retried.
     for role, status in advisory_reviews.items():
@@ -665,6 +696,15 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         }
         for name, profile in contracts.items()
     }
+    for profile in contracts.values():
+        if profile.id is not None:
+            profile = db.get(WorkflowProfile, profile.id)
+            profile.validated_against = {
+                **validate_against_object_info(profile.graph, profile.parameter_map, object_info),
+                "source": "managed_live_object_info", "generation_verified": False,
+                "services_stopped": True,
+                "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            }
     object_info_payload = json.dumps(object_info, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     from shine.comfyops.mode_capabilities import core_mode_node_types
     evidence = record_service_evidence(db, identity, {

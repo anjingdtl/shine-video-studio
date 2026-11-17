@@ -56,7 +56,7 @@ def test_installs_pinned_tool_from_local_zip_and_creates_working_shim(tmp_path):
     manifest = {
         "manifest_id": "test", "manifest_version": "0.0.1", "generated": "test",
         "command_floors": _FLOORS,
-        "tools": {"ffmpeg": {"version": "1.0", "url": "file:///" + zip_path.as_posix(),
+        "tools": {"ffmpeg": {"version": "1.0", "url": zip_path.as_uri(),
                              "size": zip_path.stat().st_size,
                              "sha256": hashlib.sha256(zip_path.read_bytes()).hexdigest(),
                              "entries": ["ffmpeg.cmd"]}},
@@ -82,7 +82,7 @@ def test_hash_mismatch_blocks_install(tmp_path):
     manifest = {
         "manifest_id": "test", "manifest_version": "0.0.1", "generated": "test",
         "command_floors": _FLOORS,
-        "tools": {"ffmpeg": {"version": "1.0", "url": "file:///" + zip_path.as_posix(),
+        "tools": {"ffmpeg": {"version": "1.0", "url": zip_path.as_uri(),
                              "size": zip_path.stat().st_size, "sha256": "0" * 64,
                              "entries": ["tool.cmd"]}},
     }

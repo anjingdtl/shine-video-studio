@@ -279,7 +279,7 @@ def resolve_runtime(
     base_url = require_loopback_url(
         config.base_url, allow_remote=bool(getattr(settings, "allow_remote_comfyui", False))
     )
-    files = runtime.verify_model_files(config)
+    files = runtime.verify_model_files(config, settings=settings)
     runtime.persist_verification(settings, config, files)
     if not files["complete"]:
         raise ImageExecutionError(

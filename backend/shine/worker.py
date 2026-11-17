@@ -2725,6 +2725,15 @@ def _run_comfy_job(
                 project_id=job.project_id,
             )
             return job_id
+    if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting",
+                     expected_state_version=expected_version, attempt_id=attempt_id,
+                     lease_seconds=settings.worker_lease_seconds):
+        return job_id
+    if managed_continuation is not None:
+        if not isinstance(managed_continuation, _ManagedAttemptContext) or managed_continuation.job_id != job_id:
+            raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
+        managed_guard.check()
+        managed_continuation.before_prepare(service, attempt_id, worker_id, expected_version)
     if profile is None and request.strategy is not None:
         # Dynamic per-shot compilation: this job carries a frozen strategy, so
         # its graph is compiled here from the strategy plus this shot's own
@@ -2837,11 +2846,6 @@ def _run_comfy_job(
                      expected_state_version=expected_version, attempt_id=attempt_id,
                      lease_seconds=settings.worker_lease_seconds):
         return job_id
-    if managed_continuation is not None:
-        if not isinstance(managed_continuation, _ManagedAttemptContext) or managed_continuation.job_id != job_id:
-            raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
-        managed_guard.check()
-        managed_continuation.before_prepare(service, attempt_id, worker_id, expected_version)
     try:
         prepared = service.prepare(
             request,

@@ -82,6 +82,11 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   MANAGED_INSTANCE_NOT_CONFIGURED: { reason: '本机还没有受管渲染器配置', action: { label: '去基础配置准备', target: 'setup-env' } },
   MODEL_VARIANT_NOT_ACCEPTED: { reason: '候选模型还没通过验收，不能用于正式生产', action: { label: '查看模型状态', target: 'setup-models' } },
   VARIANT_NOT_DOWNLOADABLE: { reason: '这个变体未进入自动下载路径', action: { label: '查看候选准备方式', target: 'setup-models' } },
+  VARIANT_STARTUP_CONTRACT_NOT_DETERMINED: {
+    reason: '所选候选 H3 方案缺少已测定的启动合同',
+    why: '在 H3 方案中选择本机已验收的方案后重新整备。候选权重可以核验和保存，启动仍需该方案的真机证据。',
+    action: { label: '选择 H3 方案', target: 'setup-models' },
+  },
   REAL_RUNTIME_NOT_ACTIVATED: { reason: '真实制作配置还没验证激活', action: { label: '去基础配置完成', target: 'setup-env' } },
   SERVICE_VALIDATION_REQUIRED: { reason: '本机服务或工作流变化，需要重新验证', action: { label: '去重新验证', target: 'setup-env' } },
   ASSET_RIGHTS_NOT_APPROVED: { reason: '素材权利还没确认', action: { label: '去确认素材', target: 'assets-stage' } },

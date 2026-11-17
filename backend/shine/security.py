@@ -26,6 +26,10 @@ LOOPBACK_HOSTS = {"localhost", "localhost.localdomain", "127.0.0.1", "::1"}
 _SENSITIVE_KEY = re.compile(r"(api[_-]?key|token|secret|password|credential|authorization)", re.IGNORECASE)
 _SENSITIVE_VALUE = re.compile(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+[A-Za-z0-9._-]{8,})")
 _ABSOLUTE_PATH = re.compile(r"[A-Za-z]:\\[^\s\"']+|/(?:home|Users|mnt|private)/[^\s\"']+")
+# A value that is itself one absolute path (spaces/UNC included) must collapse to
+# the single canonical placeholder, so a read-back equality check sees a stable
+# token instead of a half-redacted string that stops at the first space.
+_ABSOLUTE_PATH_WHOLE = re.compile(r"[A-Za-z]:[\\/].*|\\\\.*|/(?:home|Users|mnt|private)/.*")
 
 
 def safe_filename(filename: str | None) -> str:
@@ -187,6 +191,8 @@ def sanitize_payload(value: Any, *, depth: int = 0) -> Any:
     if isinstance(value, list | tuple):
         return [sanitize_payload(item, depth=depth + 1) for item in value[:100]]
     if isinstance(value, str):
+        if _ABSOLUTE_PATH_WHOLE.fullmatch(value):
+            return "[local-path]"
         redacted = _SENSITIVE_VALUE.sub("[redacted]", value)
         redacted = _ABSOLUTE_PATH.sub("[local-path]", redacted)
         if len(redacted) > 4000:

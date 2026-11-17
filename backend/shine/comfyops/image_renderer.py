@@ -453,6 +453,8 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         raise HTTPException(409, {
             "code": "IMAGE_RENDERER_RECIPE_MISMATCH",
             "detail": "出图运行时绑定的实例与本机受管运行配置不是同一个实例。",
+            "requested_instance_id": instance_id,
+            "recipe_instance_id": renderer.get("instance_id"),
         })
     if os.name != "nt":
         raise HTTPException(409, "IMAGE_RENDERER_WINDOWS_ONLY")

@@ -16,6 +16,8 @@ audited baseline.  These tests pin that separation:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from sqlalchemy import select
 
@@ -84,6 +86,7 @@ def _mark_weights_verified(factory, settings, monkeypatch) -> list[str]:
     with real small files in test_weight_verification_receipts.py.
     """
     import shine.comfyops.verification_receipts as receipts
+    from shine.comfyops.models import ComfyInstance
 
     catalog = deployment.load_deployment_catalog(LOWEND_CATALOG)
     binding = load_binding(LOWEND_VARIANT)
@@ -94,6 +97,17 @@ def _mark_weights_verified(factory, settings, monkeypatch) -> list[str]:
         rows = deployment.register_catalog_packages(db, catalog, component_ids)
         for row in rows.values():
             row.status = "FILES_VERIFIED_PENDING_RUNTIME"
+        root = settings.data_dir / "synthetic-bound-instance"
+        root.mkdir(exist_ok=True)
+        families = {}
+        for component in _required_components(catalog, binding.profiles):
+            directory = settings.comfyops_dir / "isolated-packages" / component["component_id"]
+            directory.mkdir(parents=True, exist_ok=True)
+            family = component["destination_family"]
+            families[family] = "\n".join(filter(None, [families.get(family), str(directory)]))
+        (root / "extra_model_paths.yaml").write_text(json.dumps({"shine": families}), encoding="utf-8")
+        db.add(ComfyInstance(id="local:http://127.0.0.1:8188", sha256="0" * 64, status="STOPPED",
+                             payload={"root": str(root), "managed": True, "port": 8188}))
 
     def verified_receipt(db, *, component, variant_id, catalog_id, catalog_version, cache_dir=None):
         return {

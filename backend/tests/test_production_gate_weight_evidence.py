@@ -113,8 +113,8 @@ def test_a_cache_file_with_wrong_bytes_is_not_selectable(api, monkeypatch, fake_
     assert "PROFILE_WEIGHTS_NOT_VERIFIED" in codes, codes
 
 
-def test_a_valid_in_place_verification_is_selectable(api, monkeypatch):
-    """The positive: the bytes verified where the component belongs."""
+def test_a_verified_package_is_selectable_only_after_the_instance_binds_it(api, monkeypatch, tmp_path):
+    """A package receipt proves bytes; the existing instance proves consumption."""
     client, factory, settings = api
     studio = _studio(client)
     project = studio["project"]
@@ -125,6 +125,18 @@ def test_a_valid_in_place_verification_is_selectable(api, monkeypatch):
     directory = _installed_dir(settings, component)
     _write_weights(directory)
     _save_receipt(factory, component, directory)
+
+    unbound = _ready(client, factory, monkeypatch, settings, project, row["profile_id"])
+    assert unbound["selectable"] is False
+    assert "PROFILE_WEIGHTS_NOT_CONSUMABLE" in {item["code"] for item in unbound["blockers"]}
+
+    root = tmp_path / "instance"
+    root.mkdir()
+    (root / "extra_model_paths.yaml").write_text(
+        json.dumps({"shine": {"checkpoints": str(directory)}}), encoding="utf-8")
+    with factory.begin() as db:
+        db.add(ComfyInstance(id=INSTANCE_ID, payload={"root": str(root), "managed": True},
+                             sha256="0" * 64, status="RUNNING"))
 
     gate = _ready(client, factory, monkeypatch, settings, project, row["profile_id"])
     assert gate["selectable"] is True, gate["blockers"]

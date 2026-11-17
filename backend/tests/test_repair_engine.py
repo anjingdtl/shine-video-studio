@@ -121,3 +121,10 @@ def test_manual_repair_is_bounded_by_the_semantic_budget(studio):
     assert job_data["status"] == "REPAIR_PENDING"
     manual = [record for record in job_data["repairs"] if record["outcome"] == "manual_queued"]
     assert len(manual) == 2
+    escalation = client.post(f"/api/v1/jobs/{job['id']}/repair", json={
+        "action": "wait_for_human", "root_cause": "manual review after exhausted budget",
+        "changes": [], "max_additional_attempts": 0, "human_review_required": True,
+    })
+    assert escalation.status_code == 200, escalation.text
+    assert escalation.json()["status"] == "NEEDS_REVIEW"
+    assert escalation.json()["semantic_retries"] == 2

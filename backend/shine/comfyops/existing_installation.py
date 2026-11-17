@@ -10,6 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import yaml
 from fastapi import HTTPException
 
 from shine.comfy.workflow import graph_hash
@@ -438,6 +439,7 @@ def _local_declared_dir(value: str, base: Path) -> Path | None:
     candidate = Path(os.path.expanduser(value))
     if not candidate.is_absolute():
         candidate = base / candidate
+    candidate = Path(os.path.normpath(candidate))
     if not _is_local(candidate):
         return None
     try:
@@ -451,80 +453,66 @@ def _local_declared_dir(value: str, base: Path) -> Path | None:
         return None
 
 
-def declared_model_family_roots(root: Path) -> dict[str, list[Path]]:
-    """The model directories the installation declares, grouped by family.
+_MODEL_FOLDERS = {"diffusion_models": ("unet", "diffusion_models"),
+                  "text_encoders": ("text_encoders", "clip")}
+_MODEL_ALIASES = {"unet": "diffusion_models", "clip": "text_encoders"}
 
-    ComfyUI reads this file at startup; a read-only parse is evidence of which
-    directory a *family* (``unet``, ``clip``, ``vae``...) really comes from.
-    The same defensive rules as :func:`_declared_model_roots` apply: local
-    directories only, links and network paths ignored.
-    """
-    config = root / 'extra_model_paths.yaml'
+
+def declared_model_family_roots(root: Path, *, extra_config: Path | None = None) -> dict[str, list[Path]]:
+    """Read the same YAML groups and multiline paths as ComfyUI."""
+    families = _model_config_paths(root / 'extra_model_paths.yaml')
+    if extra_config is not None:
+        for family, paths in _model_config_paths(extra_config).items():
+            families[family] = list(dict.fromkeys([*paths, *families.get(family, [])]))
+    return families
+
+
+def _model_config_paths(config: Path) -> dict[str, list[Path]]:
     families: dict[str, list[Path]] = {}
     try:
         if not config.is_file() or config.is_symlink():
             return families
-        lines = config.read_text(encoding='utf-8', errors='replace').splitlines()
-    except OSError:
+        groups = yaml.safe_load(config.read_text(encoding='utf-8-sig'))
+    except (OSError, UnicodeError, yaml.YAMLError):
         return families
-    base = root
-    for raw in lines:
-        line = raw.split('#', 1)[0].strip()
-        if not line or ':' not in line:
+    if not isinstance(groups, dict):
+        groups = {}
+    for group in groups.values():
+        if not isinstance(group, dict):
             continue
-        key, _, value = line.partition(':')
-        key = key.strip().lower()
-        value = value.strip().strip('"\'')
-        if key == 'is_default':
+        base_value = group.get('base_path')
+        base = (_local_declared_dir(os.path.expandvars(base_value), config.parent)
+                if isinstance(base_value, str) and base_value else config.parent)
+        if base is None:
             continue
-        if key == 'base_path':
-            if value:
-                base = _local_declared_dir(value, base) or base
-            continue
-        if not value:
-            continue
-        directory = _local_declared_dir(value, base)
-        if directory and directory not in families.setdefault(key, []):
-            families[key].append(directory)
+        for name, value in group.items():
+            if not isinstance(name, str) or name in {'base_path', 'is_default'} or not isinstance(value, str):
+                continue
+            for line in value.splitlines():
+                directory = _local_declared_dir(line, base) if line else None
+                if directory is not None and directory not in families.setdefault(name, []):
+                    families[name].append(directory)
     return families
 
 
-def _declared_model_roots(root: Path) -> list[Path]:
-    """Model directories the existing ComfyUI itself declares.
+def model_family_directories(models_root: Path, family: str, declared: dict) -> list[Path]:
+    """Paths the loader can see for this family, including ComfyUI's aliases."""
+    family = _MODEL_ALIASES.get(family, family)
+    return list(dict.fromkeys([
+        *(models_root / folder for folder in _MODEL_FOLDERS.get(family, (family,))),
+        *(Path(path) for name, paths in declared.items() if _MODEL_ALIASES.get(name, name) == family
+          for path in paths),
+    ]))
 
-    People commonly keep weights outside the checkout and point ComfyUI at them
-    with ``extra_model_paths.yaml``.  Those roots hold exactly the models the
-    installation can actually load, so the read-only scan follows them instead
-    of only looking at ``<root>/models``.
-    """
-    config = root / 'extra_model_paths.yaml'
-    try:
-        if not config.is_file():
-            return []
-        lines = config.read_text(encoding='utf-8', errors='replace').splitlines()
-    except OSError:
+
+def model_sources(models_root: Path, family: str, relative: Path, declared: dict) -> list[Path]:
+    if not relative.parts or relative.is_absolute() or '..' in relative.parts:
         return []
-    declared: list[Path] = []
-    base = root
-    for raw in lines:
-        line = raw.split('#', 1)[0].strip()
-        if not line or ':' not in line:
-            continue
-        key, _, value = line.partition(':')
-        key = key.strip().lower()
-        value = value.strip().strip('"\'')
-        if key == 'is_default':
-            continue
-        if key == 'base_path':
-            if value:
-                base = _local_declared_dir(value, base) or base
-            continue
-        if not value:
-            continue
-        directory = _local_declared_dir(value, base)
-        if directory and directory not in declared:
-            declared.append(directory)
-    return declared
+    directories = model_family_directories(models_root, family, declared)
+    # Some catalogues (such as RelayVSR) retain the family prefix.
+    remainder = Path(*relative.parts[1:]) if relative.parts[0] == family else relative
+    candidates = (directory / remainder for directory in directories)
+    return [file for file in candidates if file.is_file() and file.resolve() == file]
 
 
 def inspect(root_value: str, catalog: dict) -> dict:
@@ -541,7 +529,8 @@ def inspect(root_value: str, catalog: dict) -> dict:
     seen_files: set[str] = set()
     model_roots: list[str] = []
     count = 0
-    candidates = [root / 'models', *_declared_model_roots(root)]
+    families = declared_model_family_roots(root)
+    candidates = [root / 'models', *(path for dirs in families.values() for path in dirs)]
     for models in candidates:
         if str(models) in model_roots:
             continue
@@ -585,6 +574,10 @@ def inspect(root_value: str, catalog: dict) -> dict:
             # Size is a candidate filter only. Renamed files are eligible; hashes
             # are verified while copying, never inferred from names or size.
             candidates = sizes.get(spec['size'], [])
+            family = component.get('destination_family')
+            if family and candidates:
+                preferred = model_sources(root / 'models', family, Path(spec['relative_path']), families)
+                candidates = sorted(candidates, key=lambda row: row[0] not in preferred)
             entry = {'component_id': component['component_id'], 'relative_path': spec['relative_path'],
                      'sha256': spec['sha256'], 'size': spec['size']}
             if candidates:
@@ -600,7 +593,7 @@ def inspect(root_value: str, catalog: dict) -> dict:
                'models_root': str(root / 'models'),
                'declared_model_family_roots': {
                    family: [str(directory) for directory in directories]
-                   for family, directories in sorted(declared_model_family_roots(root).items())
+                   for family, directories in sorted(families.items())
                },
                'node_packages': node_package_inventory(root, catalog),
                'runtime_verified': False,
@@ -609,8 +602,10 @@ def inspect(root_value: str, catalog: dict) -> dict:
             'candidate_bytes': sum(row['size'] for row in matches)}
 
 
-def verify_models(report: dict, snapshot: str) -> dict:
+def verify_models(report: dict, snapshot: str, *, cache_dir: Path | None = None) -> dict:
     """Confirm exact catalog model bytes in place; never copies or writes them."""
+    from shine.comfyops.verification_receipts import file_digest
+
     if snapshot != report['snapshot']:
         raise HTTPException(409, '已有目录或部署清单已变化，请重新检测后确认。')
     verified, rejected = [], []
@@ -622,15 +617,11 @@ def verify_models(report: dict, snapshot: str) -> dict:
                 if source.resolve() != source or not source.is_file():
                     continue
                 expected_stat = match.get('source_stats', {}).get(source_value)
-                with source.open('rb') as stream:
-                    before = _stat_identity(os.fstat(stream.fileno()))
-                    if expected_stat and before != expected_stat:
-                        continue
-                    digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-                    after = _stat_identity(os.fstat(stream.fileno()))
-                path_after = _stat_identity(source.stat())
-                if (before == after == path_after and before['size'] == match['size']
-                        and digest == match['sha256']):
+                before = _stat_identity(source.stat())
+                if expected_stat and before != expected_stat:
+                    continue
+                result = file_digest(source, match['sha256'], match['size'], cache_dir=cache_dir)
+                if result['verified'] and before == _stat_identity(source.stat()):
                     valid_source = source_value
                     break
             except OSError:
@@ -662,11 +653,12 @@ def register_verified_packages(db, verified: list[dict], catalog: dict,
     """
     from shine.comfyops.deployment import _component_map, register_catalog_packages
 
-    matched = {(row['component_id'], row['relative_path']) for row in verified}
+    matched = {(row['component_id'], row['relative_path'], row['sha256'], row['size']) for row in verified}
     complete = []
     for component_id, component in _component_map(catalog).items():
         files = component.get('files') or []
-        if files and all((component_id, item['relative_path']) in matched for item in files):
+        if files and all((component_id, item['relative_path'], item['sha256'], item['size']) in matched
+                         for item in files):
             complete.append(component_id)
     if not complete:
         return []

@@ -165,3 +165,53 @@ def test_worker_fails_closed_when_live_object_info_is_unavailable(api, fake_comf
     assert fake_comfy.prompt_count == 0
     result = client.get(f"/api/v1/jobs/{job_id}").json()
     assert result["failure_code"] == "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"
+
+
+def test_cold_strategy_starts_the_managed_renderer_before_reading_its_nodes(api, fake_comfy, monkeypatch):  # noqa: F811
+    from datetime import timedelta
+    from types import SimpleNamespace
+
+    from shine.comfyops.models import ResourceLease
+    from shine.models import JobAttempt, utcnow
+    from shine.worker import _ManagedAttemptContext, _run_comfy_job
+
+    client, factory, settings = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    job_id = _seed_strategy_job(client, project, style["id"], DEFAULT_STRATEGY)
+    worker_id = "cold-strategy-worker"
+    events = []
+
+    class ManagedStart(_ManagedAttemptContext):
+        def before_prepare(self, *args):
+            events.append("started")
+
+    context = ManagedStart()
+    context.job_id = job_id
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.status = "SUBMITTING"
+        job.lease_owner = worker_id
+        job.lease_expires_at = utcnow() + timedelta(seconds=60)
+        version = job.state_version
+        attempt = JobAttempt(job_id=job_id, attempt_no=1, request_fingerprint=job.idempotency_key,
+                             status="SUBMITTING", lease_owner=worker_id, lease_expires_at=job.lease_expires_at)
+        db.add(attempt)
+        db.add(ResourceLease(owner="h3:" + job_id, status="ACTIVE", budget_mb=16384,
+                             exclusive=True, priority=100, expires_at=job.lease_expires_at))
+        db.flush()
+        attempt_id = attempt.id
+
+    def read_nodes(self):
+        assert events == ["started"]
+        events.append("object_info")
+        return {"Note": {}}
+
+    monkeypatch.setattr(ComfyUIClient, "object_info", read_nodes)
+    _run_comfy_job(factory, job_id=job_id, attempt_id=attempt_id, expected_version=version,
+                   worker_id=worker_id, settings=worker_settings(settings), comfy_service=None,
+                   comfy_client=ComfyUIClient(fake_comfy.base_url, timeout_s=2),
+                   managed_continuation=context, managed_guard=SimpleNamespace(check=lambda: None))
+    assert events == ["started", "object_info"]
+    assert fake_comfy.prompt_count == 0
+    assert client.get(f"/api/v1/jobs/{job_id}").json()["failure_code"] == "STRATEGY_GRAPH_NODE_MISSING"

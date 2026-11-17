@@ -59,7 +59,10 @@ def _required_keys(catalog: dict, capability: str) -> set[tuple[str, str, str, i
     ``kind`` is the only filter: a review model is not a video weight, but both
     are real files of the same catalog and both may be imported by hand.
     """
-    del capability
+    if capability in {"h3", "image"}:
+        from shine.comfyops.adoption import _required_capability_files
+
+        return _required_capability_files(catalog, capability)
     keys = set()
     for component in catalog.get("components") or []:
         if component.get("kind") not in {"model", "review-model"}:
@@ -139,7 +142,7 @@ def _with_scan_candidates(report: dict, candidates: list[dict]) -> dict:
     return report
 
 
-def reconcile_installation(db, settings, *, path: str, project_id: str | None = None,
+def reconcile_installation(db, settings, *, path: str | None, project_id: str | None = None,
                            capability: str = "h3", adopt: bool = False, port: int | None = None,
                            actor: str = "local-user", variant_id: str | None = None) -> dict[str, Any]:
     """Prove what is there, register it, and optionally confirm the instance.
@@ -159,84 +162,111 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
     the existing content-addressed cache, so the installer places those bytes
     locally and never downloads them a second time.
     """
+    from shine.comfy.workflow import graph_hash
     from shine.comfyops import resource_discovery
+    from shine.comfyops.adoption import _verified_key, adopt_existing_installation
     from shine.comfyops.existing_installation import (
         import_models,
         inspect,
         register_verified_packages,
         verify_models,
     )
+    from shine.comfyops.verification_receipts import cache_candidates, installed_directory
     from shine.services import add_audit
-    key = (str(Path(path).resolve()), capability)
+    key = (str(Path(path or settings.comfyops_dir).resolve()), capability)
     if not _claim(key):
         return {"status": "IN_PROGRESS", "path": str(key[0]), "capability": capability,
                 "registered": [], "verified": 0, "downloaded_bytes": 0}
     try:
-        required_component_ids: set[str] | None = None
         if capability == "h3" and variant_id:
             from shine.comfyops.variant_binding import load_binding
-            from shine.comfyops.variant_readiness import _required_components
 
-            binding = load_binding(str(variant_id), fresh=False)
-            catalog = binding.catalog
-            required_component_ids = {str(row.get("component_id"))
-                                      for row in _required_components(catalog, binding.profiles)}
+            catalog = load_binding(variant_id).catalog
         else:
             catalog = _capability_catalog(capability)
-        report = inspect(path, catalog)
+        if path:
+            report = inspect(path, catalog)
+        else:
+            report = {"root": None, "catalog_id": catalog["catalog_id"], "matches": [], "software": {}}
+            report["snapshot"] = graph_hash(report)
         candidates = resource_discovery.verification_candidates(db, catalog)
+        for component in catalog.get("components") or []:
+            if component.get("kind") not in {"model", "review-model"}:
+                continue
+            directory = installed_directory(settings, component)
+            for item in component.get("files") or []:
+                source = directory / item["relative_path"] if directory else None
+                if source is not None and source.is_file():
+                    from shine.comfyops.existing_installation import _stat_identity
+
+                    candidates.append({**item, "component_id": component["component_id"],
+                                       "path": str(source), "stat": _stat_identity(source.stat())})
         report = _with_scan_candidates(report, candidates)
-        result = verify_models(report, report["snapshot"])
+        cache_root = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+        result = verify_models(report, report["snapshot"], cache_dir=cache_root)
         verified = list(result.get("verified") or [])
         rejected = list(result.get("rejected") or [])
         # 手动收料目录属于同一条收料链：整备链与独立入口都经这个执行者，
         # 不再只有单独 API 认识 manual-downloads（否则一键整备仍会重排下载）。
-        manual = manual_files_reconcile(db, settings, capability=capability, actor=actor)
-        verified.extend(manual.get("imported") or [])
+        manual = manual_files_reconcile(db, settings, capability=capability, actor=actor, catalog=catalog)
         # 已入缓存的字节本身就是核验证据（与 capability_report 同一读法）：
         # 收料函数跳过已缓存文件，重复核验不得因此把 complete 翻回 false。
-        cache_root = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
-        seen = {(row["component_id"], row["relative_path"], row["sha256"], row["size"])
-                for row in verified}
+        seen = {_verified_key(row) for row in verified}
         for component in catalog.get("components") or []:
-            for item in component.get("files") or []:
-                tup = (component["component_id"], item["relative_path"], item["sha256"], item["size"])
-                if tup not in seen and (cache_root / str(item["sha256"])).is_file():
-                    verified.append({"component_id": tup[0], "relative_path": tup[1],
-                                     "sha256": tup[2], "size": tup[3],
-                                     "source": str(cache_root / str(item["sha256"]))})
-                    seen.add(tup)
+            if component.get("kind") not in {"model", "review-model"}:
+                continue
+            candidates_in_cache = [item for item in component.get("files") or []
+                                   if (component["component_id"], item["relative_path"],
+                                       item["sha256"], item["size"]) not in seen
+                                   and (cache_root / item["sha256"]).is_file()]
+            checked = cache_candidates(cache_root, {**component, "files": candidates_in_cache})
+            for item, evidence in zip(candidates_in_cache, checked["files"], strict=True):
+                if evidence["verified"]:
+                    verified.append({**item, "component_id": component["component_id"],
+                                     "source": str(cache_root / item["sha256"])})
         # RelayVSR 精修跑在既有 ComfyUI 核心上（2026-11-17 用户裁定）：已核验字节
         # 必须加性落位到该安装的 models 目录，readiness 与执行读同一个根。
         # 只加钉住文件：同名不同字节拒绝覆盖，已存在则跳过。
         served_placed: list[str] = []
-        if capability == "relayvsr":
+        if capability == "relayvsr" and path:
             served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
         candidate_paths = {row["path"] for row in candidates}
-        candidate_dirs = [Path(row["path"]).parent for row in candidates]
+        candidate_dirs = [cache_root, *(Path(row["path"]).parent for row in candidates)]
         registered = register_verified_packages(db, verified, catalog, root=report["root"],
                                                 extra_roots=candidate_dirs)
-        # Bytes proved from a search directory are copied into the existing
-        # content-addressed cache: the installer then places them locally, and
-        # the download plan for these files is empty.  The person's own file is
-        # never moved.
-        from_cache = [row for row in verified if str(row.get("source")) in candidate_paths]
-        imported: list[dict] = []
-        if from_cache:
-            imported = import_models(
-                settings, {"matches": from_cache, "snapshot": report["snapshot"]},
-                report["snapshot"]).get("imported") or []
-        verified_keys = {(row["component_id"], row["relative_path"], row["sha256"], row["size"])
-                         for row in verified}
+        verified_keys = {_verified_key(row) for row in verified}
         required = _required_keys(catalog, capability)
-        if required_component_ids is not None:
-            required = {row for row in required if row[0] in required_component_ids}
         complete = bool(required) and required <= verified_keys
+        adoption = None
+        if adopt and path and capability in {"h3", "image"}:
+            if complete:
+                try:
+                    adoption = adopt_existing_installation(
+                        db, settings, project_id=project_id, path=report["root"],
+                        snapshot=report["snapshot"], port=int(port or _known_port(db, report["root"]) or 8188),
+                        actor=actor, capability=capability, catalog=catalog, inspected=report, verified=verified,
+                    )
+                except HTTPException as exc:
+                    detail = exc.detail
+                    adoption = {"status": "REFUSED",
+                                "code": detail.get("code") if isinstance(detail, dict) else detail}
+            else:
+                adoption = {"status": "FILES_INCOMPLETE",
+                            "missing_components": sorted({row[0] for row in required - verified_keys})}
+        db.commit()
+        # Stage verified bytes for the existing installer when they are outside
+        # the installation or the installation cannot be adopted.
+        adopted = bool((adoption or {}).get("instance_id"))
+        to_cache = [row for row in verified if Path(row["source"]).parent != cache_root
+                    and ((not adopted and row["source"] in candidate_paths)
+                         or (adoption is not None and not adopted and _verified_key(row) in required))]
+        imported = import_models(settings, {"matches": to_cache, "snapshot": report["snapshot"]},
+                                 report["snapshot"]).get("imported", []) if to_cache else []
         add_audit(db, actor, "SETUP_FACTS_RECONCILED", "deployment", report["catalog_id"], {
             "root": report["root"], "snapshot": report["snapshot"], "capability": capability,
             "verified_components": sorted({row["component_id"] for row in verified}),
             "rejected_components": sorted({row["component_id"] for row in rejected}),
-            "registered": sorted(registered), "adopted": False,
+            "registered": sorted(registered), "adopted": adopted,
             "scan_candidates": len(candidates), "cached_from_scan": len(imported),
         }, project_id=project_id)
         payload: dict[str, Any] = {
@@ -259,31 +289,12 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
             "copied_bytes": sum(int(row.get("size") or 0) for row in imported),
             "user_install_modified": False,
         }
-        if adopt:
-            if not project_id:
-                payload["adoption"] = {"status": "PROJECT_REQUIRED"}
-            elif not complete:
-                payload["adoption"] = {"status": "FILES_INCOMPLETE",
-                                       "missing_components": payload["missing_components"]}
-            else:
-                from shine.comfyops.adoption import adopt_existing_installation
-
-                try:
-                    resolved_port = int(port or _known_port(db, report["root"]) or 8188)
-                    adoption = adopt_existing_installation(
-                        db, settings, project_id=project_id, path=report["root"],
-                        snapshot=report["snapshot"], port=resolved_port,
-                        actor=actor, capability=capability, catalog=catalog,
-                    )
-                    payload["adoption"] = adoption
-                    add_audit(db, actor, "SETUP_INSTALLATION_ADOPTED_BY_RECONCILE",
-                              "deployment", report["catalog_id"],
-                              {"status": adoption.get("status"), "capability": capability},
-                              project_id=project_id)
-                except HTTPException as exc:
-                    detail = exc.detail
-                    code = detail.get("code") if isinstance(detail, dict) else detail
-                    payload["adoption"] = {"status": "REFUSED", "code": str(code)}
+        if adoption is not None:
+            payload["adoption"] = adoption
+            if adopted:
+                add_audit(db, actor, "SETUP_INSTALLATION_ADOPTED_BY_RECONCILE",
+                          "deployment", report["catalog_id"],
+                          {"status": adoption["status"], "capability": capability}, project_id=project_id)
         db.commit()
         return payload
     finally:
@@ -313,7 +324,7 @@ def _hash_file(path: Path) -> str:
 
 
 def manual_files_reconcile(db, settings, *, capability: str = "h3",
-                           actor: str = "local-user") -> dict[str, Any]:
+                           actor: str = "local-user", catalog: dict | None = None) -> dict[str, Any]:
     """Adopt files a person downloaded by hand, without a second downloader.
 
     The staging directory is fixed (``<deployment_root>/manual-downloads``); the
@@ -326,7 +337,7 @@ def manual_files_reconcile(db, settings, *, capability: str = "h3",
 
     manual_root = _safe_manual_root(settings)
     cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
-    catalog = _capability_catalog(capability)
+    catalog = catalog or _capability_catalog(capability)
     imported, rejected, absent = [], [], []
     if not manual_root.is_dir():
         return {"status": "NO_STAGING_DIRECTORY", "manual_root": str(manual_root),
@@ -354,7 +365,7 @@ def manual_files_reconcile(db, settings, *, capability: str = "h3",
             expected_sha = str(item.get("sha256") or "").lower()
             size = int(item.get("size") or 0)
             target = cache / expected_sha if expected_sha else None
-            if target is not None and target.is_file():
+            if target is not None and target.is_file() and _hash_file(target) == expected_sha:
                 continue  # already cached and verified - never copy twice
             match = None
             for candidate in by_size.get(size, []):

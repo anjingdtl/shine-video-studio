@@ -263,13 +263,6 @@ export function SetupEnvironmentStatus({
     </div>
 
     {summary && <>
-      <ol className="setup-phases" aria-label="制作环境准备进度">
-        {summary.progress.map((phase) => <li key={phase.id} className={`setup-phase-${phase.state.toLowerCase()}`}>
-          {phase.state === 'DONE' ? <Check size={11} /> : <span className="setup-phase-dot" />}
-          {phase.label}
-        </li>)}
-      </ol>
-
       {chosen && <p className="run-hint" data-testid="setup-installation">
         使用的 ComfyUI：{chosen.root}
         {chosen.port ? ` · 端口 ${chosen.port}` : ''}
@@ -318,10 +311,13 @@ export function SetupEnvironmentStatus({
               </span>)}
             </div>}
             {cap.two_step && !readOnly && (() => {
-              const filesReady = cap.two_step.files.state !== 'MISSING';
               const run = cap.two_step.run.state;
               if (run === 'READY') return null;
-              if (!filesReady) {
+              const action = cap.next_step;
+              if (action?.action === 'TRIAL' && key === 'h3') {
+                return <p className="run-hint">运行合同已核对，可在作品的「⑥ 视频生产」开始真实试镜。</p>;
+              }
+              if (cap.two_step.files.state === 'MISSING') {
                 return <button type="button" className="btn-secondary setup-cap-fix" disabled={!!busy}
                   onClick={() => onPrepare?.(key, summary as SetupSummary)}>
                   <Download size={12} /> 下载安装缺文件
@@ -377,7 +373,7 @@ export function SetupEnvironmentStatus({
           if (!rows.length) return 'SKIP';
           if (rows.some((s) => s.status === 'FAILED')) return 'FAILED';
           if (rows.every((s) => s.status === 'DONE' || s.status === 'SKIPPED')) return 'DONE';
-          if (rows.some((s) => s.status === 'RUNNING' || s.status === 'PENDING')) return 'RUNNING';
+          if (rows.some((s) => s.status === 'RUNNING' || s.id === preparation.current)) return 'RUNNING';
           return 'PENDING';
         };
         const filePhase = phase(FILE_STEPS);

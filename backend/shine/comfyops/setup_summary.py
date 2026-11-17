@@ -72,10 +72,12 @@ def record_installation_choice(db, *, root: str, port: int | None, actor: str,
     different question with a different answer, and this record never pretends
     to have verified a byte.
     """
+    from shine.comfyops.existing_installation import comfy_root, local_path
     from shine.models import AppSetting, utcnow
     from shine.services import add_audit
 
-    resolved = Path(root).resolve()
+    requested = local_path(root)
+    resolved = comfy_root(requested) or requested
     value = {
         "version": 1,
         "root": str(resolved),
@@ -127,7 +129,8 @@ def _catalog_components(catalog: dict) -> dict[str, dict]:
 
 
 def model_file_presence(models_root: str | Path | None, catalog: dict, component_ids=None,
-                        *, package_root: str | Path | None = None) -> dict[str, Any]:
+                        *, package_root: str | Path | None = None,
+                        declared: dict | None = None) -> dict[str, Any]:
     """Cheap, read-only presence check: right path *and* right byte count.
 
     ``models_root`` is the ComfyUI ``models`` directory (``<root>/models`` for an
@@ -141,6 +144,8 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
     FILES_FOUND for that reason.  Only
     :mod:`shine.comfyops.verification_receipts` may say verified.
     """
+    from shine.comfyops.existing_installation import model_sources
+
     present, missing, found_bytes = [], [], 0
     base = Path(models_root) if models_root else None
     store = Path(package_root) if package_root else None
@@ -161,21 +166,7 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
                 if candidate.is_file():
                     target = candidate
             elif base is not None and family and not relative.is_absolute():
-                # ComfyUI's own aliases: text encoders also live in clip/.
-                folders = (family, "clip") if family == "text_encoders" else (family,)
-                for folder in folders:
-                    # 清单的 relative_path 有两种约定：带 family 前缀（RelayVSR
-                    # 按 HF 仓库路径）与不带（H3/出图）。已带前缀时不再叠一层，
-                    # 否则落位正确的文件永远被判缺件。
-                    candidates = [base / folder / relative]
-                    if relative.parts and relative.parts[0] == folder:
-                        candidates.append(base / relative)
-                    for candidate in candidates:
-                        if candidate.is_file():
-                            target = candidate
-                            break
-                    if target is not None:
-                        break
+                target = next(iter(model_sources(base, family, relative, declared or {})), None)
             ok = False
             if target is not None:
                 try:
@@ -215,16 +206,10 @@ def _receipt_in_place(receipt: dict, roots: list[str]) -> bool:
                 for row in receipt.get("files") or [] if isinstance(row, dict) and row.get("path")]
     if not recorded:
         recorded = [str(receipt.get("directory") or "")]
-    for value in recorded:
-        if not value:
-            continue
-        try:
-            path = Path(value).resolve()
-        except OSError:
-            continue
-        if any(path == root or path.is_relative_to(root) for root in wanted):
-            return True
-    return False
+    return bool(recorded) and all(
+        value and any(Path(value).resolve().is_relative_to(root) for root in wanted)
+        for value in recorded
+    )
 
 
 def _verified_components(db, settings, catalog: dict, component_ids,
@@ -292,7 +277,10 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
     is where it is, so the page can explain the choice instead of silently
     picking the first entry of a scan list.
     """
-    rows = _instance_rows(db)
+    from shine.comfyops.existing_installation import comfy_root, local_path
+    from shine.comfyops.resource_discovery import read_state
+
+    rows = [row for row in _instance_rows(db) if row.get("root") and Path(row["root"]).is_dir()]
     by_root = {str(Path(row["root"]).resolve()): row for row in rows if row.get("root")}
     chosen = _choice(db)
     active = _runtime_instance_id(db)
@@ -320,8 +308,10 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
                 add(str(row["root"]), instance=row, source="active_runtime",
                     reason="正在为当前作品提供运行环境")
     if chosen.get("root"):
-        add(str(chosen["root"]), instance=by_root.get(str(Path(chosen["root"]).resolve())),
-            source="user_choice", reason="你上次确认使用的这套安装")
+        root = str(Path(chosen["root"]).resolve())
+        if Path(root).is_dir():
+            add(root, instance=by_root.get(root) or {"port": chosen.get("port")},
+                source="user_choice", reason="你上次确认使用的这套安装")
     for row in rows:
         if row["adopted"]:
             add(str(row["root"]), instance=row, source="adopted",
@@ -330,9 +320,12 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
         if row["managed"]:
             add(str(row["root"]), instance=row, source="managed",
                 reason="本工作台自己的受管环境")
-    for root in discovered or []:
-        add(root, instance=by_root.get(str(Path(root).resolve())), source="discovered",
-            reason="在本机找到的 ComfyUI 安装")
+    indexed = read_state(db)["resources"]["comfy_roots"]
+    for path in dict.fromkeys([*(row["root"] for row in indexed), *(discovered or [])]):
+        root = comfy_root(local_path(path))
+        if root is not None:
+            add(str(root), instance=by_root.get(str(root)), source="discovered",
+                reason="在本机找到的 ComfyUI 安装")
     return candidates
 
 
@@ -346,7 +339,10 @@ def resolve_installation(db, settings, *, path: str | None = None,
     """
     candidates = candidate_installations(db, settings, discovered=discovered)
     if path:
-        resolved = str(Path(path).resolve())
+        from shine.comfyops.existing_installation import comfy_root, local_path
+
+        requested = local_path(path)
+        resolved = str(comfy_root(requested) or requested)
         match = next((row for row in candidates if row["root"] == resolved), None)
         if match is None:
             match = {"root": resolved, "instance_id": None, "port": None, "managed": False,
@@ -364,6 +360,26 @@ def resolve_installation(db, settings, *, path: str | None = None,
         return {"selected": usable[0] if usable else None, "candidates": candidates,
                 "choice_required": False}
     return {"selected": None, "candidates": candidates, "choice_required": True}
+
+
+def resolve_setup_port(db, settings, installation: dict, requested: int | None) -> int:
+    """A reusable installation's directory does not confer ownership of its listener."""
+    from urllib.parse import urlsplit
+
+    from fastapi import HTTPException
+
+    from shine.comfyops.host_env import DEFAULT_PORT, _first_free_port, _port_bindable
+
+    if installation.get("instance_id"):
+        return int(installation["port"])
+    port = requested or installation.get("port") or urlsplit(settings.comfyui_base_url).port or DEFAULT_PORT
+    reserved = {row["port"] for row in _instance_rows(db) if row.get("port")}
+    if port not in reserved and _port_bindable(port):
+        return port
+    available = _first_free_port(port, owned_ports=reserved)
+    if available is None:
+        raise HTTPException(409, "PORT_OCCUPIED")
+    return available
 
 
 # --- capabilities -----------------------------------------------------------
@@ -385,9 +401,9 @@ def _component_ids_for(capability: str, catalog: dict) -> set[str]:
         return set(RELAYVSR_COMPONENTS)
     if capability in REVIEW_COMPONENTS:
         return {REVIEW_COMPONENTS[capability]}
-    components = _catalog_components(catalog)
-    return {cid for cid, row in components.items()
-            if row.get("kind") == "model" and cid.startswith("minimax-h3-")}
+    from shine.comfyops.variant_readiness import required_h3_components
+
+    return {row["component_id"] for row in required_h3_components(catalog)}
 
 
 def _image_binding_state(settings) -> dict[str, Any]:
@@ -426,7 +442,7 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
     runtime must not be told they are missing just because no external
     installation was scanned.
     """
-    if capability == "image":
+    if capability == "image" and not installation:
         from shine.materialprep import runtime
 
         config = runtime.load_config(settings)
@@ -455,8 +471,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         if variant_id:
             binding = load_binding(str(variant_id), fresh=False)
         elif project_id:
-            # 有作品时事实层本来就会读基线变体台账；缺件表必须跟同一份
-            # 「图真正加载的组件」走，否则可选 LoRA 会被报成缺件而①说已核验。
+            # 缺件表与作品的基线合同读取同一组真正加载的组件。
             try:
                 manifest = next((row for row in list_variant_manifests()
                                  if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
@@ -487,9 +502,17 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     # 不是 ComfyUI 的 models 目录；presence 与 in_place 都跟着它走。
     package_root = (Path(settings.comfyops_dir) / "isolated-packages"
                     if settings is not None and capability in REVIEW_COMPONENTS else None)
-    presence = model_file_presence(served_root, catalog, component_ids,
-                                   package_root=package_root)
-    served_roots = [root for root in (served_root, (installation or {}).get("root")) if root]
+    from shine.comfyops.adoption import runtime_root
+    from shine.comfyops.existing_installation import declared_model_family_roots
+
+    extra = (runtime_root(settings, Path(installation["root"]), installation["instance_id"])
+             / "shine-node-paths.yaml" if installation and installation.get("adopted") else None)
+    declared = (declared_model_family_roots(Path(installation["root"]), extra_config=extra)
+                if installation and installation.get("root") and capability in {"h3", "image"} else {})
+    presence = model_file_presence(served_root, catalog, component_ids, package_root=package_root,
+                                   declared=declared)
+    served_roots = [root for root in (served_root,) if root]
+    served_roots.extend(str(path) for paths in declared.values() for path in paths)
     if package_root is not None:
         served_roots.extend(str(package_root / cid) for cid in sorted(component_ids))
     evidence = _verified_components(
@@ -545,11 +568,9 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                 manifest = next((row for row in list_variant_manifests()
                                  if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
                 if manifest:
-                    h3_acceptance = str(manifest.get("acceptance_status"))
-                    if project_id:
-                        binding = load_binding(str(manifest["variant_id"]), fresh=False)
-            if binding is not None and project_id:
-                report = variant_readiness(db, settings, binding, project_id)
+                    binding = load_binding(str(manifest["variant_id"]), fresh=False)
+            if binding is not None:
+                report = variant_readiness(db, settings, binding, project_id, include_host=False)
                 h3_acceptance = str(report.get("acceptance_status"))
                 weights = report.get("weights") or []
                 # ``FILES_FOUND`` is never taken from the ledger: its "prepared"
@@ -558,7 +579,6 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                 # Everything above the filesystem fact comes from the ledger.
                 facts.update({
                     "LEDGER_PREPARED": bool(report.get("facts", {}).get("FILES_FOUND")),
-                    "FILES_VERIFIED": bool(weights) and all(row.get("verified") for row in weights),
                     "INSTANCE_BOUND": bool(weights) and all(row.get("consumable") for row in weights),
                     "WORKFLOW_VALIDATED": bool(report.get("workflow_validated")),
                     "RENDER_VERIFIED": report.get("real_render") is not None,
@@ -568,7 +588,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                 # ② 的原因挂变体就绪自己的唯一下一步（它已算好），不在卡片里
                 # 另写一句通用推断：已核验未绑定时人要读到「绑定」而不是「缺件」。
                 step = report.get("next_step") or {}
-                if step.get("code") and step["code"] != "READY_FOR_PRODUCTION" and step.get("reason"):
+                if not runtime_verified and not report.get("workflow_validated") and step.get("reason"):
                     advisories.append({"code": step["code"], "message": step["reason"]})
             # 唯一检验链路：机器级运行合同已核对（与顶部裁决同一个 runtime_report）
             # 就是「② 运行」的权威答案，无论是否已绑定到具体作品。只对已验收基线
@@ -635,7 +655,8 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "key": capability,
         "label": CAPABILITY_LABELS[capability],
         "catalog": catalog.get("catalog_id"),
-        "catalog_file": CATALOG_FILE_BY_CAPABILITY.get(capability, "h3-ref2va-windows-x64"),
+        "catalog_file": (binding.manifest.get("catalog_id") if capability == "h3" and binding else None)
+        or CATALOG_FILE_BY_CAPABILITY.get(capability, H3_CATALOG),
         "state": state,
         # 审片是可选增强：没有它照样能真实出片，只是语义验收留给人工。
         # 机器级「下一步」不得把可选能力报成必做。
@@ -695,7 +716,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
         # chose this renderer, the binding is saved and the weights may be
         # verified.  What is absent is the startable recipe, so that is the one
         # action - and a download is explicitly *not* the next step.
-        return "FOUND", "已经找到出图资源，正在完善本机运行配置。", {
+        return "FOUND", "已经找到出图资源，尚需完善本机运行配置。", {
             "code": "PENDING_RECIPE", "label": "完善本机运行配置",
             "reason": "出图运行时已绑定，本机还缺一份可启动的运行配置。",
             "action": "PREPARE_ENVIRONMENT",
@@ -708,13 +729,13 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "code": "FILES_MISSING", "label": label, "reason": reason, "action": "PREPARE_ENVIRONMENT",
         }
     if not facts.get("FILES_VERIFIED"):
-        return "FOUND", "已找到资源，正在自动核验并登记。", {
+        return "FOUND", "已找到资源，尚未核验并登记。", {
             "code": "FILES_NOT_VERIFIED", "label": "核验已有文件",
             "reason": "文件已在本机，还没有逐字节核验。", "action": "RECONCILE",
         }
     if not (facts.get("INSTANCE_BOUND") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         if capability == "image":
-            return "VERIFIED", "已经找到出图资源，正在完善本机运行配置。", {
+            return "VERIFIED", "已经找到出图资源，尚需完善本机运行配置。", {
                 "code": "PENDING_RECIPE", "label": "完善本机运行配置",
                 "reason": "文件已核验，本机还缺一份可启动的运行配置。", "action": "PREPARE_ENVIRONMENT",
             }
@@ -749,20 +770,20 @@ def _progress(capabilities: dict[str, dict]) -> list[dict[str, str]]:
     facts = [row.get("facts") or {} for row in relevant]
     any_found = any(row.get("FILES_FOUND") for row in facts)
     all_verified = bool(facts) and all(row.get("FILES_VERIFIED") for row in facts)
-    all_bound = bool(facts) and all(row.get("INSTANCE_BOUND") for row in facts)
     all_validated = bool(facts) and all(
-        row.get("WORKFLOW_VALIDATED") or row.get("RUNTIME_SERVICES_VERIFIED") for row in facts)
-    any_render = any(row.get("RENDER_VERIFIED") for row in facts)
+        row.get("RUNTIME_SERVICES_VERIFIED")
+        or (row.get("INSTANCE_BOUND") and row.get("WORKFLOW_VALIDATED")) for row in facts)
+    all_rendered = bool(facts) and all(row.get("RENDER_VERIFIED") for row in facts)
     phases = [
         ("DETECT", "检测本机", any_found),
         ("FILES", "文件整备", all_verified),
         ("REGISTER", "自动登记", all_verified),
-        ("BIND", "绑定与运行核对", all_bound and all_validated),
-        ("TRIAL", "真实试镜", any_render),
+        ("BIND", "绑定与运行核对", all_validated),
+        ("TRIAL", "真实试镜", all_rendered),
     ]
     result, active_set = [], False
     for phase_id, label, done in phases:
-        if done:
+        if done and not active_set:
             state = "DONE"
         elif not active_set:
             state, active_set = "ACTIVE", True
@@ -793,7 +814,8 @@ def summary(db, settings, *, project_id: str | None = None,
         report = runtime_report(db, settings)
     except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
         report = {}
-    runtime_verified = bool(report.get("services_verified"))
+    runtime_verified = bool(report.get("services_verified") and selected
+                            and selected.get("instance_id") == _runtime_instance_id(db))
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
                                variant_id=variant_id if key == "h3" else None,
@@ -933,17 +955,9 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             "action": "CHOOSE_INSTALLATION",
             "options": installation.get("candidates") or [],
         }
-    if project_id is None:
-        # Machine-level preparation does not need a project; only a real shot
-        # and a workflow profile do.  Say so instead of blocking the page.
-        return {
-            "code": "PROJECT_REQUIRED_FOR_TRIAL",
-            "label": "建立作品后可以真实试镜",
-            "reason": "环境可以现在就准备；真实试镜要绑定到一个作品。",
-            "action": "SELECT_PROJECT",
-        }
     ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")
                if key in capabilities]
+    trial = None
     for row in ordered:
         # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
         # 没有审片模型照样能真实出片，语义验收留给人工。
@@ -951,8 +965,14 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             continue
         step = row.get("next_step")
         if step:
+            if step["action"] == "TRIAL":
+                trial = trial or {**step, "capability": row["key"]}
+                continue
             return {**step, "capability": row["key"]}
-    return None
+    if trial and not project_id:
+        return {"code": "PROJECT_REQUIRED_FOR_TRIAL", "label": "建立作品后可以真实试镜",
+                "reason": "运行合同已核对，建立作品后即可开始试镜。", "action": "SELECT_PROJECT"}
+    return trial
 
 
 # --- durable preparation task ----------------------------------------------
@@ -966,7 +986,7 @@ def preparation_state(db) -> dict[str, Any]:
         return {"status": "IDLE", "task_id": None, "current": None, "steps": [], "message": None}
     value = dict(row.value)
     steps = value.get("steps") or []
-    done = len([row for row in steps if row.get("status") == "DONE"])
+    done = len([row for row in steps if row.get("status") in {"DONE", "SKIPPED"}])
     return {
         "status": value.get("status") or "IDLE",
         "task_id": value.get("task_id"),
@@ -999,14 +1019,17 @@ def runtime_closure_gap(db, settings, installation: dict | None) -> dict[str, An
     instance_present = bool(installation and installation.get("instance_id"))
     gap: list[str] = []
     ladder: list[str] = []
-    if not instance_present:
+    if installation and installation.get("root"):
+        root = Path(installation["root"])
+        _dirs, missing = resolve_node_pack_dirs(root, catalog)
+        gap.extend(missing)
+        if not instance_present:
+            ladder = ["ADOPT"]
+    elif not instance_present:
         gap.extend(cid for cid, c in components.items()
                    if c["kind"] in {"source", "wheel", "node"})
         ladder = ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
-    else:
-        root = Path(str(installation.get("root") or ""))
-        _dirs, missing = resolve_node_pack_dirs(root, catalog)
-        gap.extend(missing)
+    if instance_present and not installation.get("adopted"):
         instance = db.get(ComfyInstance, installation["instance_id"])
         payload = instance.payload if instance is not None else {}
         expected_nodes = {cid for cid, c in components.items() if c["kind"] == "node"}

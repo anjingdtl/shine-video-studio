@@ -222,9 +222,9 @@ def _candidate_stack(accelerator_id: str, second_pass: SecondPassSpec | None) ->
     return nodes, loaders, list(profile["required_nodes"]), digest
 
 
-def _model_stack(unet: str) -> dict[str, Any]:
+def _model_stack(unet: str, *, sage_attention: bool = True) -> dict[str, Any]:
     """UNET -> realism LoRA -> sigma shift -> memory savers -> SolAttn."""
-    return {
+    nodes = {
         "10": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
         "11": {
             "class_type": "LoraLoaderModelOnly",
@@ -265,6 +265,10 @@ def _model_stack(unet: str) -> dict[str, Any]:
             },
         },
     }
+    if not sage_attention:
+        del nodes["14"]
+        nodes["15"]["inputs"]["model"] = ["13", 0]
+    return nodes
 
 
 def _sampling_stack(accelerator_id: str, steps: int) -> tuple[dict[str, Any], list, list]:
@@ -396,7 +400,7 @@ def compile_ref2va_workflow(
         )
         graph.update(model_nodes)
     elif variant_id in (None, "", "h3-ref2va-int8-convrot"):
-        graph.update(_model_stack(checkpoint))
+        graph.update(_model_stack(checkpoint, sage_attention=accelerator_id != "pdd8"))
     else:
         raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该模型变体尚无完整的已审核动态配方。")
     sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(accelerator_id, steps)
@@ -457,6 +461,7 @@ def compile_ref2va_workflow(
 
     required_nodes = list(candidate_required if candidate else BASE_MODEL_NODES)
     if accelerator_id == "pdd8":
+        required_nodes.remove("MiniMaxH3MemoryEfficientSageAttentionPatch")
         required_nodes += PDD_NODES
 
     graph.update({

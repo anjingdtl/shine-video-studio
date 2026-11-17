@@ -155,7 +155,7 @@ def test_generated_operator_password_is_reused_and_hashed_into_env(tmp_path):
         "$plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR("
         "[Runtime.InteropServices.Marshal]::SecureStringToBSTR($second))\n"
         "Write-Output ('LEN=' + $plain.Length)\n",
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
 
     result = _run_ps(script)
@@ -188,7 +188,7 @@ def test_operator_credential_file_with_short_secret_is_rejected(tmp_path):
         f"    Get-ShineOperatorPasswordFile '{str(credential).replace(chr(39), chr(39) * 2)}' | Out-Null\n"
         "    Write-Output 'NO_ERROR'\n"
         "} catch { Write-Output 'REJECTED' }\n",
-        encoding="utf-8",
+        encoding="utf-8-sig",
     )
     result = _run_ps(script)
     assert "REJECTED" in result.stdout, result.stdout + result.stderr

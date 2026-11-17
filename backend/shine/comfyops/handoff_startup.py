@@ -36,7 +36,7 @@ from shine.comfyops.owned_process import (
     named_group_active_processes,
 )
 from shine.comfyops.renderer_supervisor import RendererSupervisor, windows_port_listeners
-from shine.models import AppSetting, Job, utcnow
+from shine.models import AppSetting, Job, MediaArtifact, utcnow
 from shine.services import add_audit
 
 logger = logging.getLogger(__name__)
@@ -243,11 +243,18 @@ def _release_orphan_h3_lease(db, lease) -> bool:
     if db.get(AppSetting, "handoff-reservation:" + owner.removeprefix("h3:")) is not None:
         return False
     if job is not None:
-        # A lease whose job really reached a renderer (an attempt exists, or an
-        # external prompt id was ever recorded) may have loaded models into the
-        # GPU: losing its journal is uncertainty, and it stays blocked.  Only
-        # a lease from a run that never started rendering is a true orphan.
-        if job.provider_job_id or job.attempts:
+        # The claim creates an attempt before compiling a graph. Only a durable
+        # graph intent / external id / activation can indicate a submission.
+        # A failed attempt with none of them is still before that boundary.
+        if job.provider_job_id or any(
+            attempt.status != "FAILED" or attempt.provider_job_id or attempt.submit_ack_at
+            or attempt.prompt_graph_sha256 or attempt.output_path or attempt.output_sha256 or attempt.output_bytes
+            or db.get(AppSetting, "renderer-activation:" + attempt.id) is not None
+            or db.get(AppSetting, HANDOFF_PREFIX + attempt.id) is not None
+            for attempt in job.attempts
+        ):
+            return False
+        if db.scalar(select(MediaArtifact.id).where(MediaArtifact.job_id == job.id).limit(1)):
             return False
         job_active = job.status in ("QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING")
         if job_active and lease.expires_at is not None and lease.expires_at > utcnow():

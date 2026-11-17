@@ -34,9 +34,11 @@ def test_steps_include_instance_first():
 
 
 def test_instance_step_skips_when_installation_exists(studio, monkeypatch):
+    # 外部复用（adopted）的安装只读：实例阶梯不得改动它，直接跳过。
+    # 受管半成品安装不在此列——它交回同一架阶梯继续判断（见 test_setup_machine_reuse）。
     _client, factory, _tmp, settings = studio
     monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
-                        lambda db, settings, path=None: {"selected": {"instance_id": "i-1"}})
+                        lambda db, settings, path=None: {"selected": {"instance_id": "i-1", "adopted": True}})
     task = {"project_id": "proj-1", "request": {}}
     detail = setup_preparation._step_instance(factory, settings, task)
     assert detail["status"] == "DONE"
@@ -115,7 +117,7 @@ def test_enqueue_includes_instance_only_on_bare_machine(studio, monkeypatch):
                                          capabilities=["h3"], settings=settings)
     assert [row["id"] for row in bare["steps"]][:4] == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "INSTANCE"]
     monkeypatch.setattr("shine.comfyops.setup_summary.resolve_installation",
-                        lambda db, settings, path=None: {"selected": {"instance_id": "i-1"}})
+                        lambda db, settings, path=None: {"selected": {"instance_id": "i-1", "adopted": True}})
     project2 = create_project(client, title="已有安装")
     with factory() as db:
         existing = setup_preparation.enqueue(db, project_id=project2,

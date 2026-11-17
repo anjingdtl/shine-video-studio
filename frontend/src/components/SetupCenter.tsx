@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
+  AlertTriangle, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
   MonitorCheck, Sparkles, Video,
 } from 'lucide-react';
 import { api, json, type SetupVerdict } from '../api';
@@ -75,6 +75,7 @@ type VariantOption = {
 
 type VariantRecommendation = {
   tier: string;
+  preferred_variant_id?: string | null;
   host: { gpu?: string | null; vram_mb?: number | null; ram_mb?: number | null; free_gb?: number | null };
   recommended: VariantOption[];
   candidates: VariantOption[];
@@ -82,8 +83,6 @@ type VariantRecommendation = {
 };
 
 type Readiness = { layers: Array<{ layer: string; status: string; blockers?: unknown[] }> };
-
-type CatalogSummary = { components: Array<{ component_id: string; files: number }> };
 
 type RuntimeState = {
   status: string;
@@ -101,7 +100,6 @@ type ImageReadiness = {
 };
 
 const IMAGE_BYTES = 17.3 * 1024 ** 3;
-const REVIEW_COMPONENTS = { vlm: 'qwen3-vl-8b-fp8', asr: 'qwen3-asr-0.6b' };
 const REVIEW_BYTES = { vlm: 10.6 * 1024 ** 3, asr: 1.9 * 1024 ** 3 };
 const RELAYVSR_BYTES = 5291054712;
 
@@ -163,8 +161,9 @@ type DetectionSnapshot = {
   env: EnvReport; storage: Storage; runtime: RuntimeState; readiness: Readiness;
   scan: ExistingScan | null;
   variants: VariantRecommendation; image: ImageReadiness | null;
-  catalog: CatalogSummary | null; adoptedRoot: string | null;
+  adoptedRoot: string | null;
   variantId: string; caps: { h3: boolean; image: boolean; vlm: boolean; asr: boolean; relayvsr: boolean };
+  variantChosenByUser?: boolean;
 };
 
 function readSnapshot(): DetectionSnapshot | null {
@@ -233,7 +232,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const [scan, setScan] = useState<ExistingScan | null>(restored?.scan ?? null);
   const [variants, setVariants] = useState<VariantRecommendation | null>(restored?.variants ?? null);
   const [image, setImage] = useState<ImageReadiness | null>(restored?.image ?? null);
-  const [catalog, setCatalog] = useState<CatalogSummary | null>(restored?.catalog ?? null);
   /** 已采用的 ComfyUI 根目录：存在时不再创建受管实例，直接复用。 */
   const [adoptedRoot, setAdoptedRoot] = useState<string | null>(restored?.adoptedRoot ?? null);
   /**
@@ -241,7 +239,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
    * 推断生产事实：扫描只看目录，核验/绑定/登记/节点核对各有自己的证据。
    */
   const [availabilityRows, setAvailabilityRows] = useState<VariantAvailability[] | null>(null);
-  const [variantId, setVariantId] = useState(restored?.variantId ?? '');
+  const [variantId, setVariantId] = useState(restored?.variantChosenByUser ? restored.variantId : '');
   const [caps, setCaps] = useState(restored?.caps ?? { h3: true, image: true, vlm: false, asr: false, relayvsr: false });
   const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
   /** 用户确认「重复下载」的能力：已有权重也重新下载。 */
@@ -275,7 +273,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     setProblem('');
     setResult('');
     try {
-      const [environment, disk, state, ready, existing, imageState, variantRows, catalogRows] = await Promise.all([
+      const [environment, disk, state, ready, existing, imageState, variantRows] = await Promise.all([
         api<EnvReport>('/setup/environment'),
         api<Storage>('/setup/storage'),
         api<RuntimeState>('/setup/runtime'),
@@ -283,7 +281,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         api<{ installations: string[] }>('/setup/existing-installations'),
         api<ImageReadiness>('/setup/image-readiness').catch(() => null),
         api<VariantRecommendation>('/setup/variant-recommendations'),
-        api<CatalogSummary>('/setup/catalog').catch(() => null),
       ]);
       // 作品 id 在首屏是异步到达的：没有作品时不去问「已采用的安装」。
       const availability = projectId
@@ -293,17 +290,18 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         : null;
       if (!mounted.current) return;
       setEnv(environment); setStorage(disk); setRuntime(state); setReadiness(ready);
-      setImage(imageState); setVariants(variantRows); setCatalog(catalogRows);
+      setImage(imageState); setVariants(variantRows);
       setAdoptedRoot(availability?.adopted_root ?? null);
       setAvailabilityRows(availability?.variants ?? null);
-      const preferred = variantRows.recommended.find((row) => row.auto_download_allowed)
-        ?? variantRows.recommended[0] ?? variantRows.candidates[0];
-      setVariantId((current) => current || preferred?.variant_id || '');
+      const preferred = variantRows.preferred_variant_id
+        ?? [...variantRows.recommended, ...variantRows.candidates, ...variantRows.blocked]
+          .find((row) => row.acceptance_status === 'SUPPORTED' && row.auto_download_allowed)?.variant_id;
+      setVariantId((current) => current || preferred || '');
       const stamp = new Date().toISOString();
       setDetectedAt(stamp);
       writeSnapshot({
         detectedAt: stamp, env: environment, storage: disk, runtime: state, readiness: ready,
-        variants: variantRows, image: imageState, catalog: catalogRows,
+        variants: variantRows, image: imageState,
         adoptedRoot: availability?.adopted_root ?? null,
       });
       setPhase('ready');
@@ -353,28 +351,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const selectedVariant = allVariants.find((row) => row.variant_id === variantId) ?? null;
   const availabilityOf = (id: string | undefined) =>
     id ? availabilityRows?.find((row) => row.variant_id === id) ?? null : null;
-  const selectedAvailability = availabilityOf(selectedVariant?.variant_id);
-  const selectedPresence = selectedVariant ? variantPresence(selectedVariant, scan) : { found: 0, required: 0 };
   const comfyInstalled = !!scan?.software?.installed;
   // 缺件与下载量以后端同一份能力结论为准（summary.capabilities 就是后台整备
   // 任务读的 capability_report）。浏览器不再按自查的第一套 ComfyUI 另算一套
   // 缺件判定；扫描只作为「检测明细」的只读展示。
   const capFacts = (key: CapabilityKey) => summary?.capabilities?.[key]?.facts;
-  const h3Complete = selectedAvailability
-    ? selectedAvailability.installed
-    : !!capFacts('h3')?.FILES_FOUND;
-
-  const componentFiles = useMemo(() => Object.fromEntries(
-    (catalog?.components ?? []).map((row) => [row.component_id, row.files]),
-  ), [catalog]);
-  const vlmPresence = scan
-    ? { found: scan.matches.filter((row) => row.component_id === REVIEW_COMPONENTS.vlm).length }
-    : { found: 0 };
-  const asrPresence = scan
-    ? { found: scan.matches.filter((row) => row.component_id === REVIEW_COMPONENTS.asr).length }
-    : { found: 0 };
-  const vlmTotal = componentFiles[REVIEW_COMPONENTS.vlm] || 13;
-  const asrTotal = componentFiles[REVIEW_COMPONENTS.asr] || 10;
+  const h3Complete = !!capFacts('h3')?.FILES_FOUND;
   const vlmReady = !!capFacts('vlm')?.FILES_FOUND;
   const asrReady = !!capFacts('asr')?.FILES_FOUND;
 
@@ -387,12 +369,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     && (finding.scopes ?? finding.scope ?? []).includes('RESOURCE_PREPARATION'));
   const envBlocked = env?.findings ? blockingEnv.length > 0 : (env?.blockers.length ?? 0) > 0;
   const pendingRepair = env?.repair_plan?.status === 'COMPLETE' && (env.repair_plan.packages.length ?? 0) > 0;
-  const servicePort = env?.port?.selected ?? env?.port?.port ?? null;
-  const portAdjusted = !!env?.port?.identity && env.port.identity !== 'FREE';
+  const servicePort = summary?.installation.selected?.port ?? env?.port?.selected ?? env?.port?.port ?? null;
+  const portAdjusted = !!env?.port?.identity && env.port.identity !== 'FREE'
+    && servicePort !== summary?.installation.selected?.port;
   const imageBytes = image?.upstream?.required_bytes || IMAGE_BYTES;
   // 出图权重是否已有，读后端能力结论与受管运行时 readiness，不再自查第二套扫描。
-  const imagePresent = !!capFacts('image')?.FILES_FOUND
-    || (!!image?.configured && image.layer !== 'NOT_CONFIGURED');
+  const imagePresent = !!capFacts('image')?.FILES_FOUND;
   // 勾选且（缺权重 或 用户确认重复下载）才计入下载体积。
   // H3 是一个和素材出图、审片一样独立的能力：勾不勾由人决定，综合就绪状态
   // 不再替人做决定。
@@ -409,7 +391,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const capDownloadBytes = (key: CapabilityKey, fullBytes: number) => {
     if (force[key]) return fullBytes;
     const missing = summary?.capabilities?.[key]?.missing_bytes;
-    return missing && missing > 0 ? missing : fullBytes;
+    return missing ?? fullBytes;
   };
   const downloadBytes = (h3Want ? capDownloadBytes('h3', h3Bytes) : 0)
     + (imageWant ? capDownloadBytes('image', imageBytes) : 0)
@@ -485,7 +467,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           capabilities,
           installation_path: installation?.root ?? undefined,
           port: installation?.port ?? env?.port?.selected ?? env?.port?.port ?? undefined,
-          variant_id: selectedVariant?.variant_id,
+          variant_id: capabilities.includes('h3') ? selectedVariant?.variant_id : undefined,
           verify_runtime: true,
           deep_scan: true,
         }));
@@ -511,13 +493,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   }
 
   const verdict = verdictLine(variants);
-  const modelChips = [
-    { id: 'comfyui', label: 'ComfyUI', found: comfyInstalled ? 1 : 0, total: 1 },
-    { id: 'h3', label: 'H3 视频权重', found: selectedPresence.found, total: selectedPresence.required || 6 },
-    { id: 'image', label: '出图权重', found: imagePresent ? 1 : 0, total: 1 },
-    { id: 'vlm', label: '画面审片', found: vlmPresence.found, total: vlmTotal },
-    { id: 'asr', label: '语音核对', found: asrPresence.found, total: asrTotal },
-  ];
 
   return <section className="card section-card setup-center" id="setup">
     <div className="section-heading compact">
@@ -552,11 +527,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     {phase === 'ready' && <>
       <p className="setup-verdict"><b>{verdict}</b></p>
 
-      {selectedAvailability && !selectedAvailability.production_ready && selectedAvailability.next_step && (
-        <p className="run-hint" data-testid="setup-next-step">
-          还差一步：{selectedAvailability.next_step.label}。{selectedAvailability.next_step.reason}
-        </p>
-      )}
 
       <div className="setup-facts">
         <span>显卡 {variants?.host.gpu ?? '未识别'}</span>
@@ -578,14 +548,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         </button>
       </div>}
 
-      <div className="setup-model-chips" role="list" aria-label="本机已有的模型">
-        {modelChips.map((chip) => <span role="listitem" key={chip.id}
-          className={`setup-model-chip ${chip.found >= chip.total ? 'ok' : chip.found ? 'part' : ''}`}>
-          {chip.found >= chip.total ? <Check size={11} /> : <AlertTriangle size={11} />}
-          {chip.label}
-          <em>{chip.total > 1 ? `${chip.found}/${chip.total}` : chip.found ? '已有' : '未装'}</em>
-        </span>)}
-      </div>
 
       <div className="setup-presets">
         <h3>选一套 H3 生成方案 <GuideTip tight>只有「可直接安装」的方案会真的下载；候选方案要先在本机跑通</GuideTip></h3>
@@ -612,7 +574,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
                     : '候选 · 未真机验收；确认后可下载权重（下载不等于验收）';
             return <label key={row.variant_id} className={`setup-preset${variantId === row.variant_id ? ' active' : ''}${selectable ? '' : ' disabled'}`}>
               <input type="radio" name="h3-preset" checked={variantId === row.variant_id} disabled={!selectable || !!running}
-                onChange={() => setVariantId(row.variant_id)} />
+                onChange={() => {
+                  writeSnapshot({ variantId: row.variant_id, variantChosenByUser: true });
+                  setVariantId(row.variant_id);
+                }} />
               <span className="setup-preset-text">
                 <b>{row.title}</b>
                 <em>{reason}</em>
@@ -634,12 +599,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
             onChange={(event) => toggleCap('h3', h3Complete, event.target.checked)} />
           <Video size={14} /><span><b>H3 视频生成</b>
             <em className={h3Complete ? 'cap-found-warn' : undefined}>
-              {selectedAvailability?.verified
-                ? (selectedAvailability.bound
+              {capFacts('h3')?.FILES_VERIFIED
+                ? (capFacts('h3')?.INSTANCE_BOUND
                   ? '权重已逐字节核验，并已绑定到当前 ComfyUI 实例'
                   : '权重已逐字节核验，等待实例绑定')
                 : h3Complete
-                  ? `${selectedPresence.found}/${selectedPresence.required || 6} 个权重文件已找到`
+                  ? '本机已找到权重'
                   : `需要下载 ${gib(h3Bytes)}`}</em></span>
         </label>
         <label className="setup-cap">
@@ -652,13 +617,13 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           <input type="checkbox" checked={caps.vlm} disabled={!!running}
             onChange={(event) => toggleCap('vlm', vlmReady, event.target.checked)} />
           <MonitorCheck size={14} /><span><b>画面审片（只给建议，不卡出片）</b>
-            <em className={vlmReady ? 'cap-found-warn' : undefined}>{vlmReady ? '本机已有' : vlmPresence.found ? `只找到 ${vlmPresence.found}/${vlmTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.vlm)}`}</em></span>
+            <em className={vlmReady ? 'cap-found-warn' : undefined}>{summary?.capabilities.vlm?.summary ?? '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.asr} disabled={!!running}
             onChange={(event) => toggleCap('asr', asrReady, event.target.checked)} />
           <Mic size={14} /><span><b>语音核对（只给建议，不卡出片）</b>
-            <em className={asrReady ? 'cap-found-warn' : undefined}>{asrReady ? '本机已有' : asrPresence.found ? `只找到 ${asrPresence.found}/${asrTotal} 个文件，需要补齐` : `需要下载 ${gib(REVIEW_BYTES.asr)}`}</em></span>
+            <em className={asrReady ? 'cap-found-warn' : undefined}>{summary?.capabilities.asr?.summary ?? '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.relayvsr} disabled={!!running}
@@ -693,7 +658,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           {running ? running.label : actionLabel}
         </button>
         <GuideTip>
-          {!projectId ? '先在上方创建作品'
+          {!projectId ? '可以先整备机器，作品稍后再建'
             : capabilityRows.length ? '点一次确认即可，下载后可离开页面'
               : pendingRepair ? '先补装缺失的基础工具，它不依赖显卡门槛'
                 : '本机权重已齐，点一次自动登记方案并激活'}

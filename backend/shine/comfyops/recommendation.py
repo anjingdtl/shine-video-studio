@@ -438,6 +438,8 @@ def recommend_variants(env: dict[str, Any], *, manifests: list[dict[str, Any]] |
         )
     return {
         "tier": tier,
+        "preferred_variant_id": next((row["variant_id"] for row in recommended), None)
+        or next((row["variant_id"] for row in entries if row.get("default_recommended")), None),
         "host": {
             "gpu": (env.get("gpu") or {}).get("name"),
             "vram_mb": vram,

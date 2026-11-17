@@ -309,6 +309,47 @@ def test_an_orphan_lease_is_kept_when_any_recorded_renderer_is_still_alive(api, 
         assert db.get(ResourceLease, lease_id).status == "RECONCILE_REQUIRED"
 
 
+@pytest.mark.parametrize("external_marker", [None, "graph", "ack", "activation"])
+def test_failed_pre_submit_attempt_is_reconciled_only_without_external_markers(api, monkeypatch, external_marker):
+    from datetime import timedelta
+
+    from shine.comfyops import handoff_startup
+    from shine.models import Job, JobAttempt
+    from tests.conftest import create_job, create_project, create_shot, freeze_style
+
+    client, factory, settings = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job_id = create_job(client, project, shot["id"])["id"]
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.provider = "comfyui"
+        job.status = "REPAIR_PENDING"
+        job.failure_code = "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"
+        lease = ResourceLease(owner="h3:" + job_id, budget_mb=16384, exclusive=True,
+                              status="RECONCILE_REQUIRED", priority=100,
+                              expires_at=utcnow() - timedelta(seconds=60))
+        attempt = JobAttempt(job_id=job_id, attempt_no=1, request_fingerprint="a" * 64,
+                             status="FAILED", lease_owner="dead-worker", lease_expires_at=utcnow(),
+                             failure_code=job.failure_code)
+        if external_marker == "graph":
+            attempt.prompt_graph_sha256 = "b" * 64
+        if external_marker == "ack":
+            attempt.submit_ack_at = utcnow()
+        db.add_all([lease, attempt])
+        db.flush()
+        lease_id = lease.id
+        if external_marker == "activation":
+            db.add(AppSetting(key="renderer-activation:" + attempt.id, value={"stage": "INTENT"}))
+    handoff_startup.reconcile_dead_renderer_leases(factory, settings)
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == ("RELEASED" if external_marker is None
+                                                         else "RECONCILE_REQUIRED")
+        assert db.get(Job, job_id).status == "REPAIR_PENDING"
+
+
 def _agent_orphan(factory, *, expires_at=None):
     from datetime import timedelta
 

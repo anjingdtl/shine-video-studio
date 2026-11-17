@@ -25,12 +25,12 @@ from shine.services import add_audit, require_project
 
 _CODE_SUFFIXES = {".py", ".pyi", ".pyd", ".dll", ".json", ".toml", ".yaml", ".yml", ".ini"}
 _IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache"}
-# These are the additional folders exposed by the pinned ComfyUI revision's
-# folder_paths aliases. Reuse stays in place; no model is relocated.
-_MODEL_FAMILY_ALIASES = {
-    "text_encoders": ("clip",),
-    "diffusion_models": ("unet",),
-}
+
+
+def runtime_root(settings, root: Path, instance_id: str) -> Path:
+    return settings.comfyops_dir / "adopted-runtime" / graph_hash({
+        "root": str(root), "instance_id": instance_id,
+    })[:24]
 
 
 def _node_tree_fingerprint(directory: Path) -> str:
@@ -149,7 +149,13 @@ def _required_capability_files(catalog: dict, capability: str) -> set[tuple[str,
     asking it for the video model would force a download nobody requested.
     """
     if capability == "h3":
-        return _required_h3_files(catalog)
+        from shine.comfyops.variant_readiness import required_h3_components
+
+        return {
+            (component["component_id"], item["relative_path"], item["sha256"], item["size"])
+            for component in required_h3_components(catalog)
+            for item in component.get("files") or []
+        }
     if capability == "image":
         return {
             (component["component_id"], item["relative_path"], item["sha256"], item["size"])
@@ -249,7 +255,7 @@ def adopt_existing_installation(
     db,
     settings,
     *,
-    project_id: str,
+    project_id: str | None,
     path: str,
     snapshot: str,
     name: str = "shine-h3",
@@ -257,6 +263,8 @@ def adopt_existing_installation(
     actor: str,
     capability: str = "h3",
     catalog: dict | None = None,
+    inspected: dict | None = None,
+    verified: list[dict] | None = None,
 ) -> dict:
     """Record a locally confirmed installation after exact weight hashing.
 
@@ -272,14 +280,17 @@ def adopt_existing_installation(
         load_default_catalog,
         load_deployment_catalog,
     )
+    from shine.comfyops.existing_installation import model_sources
+    from shine.comfyops.verification_receipts import installed_directory
 
     if capability not in {"h3", "image"}:
         raise HTTPException(409, "ADOPTION_CAPABILITY_UNKNOWN")
-    require_project(db, project_id)
+    if project_id is not None:
+        require_project(db, project_id)
     catalog = catalog or (load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)
                           if capability == "image" else load_default_catalog())
     selected = local_path(path)
-    report = inspect(str(selected), catalog)
+    report = inspected if inspected is not None else inspect(str(selected), catalog)
     if report["snapshot"] != snapshot:
         raise HTTPException(409, "已有目录或模型清单变化，请重新检测后确认；本次没有下载任何文件。")
     service = probe_comfy_service(port)
@@ -307,7 +318,8 @@ def adopt_existing_installation(
     if not python_value or not Path(python_value).is_file():
         raise HTTPException(409, "EXISTING_COMFY_PYTHON_NOT_FOUND")
 
-    verified_files = _verified_existing_files(db, report)
+    verified_files = verified if verified is not None else _verified_existing_files(db, report)
+    verified_by_key = {_verified_key(item): item for item in verified_files}
     verified_keys = {_verified_key(item) for item in verified_files}
     required = _required_capability_files(catalog, capability)
     missing = sorted(required - verified_keys)
@@ -331,18 +343,22 @@ def adopt_existing_installation(
         item = matches.get(key)
         component = components.get(key[0]) or {}
         family = component.get("destination_family")
-        relative = Path(key[1])
-        models_root = root / "models"
         candidates = item.get("sources", []) if item else []
-        allowed_paths = {
-            (models_root / folder / relative).resolve()
-            for folder in ((family, *_MODEL_FAMILY_ALIASES.get(family, ())) if family else ())
-        } if not relative.is_absolute() and ".." not in relative.parts else set()
-        source_path = Path(candidates[0]).resolve() if len(candidates) == 1 else None
-        if (not allowed_paths or len(candidates) != 1 or source_path not in allowed_paths
-                or not source_path.is_relative_to(models_root.resolve())):
+        served = model_sources(root / "models", family, Path(key[1]),
+                               report.get("declared_model_family_roots") or {}) if family else []
+        # Legacy audit rows did not keep the verified path. That path can only
+        # be recovered when the original inspection offered one candidate.
+        verified_source = verified_by_key[key].get("source")
+        if not verified_source and len(candidates) == 1:
+            verified_source = candidates[0]
+        package_dir = installed_directory(settings, component)
+        installed = package_dir / key[1] if package_dir is not None else None
+        if installed is not None and installed.is_file() and verified_source and installed == Path(verified_source):
+            continue
+        if len(served) != 1 or not verified_source or served[0] != Path(verified_source):
             raise HTTPException(409, "EXISTING_H3_MODEL_PATH_UNAMBIGUOUS_REQUIRED")
-    if any((event.payload or {}).get("snapshot") == snapshot and (event.payload or {}).get("rejected_files")
+    if verified is None and any(
+           (event.payload or {}).get("snapshot") == snapshot and (event.payload or {}).get("rejected_files")
            for event in db.scalars(select(AuditEvent).where(
                AuditEvent.event_type == "EXISTING_COMFY_INSTALLATION_VERIFIED",
                AuditEvent.entity_type == "deployment",
@@ -350,14 +366,8 @@ def adopt_existing_installation(
            )).all()):
         raise HTTPException(409, "EXISTING_MODEL_HASH_REJECTIONS_PRESENT")
 
-    from shine.comfyops.deployment import ADAPTER_DIR
-    from shine.comfyops.managed_recipe import adapter_identity
-
-    adapter_dir = root / "custom_nodes" / "shine_comfy_handoff"
-    if not adapter_dir.is_dir() or adapter_identity(adapter_dir) != adapter_identity(ADAPTER_DIR):
-        raise HTTPException(409, "EXISTING_COMFY_HANDOFF_ADAPTER_MISMATCH")
     try:
-        node_fingerprints = _node_fingerprints(root, catalog)
+        node_fingerprints = _node_fingerprints(root, load_default_catalog())
     except (OSError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
@@ -372,26 +382,23 @@ def adopt_existing_installation(
             if not same_root:
                 raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
             covered = set(prior_adoption.get("capabilities") or ["h3"])
-            if prior_adoption.get("snapshot") == snapshot and capability in covered:
+            old_files = prior_adoption.get("verified_files") or [
+                {**item, "capability": "h3"} for item in prior_adoption.get("verified_h3_files") or []
+            ]
+            covered_here = {_verified_key(item) for item in old_files
+                            if (item.get("capability") or "h3") == capability}
+            if (capability in covered and required <= covered_here
+                    and not adopted_installation_blockers(prior, catalog, capability=capability)):
                 return {
                     "status": "ALREADY_ADOPTED",
                     "instance_id": prior.id,
                     "capability": capability,
-                    "installed_h3_bytes": sum(item[3] for item in required),
+                    "installed_h3_bytes": sum(item["size"] for item in prior_adoption.get("verified_h3_files") or []),
                     "copied_bytes": 0,
                     "downloaded_bytes": 0,
                 }
-            # Same physical installation, one more capability confirmed.  The
-            # previously confirmed bytes must still be there; adding evidence
-            # is allowed, losing it is not.
-            previously = set()
-            for row in prior_adoption.get("verified_files") or []:
-                previously.add(_verified_key(row))
-            for row in prior_adoption.get("verified_h3_files") or []:
-                previously.add(_verified_key(row))
-            present = {_verified_key(item) for item in verified_files}
-            if previously and not previously <= present:
-                raise HTTPException(409, "ADOPTED_COMFY_FILES_CHANGED")
+            if prior.status != "STOPPED" or prior.payload.get("process"):
+                raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION")
         elif prior.payload.get("managed") or prior.payload.get("is_mock"):
             # A managed (or fake) row that was never adopted is a real claim on
             # this identity; only a read-only detection row may be taken over.
@@ -408,7 +415,17 @@ def adopt_existing_installation(
     h3_verified_files = [item for item in verified_files
                          if _verified_key(item) in _required_h3_files(catalog)]
     covered_capabilities = sorted({*(prior_adoption.get("capabilities") or []), capability})
-    receipt_count = _save_adoption_receipts(db, report, catalog, verified_files)
+    previous_files = prior_adoption.get("verified_files") or [
+        {**item, "capability": "h3"} for item in prior_adoption.get("verified_h3_files") or []
+    ]
+    confirmed_files = [item for item in previous_files if (item.get("capability") or "h3") != capability]
+    confirmed_files.extend(
+        {**{key: item[key] for key in ("component_id", "relative_path", "sha256", "size")},
+         **({"source": item["source"]} if item.get("source") else {}),
+         "capability": capability} for item in capability_files
+    )
+    receipt_count = (_save_adoption_receipts(db, report, catalog, verified_files)
+                     if verified is None else len({row["component_id"] for row in verified_files}))
     review_components = {
         component["component_id"]: len(component.get("files", []))
         for component in catalog.get("components", []) if component.get("kind") == "review-model"
@@ -437,17 +454,13 @@ def adopt_existing_installation(
         "python": str(Path(python_value).resolve()),
         "python_sha256": hashlib.sha256(Path(python_value).read_bytes()).hexdigest(),
         "node_fingerprints": node_fingerprints,
-        "verified_h3_files": [
+        "verified_h3_files": (prior_adoption.get("verified_h3_files") or []) if capability != "h3" else [
             {key: item[key] for key in ("component_id", "relative_path", "sha256", "size")}
             for item in h3_verified_files
         ],
         #: Every capability's confirmed bytes, keyed by capability, so a later
         #: re-validation asks the same question the adoption answered.
-        "verified_files": [
-            {**{key: item[key] for key in ("component_id", "relative_path", "sha256", "size")},
-             "capability": capability}
-            for item in capability_files
-        ],
+        "verified_files": confirmed_files,
         "review_model_file_counts": review_counts,
         "review_model_expected_counts": review_components,
         "path_bound_receipts": receipt_count,
@@ -583,6 +596,7 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
     model, and an H3 adoption cannot start rendering video because an image
     recipe asked a laxer question.
     """
+    from shine.comfyops.deployment import load_default_catalog
     from shine.comfyops.existing_installation import inspect
 
     payload = instance.payload
@@ -607,6 +621,11 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
             # Adoption records written before capabilities existed only carry
             # the H3 set; that set *is* the H3 evidence.
             confirmed_rows = adoption.get("verified_h3_files", [])
+        for item in confirmed_rows:
+            source = Path(item["source"]) if item.get("source") else None
+            if (source is not None and source.is_absolute() and source.resolve() == source
+                    and source.is_file() and source.stat().st_size == item.get("size")):
+                present.add((item["component_id"], item["relative_path"]))
         confirmed = {
             (item.get("component_id"), item.get("relative_path"))
             for item in confirmed_rows
@@ -619,7 +638,11 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
         if (not python.is_file() or python.resolve() != python
                 or hashlib.sha256(python.read_bytes()).hexdigest() != adoption.get("python_sha256")):
             blockers.append("ADOPTED_COMFY_PYTHON_CHANGED")
-        if _node_fingerprints(root, catalog) != adoption.get("node_fingerprints"):
+        expected_nodes = adoption.get("node_fingerprints") or {}
+        # Older image-only records pinned only the packs visible in the image
+        # catalog. Their evidence still applies to those same packs.
+        actual_nodes = _node_fingerprints(root, load_default_catalog())
+        if any(actual_nodes.get(name) != digest for name, digest in expected_nodes.items()):
             blockers.append("ADOPTED_COMFY_NODES_CHANGED")
         required = _required_capability_files(catalog, capability)
         verified = {(item.get("component_id"), item.get("relative_path"),

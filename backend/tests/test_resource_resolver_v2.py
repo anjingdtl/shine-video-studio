@@ -437,7 +437,8 @@ def test_live_node_check_reports_exact_missing_classes(studio, monkeypatch):
     with factory() as db:
         result = check_owned_node_inputs(db, "physical", GenerationStrategy())
     assert result["state"] == "NODE_INPUTS_MISSING"
-    assert "MiniMaxH3MemoryEfficientSageAttentionPatch" in result["missing_nodes"]
+    assert "MiniMaxH3ReferenceToVideo" in result["missing_nodes"]
+    assert "MiniMaxH3MemoryEfficientSageAttentionPatch" not in result["missing_nodes"]
     assert result["gpu_compatibility"] == "UNVERIFIED"
     assert result["production_ready"] is False
 

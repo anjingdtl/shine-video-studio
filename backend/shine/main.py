@@ -1592,8 +1592,6 @@ def create_app(
             raise HTTPException(status_code=404, detail="Job not found")
         if job.status != "REPAIR_PENDING":
             raise HTTPException(status_code=409, detail="A failed attempt must be diagnosed before repair")
-        if job.semantic_retries >= min(job.max_semantic_retries, plan.max_additional_attempts):
-            raise HTTPException(status_code=409, detail="Semantic repair budget is exhausted")
         if plan.human_review_required or plan.action.value == "wait_for_human":
             job.last_repair_plan = plan.model_dump(mode="json")
             transition(job, "NEEDS_REVIEW")
@@ -1619,6 +1617,8 @@ def create_app(
             )
             db.commit()
             return jsonable_encoder(_job_data(db, job))
+        if job.semantic_retries >= min(job.max_semantic_retries, plan.max_additional_attempts):
+            raise HTTPException(status_code=409, detail="Semantic repair budget is exhausted")
         if mock_scenario not in {"success", "delay", "fail", "uncertain", "duplicate"}:
             raise HTTPException(status_code=422, detail="Unknown mock scenario")
         job.semantic_retries += 1

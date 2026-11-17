@@ -20,7 +20,6 @@ without the matching bytes proves nothing.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +93,15 @@ def _required_components(catalog: dict[str, Any], profiles: tuple[dict[str, Any]
     return required
 
 
+def required_h3_components(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+    from shine.comfyops.variant_binding import profile_files
+
+    names = catalog.get("workflow_profiles") or []
+    if names:
+        return _required_components(catalog, tuple(profile_files(names)))
+    return [row for row in catalog.get("components") or [] if row.get("kind") == "model"]
+
+
 def _cache_dir(settings) -> Any:
     """The verified-bytes cache of the isolated package store, when there is one."""
     if settings is None:
@@ -106,44 +114,6 @@ def _cache_dir(settings) -> Any:
         return None
 
 
-def managed_model_bindings(db: Session, settings) -> dict[str, str]:
-    """The model directories the *current* managed renderer consumes.
-
-    The relation is read from the instance's own extra_model_paths.yaml, so a
-    managed instance that was switched is answered from its new binding
-    without reading a single weight byte again.  An instance that cannot be
-    read simply has no binding: that is a fact, not a failure.
-    """
-    if settings is None:
-        return {}
-    try:
-        from shine.comfyops.runtime_configuration import _current_identity
-
-        identity = _current_identity(db, settings) or {}
-    except Exception:  # noqa: BLE001 - an unreadable runtime is a fact
-        return {}
-    instance_id = identity.get("instance_id")
-    if not instance_id:
-        return {}
-    try:
-        from shine.comfyops.models import ComfyInstance
-
-        instance = db.get(ComfyInstance, instance_id)
-    except Exception:  # noqa: BLE001 - no instance row is a fact
-        return {}
-    root = (instance.payload or {}).get("root") if instance is not None else None
-    if not root:
-        return {}
-    try:
-        raw = json.loads((Path(root) / "extra_model_paths.yaml").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    bindings = raw.get("shine") if isinstance(raw, dict) else None
-    if not isinstance(bindings, dict):
-        return {}
-    return {str(key): str(value) for key, value in bindings.items()}
-
-
 def _same_directory(left: str | None, right: str | None) -> bool:
     if not left or not right:
         return False
@@ -153,14 +123,6 @@ def _same_directory(left: str | None, right: str | None) -> bool:
         return False
 
 
-#: The family aliases the pinned ComfyUI revision exposes.  A file placed in
-#: either directory is loaded by the same folder_paths entry.
-_FAMILY_ALIASES = {
-    "text_encoders": ("clip",),
-    "diffusion_models": ("unet",),
-}
-
-
 def current_instance(db: Session, settings) -> dict[str, Any]:
     """The instance a readiness check is about, or an explicit absence.
 
@@ -168,81 +130,39 @@ def current_instance(db: Session, settings) -> dict[str, Any]:
     installation is still a real instance and is used.  Nothing is started or
     written here.
     """
-    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.adoption import runtime_root
+    from shine.comfyops.existing_installation import declared_model_family_roots
+    from shine.comfyops.setup_summary import resolve_installation
 
-    instance = None
-    source = None
-    try:
-        from shine.comfyops.runtime_configuration import _current_identity
-
-        identity = _current_identity(db, settings) or {}
-        instance_id = identity.get("instance_id")
-        if instance_id:
-            instance = db.get(ComfyInstance, instance_id)
-            source = "RUNTIME_CONFIGURATION"
-    except Exception:  # noqa: BLE001 - no configuration is a fact, not a failure
-        instance = None
-    if instance is None:
-        try:
-            rows = db.scalars(select(ComfyInstance)).all()
-        except Exception:  # noqa: BLE001 - an unreadable ledger is an absence
-            rows = []
-        adopted = [row for row in rows
-                   if isinstance(row.payload, dict) and row.payload.get("adopted")
-                   and row.payload.get("root")]
-        instance = adopted[0] if adopted else None
-        source = "ADOPTED_REGISTRATION" if instance is not None else None
-    if instance is None or not isinstance(instance.payload, dict):
+    instance = resolve_installation(db, settings)["selected"] or {}
+    if not instance.get("instance_id"):
         return {"instance_id": None, "mode": "NONE", "root": None,
                 "families": {}, "source": None, "adopted": False}
-    payload = instance.payload
-    root = payload.get("root")
-    adopted = bool(payload.get("adopted") or payload.get("external_installation"))
-    families: dict[str, list[str]] = {}
-    if root:
-        try:
-            from shine.comfyops.existing_installation import declared_model_family_roots
-
-            declared = declared_model_family_roots(Path(root))
-            families = {family: [str(directory) for directory in directories]
-                        for family, directories in declared.items()}
-        except Exception:  # noqa: BLE001 - an unreadable declaration is absent
-            families = {}
+    root = Path(instance["root"])
+    adopted = instance["adopted"]
+    extra = runtime_root(settings, root, instance["instance_id"]) / "shine-node-paths.yaml" if adopted else None
     return {
-        "instance_id": instance.id,
+        "instance_id": instance["instance_id"],
         "mode": "ADOPTED_EXTERNAL_INSTALLATION" if adopted else "MANAGED_INSTALLATION",
-        "root": str(root) if root else None,
-        "models_root": str(Path(root) / "models") if root else None,
-        "families": families,
+        "root": str(root),
+        "models_root": str(root / "models"),
+        "families": {family: [str(path) for path in paths]
+                     for family, paths in declared_model_family_roots(root, extra_config=extra).items()},
         "adopted": adopted,
-        "source": source,
+        "source": "RUNTIME_CONFIGURATION" if instance["source"] == "active_runtime"
+        else "ADOPTED_REGISTRATION" if adopted else "MANAGED_REGISTRATION",
     }
 
 
-def _family_directories(component: dict[str, Any], binding_info: dict[str, Any],
-                        managed: dict[str, str]) -> list[Path]:
+def _family_directories(component: dict[str, Any], binding_info: dict[str, Any]) -> list[Path]:
     """Every directory the current instance may read this family from."""
+    from shine.comfyops.existing_installation import model_family_directories
+
     family = str(component.get("destination_family") or "")
-    names = (family, *_FAMILY_ALIASES.get(family, ())) if family else ()
-    directories: list[Path] = []
     models_root = binding_info.get("models_root")
-    for name in names:
-        if models_root:
-            directories.append(Path(models_root) / name)
-        for value in (binding_info.get("families") or {}).get(name, []):
-            directories.append(Path(value))
-    for key, value in managed.items():
-        if key in names:
-            directories.append(Path(value))
-    unique: list[Path] = []
-    for directory in directories:
-        try:
-            resolved = directory.resolve()
-        except OSError:
-            resolved = directory
-        if resolved not in unique:
-            unique.append(resolved)
-    return unique
+    if not family or not models_root:
+        return []
+    return model_family_directories(Path(models_root), family, binding_info["families"])
 
 
 def _paths_inside(receipt: dict[str, Any], directories: list[Path]) -> bool:
@@ -293,7 +213,6 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     )
 
     cache = _cache_dir(settings)
-    bound = managed_model_bindings(db, settings)
     instance_binding = current_instance(db, settings)
     registry = {row.id: row for row in db.scalars(select(ModelPackage)).all()}
     evidence: list[dict[str, Any]] = []
@@ -326,14 +245,12 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
         installed_path = installed_directory(settings, component)
         installed = str(installed_path) if installed_path is not None else None
         in_place = bool(receipt["verified"] and _same_directory(verified_directory, installed))
-        family_directories = _family_directories(component, instance_binding, bound)
+        family_directories = _family_directories(component, instance_binding)
         bound_here = bool(receipt["verified"]
                           and _paths_inside(receipt.get("receipt") or {}, family_directories))
-        consumable = bool(receipt["verified"] and (in_place or bound_here))
+        consumable = bound_here
         if not receipt["verified"]:
             binding_reason = "NO_VERIFIED_BYTES"
-        elif in_place:
-            binding_reason = "MANAGED_PACKAGE_STORE"
         elif bound_here:
             binding_reason = ("ADOPTED_INSTALLATION_FAMILY_DIRECTORY"
                               if instance_binding["mode"] == "ADOPTED_EXTERNAL_INSTALLATION"
@@ -378,7 +295,7 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     return evidence
 
 
-def _profile_rows(db: Session, project_id: str, names: list[str],
+def _profile_rows(db: Session, project_id: str | None, names: list[str],
                   machine_validated: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     # 机器级运行激活已校验的规范方案，项目直接继承其「已登记+已校验」事实，
     # 不再要求每个项目把同一套规范图重新登记+重新校验（一个裁决，下级继承上级）。
@@ -413,7 +330,7 @@ def _profile_rows(db: Session, project_id: str, names: list[str],
     return result
 
 
-def _real_render(db: Session, project_id: str, profile_ids: list[str]) -> dict[str, Any] | None:
+def _real_render(db: Session, project_id: str | None, profile_ids: list[str]) -> dict[str, Any] | None:
     """A real, non-mock job that really passed with one of these profiles."""
     if not profile_ids:
         return None
@@ -474,7 +391,8 @@ def _layer(state: str, detail: str, **extra: Any) -> dict[str, Any]:
     return {"state": state, "detail": detail, **extra}
 
 
-def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]:
+def readiness(db: Session, settings, binding, project_id: str | None, *,
+              include_host: bool = True) -> dict[str, Any]:
     """The five layers of one variant on this machine, plus one next step."""
     weights = weight_evidence(db, settings, binding)
     instance_binding = current_instance(db, settings)
@@ -642,7 +560,7 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
         "weights": weights,
         "profiles": profiles,
         "real_render": render,
-        "host": _host_summary(settings),
+        "host": _host_summary(settings) if include_host else {},
     }
 
 

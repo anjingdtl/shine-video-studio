@@ -115,7 +115,7 @@ def config_digest(settings) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
+def verify_model_files(config: ImageRuntimeConfig, *, settings=None) -> dict[str, Any]:
     """Hash every required model file against its pinned digest.
 
     A file that is present but wrong is worse than a missing one: it would render
@@ -125,7 +125,13 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
     "cached": true and the time it was verified, and any change of size or
     modification time forces a real re-hash.
     """
+    from shine.comfyops.adoption import runtime_root
+    from shine.comfyops.existing_installation import declared_model_family_roots, model_sources
+
     root = Path(config.model_root) if config.model_root else None
+    extra = (runtime_root(settings, root.parent, config.instance_id) / "shine-node-paths.yaml"
+             if settings is not None and root is not None else None)
+    declared = declared_model_family_roots(root.parent, extra_config=extra) if root is not None else {}
     entries = config.model_files or [dict(entry) for entry in qwen_workflow.MODEL_FILES]
     cached = {entry.get("filename"): entry for entry in (config.verified_files or [])}
     checked, problems = [], []
@@ -138,7 +144,8 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
             problems.append({**record, "code": "IMAGE_MODEL_ROOT_NOT_CONFIGURED"})
             checked.append(record)
             continue
-        path = root / (entry.get("folder") or "") / filename
+        paths = model_sources(root, entry.get("folder") or "", Path(filename), declared)
+        path = next(iter(paths), root / (entry.get("folder") or "") / filename)
         if not path.is_file():
             problems.append({**record, "code": "IMAGE_MODEL_FILE_MISSING", "path_present": False})
         else:
@@ -150,6 +157,7 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
                 reusable = (
                     previous
                     and previous.get("sha256")
+                    and previous.get("path") == str(path)
                     and previous.get("size") == stat.st_size
                     and previous.get("mtime_ns") == stat.st_mtime_ns
                 )
@@ -167,6 +175,7 @@ def verify_model_files(config: ImageRuntimeConfig) -> dict[str, Any]:
                     record["verified_at"] = utcnow().isoformat()
                     record["size"] = stat.st_size
                     record["mtime_ns"] = stat.st_mtime_ns
+                    record["path"] = str(path)
                 if entry.get("sha256") and record["actual_sha256"] != entry["sha256"]:
                     problems.append({**record, "code": "IMAGE_MODEL_HASH_MISMATCH"})
         checked.append(record)
@@ -186,6 +195,7 @@ def persist_verification(settings, config: ImageRuntimeConfig, result: dict[str,
             "sha256": record.get("actual_sha256"),
             "size": record.get("size"),
             "mtime_ns": record.get("mtime_ns"),
+            "path": record.get("path"),
             "verified_at": record.get("verified_at"),
         }
         for record in (result.get("files") or [])
@@ -350,7 +360,8 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         binding_state = "PENDING_RECIPE"
     else:
         binding_state = "READY"
-    files = verify_model_files(config) if config.model_root else {"files": [], "problems": [], "complete": False}
+    files = verify_model_files(config, settings=settings) if config.model_root else {
+        "files": [], "problems": [], "complete": False}
     if config.model_root:
         # Store what was just hashed, so the next read does not hash 16 GiB again.
         persist_verification(settings, config, files)

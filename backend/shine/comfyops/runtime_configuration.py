@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -282,6 +281,8 @@ def _template_drift_advisories(db, evidence: dict) -> list[dict]:
     """
     advisories = []
     for name, expected in (evidence.get('workflow_profiles') or {}).items():
+        if expected.get('id') is None:
+            continue
         profile = db.get(WorkflowProfile, expected.get('id'))
         if (profile is None or profile.name != name
                 or workflow_contract_sha256(profile) != expected.get('contract_sha256')):
@@ -519,7 +520,8 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
     from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
 
     db.execute(text('BEGIN IMMEDIATE'))
-    require_project(db, project_id)
+    if project_id is not None:
+        require_project(db, project_id)
     candidate = db.get(AppSetting, CANDIDATE_KEY)
     if not candidate or candidate.value.get('project_id') != project_id:
         raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
@@ -555,12 +557,8 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
     # Activation is the operator's statement that this host now renders for real.
     # Persist the renderer choice so a later START_APP.cmd reuses it instead of
     # silently dropping back to Mock after a reboot.
-    from shine.comfyops.deployment import ENV_PATH, persist_env
-    runtime_env_override = os.getenv('SHINE_RUNTIME_ENV_PATH')
-    runtime_env_path = Path(runtime_env_override).resolve() if runtime_env_override else ENV_PATH
-    if runtime_env_override and not runtime_env_path.is_relative_to(settings.data_dir.resolve()):
-        raise HTTPException(409, 'RUNTIME_SETTINGS_PATH_OUTSIDE_DATA_DIR')
-    env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'}, runtime_env_path)
+    from shine.comfyops.deployment import persist_env, runtime_settings_path
+    env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'}, runtime_settings_path(settings))
     add_audit(db, actor, 'DEPLOYMENT_RENDER_PROVIDER_PERSISTED', 'comfy_instance', instance.id,
               {'env_keys': env_keys, 'value': 'comfyui'}, project_id=project_id)
     db.commit()

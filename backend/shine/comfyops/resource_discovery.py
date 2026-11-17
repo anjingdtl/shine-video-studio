@@ -199,7 +199,8 @@ def _queue_scan(state: dict) -> int:
     return len(queue)
 
 
-def start_scan(db, *, drives: bool = True, actor: str = "local-user") -> dict:
+def start_scan(db, *, drives: bool = True, probe_roots: tuple[str, ...] = (),
+               actor: str = "local-user") -> dict:
     """Queue one bounded deep scan over fixed drives and declared directories.
 
     An explicit re-scan re-walks the directories a previous round already
@@ -212,19 +213,17 @@ def start_scan(db, *, drives: bool = True, actor: str = "local-user") -> dict:
     for row in state.get("directories") or []:
         _enqueue_seed(state, row["path"], CONFIGURED_ROOT_DEPTH, source="rescan",
                       rescan=True)
+    for root in probe_roots:
+        try:
+            _enqueue_seed(state, str(local_path(root)), CONFIGURED_ROOT_DEPTH,
+                          source="probe_root", rescan=True)
+        except Exception:  # noqa: BLE001 - an invalid env root is named, not fatal
+            state["scan"].setdefault("unreadable", []).append(root)
     if drives:
         for drive in fixed_drives():
             # 一次显式重检索要能发现之后才出现的文件，所以固定盘也重走一遍；
             # 分批推进，UI 上如实显示还剩几批。
             _enqueue_seed(state, str(drive), DRIVE_SCAN_DEPTH, source="drive", rescan=True)
-    probe_roots = os.environ.get("SHINE_COMFY_PROBE_ROOTS", "")
-    for raw in probe_roots.split(os.pathsep):
-        if raw.strip():
-            try:
-                _enqueue_seed(state, str(local_path(raw.strip())), CONFIGURED_ROOT_DEPTH,
-                              source="probe_root", rescan=True)
-            except Exception:  # noqa: BLE001 - an invalid env root is named, not fatal
-                state["scan"].setdefault("unreadable", []).append(raw.strip())
     queued = _queue_scan(state)
     if not queued:
         _save(db, state)
@@ -469,10 +468,14 @@ def verification_candidates(db, catalog: dict) -> list[dict]:
     is offered, so a moved or rewritten file never becomes a source.
     """
     catalog_id = str(catalog.get("catalog_id") or "")
+    pinned = {(component["component_id"], item["relative_path"], item["sha256"], item["size"])
+              for component in catalog.get("components") or [] for item in component.get("files") or []}
     state = read_state(db)
     rows: list[dict] = []
     for row in state["resources"]["model_candidates"]:
         if catalog_id and row.get("catalog_id") != catalog_id:
+            continue
+        if (row["component_id"], row["relative_path"], row["sha256"], row["size"]) not in pinned:
             continue
         path = Path(str(row.get("path") or ""))
         try:

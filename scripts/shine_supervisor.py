@@ -446,32 +446,6 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
     return 200, {"status": "RUNNING", "pid": process.pid}
 
 
-def _validate_project_profiles(factory, settings, project_id: str) -> int:
-    """Validate every registered profile of the project against the renderer.
-
-    Runs while the Worker is stopped and the owned instance is idle (the caller
-    just finished service validation). A profile that cannot validate is left
-    with its own named state; it never blocks the others or the preparation.
-    """
-    from sqlalchemy import select
-
-    from shine.comfyops.service_validation import validate_registered_workflow
-    from shine.models import WorkflowProfile
-
-    with factory() as db:
-        profile_ids = [row.id for row in db.scalars(
-            select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))]
-    checked = 0
-    for profile_id in profile_ids:
-        try:
-            with factory() as db:
-                validate_registered_workflow(db, settings, profile_id)
-            checked += 1
-        except Exception:  # noqa: BLE001 - a named per-profile refusal, not a crash
-            continue
-    return checked
-
-
 def _validate_services_background(data_dir: Path) -> dict:
     """Validate and activate the runtime while the Worker is stopped.
 
@@ -524,24 +498,26 @@ def _validate_services_background(data_dir: Path) -> dict:
         candidate = report.get("candidate") or {}
         recipe_sha256 = candidate.get("recipe_sha256")
         project_id = candidate.get("project_id")
-        if not recipe_sha256 or not project_id:
+        if not recipe_sha256:
             mark_task("FAILED", "GENERATE_RUNTIME_CONFIGURATION_FIRST", "还没有可核验的运行配置。")
             _start_worker(data_dir)
             return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST"}
         try:
             with factory() as db:
-                validated = validate_services(db, settings, str(project_id), recipe_sha256,
+                validated = validate_services(db, settings, project_id, recipe_sha256,
                                               actor="supervisor:setup")
             if validated.get("status") != "READY":
                 detail = "服务核验没有通过：" + str(validated.get("status"))
                 mark_task("FAILED", str(validated.get("status") or "SERVICE_VALIDATION_FAILED"), detail)
                 return {"status": "FAILED", "code": validated.get("status"), "detail": detail}
             with factory() as db:
-                activate_runtime(db, settings, str(project_id), recipe_sha256, "supervisor:setup")
+                activate_runtime(db, settings, project_id, recipe_sha256, "supervisor:setup")
             # One-click preparation also finishes the project-level node check:
             # validate each registered profile against the live renderer so the
             # director package shows ready without a separate manual step.
-            checked = _validate_project_profiles(factory, settings, str(project_id))
+            # validate_services checked these profiles against the same live
+            # object_info already. One renderer startup owns that evidence.
+            checked = len(validated.get("workflow_profiles") or [])
             mark_task("DONE", None,
                       f"服务核验通过，本机配置已激活；已核对 {checked} 个生成方案节点（Worker 已自动恢复）。")
             return {"status": "READY"}

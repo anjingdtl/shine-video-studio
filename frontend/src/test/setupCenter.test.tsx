@@ -40,6 +40,16 @@ async function detect() {
 }
 
 describe('制作环境：检测快照与候选下载', () => {
+  it('硬件推荐候选时仍默认使用服务端指定的已验收基线', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/variant-recommendations$/, respond: () => jsonResponse({
+      tier: 'lowend_12gb', host: { gpu: 'RTX 4070', vram_mb: 12282 },
+      preferred_variant_id: INT8.variant_id, recommended: [], candidates: [W6A8], blocked: [INT8],
+    }) });
+    render(<SetupCenter projectId="proj-1" />);
+    await detect();
+    expect(screen.getByRole('radio', { name: /当前生产基线/ })).toBeChecked();
+    expect(screen.getByRole('radio', { name: /W6A8/ })).not.toBeChecked();
+  });
   it('打开就自动检测，不需要先找检测入口', async () => {
     render(<SetupCenter projectId="proj-1" />);
     await detect();
@@ -70,6 +80,9 @@ describe('制作环境：检测快照与候选下载', () => {
   });
 
   it('已有权重标红；勾选时二次确认是否重复下载', async () => {
+    const current = setupSummary();
+    current.capabilities.image.facts.FILES_FOUND = true;
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(current) });
     stub.add({ method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse({
       configured: true, layer: 'GRAPH_VERIFIED', families: {}, renderer: { state: 'RUNNING' },
       blockers: [], upstream: { required_bytes: 0 },
@@ -129,6 +142,14 @@ describe('制作环境：检测快照与候选下载', () => {
   });
 
   it('后端已核验并绑定的权重不被界面当成缺失而重新下载', async () => {
+    const current = setupSummary();
+    for (const key of ['h3', 'image'] as const) {
+      current.capabilities[key].facts = {
+        ...current.capabilities[key].facts,
+        FILES_FOUND: true, FILES_VERIFIED: true, INSTANCE_BOUND: true,
+      };
+    }
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(current) });
     stub.add({ method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse({
       configured: true, layer: 'GRAPH_VERIFIED', families: {}, renderer: { state: 'RUNNING' },
       blockers: [], upstream: { required_bytes: 0 },
@@ -163,7 +184,7 @@ describe('制作环境：检测快照与候选下载', () => {
     await detect();
 
     expect(screen.getByText('本机已核验 · 已绑定')).toBeTruthy();
-    expect(screen.getByTestId('setup-next-step')).toHaveTextContent('把这个变体的生成方案登记到当前作品');
+    expect(screen.queryByTestId('setup-next-step')).toBeNull();
     // H3 is verified by the backend, and the image capability is already
     // present, so nothing needs downloading: the same 44GB is never planned twice.
     expect(screen.getByRole('button', { name: /确认并完成配置（不下载）/ })).toBeEnabled();
@@ -201,8 +222,9 @@ describe('页面直连执行旁路已收掉', () => {
     await detect();
     await user.click(screen.getByRole('button', { name: /交给后台验证出图/ }));
     await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1), { timeout: 20000 });
-    const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[] };
+    const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[]; variant_id?: string };
     expect(body.capabilities).toEqual(['image']);
+    expect(body.variant_id).toBeUndefined();
     expect(stub.callsOf('POST', /setup\/image-runtime\/start/)).toHaveLength(0);
     expect(stub.callsOf('POST', /setup\/image-runtime\/validate/)).toHaveLength(0);
   });

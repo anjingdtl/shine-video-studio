@@ -285,10 +285,10 @@ def resource_scan_report(db: DBSession):
 
 
 @router.post('/resource-scan/start')
-def resource_scan_start(actor: Operator, db: DBSession):
+def resource_scan_start(actor: Operator, db: DBSession, settings: SettingsDep):
     from shine.comfyops.resource_discovery import start_scan
 
-    return start_scan(db, actor=actor)
+    return start_scan(db, actor=actor, probe_roots=settings.comfy_probe_roots)
 
 
 @router.post('/resource-scan/advance')
@@ -1816,11 +1816,17 @@ def _discovered_roots(settings, db) -> list[str]:
     newly copied ComfyUI still shows up within half a minute.
     """
     import time
+    from pathlib import Path
 
+    from shine.comfyops.resource_discovery import read_state
     from shine.comfyops.setup_summary import _instance_rows
 
     if _instance_rows(db):
         return []
+    indexed = [row["root"] for row in read_state(db)["resources"]["comfy_roots"]
+               if Path(row["root"]).is_dir()]
+    if indexed:
+        return indexed
     key = tuple(str(row) for row in settings.comfy_probe_roots)
     now = time.monotonic()
     cached = _discovery_cache.get(key)
@@ -1945,7 +1951,8 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     selected = resolved.get("selected") or {}
     gap = runtime_closure_gap(db, settings, selected)
     reports = {capability: capability_report(db, settings, capability, installation=selected,
-                                             project_id=body.project_id)
+                                             project_id=body.project_id,
+                                             variant_id=body.variant_id if capability == "h3" else None)
                for capability in body.capabilities}
     plans = []
     for capability, report in reports.items():
@@ -1961,9 +1968,9 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
             # (source / wheels / node packs) the instance ladder will install.
             closure = set(gap["missing_components"])
             components = sorted(set(components) | closure)
-        from shine.comfyops.setup_summary import IMAGE_CATALOG
-        catalog = (deployment.load_deployment_catalog(IMAGE_CATALOG)
-                   if capability == "image" else deployment.load_default_catalog())
+        from shine.comfyops.setup_preparation import _catalog_file_for
+
+        catalog = deployment.load_deployment_catalog(_catalog_file_for(capability, body.variant_id, report))
         cmap = deployment._component_map(catalog)
         plans.append({
             "capability": capability,
@@ -2004,12 +2011,18 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     closed tab, a restart or a reboot resumes instead of restarting.
     """
     from shine.comfyops.setup_preparation import enqueue
+    from shine.comfyops.setup_summary import resolve_installation, resolve_setup_port
     from shine.services import require_project
 
     if body.project_id:
         require_project(db, body.project_id)
+    resolved = resolve_installation(db, settings, path=body.installation_path)
+    if resolved["choice_required"]:
+        raise HTTPException(409, "INSTALLATION_SELECTION_REQUIRED")
+    selected = resolved["selected"] or {}
+    port = resolve_setup_port(db, settings, selected, body.port)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
-                    installation_path=body.installation_path, port=body.port,
+                    installation_path=selected.get("root"), port=port,
                     variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,
                     settings=settings, deep_scan=body.deep_scan)
     db.commit()

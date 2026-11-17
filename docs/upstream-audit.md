@@ -483,3 +483,15 @@ prompt、UI 或素材；许可证与使用领域约束未因此变化。
 - 本机 ComfyUI `b0b743566f65daafc423b4fea8a2fbda94b3384a` 的 `comfy_extras/nodes_qwen.py` 中，`TextEncodeQwenImage21` 将 `resolution²` 作为像素预算，按首张参考图比例对齐到 32 像素，首张参考的尺寸决定编辑 latent。
 - 同一版本 `nodes.py` 提供 `ImageScale` 的 Lanczos 和中心裁切。Shine 通过 API 图调用该节点，把成品归一到明确请求的宽高，再由输出节点 `461` 写入 PNG。编辑图的能力证据继续绑定 adapter hash，图变化后需要新样例。模板 commit 仍为 `21d7cc4fb9afd983957f2d2d6b1d583860ccb40b`。
 - 本机 RTX 5080 上通过受管 ComfyUI 实测 512×512 文生图和带真实底图的 640×448 图生图。两项均由 Worker 获取节点 `461` 的结果并完成技术质检。复用本机节点和原有锁定模型文件，通过 ComfyUI API 调用。
+
+### 2026-11-18 已有安装与运行配方收敛
+
+- 复核本机 ComfyUI `b0b743566f65daafc423b4fea8a2fbda94b3384a` 的
+  `utils/extra_config.py`、`folder_paths.py`、`main.py` 与 `nodes.py`。
+  读取其分组 YAML、多行模型路径、`clip/unet` aliases、
+  `--extra-model-paths-config` 和自定义节点 whitelist 的实际接口。
+- Shine 用已有锁定版本 `PyYAML 6.0.3` 解析配置，并将其声明为直接依赖。
+  现有安装检测、文件 presence、H3 绑定与出图核验复用同一解析器。
+  受管进程通过自己的数据目录加载 Shine handoff 与 sampling 节点。
+- 本轮按接口独立实现，无上游源码复制，未改上游 revision 或许可证边界。
+  具体回归与真机范围见 `ACCEPTANCE_20261118_SETUP_RUNTIME_CONVERGENCE.md`。
