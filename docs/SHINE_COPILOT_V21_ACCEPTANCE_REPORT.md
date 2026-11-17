@@ -15,7 +15,7 @@
 | `tests/test_support_agent.py`（V1） | 55 项全部通过 |
 | `tests/test_support_copilot_v2.py`（V201—V240） | 24 项全部通过 |
 | `tests/test_support_copilot_v3.py`（V2 P0/P1） | 27 项全部通过 |
-| `tests/test_support_copilot_v21.py`（本轮专项） | **40 项全部通过** |
+| `tests/test_support_copilot_v21.py`（本轮专项） | **41 项全部通过** |
 | 后端八分片全量 | **255 个测试模块 / 8 片全部退出码 0 / 0 失败** |
 | 前端 Vitest | **79 文件 / 414 项全部通过**（管家组件 18 项，含 2 项构建提示） |
 | TypeScript / Vite | `tsc -b`、`vite build` 通过（仅既有 chunk>500kB 提示） |
@@ -27,7 +27,7 @@
 ### 1.1 后端八分片
 
 - 命令：255 个 `backend/tests/test_*.py` 按文件均分 8 片，`pytest -q -p no:cacheprovider --shine-runner-tier full`。
-- 结果：**8/8 退出码 0，0 失败**（包含 `test_support_copilot_v21.py` 40 项、V1/V2/V3 回归、迁移与真实浏览器外的全部后端合同）。
+- 结果：**8/8 退出码 0，0 失败**（包含 `test_support_copilot_v21.py` 41 项、V1/V2/V3 回归、迁移与真实浏览器外的全部后端合同）。
 - 日志：`/tmp/v21shards/shard-1..8.log`、`shard-1..8.exit`（本轮最终代码运行；隔离环境临时目录，不入库）。
 
 ## 2. 本轮验收场景逐项
@@ -141,6 +141,7 @@
 | 问「Shine 当前版本支持哪些导演模式能力？」 | 返回带来源的版本化引用：`导演模式七阶段`、`AI 管家契约自动同步（V2.1）`、`导演风格引擎与冻结` |
 | 说「建立一个名叫《雾港回声》的短剧项目。」 | 计划 → 预览 → 确认 → `已完成并通过权威复核`；`GET /api/v1/projects` 出现 `雾港回声` |
 | 本轮复验：打开 AI 管家 | 面板顶部 `p.copilot-build` 显示「AI 管家知识已匹配当前版本。」；控制台无 error，55 个请求无 4xx/5xx |
+| 本轮复验：自然语言新能力 | 输入「帮我开启管家联网检索」→ 出现「开启管家联网检索」计划步骤、预览与授权按钮；无 error |
 
 截图：`/tmp/v21e2e/01-build-notice.png`、`02-knowledge-answer.png`、`03-project-created.png`（运行环境临时目录，不入库）。
 

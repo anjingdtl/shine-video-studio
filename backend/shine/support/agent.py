@@ -349,6 +349,7 @@ def handle_message(
             "release",
             "parameters",
             "create_project",
+            "web_search",
             "import_document",
             "literary_scripts",
             "switch_basis",

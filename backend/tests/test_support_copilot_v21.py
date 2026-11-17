@@ -1225,3 +1225,17 @@ def test_preview_allows_a_compatible_live_request_schema_addition(api, monkeypat
     response = _preview(client, "project_create", {"title": "兼容新增"})
     assert response.status_code == 200, response.text
     assert response.json()["action"]["status"] == "PREVIEWED"
+
+
+def test_chat_natural_language_returns_the_new_capability_plan(api):
+    client, _, _ = api
+    session = client.post(
+        "/api/v1/support/sessions",
+        json={"page_id": "global", "question": "帮我开启管家联网检索"},
+        headers=HEADERS,
+    ).json()["session"]
+    message = session["messages"][-1]
+    plan = message["payload"]["plan"]
+    assert plan["intent"] == "WEB_SEARCH"
+    assert plan["plan_id"].startswith("plan-")
+    assert plan["steps"][0]["action"]["kind"] == "support_web_search_update"
