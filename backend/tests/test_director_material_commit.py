@@ -193,6 +193,16 @@ def test_a_single_row_commit_keeps_the_whole_requirement_list(api):
     """
     client, _factory, settings = api
     project, derived = _episode_one_requirements(client, settings)
+    # 新逻辑不再为每场强造填充场景板；用一条用户指定道具保证 >=2 项真实需求，
+    # 以验证单条提交不塌缩整张清单。
+    if len(derived["requirements"]) < 2:
+        shots = client.get(
+            f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/shots").json()["shots"]
+        client.post(
+            f"/api/v1/projects/{project}/director/storyboard/shots/{shots[0]['shot_id']}/requested-assets",
+            json={"family": "prop", "name": "怀表", "description": "老周的旧怀表"}, headers=LOCAL)
+        derived = client.post(f"/api/v1/projects/{project}/director/materials/derive",
+                              json={}, headers=LOCAL).json()
     requirements = derived["requirements"]
     assert len(requirements) >= 2, "需要至少两项需求才能验证清单不塌缩"
     target = requirements[0]
@@ -218,6 +228,20 @@ def test_a_single_row_commit_keeps_the_whole_requirement_list(api):
     kept = {row["requirement_id"] for row in body["requirements"]}
     original = {row["requirement_id"] for row in requirements}
     assert original.issubset(kept), f"单条提交后清单塌缩：丢失 {original - kept}"
+
+
+def test_derive_reuses_real_masters_and_does_not_force_fill_scenes(api):
+    """2026-11-17 用户报障：Ref2VA 最低参考被用「每场一张互不相同的无关场景图」
+    满足，且真实需要的人物/场景/道具不被复用。新逻辑：有人物等真实参考时不为每场
+    强造填充场景；已批准锁定的主素材按实体复用（matched_master），不重复生成。"""
+    client, _factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    rows = derived["requirements"]
+    families = [row["family"] for row in rows]
+    assert "character" in families, "点名人物仍是真实需求"
+    assert "scene" not in families, "镜头已有人物参考时不应为每场强造填充场景板"
+    character = next(row for row in rows if row["family"] == "character")
+    assert character["matched_master"] is not None, "已批准人物主素材应被复用而非重生成"
 
 
 def test_material_preparation_confirm_binds_shots_like_director_commit(api):

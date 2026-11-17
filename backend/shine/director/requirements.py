@@ -69,20 +69,6 @@ def _alias_index(catalog: dict[str, Any]) -> dict[str, str]:
     return index
 
 
-def _catalog_entry(catalog: dict[str, Any], family: str, name: str) -> dict[str, Any] | None:
-    collection = {"character": "characters", "scene": "scenes", "prop": "props"}.get(family)
-    if not collection:
-        return None
-    key = character_reference_key(name)
-    for row in catalog.get(collection) or []:
-        if character_reference_key(str(row.get("name") or "")) == key:
-            return row
-        for alias in row.get("aliases") or []:
-            if character_reference_key(str(alias)) == key:
-                return row
-    return None
-
-
 def bound_profile(db: Session, project_id: str) -> WorkflowProfile | None:
     """The profile the current scope really renders with, from existing rows.
 
@@ -289,7 +275,6 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
             scene_key = scene.key if scene is not None else f"section:{str(section_id)[:60]}"
             scene_name = str(section.get("title") or "").strip() or f"场次 {section.get('order') or ''}".strip()
             local: dict[tuple[str, str], dict[str, Any]] = {}
-            scene_description = ""
 
             for shot_id in shot_ids:
                 shot = db.get(Shot, shot_id)
@@ -355,15 +340,27 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                             note("prop", str(asset.entity_id), shot_id=shot.id,
                                  episode_id=episode.episode_id, cited_by_shot=True)
 
-            # The scene plate: a suggestion unless a shot promised it by id.
-            scene_catalog = _catalog_entry(catalog, "scene", scene_name)
-            scene_text = str((scene_catalog or {}).get("description") or scene_description or
-                             (section.get("title") or ""))[:300]
-            if scene_text and shot_ids:
-                _note_local(local, "scene", scene_name)
+            # 场景需求只认真实地点：catalog 的关键地点（跨场共享、可复用主素材），
+            # 不为凑 Ref2VA 最低参考在每场强造一张互不相同、与剧情无关的填充图。
+            for loc in (catalog.get("scenes") or []):
+                if str(section_id) not in [str(item) for item in loc.get("section_ids") or []]:
+                    continue
+                name = str(loc.get("name") or "").strip()
+                if not name:
+                    continue
+                _note_local(local, "scene", name, cited=True)
                 for shot_id in shot_ids:
-                    note("scene", scene_name, shot_id=str(shot_id),
-                         episode_id=episode.episode_id, description=scene_text)
+                    note("scene", name, shot_id=str(shot_id), episode_id=episode.episode_id,
+                         description=str(loc.get("description") or "")[:300], cited_by_shot=True)
+            # 仅当这一场的镜头没有任何其它参考（人物/道具/已绑定）时，才为 Ref2VA
+            # 补一张场景参考；描述用剧本真实场景文字，不用场次序号标题造无关图。
+            if not local and shot_ids:
+                prose = " ".join(sp.text for sp in scene.spans)[:300] if scene is not None else ""
+                fallback = str(scene_key)
+                _note_local(local, "scene", fallback)
+                for shot_id in shot_ids:
+                    note("scene", fallback, shot_id=str(shot_id),
+                         episode_id=episode.episode_id, description=prose or scene_name)
             # Core props the catalogue already established for this section.
             for prop in (catalog.get("props") or []):
                 if str(section_id) not in [str(item) for item in prop.get("section_ids") or []]:
