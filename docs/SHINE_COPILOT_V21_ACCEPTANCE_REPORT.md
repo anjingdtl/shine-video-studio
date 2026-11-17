@@ -161,9 +161,9 @@
 
 - 分支：`feat/shine-copilot-v21-auto-sync`（基于 V2 HEAD），不新建其它分支、不改 main。
 - PR：`#59`（https://github.com/anjingdtl/shine-video-studio/pull/59），base 为 V2 分支，保持 OPEN，不自行合并。
-- CI：run `44010753962`（`7258ce1`）— Frontend build、L1 backend quick（含
+- CI：run `44043028951`（`0d81143`）— Frontend build、L1 backend quick（含
   `generate_shine_copilot_contracts --check`）、L2 backend integration **全部 success**；
-  L3 full/Windows/browser E2E 按 PR 级跳过。
+  L3 full/Windows/browser E2E 按 PR 级跳过。本报告更新提交仅改文档，不改变合同/代码。
 - 本轮未改 `main`（`f066357f`）；PR #55、#56 均保持 OPEN，未自行合并。
 - PR 堆叠关系：#55（V1 → main）→ #56（V2 → #55）→ #59（V2.1 → #56）。
 - 与最新 `main`（`f066357f`）的合入检查：#55 与 main 在 `frontend/src/components/FourStagePanel.tsx`（main 删除、V1 修改）冲突；#56 同样在该文件冲突；#59 在 `AGENTS.md` 内容冲突并叠加该删除/修改冲突。冲突属于 UI/文档合并面，不改变本分支后端合同；按“不擅自合并”要求保持现状。
