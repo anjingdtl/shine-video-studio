@@ -1178,18 +1178,34 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
     not the material list.  This is the single executor every confirmation path
     runs, so the material list and the package always agree.
 
+    **One shot, one write.**  A shot can be affected by several confirmed
+    requirements at once (two characters, or a character and the scene plate).
+    Writing them one requirement at a time made the second write read the
+    bindings from before the first one and refuse the whole confirmation with
+    ``Bindings are missing assets required by the shot``.  So every decision is
+    collected first, the shot's complete target set is composed once, and
+    ``shot.bindings`` plus ``required_asset_ids`` are written exactly once.
+
     Confirming master B for a character that previously used A **replaces** A's
     subject slot with B and drops A from the shot's ``required_asset_ids``; it
-    never leaves both A and B bound to one person.  Idempotent: a replayed
-    confirmation repairs a half-finished hand-off.  Frozen versions, live shoots
-    and shots that already own a current passed take are never touched.
+    never leaves both A and B bound to one person, and every other valid
+    reference on that shot stays.  Idempotent: a replayed confirmation (a lost
+    response, a resumed batch) finds the target set already in place and writes
+    nothing.  Frozen versions, live shoots and shots that already own a current
+    passed take are never touched.
     """
     from sqlalchemy import select as sa_select
 
     from shine.comfyops.models import AssetRequirement
     from shine.models import Asset, Job, Shot
     from shine.schemas import ReferenceUse, ShotBindingInput
-    from shine.services import protected_shot_ids, require_project, set_shot_bindings
+    from shine.services import (
+        _binding_rows,
+        bindings_unchanged,
+        protected_shot_ids,
+        require_project,
+        set_shot_bindings,
+    )
 
     project = require_project(db, project_id)
     rows = db.scalars(sa_select(AssetRequirement).where(
@@ -1203,108 +1219,107 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         for shot_id in (row.payload or {}).get("used_shot_ids") or []
     })
     protected = protected_shot_ids(db, project_id, touched)
-    bound = 0
-    for requirement in rows:
+
+    # 1. Read every decision first.  One shot may answer to several requirements;
+    #    the per-shot target set is composed before any row is written, so no
+    #    write can be decided from bindings another write just replaced.
+    decisions: dict[str, dict[tuple[str, str], str]] = {}
+    for requirement in sorted(rows, key=lambda row: row.id):
         payload = dict(requirement.payload or {})
-        if payload.get("strategy") != "reuse_master" or payload.get("family") != "character":
+        if payload.get("strategy") != "reuse_master":
+            continue
+        family = payload.get("family")
+        if family not in {"character", "scene"}:
             continue
         asset_id = payload.get("bound_asset_id")
-        entity = payload.get("entity_id") or ""
+        entity = str(payload.get("entity_id") or "")
         if not asset_id or not entity:
             continue
         asset = db.get(Asset, asset_id)
         if asset is None or not asset.approved or not asset.locked:
             continue
-
-        def is_entity_subject(link, entity=entity) -> bool:
-            if link.use_as != "subject":
-                return False
-            if link.role == entity:
-                return True
-            if link.role:
-                return False
-            old = db.get(Asset, link.asset_id)
-            return old is not None and old.entity_id == entity
-
         for shot_id in payload.get("used_shot_ids") or []:
-            if shot_id in protected:
-                continue
-            shot = db.get(Shot, shot_id)
-            if shot is None or shot.project_id != project_id:
-                continue
-            if entity not in list((shot.spec or {}).get("characters") or []):
-                continue
-            passed = db.scalar(sa_select(Job).where(
-                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
-                Job.shot_revision == shot.revision,
-            ))
-            if passed is not None:
-                continue
-            current = list(shot.bindings)
-            entity_links = [link for link in current if is_entity_subject(link)]
-            if len(entity_links) == 1 and entity_links[0].asset_id == asset.id:
-                continue
-            keep = [link for link in current if not is_entity_subject(link)]
-            inputs = [
-                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
-                                 role=link.role, frame_role=link.frame_role, ordinal=index)
-                for index, link in enumerate(keep)
-            ]
-            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.SUBJECT,
-                                           role=entity, ordinal=len(inputs)))
-            # The shot's declaration follows the replacement: drop the master
-            # being swapped out so the binding write does not refuse a required
-            # asset it no longer binds.  set_shot_bindings re-merges what stays.
-            replaced = {link.asset_id for link in entity_links if link.asset_id != asset.id}
-            if replaced:
-                spec_payload = dict(shot.spec or {})
-                spec_payload["required_asset_ids"] = [
-                    aid for aid in (spec_payload.get("required_asset_ids") or [])
-                    if aid not in replaced
-                ]
-                shot.spec = spec_payload
-            set_shot_bindings(db, project, shot, inputs, actor=actor)
-            bound += 1
-    # The minimum reference material: a confirmed scene plate is the environment
-    # image a shot renders from.  Ref2VA needs at least one reference, so a
-    # narrator-only shot (no character subject) is carried by its scene plate
-    # instead of refusing to start.  The same executor binds it as a picture
-    # reference; the material verdict and the package readiness both read the
-    # resulting shot.bindings, so "has a reference" is one fact, one verdict.
-    for requirement in rows:
-        payload = dict(requirement.payload or {})
-        if payload.get("strategy") != "reuse_master" or payload.get("family") != "scene":
+            # 同一需求（同一人物 / 同一场景）被确认过两次时，最后一次确认的那份胜出；
+            # 场景底图就是这一镜渲染的环境图，Ref2VA 至少一个参考时由它兜底。
+            decisions.setdefault(str(shot_id), {})[(str(family), entity)] = asset.id
+
+    def matches_decision(link, family: str, entity: str) -> bool:
+        """Whether this existing binding is the slot the decision replaces."""
+        if link.use_as != ("subject" if family == "character" else "picture"):
+            return False
+        if link.role == entity:
+            return True
+        if family == "character" and link.role:
+            return False
+        old = db.get(Asset, link.asset_id)
+        return old is not None and str(old.entity_id or "") == entity
+
+    bound = 0
+    for shot_id in sorted(decisions):
+        if shot_id in protected:
             continue
-        asset_id = payload.get("bound_asset_id")
-        if not asset_id:
+        shot = db.get(Shot, shot_id)
+        if shot is None or shot.project_id != project_id:
             continue
-        asset = db.get(Asset, asset_id)
-        if asset is None or not asset.approved or not asset.locked:
+        passed = db.scalar(sa_select(Job).where(
+            Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
+            Job.shot_revision == shot.revision,
+        ))
+        if passed is not None:
             continue
-        for shot_id in payload.get("used_shot_ids") or []:
-            if shot_id in protected:
+        declared_characters = list((shot.spec or {}).get("characters") or [])
+        wanted = {key: asset_id for key, asset_id in decisions[shot_id].items()
+                  if key[0] != "character" or key[1] in declared_characters}
+        if not wanted:
+            continue
+
+        # 2. The target set: keep every valid reference, drop the master a
+        #    requirement is being moved off, then add the confirmed ones.
+        current = _binding_rows(db, shot)
+        keep, replaced = [], set()
+        for link in current:
+            swap = [asset_id for (family, entity), asset_id in wanted.items()
+                    if matches_decision(link, family, entity) and link.asset_id != asset_id]
+            if swap:
+                replaced.add(link.asset_id)
                 continue
-            shot = db.get(Shot, shot_id)
-            if shot is None or shot.project_id != project_id:
+            keep.append(link)
+        target: list[ShotBindingInput] = [
+            ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
+                             role=link.role, frame_role=link.frame_role, ordinal=index)
+            for index, link in enumerate(keep)
+        ]
+        bound_ids = {row.asset_id for row in target}
+        for (family, entity), asset_id in wanted.items():
+            if asset_id in bound_ids:
                 continue
-            passed = db.scalar(sa_select(Job).where(
-                Job.shot_id == shot.id, Job.status == "PASSED", Job.stale.is_(False),
-                Job.shot_revision == shot.revision,
-            ))
-            if passed is not None:
-                continue
-            current = list(shot.bindings)
-            if any(link.asset_id == asset.id for link in current):
-                continue
-            inputs = [
-                ShotBindingInput(asset_id=link.asset_id, use_as=ReferenceUse(link.use_as),
-                                 role=link.role, frame_role=link.frame_role, ordinal=index)
-                for index, link in enumerate(current)
-            ]
-            inputs.append(ShotBindingInput(asset_id=asset.id, use_as=ReferenceUse.PICTURE,
-                                           ordinal=len(inputs)))
-            set_shot_bindings(db, project, shot, inputs, actor=actor)
-            bound += 1
+            if family == "character":
+                target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.SUBJECT,
+                                               role=entity, ordinal=len(target)))
+            else:
+                target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.PICTURE,
+                                               ordinal=len(target)))
+            bound_ids.add(asset_id)
+        # 唯一"是否已经就是这个集合"的判定：复用 services 的同一个比较函数，
+        # 读取前先让关系集合从台账重读，避免拿到另一笔写入之前的旧值。
+        db.expire(shot, ["bindings"])
+        if bindings_unchanged(shot, target):
+            continue
+
+        # 3. One write: the declaration follows this exact set, the bindings are
+        #    written once, and the revision moves exactly when the set did.
+        spec_payload = dict(shot.spec or {})
+        declared = list(spec_payload.get("required_asset_ids") or [])
+        merged = list(dict.fromkeys([
+            *[asset_id for asset_id in declared if asset_id not in replaced],
+            *[row.asset_id for row in target],
+        ]))
+        if merged != declared:
+            spec_payload["required_asset_ids"] = merged
+            shot.spec = spec_payload
+            shot.revision = (shot.revision or 1) + 1
+        set_shot_bindings(db, project, shot, target, actor=actor, bump_revision=False)
+        bound += 1
     return bound
 
 

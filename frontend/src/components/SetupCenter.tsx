@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Download, Image as ImageIcon, Loader2, Mic,
   MonitorCheck, Sparkles, Video,
 } from 'lucide-react';
-import { api, json, timeoutSignal, type SetupVerdict } from '../api';
+import { api, json, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
 import { Meter } from './Meter';
@@ -546,15 +546,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       onSummary={setSummary}
       onGoSettings={() => window.setTimeout(() => document.getElementById('setup')?.scrollIntoView({ block: 'start' }), 40)}
       onPrepare={(capability) => prepare([capability])}
-      onReconcile={async (capability) => {
-        await api('/setup/reconcile', { ...json('POST', {
-          project_id: projectId || undefined,
-          capability: capability === 'image' ? 'image' : 'h3',
-          adopt: false,
-          ...(capability !== 'image' && selectedVariant ? { variant_id: selectedVariant.variant_id } : {}),
-        }), signal: timeoutSignal(3_600_000) });
-        await detect();
-      }}
     />
 
     <ResourceScanCard />

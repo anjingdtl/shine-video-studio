@@ -651,7 +651,8 @@ def verify_models(report: dict, snapshot: str) -> dict:
 
 
 def register_verified_packages(db, verified: list[dict], catalog: dict,
-                               root: str | None = None) -> list[str]:
+                               root: str | None = None,
+                               extra_roots: list[Path] | None = None) -> list[str]:
     """Register the catalog packages whose every file was hash-verified in place.
 
     The existing-install reuse path historically only cached or verified bytes;
@@ -682,6 +683,11 @@ def register_verified_packages(db, verified: list[dict], catalog: dict,
                       for directory in dirs]]
         if root_path is not None else []
     )
+    # Bytes proved in a directory the person added (a renamed weight in a
+    # downloads folder) are recorded where they were really read, so the receipt
+    # is evidence about those bytes and not a claim about the installation.
+    allowed_roots.extend(Path(directory) for directory in (extra_roots or [])
+                         if Path(directory) not in allowed_roots)
     for component_id, row in rows.items():
         if row.status == 'UNVERIFIED_ORIGIN':
             row.status = 'FILES_VERIFIED_PENDING_RUNTIME'

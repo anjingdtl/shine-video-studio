@@ -203,10 +203,9 @@ def _live_installation_work(db, project_id: str) -> list[str]:
       suggestions and never gate a production, so a review download that is
       still running must not hold the H3 chain either.
     """
-    from shine.comfyops.deployment import REVIEW_COMPONENTS
+    from shine.comfyops.deployment import review_only_plan
     from shine.comfyops.models import InstallationAttempt, InstallationPlan
 
-    review_only = set(REVIEW_COMPONENTS.values())
     rows = db.scalars(select(InstallationAttempt).where(
         InstallationAttempt.status.in_(["QUEUED", "SUBMIT_INTENT", "INSTALLING"]))).all()
     live = []
@@ -217,8 +216,7 @@ def _live_installation_work(db, project_id: str) -> list[str]:
         payload = plan.payload or {}
         if payload.get("project_id") not in (None, project_id):
             continue
-        packages = [str(row.get("id") or "") for row in (payload.get("packages") or [])]
-        if packages and set(packages).issubset(review_only):
+        if review_only_plan(payload):
             # Advisory review models never gate the production chain.
             continue
         live.append(attempt.id)
@@ -298,9 +296,11 @@ def advance(factory, settings, worker_id: str) -> str | None:
                 live = _live_installation_work(db, str(task.get("project_id") or ""))
             if live:
                 # The bytes are still arriving; convergence must not judge them yet.
+                # ``:waiting`` is the honest answer: this tick did nothing that
+                # other queues must yield to (they can still make progress).
                 task["message"] = "正在等待下载完成（关闭页面也会继续）"
                 _save(factory, task)
-                return "setup:waiting"
+                return f"setup:{step_id}:waiting"
         detail = _run_step(factory, settings, task, step_id)
         for row in steps:
             if row["id"] == step_id:
@@ -319,7 +319,10 @@ def advance(factory, settings, worker_id: str) -> str | None:
                 task["error"] = failures[0].get("code")
             task["current"] = None
         _save(factory, task)
-        return f"setup:{step_id}"
+        # A step that is merely waiting on bytes has not consumed the tick:
+        # the caller keeps serving the queues that can still advance.
+        return f"setup:{step_id}:waiting" if detail.get("status") == "PENDING" \
+            else f"setup:{step_id}"
     except Exception as exc:  # noqa: BLE001 - a failed step is evidence, not a crash
         detail_code = _code_of(exc)
         for row in steps:

@@ -708,6 +708,17 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 
+
+def review_only_plan(payload: dict | None) -> bool:
+    """Whether an install plan carries only the optional advisory review models.
+
+    The two reviewers give suggestions and never gate a production, so work
+    that only moves those bytes must yield to work that can actually progress.
+    One answer, read by both the preparation chain and the Worker's scheduler.
+    """
+    packages = [str(row.get("id") or "") for row in ((payload or {}).get("packages") or [])]
+    return bool(packages) and set(packages).issubset(set(REVIEW_COMPONENTS.values()))
+
 IMAGE_CAPABILITY_CATALOG = "qwen-image-2.1-windows-x64"
 """The image capability's own catalogue: separate bytes, separate licence."""
 

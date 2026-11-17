@@ -82,10 +82,14 @@ def _build_installer(settings, *, progress, should_stop):
     )
 
 
-def run_pending_installation(factory, worker_id: str, *, settings) -> str | None:
+def run_pending_installation(factory, worker_id: str, *, settings,
+                             detail: dict | None = None) -> str | None:
     """One Worker tick for setup-type installation attempts.
 
     It returns the stage it reached, or None when nothing was claimable.
+    ``detail`` (optional) is filled with what was really served, so the caller
+    can tell a production-critical install from an advisory review model that
+    must not hold the tick.
     """
     recover_expired_attempts(factory, worker_id)
     attempt_id = claim_next_attempt(factory, worker_id)
@@ -94,6 +98,13 @@ def run_pending_installation(factory, worker_id: str, *, settings) -> str | None
     with factory() as db:
         attempt = db.get(InstallationAttempt, attempt_id)
         executor = (attempt.payload or {}).get("executor") if attempt else None
+        plan = db.get(InstallationPlan, attempt.plan_id) if attempt is not None else None
+        if detail is not None:
+            from shine.comfyops.deployment import review_only_plan
+
+            detail.update({"attempt_id": attempt_id,
+                           "plan_id": attempt.plan_id if attempt is not None else None,
+                           "review_only": review_only_plan(plan.payload if plan else None)})
     if executor == "LOCAL_ISOLATED" and settings.offline_simulation:
         # An offline simulation never downloads real bytes.  The attempt stays
         # queued and keeps its confirmed bytes.

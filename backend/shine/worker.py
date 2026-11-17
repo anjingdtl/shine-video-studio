@@ -4273,15 +4273,21 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     # A setup-type installation is durable work that does not need the video
     # runtime: the new-machine flow installs the renderer before any runtime
     # exists.  It is served before the other queues so a long film run never
-    # starves the installer.
+    # starves the installer - but only the production-critical bytes own the
+    # tick.  A plan that moves nothing but the optional review models (画面审片 /
+    # 语音核对) is advisory: it keeps running in the background and must not
+    # starve work that can actually advance.
     try:
         from shine.comfyops.installation_worker import run_pending_installation
 
-        installation = run_pending_installation(session_factory, worker_id, settings=settings)
+        served: dict = {}
+        installation = run_pending_installation(session_factory, worker_id,
+                                                settings=settings, detail=served)
     except Exception as exc:  # noqa: BLE001 - the installation queue must not kill the tick
         logger.warning("installation_step_failed error=%s", type(exc).__name__)
         installation = None
-    if installation:
+        served = {}
+    if installation and not served.get("review_only"):
         return f"installation:{installation}"
 
     # An authorized preparation that is still unfinished is durable work: the
@@ -4297,29 +4303,11 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     except Exception as exc:  # noqa: BLE001 - a setup step must not kill the tick
         logger.warning("setup_preparation_step_failed error=%s", type(exc).__name__)
         setup_step = None
-    if setup_step:
-        # The IMAGE_SAMPLES / IMAGE_EDIT_SAMPLES steps wait on sample renders
-        # that the material and asset-center queues produce later in this same
-        # tick. Returning early here would deadlock: the task waits for samples
-        # the worker never gets to render. Yield the tick so those queues run.
-        if setup_step not in {"setup:IMAGE_SAMPLES", "setup:IMAGE_EDIT_SAMPLES"}:
-            return setup_step
-
-    # A queued resource deep-scan is read-only directory work: advance one
-    # bounded batch per tick so a closed page never stops the scan, and a slow
-    # drive never holds the production queues for more than one batch.
-    try:
-        from shine.comfyops.resource_discovery import advance_scan, read_state
-
-        with session_factory() as db:
-            scan_status = read_state(db)["scan"].get("status")
-        if scan_status in {"QUEUED", "RUNNING"}:
-            with session_factory() as db:
-                advanced = advance_scan(db, budget_s=1.5)
-            if advanced.get("status") in {"QUEUED", "RUNNING"}:
-                return "resource-scan"
-    except Exception as exc:  # noqa: BLE001 - a scan batch must not kill the tick
-        logger.warning("resource_scan_step_failed error=%s", type(exc).__name__)
+    # A step that merely waits on bytes (a download, a queued sample render)
+    # has not consumed the tick: the queues below can still make progress.  Only
+    # a step that really advanced, or a failure, owns the rest of this tick.
+    if setup_step and not setup_step.endswith(":waiting"):
+        return setup_step
 
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.
@@ -4334,6 +4322,25 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
             return "text-preparation"
     else:
         _text_preparation_ticks = 0
+
+    # A queued resource deep-scan is read-only directory work: advance one
+    # bounded batch per tick so a closed page never stops the scan.  It runs
+    # after the text queues on purpose - it is background work and must not take
+    # four ticks in a row from a text task that could have finished.  The burst
+    # window above still lets it advance one batch whenever a long text run
+    # yields, so it can never be starved completely.
+    try:
+        from shine.comfyops.resource_discovery import advance_scan, read_state
+
+        with session_factory() as db:
+            scan_status = read_state(db)["scan"].get("status")
+        if scan_status in {"QUEUED", "RUNNING"}:
+            with session_factory() as db:
+                advanced = advance_scan(db, budget_s=1.5)
+            if advanced.get("status") in {"QUEUED", "RUNNING"}:
+                return "resource-scan"
+    except Exception as exc:  # noqa: BLE001 - a scan batch must not kill the tick
+        logger.warning("resource_scan_step_failed error=%s", type(exc).__name__)
     try:
         with session_factory() as runtime_db:
             current = resolve_runtime(runtime_db, settings)

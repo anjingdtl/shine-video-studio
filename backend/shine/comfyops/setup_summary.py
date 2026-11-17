@@ -173,20 +173,84 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
     return {"present": present, "missing": missing, "bytes": found_bytes}
 
 
-def _registered_components(db, component_ids) -> set[str]:
-    from shine.comfyops.models import ModelPackage, NodePackage
-
-    registered: set[str] = set()
-    for cls in (ModelPackage, NodePackage):
-        try:
-            rows = db.scalars(select(cls).where(cls.id.in_(list(component_ids)))).all()
-        except Exception:  # noqa: BLE001
+def _receipt_in_place(receipt: dict, roots: list[str]) -> bool:
+    """Whether the bytes a receipt read really sit in the served location."""
+    wanted = []
+    for root in roots:
+        if not root:
             continue
-        for row in rows:
-            if row.status in {"FILES_VERIFIED_PENDING_RUNTIME", "PACKAGED", "INSTALLED",
-                              "MOCK_VERIFIED", "READY_FOR_RUNTIME"}:
-                registered.add(row.id)
-    return registered
+        try:
+            wanted.append(Path(root).resolve())
+        except OSError:
+            continue
+    if not wanted:
+        return False
+    # The receipt's ``root`` is the authorization boundary it was read under,
+    # not where the bytes are: a candidate verified in the person's own folder
+    # carries the installation root there while living somewhere else.  Only
+    # the per-file paths (in-place verification) or the package directory say
+    # where the bytes really are.
+    recorded = [str(row.get("path") or "")
+                for row in receipt.get("files") or [] if isinstance(row, dict) and row.get("path")]
+    if not recorded:
+        recorded = [str(receipt.get("directory") or "")]
+    for value in recorded:
+        if not value:
+            continue
+        try:
+            path = Path(value).resolve()
+        except OSError:
+            continue
+        if any(path == root or path.is_relative_to(root) for root in wanted):
+            return True
+    return False
+
+
+def _verified_components(db, settings, catalog: dict, component_ids,
+                        *, served_roots: list[str] | None = None) -> dict[str, set[str]]:
+    """Components whose pinned bytes are provably here *now*.
+
+    A package row is a claim about the past: a file that was moved or
+    overwritten still carried ``FILES_VERIFIED_PENDING_RUNTIME`` and kept the
+    page green.  Only two sources answer "are these bytes here now?" — a
+    verification receipt that still matches on disk, and the verified-bytes
+    cache — and both are re-read here (by stat when unchanged, by digest when
+    not).  This one answer feeds the file facts and the download plan.
+
+    ``in_place`` is the subset whose receipt still reads bytes inside the
+    served location: those need no install either.  A component proved only in
+    the cache is verified but still has to be placed, which is a local copy and
+    never a download.
+    """
+    from shine.comfyops.verification_receipts import cache_candidates, verify_receipt
+
+    components = _catalog_components(catalog)
+    if db is None or settings is None:
+        # 没有台账或没有本机配置时，没有任何凭据可读：如实报"未核验"，不猜。
+        return {"verified": set(), "in_place": set()}
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+    verified: set[str] = set()
+    in_place: set[str] = set()
+    for component_id in component_ids:
+        component = components.get(component_id)
+        if not component:
+            continue
+        try:
+            receipt = verify_receipt(
+                db, component=component, variant_id=None,
+                catalog_id=catalog.get("catalog_id"),
+                catalog_version=str(catalog.get("catalog_version") or ""),
+                cache_dir=cache)
+            if receipt.get("verified"):
+                verified.add(component_id)
+                if _receipt_in_place(receipt.get("receipt") or {}, served_roots or []):
+                    in_place.add(component_id)
+                continue
+            if cache_candidates(cache, component).get("verified"):
+                verified.add(component_id)
+        except OSError:  # an unreadable file is not evidence
+            continue
+    return {"verified": verified, "in_place": in_place}
 
 
 def _runtime_instance_id(db) -> str | None:
@@ -385,23 +449,36 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
             "missing_files": [], "advisories": [],
         }
-    presence = model_file_presence(_effective_models_root(settings, capability, installation),
-                                   catalog, component_ids)
-    registered = _registered_components(db, component_ids)
-    # Reconcile hash-verifies bytes in place, including files the person renamed:
-    # a component it registered as verified owns those bytes on this machine.
-    # The filename-only presence check must not call them missing and trigger a
-    # second download.  The download step and the basic-config page both read
-    # this one converged conclusion instead of each recomputing "what is missing".
-    missing = [item for item in presence["missing"] if item["component_id"] not in registered]
+    served_root = _effective_models_root(settings, capability, installation)
+    presence = model_file_presence(served_root, catalog, component_ids)
+    evidence = _verified_components(
+        db, settings, catalog, component_ids,
+        served_roots=[root for root in (served_root, (installation or {}).get("root")) if root])
+    verified_now = evidence["verified"]
+    # What still has to be *placed* into this installation.  A file the person
+    # renamed is fine — reconcile proved those exact bytes in place, so it is not
+    # missing.  A registry row alone is not: once the bytes were moved away the
+    # receipt fails and the file is missing again, which is exactly the gap the
+    # old shortcut hid.  Bytes that exist only in the verified cache stay in this
+    # list (they still need placing) but owe no download.
+    missing = [item for item in presence["missing"]
+               if item["component_id"] not in evidence["in_place"]]
+    cache_root = (Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+                  if settings is not None else None)
+    cached_keys = {(component_id, str(row.get("relative_path")))
+                   for component_id in component_ids
+                   for row in (_catalog_components(catalog).get(component_id) or {}).get("files") or []
+                   if cache_root is not None
+                   and (cache_root / str(row.get("sha256") or "")).is_file()}
     required = [row for row in (_catalog_components(catalog).get(cid) for cid in component_ids) if row]
     complete_components = {
         cid for cid in component_ids
         if all(item["component_id"] != cid for item in missing)
     }
     files_found = bool(component_ids) and len(complete_components) == len(component_ids)
-    files_verified = bool(complete_components) and complete_components <= registered
-    missing_bytes = sum(int(item.get("size") or 0) for item in missing)
+    files_verified = bool(component_ids) and set(component_ids) <= verified_now
+    missing_bytes = sum(int(item.get("size") or 0) for item in missing
+                        if (item["component_id"], str(item["relative_path"])) not in cached_keys)
 
     facts: dict[str, Any] = {
         "FILES_FOUND": files_found,
@@ -492,9 +569,11 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         advisories.append({"code": "FACT_LAYER_UNAVAILABLE", "detail": type(exc).__name__,
                            "layer": str(capability)})
 
+    cached_files = sum(1 for item in missing
+                       if (item["component_id"], str(item["relative_path"])) in cached_keys)
     state, summary, next_step = _capability_verdict(
         capability, facts, missing_bytes=missing_bytes, has_installation=bool(installation),
-        missing_files=missing,
+        missing_files=missing, cached_files=cached_files,
     )
     return {
         "key": capability,
@@ -510,16 +589,19 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "next_step": next_step,
         "missing_files": missing,
         "missing_bytes": missing_bytes,
+        "cached_files": cached_files,
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
         "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
-                                         missing_files=missing, advisories=advisories),
+                                         missing_files=missing, advisories=advisories,
+                                         cached_files=cached_files),
     }
 
 
 def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
-                         missing_files: list, advisories: list) -> dict[str, Any]:
+                         missing_files: list, advisories: list,
+                         cached_files: int = 0) -> dict[str, Any]:
     """The user-facing model: two questions, not a dozen engineering steps.
 
     ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
@@ -529,6 +611,13 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
         files = {"state": "READY", "label": "文件已就绪并核验"}
     elif facts.get("FILES_FOUND"):
         files = {"state": "UNVERIFIED", "label": "文件已找到，待核验"}
+    elif cached_files and not missing_bytes:
+        # 字节已经在本机缓存里，只差落到实例目录：这不是一次下载。
+        files = {
+            "state": "MISSING",
+            "label": f"还差 {len(missing_files)} 个文件落位（字节已在本机，不需要下载）",
+            "missing_count": len(missing_files), "missing_bytes": 0,
+        }
     else:
         files = {
             "state": "MISSING",
@@ -550,7 +639,8 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
 
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
-                        has_installation: bool, missing_files: list) -> tuple[str, str, dict | None]:
+                        has_installation: bool, missing_files: list,
+                        cached_files: int = 0) -> tuple[str, str, dict | None]:
     """The one sentence a person reads, and the single action behind it."""
     if capability == "image" and facts.get("BINDING_STATE") == "PENDING_RECIPE":
         # The dominant fact is not "a file is missing": the person already
@@ -571,8 +661,11 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
                 "reason": "文件已经核验，本机还缺一份可启动的运行配置。", "action": "PREPARE_ENVIRONMENT",
             }
         label = "准备环境" if not has_installation else "补齐缺失文件"
-        reason = ("本机还没有这套资源（需要下载约 %.1f GiB）；也可以手动下载后放进来。"
-                  % (missing_bytes / 1024 ** 3)) if missing_bytes else "本机还没有这套资源。"
+        if not missing_bytes and cached_files:
+            reason = "字节已经在本机缓存里，只差落到实例目录；这次不需要下载。"
+        else:
+            reason = ("本机还没有这套资源（需要下载约 %.1f GiB）；也可以手动下载后放进来。"
+                      % (missing_bytes / 1024 ** 3)) if missing_bytes else "本机还没有这套资源。"
         return "MISSING", "本机还没有这套资源。", {
             "code": "FILES_MISSING", "label": label, "reason": reason, "action": "PREPARE_ENVIRONMENT",
         }

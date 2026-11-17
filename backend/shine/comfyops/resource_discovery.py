@@ -116,7 +116,12 @@ def list_directories(db) -> list[dict]:
 
 
 def add_directory(db, path_value: str, *, actor: str = "local-user") -> dict:
-    """Register one local search directory (drive root, downloads, models...)."""
+    """Register one local search directory (drive root, downloads, models...).
+
+    Registering a directory **is** a scan request: it hands the work to the one
+    durable scan task, so the queue and the status never disagree (a queue with
+    tasks while the page still said ``IDLE`` was exactly that bug).
+    """
     from shine.services import add_audit
 
     path = local_path(path_value)
@@ -136,11 +141,13 @@ def add_directory(db, path_value: str, *, actor: str = "local-user") -> dict:
     directories.append(row)
     state["directories"] = directories
     _enqueue_seed(state, resolved, CONFIGURED_ROOT_DEPTH, source="user")
+    queued = _queue_scan(state)
     _save(db, state)
     add_audit(db, actor, "RESOURCE_SEARCH_DIRECTORY_ADDED", "resource_discovery", row["id"],
-              {"path": resolved})
+              {"path": resolved, "queued": queued})
     db.commit()
-    return {"status": "ADDED", "directory": row}
+    return {"status": "ADDED", "directory": row,
+            "scan": {"status": state["scan"]["status"], "queued": queued}}
 
 
 def remove_directory(db, directory_id: str, *, actor: str = "local-user") -> dict:
@@ -153,8 +160,10 @@ def remove_directory(db, directory_id: str, *, actor: str = "local-user") -> dic
         from fastapi import HTTPException
         raise HTTPException(404, "没有这条检索目录记录。")
     state["directories"] = [item for item in directories if item["id"] != directory_id]
+    # A removed directory is no longer a place to search: drop whatever was
+    # queued for that root, whichever round enqueued it.
     state["scan"]["queue"] = [seed for seed in state["scan"]["queue"]
-                              if seed.get("source") != "user" or seed.get("root") != row["path"]]
+                              if seed.get("root") != row["path"]]
     _save(db, state)
     add_audit(db, actor, "RESOURCE_SEARCH_DIRECTORY_REMOVED", "resource_discovery",
               directory_id, {"path": row["path"]})
@@ -162,46 +171,69 @@ def remove_directory(db, directory_id: str, *, actor: str = "local-user") -> dic
     return {"status": "REMOVED", "path": row["path"]}
 
 
-def _enqueue_seed(state: dict, root: str, depth: int, *, source: str) -> None:
+def _enqueue_seed(state: dict, root: str, depth: int, *, source: str,
+                  rescan: bool = False) -> None:
     queue = state["scan"].setdefault("queue", [])
-    if any(seed["root"] == root and seed["source"] == source for seed in queue):
+    if any(seed["root"] == root for seed in queue):
         return
     coverage = state["scan"].setdefault("coverage", {})
-    if coverage.get(root, {}).get("status") == "DONE" and source != "rescan":
+    if not rescan and coverage.get(root, {}).get("status") == "DONE":
         return
     queue.append({"root": root, "depth": depth, "source": source})
 
 
+def _queue_scan(state: dict) -> int:
+    """Hand queued work to the one scan task.
+
+    The status is not a second fact the caller may set: a queued seed means the
+    task is ``QUEUED``, and an empty queue means it is not.  Both the directory
+    route and an explicit re-scan enter through here.
+    """
+    queue = state["scan"].get("queue") or []
+    if not queue:
+        state["scan"]["message"] = "没有可检索的目录"
+        return 0
+    state["scan"]["status"] = "QUEUED"
+    state["scan"]["started_at"] = state["scan"].get("started_at") or utcnow().isoformat()
+    state["scan"]["message"] = "检索已排队，后台分批进行"
+    return len(queue)
+
+
 def start_scan(db, *, drives: bool = True, actor: str = "local-user") -> dict:
-    """Queue one bounded deep scan over fixed drives and declared directories."""
+    """Queue one bounded deep scan over fixed drives and declared directories.
+
+    An explicit re-scan re-walks the directories a previous round already
+    finished, so a file that arrived afterwards is found instead of being
+    skipped because its root had a ``DONE`` coverage record.
+    """
     from shine.services import add_audit
 
     state = read_state(db)
     for row in state.get("directories") or []:
-        _enqueue_seed(state, row["path"], CONFIGURED_ROOT_DEPTH, source="user")
+        _enqueue_seed(state, row["path"], CONFIGURED_ROOT_DEPTH, source="rescan",
+                      rescan=True)
     if drives:
         for drive in fixed_drives():
-            _enqueue_seed(state, str(drive), DRIVE_SCAN_DEPTH, source="drive")
+            # 一次显式重检索要能发现之后才出现的文件，所以固定盘也重走一遍；
+            # 分批推进，UI 上如实显示还剩几批。
+            _enqueue_seed(state, str(drive), DRIVE_SCAN_DEPTH, source="drive", rescan=True)
     probe_roots = os.environ.get("SHINE_COMFY_PROBE_ROOTS", "")
     for raw in probe_roots.split(os.pathsep):
         if raw.strip():
             try:
                 _enqueue_seed(state, str(local_path(raw.strip())), CONFIGURED_ROOT_DEPTH,
-                              source="probe_root")
+                              source="probe_root", rescan=True)
             except Exception:  # noqa: BLE001 - an invalid env root is named, not fatal
                 state["scan"].setdefault("unreadable", []).append(raw.strip())
-    if not state["scan"]["queue"]:
-        state["scan"]["message"] = "没有可检索的目录"
+    queued = _queue_scan(state)
+    if not queued:
         _save(db, state)
         return {"status": "IDLE", "queued": 0}
-    state["scan"]["status"] = "QUEUED"
-    state["scan"]["started_at"] = utcnow().isoformat()
-    state["scan"]["message"] = "检索已排队，后台分批进行"
     _save(db, state)
     add_audit(db, actor, "RESOURCE_SCAN_STARTED", "resource_discovery", STATE_KEY,
-              {"queued": len(state["scan"]["queue"])})
+              {"queued": queued})
     db.commit()
-    return {"status": "QUEUED", "queued": len(state["scan"]["queue"])}
+    return {"status": "QUEUED", "queued": queued}
 
 
 def _priority(entry) -> tuple[int, str]:
@@ -426,3 +458,37 @@ def candidates_for_component(db, component_id: str, relative_path: str) -> list[
     state = read_state(db)
     return [row for row in state["resources"]["model_candidates"]
             if row["component_id"] == component_id and row["relative_path"] == relative_path]
+
+
+def verification_candidates(db, catalog: dict) -> list[dict]:
+    """Scan candidates that claim one of this catalog's pinned files, with their stat.
+
+    The index recorded the file by size and pinned digest; the caller still has
+    to hash it before it counts as evidence (``existing_installation.verify_models``
+    does exactly that).  Only a file that is still on disk with the recorded size
+    is offered, so a moved or rewritten file never becomes a source.
+    """
+    catalog_id = str(catalog.get("catalog_id") or "")
+    state = read_state(db)
+    rows: list[dict] = []
+    for row in state["resources"]["model_candidates"]:
+        if catalog_id and row.get("catalog_id") != catalog_id:
+            continue
+        path = Path(str(row.get("path") or ""))
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        if not path.is_file() or stat.st_size != int(row.get("size") or -1):
+            continue
+        rows.append({
+            "component_id": row["component_id"], "relative_path": row["relative_path"],
+            "sha256": row["sha256"], "size": int(row["size"]), "path": str(path),
+            "stat": {
+                "size": stat.st_size,
+                "mtime_ns": getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000)),
+                "device": getattr(stat, "st_dev", None),
+                "inode": getattr(stat, "st_ino", None),
+            },
+        })
+    return rows

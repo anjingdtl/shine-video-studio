@@ -105,6 +105,40 @@ def _known_port(db, root: str) -> int | None:
     return None
 
 
+def _with_scan_candidates(report: dict, candidates: list[dict]) -> dict:
+    """Offer the search index's candidates to the same verifier.
+
+    A renamed weight in a directory the person added is a real file on this
+    machine: the reconciler reads it, hashes it and — if it is the pinned bytes —
+    uses it instead of downloading it again.  The report keeps its shape, so the
+    one verifier (``verify_models``) stays the only judge of "these are the
+    pinned bytes"; the snapshot is recomputed because the candidate list is part
+    of what was measured.
+    """
+    from shine.comfy.workflow import graph_hash
+
+    if not candidates:
+        return report
+    by_key = {(row["component_id"], row["relative_path"]): row for row in report["matches"]}
+    for row in candidates:
+        key = (row["component_id"], row["relative_path"])
+        entry = by_key.get(key)
+        if entry is None:
+            entry = {
+                "component_id": row["component_id"], "relative_path": row["relative_path"],
+                "sha256": row["sha256"], "size": row["size"],
+                "sources": [], "source_stats": {}, "status": "PENDING_HASH",
+            }
+            report["matches"].append(entry)
+            by_key[key] = entry
+        if row["path"] not in entry["sources"]:
+            entry["sources"].append(row["path"])
+            entry.setdefault("source_stats", {})[row["path"]] = row["stat"]
+    payload = {key: value for key, value in report.items() if key != "snapshot"}
+    report["snapshot"] = graph_hash(payload)
+    return report
+
+
 def reconcile_installation(db, settings, *, path: str, project_id: str | None = None,
                            capability: str = "h3", adopt: bool = False, port: int | None = None,
                            actor: str = "local-user", variant_id: str | None = None) -> dict[str, Any]:
@@ -116,8 +150,19 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
 
     ``variant_id`` names the H3 stack the person chose: the bytes are then
     verified against that variant's own catalog, never the default one.
+
+    The reconciler also consumes the resource scan's index: a byte-identical
+    file in a directory the person added is verified, registered and copied into
+    the existing content-addressed cache, so the installer places those bytes
+    locally and never downloads them a second time.
     """
-    from shine.comfyops.existing_installation import inspect, register_verified_packages, verify_models
+    from shine.comfyops import resource_discovery
+    from shine.comfyops.existing_installation import (
+        import_models,
+        inspect,
+        register_verified_packages,
+        verify_models,
+    )
     from shine.services import add_audit
     key = (str(Path(path).resolve()), capability)
     if not _claim(key):
@@ -136,10 +181,25 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
         else:
             catalog = _capability_catalog(capability)
         report = inspect(path, catalog)
+        candidates = resource_discovery.verification_candidates(db, catalog)
+        report = _with_scan_candidates(report, candidates)
         result = verify_models(report, report["snapshot"])
         verified = list(result.get("verified") or [])
         rejected = list(result.get("rejected") or [])
-        registered = register_verified_packages(db, verified, catalog, root=report["root"])
+        candidate_paths = {row["path"] for row in candidates}
+        candidate_dirs = [Path(row["path"]).parent for row in candidates]
+        registered = register_verified_packages(db, verified, catalog, root=report["root"],
+                                                extra_roots=candidate_dirs)
+        # Bytes proved from a search directory are copied into the existing
+        # content-addressed cache: the installer then places them locally, and
+        # the download plan for these files is empty.  The person's own file is
+        # never moved.
+        from_cache = [row for row in verified if str(row.get("source")) in candidate_paths]
+        imported: list[dict] = []
+        if from_cache:
+            imported = import_models(
+                settings, {"matches": from_cache, "snapshot": report["snapshot"]},
+                report["snapshot"]).get("imported") or []
         verified_keys = {(row["component_id"], row["relative_path"], row["sha256"], row["size"])
                          for row in verified}
         required = _required_keys(catalog, capability)
@@ -151,6 +211,7 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
             "verified_components": sorted({row["component_id"] for row in verified}),
             "rejected_components": sorted({row["component_id"] for row in rejected}),
             "registered": sorted(registered), "adopted": False,
+            "scan_candidates": len(candidates), "cached_from_scan": len(imported),
         }, project_id=project_id)
         payload: dict[str, Any] = {
             "status": "RECONCILED",
@@ -164,8 +225,10 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
             "registered": sorted(registered),
             "complete": complete,
             "missing_components": sorted({row[0] for row in required - verified_keys}),
+            "scan_candidates": len(candidates),
+            "cached_from_scan": [row["sha256"] for row in imported],
             "downloaded_bytes": 0,
-            "copied_bytes": 0,
+            "copied_bytes": sum(int(row.get("size") or 0) for row in imported),
             "user_install_modified": False,
         }
         if adopt:

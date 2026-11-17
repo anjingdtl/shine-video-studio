@@ -151,13 +151,12 @@ type Props = {
   /** 用户选定的 H3 变体：h3 能力的事实必须跟着它走，而不是默认那套。 */
   variantId?: string | null;
   onPrepare?: (capability: CapabilityKey, summary: SetupSummary) => void | Promise<void>;
-  onReconcile?: (capability: CapabilityKey) => void | Promise<void>;
   onGoSettings?: () => void;
   onSummary?: (summary: SetupSummary | null) => void;
 };
 
 export function SetupEnvironmentStatus({
-  projectId, readOnly = false, refreshEpoch = 0, variantId = null, onPrepare, onReconcile,
+  projectId, readOnly = false, refreshEpoch = 0, variantId = null, onPrepare,
   onGoSettings, onSummary,
 }: Props) {
   const [summary, setSummary] = useState<SetupSummary | null>(null);
@@ -209,13 +208,11 @@ export function SetupEnvironmentStatus({
       // 选哪一套必须是人点的：这里不替人挑列表第一项。
       return;
     }
-    if (action.action === 'RECONCILE') {
-      if (onReconcile && action.capability) { await onReconcile(action.capability); await load(); }
-      return;
-    }
-    if (action.action === 'TRIAL' || action.action === 'PREPARE_ENVIRONMENT') {
-      // 试镜不再是一个独立入口：运行核验交给同一个「一键准备」后台任务，
-      // 首次真实 H3 运行走「开拍」。
+    if (action.action === 'TRIAL' || action.action === 'PREPARE_ENVIRONMENT'
+        || action.action === 'RECONCILE') {
+      // 只有一个执行入口：核验、登记、下载、绑定、运行核验都是同一个「一键准备」
+      // 后台任务的步骤。页面不再直调 /setup/reconcile——那是绕过任务、关页面就断
+      // 的旁路，且与任务各自推进同一件事。
       if (onPrepare && action.capability) await onPrepare(action.capability, summary as SetupSummary);
       return;
     }

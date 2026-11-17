@@ -1,11 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
-import { api, json, knownFreeBytes, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
+import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupCenter } from './SetupCenter';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { GuideTip } from './GuideTip';
-import { approveAndExecuteSetupPlan, isQueuedInstallation, waitForInstallationAttempt } from '../setupExecution';
 
 type Tab = 'env' | 'models' | 'extra';
 
@@ -83,6 +82,7 @@ export default function DirectorSetupPanel({
   const [image, setImage] = useState<ImageState | null>(null);
   const [extraBusy, setExtraBusy] = useState('');
   const [extraNote, setExtraNote] = useState('');
+  const [prepRunning, setPrepRunning] = useState(false);
 
   useEffect(() => { setTab(focusTab); }, [focusTab]);
 
@@ -101,6 +101,21 @@ export default function DirectorSetupPanel({
 
   useEffect(() => { void load(); }, [load, refreshEpoch]);
 
+  // 后台整备在跑时跟读（每 5s），结束后停：进度来自安装记录，不是页面自己的状态。
+  useEffect(() => {
+    if (!prepRunning) return;
+    let cancelled = false;
+    const tick = async () => {
+      await load();
+      const summary = await api<{ preparation?: { status?: string } }>(
+        `/setup/summary${projectId ? `?project_id=${projectId}` : ''}`).catch(() => null);
+      const status = summary?.preparation?.status;
+      if (!cancelled && status !== 'QUEUED' && status !== 'RUNNING') setPrepRunning(false);
+    };
+    const timer = window.setInterval(() => { void tick(); }, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [prepRunning, load, projectId]);
+
   const mode = system?.production_mode?.mode ?? null;
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
@@ -112,28 +127,27 @@ export default function DirectorSetupPanel({
     ? (system?.production_mode?.label ?? '已就绪')
     : (system?.production_mode?.detail ?? '尚未检查');
 
+  /**
+   * 可选能力也只有「一键准备」这一个执行入口。
+   *
+   * 页面不再自己排安装计划、也不再等一次下载结束：检索复用、核验、下载、登记
+   * 都是后台任务的步骤，关掉页面也会继续。进度只读已有的安装记录
+   * （/setup/environment 的 advisory_reviews），与基础配置页读同一份事实。
+   */
   async function installAdvisory(kind: 'VLM' | 'ASR') {
     if (!projectId) return;
-    const model = kind === 'VLM' ? 'qwen3-vl-8b-fp8' : 'qwen3-asr-0.6b';
     const label = kind === 'VLM' ? '画面审片' : '语音核对';
-    if (!window.confirm(`下载并启用${label}模型？\n这是独立能力，只给建议、不阻断出片；权重按固定清单逐字节核验。`)) return;
+    if (!window.confirm(`准备${label}模型？\n这是可选能力，只给建议、不阻断出片；下载、核验与登记都由后台「一键准备」完成。`)) return;
     setExtraBusy(kind);
     setExtraNote('');
     try {
-      const storage = await api<{ free_bytes: number }>('/setup/storage');
-      const plan = await api<{ plan_id: string; sha256: string; status: string; download_bytes: number }>(
-        '/setup/install-plan', json('POST', {
-          catalog: 'h3-ref2va-windows-x64',
-          components: [model],
-          project_id: projectId,
-          disk_free: knownFreeBytes(storage.free_bytes),
-        }),
-      );
-      const queued = await approveAndExecuteSetupPlan({ ...plan, kind: 'INSTALL' }, () => undefined, { wait: false });
-      if (isQueuedInstallation(queued)) {
-        await waitForInstallationAttempt(queued.attempt_id);
-      }
-      setExtraNote(`${label}模型已下载并核验；可以在审片设置里启用它。`);
+      await api('/setup/prepare/execute', json('POST', {
+        project_id: projectId,
+        capabilities: [kind.toLowerCase()],
+        verify_runtime: false,
+      }));
+      setExtraNote(`${label}已交给后台整备（关闭页面也会继续）；进度读本机安装记录。`);
+      setPrepRunning(true);
       await load();
       await onRefresh();
     } catch (error) {
@@ -299,7 +313,9 @@ export default function DirectorSetupPanel({
         </div>
       </section>
 
-      {extraNote && <p className="run-hint" role="status">{extraNote}</p>}
+      {extraNote && <p className="run-hint" role="status">
+        {extraNote}{prepRunning ? '（后台整备进行中…）' : ''}
+      </p>}
     </div>}
 
     <footer className="page-footer"><span>SHINE VIDEO STUDIO <i>·</i> DIRECTOR SETUP</span><span>所有配置保存在本机</span></footer>

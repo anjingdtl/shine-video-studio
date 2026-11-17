@@ -237,6 +237,9 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
     # 唯一裁决：每镜的素材缺口直接读 journey 的同一个判断函数（Ref2VA 每镜至少
     # 一个参考、点名人物必须有主体主素材），需求页不再按方案槽位另判一套。
     shot_problems: dict[str, list[str]] = {}
+    # 哪几镜自己已经带着可绑成参考的需求（人物 / 场景）。道具不算参考：采纳执行者
+    # 不会把道具绑成参考图，拿它当"这镜已经有参考"会让镜头一直停在缺参考上。
+    referenced: set[str] = set()
     preparations: list[dict[str, Any]] = []
 
     def note(family: str, name: str, *, shot_id: str, episode_id: str,
@@ -288,6 +291,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                     _note_local(local, "character", canonical,
                                 variant=(reference if canonical != reference else None),
                                 cited=True)
+                    referenced.add(shot.id)
                     note("character", canonical, shot_id=shot.id, episode_id=episode.episode_id,
                          description=identity_by_name.get(canonical)
                          or identity_by_name.get(reference) or "",
@@ -303,6 +307,8 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                         continue
                     canonical = aliases.get(character_reference_key(name), name)
                     _note_local(local, family, canonical, cited=True)
+                    if family in {"character", "scene"}:
+                        referenced.add(shot.id)
                     note(family, canonical, shot_id=shot.id, episode_id=episode.episode_id,
                          description=str(requested.get("description") or "")[:600],
                          cited_by_shot=True, user_specified=True)
@@ -315,6 +321,8 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                     family = asset.role if asset.role in {"character", "scene", "prop"} else "prop"
                     entity = str(asset.entity_id or asset.filename)
                     _note_local(local, family, entity, cited=True)
+                    if family in {"character", "scene"}:
+                        referenced.add(shot.id)
                     note(family, entity, shot_id=shot.id, episode_id=episode.episode_id,
                          description=str((asset.provenance or {}).get("description") or "")[:300],
                          cited_by_shot=True)
@@ -326,6 +334,8 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                         continue
                     entity = str(asset.entity_id or asset.filename)
                     _note_local(local, str(asset.role), entity, variant=(link.role or None), cited=True)
+                    if asset.role in {"character", "scene"}:
+                        referenced.add(shot.id)
                     note(str(asset.role), entity, shot_id=shot.id,
                          episode_id=episode.episode_id, variant=(link.role or None),
                          cited_by_shot=True)
@@ -350,17 +360,23 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                     continue
                 _note_local(local, "scene", name, cited=True)
                 for shot_id in shot_ids:
+                    referenced.add(str(shot_id))
                     note("scene", name, shot_id=str(shot_id), episode_id=episode.episode_id,
                          description=str(loc.get("description") or "")[:300], cited_by_shot=True)
-            # 仅当这一场的镜头没有任何其它参考（人物/道具/已绑定）时，才为 Ref2VA
-            # 补一张场景参考；描述用剧本真实场景文字，不用场次序号标题造无关图。
-            if not local and shot_ids:
+            # Ref2VA 每镜至少一个参考，但「这一场有没有素材」不是判据：同一场里
+            # 一镜有人物、另一镜只有旁白时，整场判定会把旁白镜漏掉（这正是 23 镜
+            # 项目 1d14b472 报 SHOT_REFERENCE_MISSING 却不在清单里的原因）。这里
+            # 逐镜读 journey 的同一份裁决：只有真正没有可绑参考的镜头才补场景需求，
+            # 名字用真实场次标题——已有场景主素材时它会直接命中复用。
+            lacking = [shot_id for shot_id in (str(row) for row in shot_ids)
+                       if "SHOT_REFERENCE_MISSING" in shot_problems.get(shot_id, [])
+                       and shot_id not in referenced]
+            if lacking:
                 prose = " ".join(sp.text for sp in scene.spans)[:300] if scene is not None else ""
-                fallback = str(scene_key)
-                _note_local(local, "scene", fallback)
-                for shot_id in shot_ids:
-                    note("scene", fallback, shot_id=str(shot_id),
-                         episode_id=episode.episode_id, description=prose or scene_name)
+                _note_local(local, "scene", scene_name)
+                for shot_id in lacking:
+                    note("scene", scene_name, shot_id=shot_id, episode_id=episode.episode_id,
+                         description=prose or scene_name)
             # Core props the catalogue already established for this section.
             for prop in (catalog.get("props") or []):
                 if str(section_id) not in [str(item) for item in prop.get("section_ids") or []]:

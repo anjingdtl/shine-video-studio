@@ -18,7 +18,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from shine.director.models import ShotSubtitle
-from shine.models import Job, Shot, SubtitleTrack, utcnow
+from shine.models import Shot, SubtitleTrack, utcnow
 
 MAX_LINES_PER_SHOT = 12
 MAX_SUBTITLE_TEXT = 200
@@ -149,34 +149,46 @@ def episode_shot_subtitles(db, project, episode_id: str) -> dict[str, Any]:
     }
 
 
-def _real_clip_durations(db, project_id: str, episode_id: str) -> dict[str, float]:
-    """The delivered, real length of each shot of this episode, when it exists."""
-    from shine.media.delivery_models import DeliveryOrder
+def _selected_cut_timing(db, project_id: str, episode_id: str) -> dict[str, Any]:
+    """The real cut of the version this episode currently points at.
 
-    order = db.scalars(select(DeliveryOrder).where(
-        DeliveryOrder.project_id == project_id,
-        DeliveryOrder.scope_kind == "episode",
-        DeliveryOrder.scope_id == episode_id,
-        DeliveryOrder.status == "COMPLETED",
-    ).order_by(DeliveryOrder.version.desc())).first()
-    if order is None or not order.edl_payload:
-        return {}
-    clips = [row for row in (order.edl_payload.get("clips") or []) if row.get("job_id")]
-    if not clips:
-        return {}
-    jobs = {
-        row.id: row for row in db.scalars(select(Job).where(
-            Job.id.in_([clip["job_id"] for clip in clips]))).all()
-    }
-    durations: dict[str, float] = {}
-    for clip in clips:
-        job = jobs.get(clip["job_id"])
-        if job is None:
+    The delivered edit table is the only authority on where a shot really starts
+    in the reel: the run's episode row names the selected ``DeliveryOrder`` (a
+    re-cut is a new version and the pointer moves with it), and that order's
+    ``edl_payload`` carries the real clip order with ``in_s`` / ``out_s``.  The
+    old lookup asked for ``scope_id == episode_id`` and ``status == COMPLETED``,
+    which no delivered row satisfies — so every subtitle track silently fell back
+    to planned lengths while the picture used the real cut.
+
+    Each entry is ``{shot_id: {start_s, in_s, duration_s}}``; ``start_s`` is the
+    clip's real start in the reel, ``in_s`` the source offset the cut begins at.
+    """
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.production.models import ProductionRunEpisode
+
+    rows = db.scalars(select(ProductionRunEpisode).where(
+        ProductionRunEpisode.project_id == project_id,
+        ProductionRunEpisode.episode_id == episode_id,
+        ProductionRunEpisode.delivery_order_id.isnot(None),
+    ).order_by(ProductionRunEpisode.updated_at.desc())).all()
+    for episode in rows:
+        order = db.get(DeliveryOrder, episode.delivery_order_id or "")
+        if order is None or order.status != "DELIVERED" or not order.edl_payload:
             continue
-        length = float(clip.get("out_s") or 0) - float(clip.get("in_s") or 0)
-        if length > 0:
-            durations[job.shot_id] = round(length, 3)
-    return durations
+        clips: dict[str, dict[str, float]] = {}
+        offset = 0.0
+        for clip in order.edl_payload.get("clips") or []:
+            shot_id = str(clip.get("shot_id") or "")
+            in_s = float(clip.get("in_s") or 0.0)
+            out_s = float(clip.get("out_s") or 0.0)
+            length = round(out_s - in_s, 3)
+            if shot_id and length > 0:
+                clips[shot_id] = {"start_s": round(offset, 3), "in_s": round(in_s, 3),
+                                  "duration_s": length}
+                offset += length
+        if clips:
+            return {"order_id": order.id, "version": order.version, "clips": clips}
+    return {}
 
 
 def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str = "user") -> dict[str, Any]:
@@ -193,29 +205,45 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
             "code": "EPISODE_SUBTITLE_EMPTY",
             "message": "这一集还没有冻结的镜头字幕；先给至少一镜配置并冻结字幕",
         })
-    real = _real_clip_durations(db, project.id, episode_id)
-    basis = "actual" if real and all(row["shot_id"] in real for row in shots) else "planned"
+    # 字幕与装配读同一张剪辑表：真实成片在，时码就按它的顺序和 in_s/out_s 排；
+    # 只有还没有真实交付时才回落到计划时长（并在结果里如实说明）。
+    cut = _selected_cut_timing(db, project.id, episode_id)
+    actual = bool(cut) and all(row["shot_id"] in cut["clips"] for row in shots)
+    basis = "actual" if actual else "planned"
     warnings: list[str] = []
     if basis == "planned":
         warnings.append("还没用真实成片时长：字幕时间按每镜计划时长排布，出片后建议重新生成一次")
+    ordered = (sorted(shots, key=lambda row: cut["clips"][row["shot_id"]]["start_s"])
+               if basis == "actual" else shots)
 
     cues: list[SubtitleCue] = []
     offset = 0.0
     index = 0
-    for shot in shots:
-        duration = float(real.get(shot["shot_id"]) or shot["duration_target_s"] or 0)
+    for shot in ordered:
+        if basis == "actual":
+            clip = cut["clips"][shot["shot_id"]]
+            base, source_in = float(clip["start_s"]), float(clip["in_s"])
+            duration = float(clip["duration_s"])
+        else:
+            base, source_in = offset, 0.0
+            duration = float(shot["duration_target_s"] or 0)
+            offset += duration
         for line in shot["lines"] if shot["status"] == "FROZEN" else []:
-            start = offset + float(line["start_s"])
-            end = offset + float(line["end_s"])
-            if end > offset + duration + 0.05:
+            # 每镜字幕是相对这一镜自己的时间写的；被裁掉的片头不再出现在成片里，
+            # 所以整行落在 in_s 之前就丢掉，跨过切点的行从片段起点开始。
+            start = base + float(line["start_s"]) - source_in
+            end = base + float(line["end_s"]) - source_in
+            if end <= base + 0.001:
+                continue
+            start = max(start, base)
+            if end > base + duration + 0.05:
                 warnings.append(f"镜头 {shot['position']} 的字幕超出实际片段，已按片段末尾截断")
-                end = offset + duration
+                end = base + duration
                 if end <= start:
                     continue
             index += 1
             cues.append(SubtitleCue(index=index, start_s=round(start, 3),
                                     end_s=round(end, 3), text=str(line["text"])))
-        offset += duration
     if not cues:
         raise HTTPException(409, {"code": "EPISODE_SUBTITLE_EMPTY",
                                   "message": "冻结的字幕没有落在这一镜的时长内"})
@@ -253,6 +281,9 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
         "status": row.status,
         "cue_count": len(cues),
         "basis": basis,
+        # 字幕跟随的是哪一版成片：与装配读同一张剪辑表，页面不必再猜。
+        "cut_order_id": cut.get("order_id") if basis == "actual" else None,
+        "cut_version": cut.get("version") if basis == "actual" else None,
         "warnings": warnings,
         "sha256": row.sha256,
         "cues": row.cues,

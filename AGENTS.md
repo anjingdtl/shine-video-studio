@@ -1857,3 +1857,33 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   三处一起收敛、无运行不轮询）。前端全量 vitest 77 文件 / 393 例、tsc、build 全绿；
   真实浏览器复测⑥全绿（7/7 阶段、6/6 镜、已交付 1 集、右轨无待处理），⑦验收入口齐备。
 - 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-17 素材缺口/一次采纳/字幕剪辑表/整备一条链（本轮新增）
+
+- **每镜素材需求只读一份逐镜裁决**。`director/requirements.py` 不再用「这一场有没有素材」
+  决定是否补场景参考；只有 journey `_shot_material_problems` 报 `SHOT_REFERENCE_MISSING`
+  且本镜自己没有任何可绑参考（人物/场景；道具不算）时，才按真实场次标题补该镜的场景
+  需求，已有同名场景主素材时直接复用。已有参考的镜头不生成填充图。
+- **同一镜的素材一次采纳、一次写入**。`materialprep/service.py::bind_adopted_masters_to_shots`
+  先把同一镜的全部确认合成为目标集合，再写一次 `shot.bindings` 并同步一次
+  `required_asset_ids`；同一人物/场景换主素材只留新的那份，其他有效引用保留。
+  绑定相等判定复用 `services.bindings_unchanged`（读取前从台账重读），重复确认不写第二遍。
+  冻结/在途/已通过镜头仍受 `protected_shot_ids` 保护。
+- **⑦ 字幕与装配读同一张实际剪辑表**。`director/subtitles.py` 沿当前所选成片版本的
+  `ProductionRunEpisode.delivery_order_id` 读 `DeliveryOrder.edl_payload`（只认
+  `DELIVERED`），按真实顺序与 `in_s`/`out_s` 计算时码；换版只跟随指针，重新装配仍复用
+  原镜头产物。六镜成片第 6 镜起点 49.912s（计划值 49.000s 不再使用）。
+- **检索 → 核验 → 复用 → 下载一条链**。添加目录走同一个 `_queue_scan`（有种子即 `QUEUED`）；
+  显式重检索按 `rescan` 重走用户目录与固定盘；`reconcile_installation` 消费
+  `resource_discovery.verification_candidates`，命中则登记并把字节复制进现有缓存，
+  `create_install_plan` 的 `download_bytes` 为 0。`setup_summary` 只用当前证据
+  （`verify_receipt` / `cache_candidates`）判定 `FILES_FOUND`/`FILES_VERIFIED`，
+  `in_place` 才从缺件里排除；旧 `ModelPackage` 登记不再压制缺件。
+- **基础配置只有「一键准备」一个执行入口**：`RECONCILE` 与审片/语音下载都提交
+  `/setup/prepare/execute`，进度读已有安装记录。`worker.py::run_configured_once` 里
+  文本队列先于资源扫描（突发窗口仍放行扫描），整备 `:waiting` 与只搬可选审片字节的
+  安装计划（`deployment.review_only_plan`）不再独占 tick。
+- 回归：`test_material_shot_scene_gap`（2）、`test_material_adoption_one_write`（5）、
+  `test_episode_subtitle_cut`（3）、`test_setup_chain_convergence`（4）、
+  `test_worker_batch_priority`（6）、前端 `setupSingleExecutor`（2）。验收记录见
+  `docs/ACCEPTANCE_20261117_R3_MATERIAL_SETUP_UNIQUENESS.md`。
