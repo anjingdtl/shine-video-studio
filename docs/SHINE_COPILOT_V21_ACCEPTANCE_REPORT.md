@@ -130,5 +130,8 @@
 ## 6. CI 与交付
 
 - 分支：`feat/shine-copilot-v21-auto-sync`（基于 V2 HEAD），不新建其它分支、不改 main。
-- CI：L1 在 `uv sync` 后执行 `generate_shine_copilot_contracts --check`，再跑 `run_tests.py quick`；L2 集成与 Frontend 既有门禁不变。最新运行结论见 PR。
-- PR：依赖 V2 PR #56；V2 未合并期间 base 为 V2 分支，保持 OPEN，不自行合并。
+- PR：`#59`（https://github.com/anjingdtl/shine-video-studio/pull/59），base 为 V2 分支，保持 OPEN，不自行合并。
+- CI：run `44010753962`（`7258ce1`）— Frontend build、L1 backend quick（含
+  `generate_shine_copilot_contracts --check`）、L2 backend integration **全部 success**；
+  L3 full/Windows/browser E2E 按 PR 级跳过。
+- 本轮未改 `main`（`f066357f`）；PR #55、#56 均保持 OPEN。
