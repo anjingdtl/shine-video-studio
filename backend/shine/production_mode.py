@@ -35,7 +35,10 @@ _CODE_ZH = {
     "ACTIVE_RUNTIME_CONFIGURATION_INVALID": "本机制作环境配置未通过完整性检查，需要重新配置。",
     "ACTIVE_RUNTIME_OFFLINE_SIMULATION_FORBIDDEN": "离线演练模式与真实制作不能同时开启。",
     "ACTIVE_RUNTIME_RECIPE_CHANGED": "本机受管渲染器的配置文件发生了变化。",
-    "WORKER_OFFLINE": "后台制作服务未在线，请用启动器重新打开工作台后再试。",
+    "WORKER_OFFLINE": (
+        "后台 Worker 未运行，真实制作会停在这里。"
+        "在页面左下角「工作栈」点「启动 Worker」即可继续，不用重开启动器。"
+    ),
 }
 
 

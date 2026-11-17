@@ -24,8 +24,11 @@ _CATEGORY_LABELS = {
 _CODE_RULES: dict[str, dict[str, str]] = {
     "WORKER_OFFLINE": {
         "category": "ENVIRONMENT",
-        "symptom": "后台制作服务未在线，任务不会继续推进。",
-        "next_step": "用启动器重新打开工作台；后台恢复后原任务会继续。",
+        "symptom": "后台 Worker 未运行，制作任务不会继续推进。",
+        # The same sentence the verdict shows, and the same executor: the work
+        # stack already starts the Worker. Sending the person to the launcher
+        # was a second instruction for one fact.
+        "next_step": "在页面左下角「工作栈」点「启动 Worker」即可恢复；后台恢复后原任务会继续，不用重开启动器。",
     },
     "REAL_RUNTIME_NOT_ACTIVATED": {
         "category": "CONFIG",
@@ -193,12 +196,21 @@ def _facts(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     ]
     capabilities = ((snapshot.get("setup") or {}).get("summary") or {}).get("capabilities") or {}
     missing = [
-        f"{row.get('label')}（缺 {row.get('missing_count')} 个文件）"
+        f"{row.get('label')}（缺 {row.get('missing_count')} 个文件"
+        + ("，可选增强" if row.get("optional") else "")
+        + "）"
         for row in capabilities.values()
         if isinstance(row, dict) and row.get("missing_count")
     ]
     if missing:
-        facts.append({"key": "缺失资源", "value": "、".join(missing[:5]), "source": "/api/v1/setup/summary"})
+        facts.append({
+            "key": "缺失资源",
+            # Optional review capabilities never block a real shoot; saying so
+            # here keeps the evidence list from reading as "you must install
+            # 9.9 GiB before you can start".
+            "value": "、".join(missing[:5]) + "；标了「可选增强」的缺件不影响出片。",
+            "source": "/api/v1/setup/summary",
+        })
     if task:
         attempt = task.get("attempt") or {}
         facts.append(

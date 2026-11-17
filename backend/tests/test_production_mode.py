@@ -112,7 +112,11 @@ def test_worker_offline_blocks_ready(prep, candidate):  # noqa: F811
     mode = _mode(client)
     assert mode['mode'] == 'BLOCKED'
     assert mode['code'] == 'WORKER_OFFLINE'
-    assert '后台制作服务' in mode['detail']
+    # The one action is the work stack's own "start Worker"; sending the person
+    # back to the launcher was the wrong executor and read as "the machine is
+    # not configured".
+    assert 'Worker 未运行' in mode['detail']
+    assert '启动 Worker' in mode['detail']
 
 
 def test_real_running_job_and_live_series_report_running(prep, candidate):  # noqa: F811

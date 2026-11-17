@@ -202,10 +202,17 @@ def llm_readiness(db, *, workflow: str | None = None, secrets=None):
             'readiness_status': readiness,
             **evidence_status,
         })
-    status = 'READY' if all(row['code'] is None for row in rows) else 'BLOCKED'
+    # One verdict, and it is the production one: only the roles the product
+    # actually needs may block "text model ready".  ``support_agent`` is
+    # declared optional (it degrades to offline rule diagnosis), so routing it
+    # or not can never turn a ready machine into "one role has no model" -
+    # that reading sent people to configure a model the film does not need.
+    required_rows = [row for row in rows if row.get('required')]
+    optional_rows = [row for row in rows if not row.get('required')]
+    status = 'READY' if all(row['code'] is None for row in required_rows) else 'BLOCKED'
     if status == 'BLOCKED':
         generation_status = 'BLOCKED'
-    elif all(row['readiness_status'] == READINESS_GENERATION_READY for row in rows):
+    elif required_rows and all(row['readiness_status'] == READINESS_GENERATION_READY for row in required_rows):
         generation_status = 'GENERATION_READY'
     else:
         generation_status = 'CONNECTION_READY'
@@ -213,7 +220,14 @@ def llm_readiness(db, *, workflow: str | None = None, secrets=None):
         'status': status,
         'workflow': workflow or 'all_text',
         'role_count': len(rows),
+        'required_role_count': len(required_rows),
         'roles': rows,
+        'optional_roles': [
+            {'role': row['role'], 'code': row['code'], 'required': False,
+             'label': row.get('label_zh')}
+            for row in optional_rows
+        ],
+        'optional_missing': [row['role'] for row in optional_rows if row['code']],
         'verification': 'CONNECTION_ONLY_NOT_GENERATION',
         'generation_verification': (
             'GENERATION_TESTED_NOT_QUALITY_ACCEPTANCE'

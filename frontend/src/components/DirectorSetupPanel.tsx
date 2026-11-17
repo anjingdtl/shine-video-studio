@@ -27,7 +27,13 @@ type VoiceReadiness = {
   roles: Array<{ role: string; code: string | null; files_present?: boolean | null }>;
 };
 
-type LlmReadiness = { status: string; roles: Array<{ role: string; profile_name: string | null; code: string | null }> };
+type LlmReadiness = {
+  status: string;
+  roles: Array<{ role: string; profile_name: string | null; code: string | null; required?: boolean; label_zh?: string }>;
+  /** Optional roles (the copilot's explanation layer) that have no model yet.
+   *  They never decide whether the film can be made. */
+  optional_missing?: string[];
+};
 
 type ImageState = { configured: boolean; layer: string; renderer: { state: string }; upstream: { required_bytes: number } };
 
@@ -121,13 +127,22 @@ export default function DirectorSetupPanel({
   const mode = system?.production_mode?.mode ?? null;
   const ready = mode === 'READY' || mode === 'RUNNING';
   const llmReady = llm?.status === 'READY';
-  const missingRoles = (llm?.roles ?? []).filter((row) => row.code);
+  // A role without a model only means "not configured" when the product needs
+  // it.  The copilot's explanation layer is optional: reporting it as a missing
+  // 工种 next to "真实制作已就绪" is what sent people to configure a model the
+  // film never uses.
+  const missingRoles = (llm?.roles ?? []).filter((row) => row.code && row.required !== false);
+  const optionalMissing = llm?.optional_missing ?? [];
   /** The same verdict the top-right badge and the expert settings page read.
    *  One machine, one answer: a card that says "ready" while the badge says
-   *  "not available" leaves the person with no way to tell which is true. */
+   *  "not available" leaves the person with no way to tell which is true.
+   *  "Still loading" is not "not ready": before the verdict arrives the card
+   *  says so instead of raising a warning triangle. */
+  const verdictPending = system?.production_mode == null;
   const envLabel = ready
     ? (system?.production_mode?.label ?? '已就绪')
-    : (system?.production_mode?.detail ?? '尚未检查');
+    : verdictPending ? '正在检查本机…' : (system?.production_mode?.detail ?? '尚未检查');
+  const envTone = ready ? 'ok' : verdictPending ? 'checking' : 'pending';
 
   /**
    * 可选能力也只有「一键准备」这一个执行入口。
@@ -175,14 +190,16 @@ export default function DirectorSetupPanel({
     <MachineProgressBanner refreshEpoch={refreshEpoch + prepTick} />
 
     <section className="setup-status-grid">
-      <div className={`setup-status ${ready ? 'ok' : 'pending'}`}>
+      <div className={`setup-status ${envTone}`}>
         <div className="setup-status-icon"><Cpu size={16} /></div>
         <div><b>本机生成环境</b><span>{envLabel}</span></div>
-        {ready ? <Check size={15} /> : <AlertTriangle size={15} />}
+        {ready ? <Check size={15} /> : verdictPending ? null : <AlertTriangle size={15} />}
       </div>
       <div className={`setup-status ${llmReady ? 'ok' : 'pending'}`}>
         <div className="setup-status-icon"><Wand2 size={16} /></div>
-        <div><b>文本模型（LLM）</b><span>{llmReady ? '连接检查通过，可用于分镜与导演' : missingRoles.length ? `还有 ${missingRoles.length} 个工种没配模型` : '尚未配置'}</span></div>
+        <div><b>文本模型（LLM）</b><span>{llmReady
+          ? (optionalMissing.length ? '连接检查通过；AI 管家解释层未配（可选，不影响出片）' : '连接检查通过，可用于分镜与导演')
+          : missingRoles.length ? `还有 ${missingRoles.length} 个工种没配模型` : '尚未配置'}</span></div>
         {llmReady ? <Check size={15} /> : <AlertTriangle size={15} />}
       </div>
       <div className={`setup-status ${vlm?.status === 'READY' || asr?.status === 'READY' ? 'ok' : ''}`}>

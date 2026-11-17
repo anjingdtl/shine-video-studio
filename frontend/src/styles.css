@@ -921,6 +921,7 @@ fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}
 .setup-status{display:flex;align-items:center;gap:10px;padding:11px 13px;border:1px solid var(--line);border-radius:9px;background:var(--paper)}
 .setup-status.ok{border-color:var(--ok-line);background:var(--ok-bg-2)}
 .setup-status.pending{border-color:var(--warn-line);background:var(--warn-bg-3)}
+.setup-status.checking{border-color:var(--line);background:var(--paper)}
 .setup-status-icon{width:28px;height:28px;border-radius:7px;display:grid;place-items:center;background:var(--line-soft);color:var(--olive-mid)}
 .setup-status.ok .setup-status-icon{background:var(--ok-bg);color:var(--ok-ink-2)}
 .setup-status b,.setup-status span{display:block}

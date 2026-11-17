@@ -500,6 +500,13 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
     unverified = [w["component_id"] for w in weights if w["prepared"] and not w["verified"]]
     missing_profiles = [row["name"] for row in profiles if not row["registered"]]
     unvalidated = [row["name"] for row in profiles if row["registered"] and not row["validated"]]
+    # A real, passed, non-stale render of THIS variant is the strongest runtime
+    # evidence there is: the graph ran on the real renderer and produced a shot
+    # that passed technical QC.  Requiring each sibling profile to be probed
+    # one by one on top of that made one card say "已真实验证" and "还没有核对
+    # 4 个方案" at the same time - two verdicts for one fact.  The weaker
+    # evidence is now reported, never used as a second gate.
+    render_proves_runtime = render is not None
 
     layers: list[dict[str, Any]] = []
     # The five layers are a dependency order: a layer can only be done when
@@ -541,10 +548,13 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
 
     if blocked:
         add("PENDING", "等方案登记后，才能在本机真实渲染器上核对节点。")
-    elif unvalidated:
+    elif unvalidated and not render_proves_runtime:
         add("PENDING", "这些方案还没有在本机真实渲染器上核对过节点：" + "、".join(unvalidated) + "。",
             profiles=unvalidated)
         blocked = True
+    elif unvalidated:
+        add("DONE", "已用这个变体真实出过片，运行链路已由这次出片证明；"
+                     "其余方案尚未逐个核对：" + "、".join(unvalidated) + "（不阻断）。")
     else:
         add("DONE", "方案已在受管渲染器上核对过节点与输入。")
 
@@ -578,7 +588,9 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
     files_found = bool(weights) and all(row["prepared"] for row in weights)
     files_verified = bool(weights) and all(row["verified"] for row in weights)
     instance_bound = bool(weights) and all(row["consumable"] for row in weights)
-    workflow_validated = bool(profiles) and all(row["validated"] for row in profiles)
+    workflow_validated = bool(profiles) and (
+        all(row["validated"] for row in profiles) or render_proves_runtime
+    )
     trial_ready = bool(files_verified and instance_bound and workflow_validated)
     if files_verified and not instance_bound and next_step["code"] not in {
         "PROFILE_NOT_REGISTERED", "PROFILE_NOT_VALIDATED",
@@ -609,6 +621,11 @@ def readiness(db: Session, settings, binding, project_id: str) -> dict[str, Any]
         "reached_layer": LAYER_IDS[reached] if reached < len(LAYER_IDS) else LAYER_IDS[-1],
         "reached_label": LAYER_LABELS[LAYER_IDS[reached]] if reached < len(LAYER_IDS) else LAYER_LABELS[LAYER_IDS[-1]],
         "production_ready": reached >= len(LAYERS),
+        # Exposed at the top level as well: callers (the machine capability
+        # card) read this one fact and must not re-derive it from a different
+        # field name, which is how "已真实验证" and "运行核对未完成" coexisted.
+        "workflow_validated": workflow_validated,
+        "render_verified": render is not None,
         # Seven separate facts.  ``available`` (the historic production gate)
         # is not one of them: a file on disk is never a runtime claim.
         "facts": {
