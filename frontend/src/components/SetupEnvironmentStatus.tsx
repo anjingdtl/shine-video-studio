@@ -4,6 +4,7 @@ import {
 } from 'lucide-react';
 import { api, json } from '../api';
 import type { SetupVerdict } from '../api';
+import { describeBlocker } from '../errorActions';
 
 /**
  * 「制作环境」的唯一事实视图。
@@ -408,9 +409,14 @@ export function SetupEnvironmentStatus({
               </li>)}
             </ol>
           </details>
-          {preparation.status === 'FAILED' && <p className="form-error">
-            {preparation.error ?? '准备没有完成'}：已经在前面完成的步骤会保留，不需要从头再来。
-          </p>}
+          {preparation.status === 'FAILED' && (() => {
+            // 失败原因挂同一张错误码映射表：裸类名（ValueError）不是原因。
+            const fault = describeBlocker(preparation.error ?? undefined, preparation.message ?? '');
+            return <p className="form-error">
+              {fault.reason}{fault.why ? ` ${fault.why}` : ''}
+              已经在前面完成的步骤会保留，不需要从头再来。
+            </p>;
+          })()}
         </div>;
       })()}
 

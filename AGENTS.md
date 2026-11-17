@@ -1939,3 +1939,30 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   （本机现为 `D:/Shine/data`）；迁移用 `robocopy /E` 复制、逐项比对文件数与字节后
   再删源，改 `.env` 的 `SHINE_DATA_DIR` 即完成。删源前确认库里没有素材路径引用旧目录
   （素材按相对路径存于 `<data>/assets`）。
+
+## 2026-11-17 能力卡缺件与文件裁决同源轮（用户报障：已核验却报缺件 / 审片 0 GiB 缺件 / 整备停步裸 ValueError）
+
+- **缺件表与「① 文件」是同一个裁决**。`capability_report` 对每个文件只分类一次：
+  `missing_files`/`missing_bytes` 只列**需要外取**的字节（未落位到消费根、本机无有效
+  核验凭据、也不在缓存），供卡片显示与下载体积预览；`unplaced_files` 是「尚未落位到
+  消费根」的全集（含本机还没有的字节），供执行者建计划——缓存/凭据命中下载 0 字节，
+  执行的是本地放置。已核验但未落位的字节不得在「文件已就绪并核验」旁边再报缺件；
+  落位/绑定是②的问题，由同一个「一键准备」完成。`prepare-plan` 与 `_step_download`
+  的组件取两者并集，下载体积只算 `missing_bytes`，与卡片同一个数。
+- **审片能力（vlm/asr）的 presence 与 `advisory_review_readiness` 同根**
+  （`isolated-packages/<component_id>`），不再读 ComfyUI 的 models 目录；②的原因挂
+  同一份审片就绪裁决（模型文件计数 + 缺的运行时包），不在卡片里另写推断。
+- **H3 缺件表与事实层跟同一份「图真正加载的组件」**：有作品时基线 binding 解析前移，
+  图不加载的可选 LoRA 不进缺件表；显式 `variant_id` 行为不变，读不到的基线回退默认
+  清单并由台账层具名。②的原因挂 `variant_readiness.next_step` 既有的唯一下一步
+  （如 `WEIGHTS_NOT_BOUND`），卡片不再丢弃它而显示通用句。
+- **整备停步的具名码必须到达页面**：安装链的拒绝是裸 `ValueError`、具名码在 message
+  里，`_code_of` 按码形状取回（与前端裸码规则同口径）；前端失败块挂 `describeBlocker`
+  （新增 `INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED` 映射：再点一次一键准备会
+  重新批准同一份计划并从停下的步骤继续），不再显示「ValueError」。批准不提交即回滚
+  的根因早前已修（见 `test_machine_progress`），本轮收敛的是显示与缺件裁决。
+- 回归：`backend/tests/test_setup_missing_verdict.py`（6 例）、
+  `test_setup_chain_convergence` 缓存字节断言迁移；前端 `setupMissingVerdict.test.tsx`
+  （3 例）。前端全量 80 文件 / 402 例、tsc、build、Ruff 干净；后端定向 9 模块全绿。
+- **真机边界**：报障截图来自远端旧包；本轮无新真实 H3 出片，远端 DOWNLOAD 停步是否
+  在新包复现待真机复测。改动未触及 `worker.py`/`preproduction.py`，不触发 VLM 重校准。

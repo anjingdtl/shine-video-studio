@@ -126,17 +126,24 @@ def _catalog_components(catalog: dict) -> dict[str, dict]:
     return {row["component_id"]: row for row in catalog.get("components") or []}
 
 
-def model_file_presence(models_root: str | Path | None, catalog: dict, component_ids=None) -> dict[str, Any]:
+def model_file_presence(models_root: str | Path | None, catalog: dict, component_ids=None,
+                        *, package_root: str | Path | None = None) -> dict[str, Any]:
     """Cheap, read-only presence check: right path *and* right byte count.
 
     ``models_root`` is the ComfyUI ``models`` directory (``<root>/models`` for an
     installation, ``image-runtime.json``'s own ``model_root`` for the image
-    runtime).  Size is a filter, never proof - the column is called
+    runtime).  Review models are the exception: the review runtime reads them
+    from ``isolated-packages/<component_id>`` (the same root
+    :func:`deployment.advisory_review_readiness` reads), so ``package_root``
+    names that store and presence follows it — reading the ComfyUI models dir
+    for them made one card say 「已核验」 and 「缺少 13 个文件」 at once.
+    Size is a filter, never proof - the column is called
     FILES_FOUND for that reason.  Only
     :mod:`shine.comfyops.verification_receipts` may say verified.
     """
     present, missing, found_bytes = [], [], 0
     base = Path(models_root) if models_root else None
+    store = Path(package_root) if package_root else None
     components = _catalog_components(catalog)
     for component_id, component in components.items():
         if component_ids is not None and component_id not in component_ids:
@@ -144,10 +151,16 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
         if component.get("kind") not in {"model", "review-model"}:
             continue
         family = component.get("destination_family")
+        review_store = store / component_id if (
+            store is not None and component.get("kind") == "review-model") else None
         for item in component.get("files") or []:
             relative = Path(str(item.get("relative_path") or ""))
             target = None
-            if base is not None and family and not relative.is_absolute():
+            if review_store is not None and not relative.is_absolute():
+                candidate = review_store / relative
+                if candidate.is_file():
+                    target = candidate
+            elif base is not None and family and not relative.is_absolute():
                 # ComfyUI's own aliases: text encoders also live in clip/.
                 folders = (family, "clip") if family == "text_encoders" else (family,)
                 for folder in folders:
@@ -435,10 +448,22 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     candidate it selected is already prepared.
     """
     binding = None
-    if capability == "h3" and variant_id:
+    if capability == "h3":
         from shine.comfyops.variant_binding import load_binding
+        from shine.comfyops.variants import list_variant_manifests
 
-        binding = load_binding(str(variant_id), fresh=False)
+        if variant_id:
+            binding = load_binding(str(variant_id), fresh=False)
+        elif project_id:
+            # 有作品时事实层本来就会读基线变体台账；缺件表必须跟同一份
+            # 「图真正加载的组件」走，否则可选 LoRA 会被报成缺件而①说已核验。
+            try:
+                manifest = next((row for row in list_variant_manifests()
+                                 if row.get("acceptance_status") in {"SUPPORTED", "EXPERIMENTAL"}), None)
+                if manifest:
+                    binding = load_binding(str(manifest["variant_id"]), fresh=False)
+            except Exception:  # noqa: BLE001 - 读不到的基线回退默认清单，台账层另行具名
+                binding = None
     if binding is not None:
         from shine.comfyops.variant_readiness import _required_components
 
@@ -458,19 +483,18 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             "missing_files": [], "advisories": [],
         }
     served_root = _effective_models_root(settings, capability, installation)
-    presence = model_file_presence(served_root, catalog, component_ids)
+    # 审片模型的消费根是隔离包目录（与 advisory_review_readiness 同一根），
+    # 不是 ComfyUI 的 models 目录；presence 与 in_place 都跟着它走。
+    package_root = (Path(settings.comfyops_dir) / "isolated-packages"
+                    if settings is not None and capability in REVIEW_COMPONENTS else None)
+    presence = model_file_presence(served_root, catalog, component_ids,
+                                   package_root=package_root)
+    served_roots = [root for root in (served_root, (installation or {}).get("root")) if root]
+    if package_root is not None:
+        served_roots.extend(str(package_root / cid) for cid in sorted(component_ids))
     evidence = _verified_components(
-        db, settings, catalog, component_ids,
-        served_roots=[root for root in (served_root, (installation or {}).get("root")) if root])
+        db, settings, catalog, component_ids, served_roots=served_roots)
     verified_now = evidence["verified"]
-    # What still has to be *placed* into this installation.  A file the person
-    # renamed is fine — reconcile proved those exact bytes in place, so it is not
-    # missing.  A registry row alone is not: once the bytes were moved away the
-    # receipt fails and the file is missing again, which is exactly the gap the
-    # old shortcut hid.  Bytes that exist only in the verified cache stay in this
-    # list (they still need placing) but owe no download.
-    missing = [item for item in presence["missing"]
-               if item["component_id"] not in evidence["in_place"]]
     cache_root = (Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
                   if settings is not None else None)
     cached_keys = {(component_id, str(row.get("relative_path")))
@@ -478,6 +502,19 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                    for row in (_catalog_components(catalog).get(component_id) or {}).get("files") or []
                    if cache_root is not None
                    and (cache_root / str(row.get("sha256") or "")).is_file()}
+    # One classification per file, two projections of it.  ``unplaced`` is the
+    # executor's question (bytes not yet in the served directory, whether or not
+    # this machine already owns them); ``missing`` is the person's question
+    # (bytes this machine does not have at all, so they must be fetched).  A
+    # receipt proved at the person's own folder or in the verified cache owns
+    # the bytes: placing them is a local copy the preparation performs, never a
+    # download the card may claim.  Reporting those as 「缺少 N 个文件」 next to
+    # 「文件已就绪并核验」 was two verdicts for one fact.
+    unplaced = [item for item in presence["missing"]
+                if item["component_id"] not in evidence["in_place"]]
+    missing = [item for item in unplaced
+               if item["component_id"] not in verified_now
+               and (item["component_id"], str(item["relative_path"])) not in cached_keys]
     required = [row for row in (_catalog_components(catalog).get(cid) for cid in component_ids) if row]
     complete_components = {
         cid for cid in component_ids
@@ -485,8 +522,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     }
     files_found = bool(component_ids) and len(complete_components) == len(component_ids)
     files_verified = bool(component_ids) and set(component_ids) <= verified_now
-    missing_bytes = sum(int(item.get("size") or 0) for item in missing
-                        if (item["component_id"], str(item["relative_path"])) not in cached_keys)
+    missing_bytes = sum(int(item.get("size") or 0) for item in missing)
 
     facts: dict[str, Any] = {
         "FILES_FOUND": files_found,
@@ -529,6 +565,11 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                     "PRODUCTION_READY": bool(report.get("production_ready")),
                 })
                 advisories.extend(report.get("blocking_reasons") or [])
+                # ② 的原因挂变体就绪自己的唯一下一步（它已算好），不在卡片里
+                # 另写一句通用推断：已核验未绑定时人要读到「绑定」而不是「缺件」。
+                step = report.get("next_step") or {}
+                if step.get("code") and step["code"] != "READY_FOR_PRODUCTION" and step.get("reason"):
+                    advisories.append({"code": step["code"], "message": step["reason"]})
             # 唯一检验链路：机器级运行合同已核对（与顶部裁决同一个 runtime_report）
             # 就是「② 运行」的权威答案，无论是否已绑定到具体作品。只对已验收基线
             # 生效——候选变体不是当前激活的运行配置，绝不能借基线核验冒充就绪。
@@ -571,17 +612,24 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             role = advisory_review_readiness(settings).get(capability.upper()) or {}
             facts["INSTANCE_BOUND"] = role.get("status") == "READY"
             facts["WORKFLOW_VALIDATED"] = role.get("status") == "READY"
+            if role.get("status") != "READY" and role.get("code"):
+                # ② 的原因读同一份审片就绪裁决，不在卡片里另写一套推断。
+                runtime_missing = role.get("runtime_packages_missing") or []
+                advisories.append({
+                    "code": role["code"],
+                    "message": (f"审片资源未就绪：模型文件 "
+                                f"{role.get('model_files_present', 0)}/{role.get('model_files_expected', 0)}"
+                                + (f"，运行时包缺 {'、'.join(runtime_missing)}" if runtime_missing else "")),
+                })
     except Exception as exc:  # noqa: BLE001 - an unreadable layer stays unproven
         # The filesystem facts above are still true; only the ledger layers stay
         # unproven, and the page is told which part could not be read.
         advisories.append({"code": "FACT_LAYER_UNAVAILABLE", "detail": type(exc).__name__,
                            "layer": str(capability)})
 
-    cached_files = sum(1 for item in missing
-                       if (item["component_id"], str(item["relative_path"])) in cached_keys)
     state, summary, next_step = _capability_verdict(
         capability, facts, missing_bytes=missing_bytes, has_installation=bool(installation),
-        missing_files=missing, cached_files=cached_files,
+        missing_files=missing,
     )
     return {
         "key": capability,
@@ -597,35 +645,28 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "next_step": next_step,
         "missing_files": missing,
         "missing_bytes": missing_bytes,
-        "cached_files": cached_files,
+        "unplaced_files": unplaced,
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
         "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
-                                         missing_files=missing, advisories=advisories,
-                                         cached_files=cached_files),
+                                         missing_files=missing, advisories=advisories),
     }
 
 
 def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
-                         missing_files: list, advisories: list,
-                         cached_files: int = 0) -> dict[str, Any]:
+                         missing_files: list, advisories: list) -> dict[str, Any]:
     """The user-facing model: two questions, not a dozen engineering steps.
 
     ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
     调整）。内部的核验/绑定/登记/核对仍是必要的工程事实，但用户只需读这两行。
+    「缺」只指本机真的没有的字节（``missing_files``）；已核验但尚未落位的字节
+    属于②的绑定/整备，不在①报缺，否则同一张卡片会给出两个互相矛盾的裁决。
     """
     if facts.get("FILES_VERIFIED"):
         files = {"state": "READY", "label": "文件已就绪并核验"}
     elif facts.get("FILES_FOUND"):
         files = {"state": "UNVERIFIED", "label": "文件已找到，待核验"}
-    elif cached_files and not missing_bytes:
-        # 字节已经在本机缓存里，只差落到实例目录：这不是一次下载。
-        files = {
-            "state": "MISSING",
-            "label": f"还差 {len(missing_files)} 个文件落位（字节已在本机，不需要下载）",
-            "missing_count": len(missing_files), "missing_bytes": 0,
-        }
     else:
         files = {
             "state": "MISSING",
@@ -647,8 +688,7 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
 
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
-                        has_installation: bool, missing_files: list,
-                        cached_files: int = 0) -> tuple[str, str, dict | None]:
+                        has_installation: bool, missing_files: list) -> tuple[str, str, dict | None]:
     """The one sentence a person reads, and the single action behind it."""
     if capability == "image" and facts.get("BINDING_STATE") == "PENDING_RECIPE":
         # The dominant fact is not "a file is missing": the person already
@@ -661,19 +701,9 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "action": "PREPARE_ENVIRONMENT",
         }
     if not facts.get("FILES_FOUND"):
-        if facts.get("FILES_VERIFIED"):
-            # Verified bytes already live in a cache the runtime knows about;
-            # only the instance path is missing, so a download is not the step.
-            return "FOUND", "已经找到出图资源，正在完善本机运行配置。", {
-                "code": "PENDING_RECIPE", "label": "完善本机运行配置",
-                "reason": "文件已经核验，本机还缺一份可启动的运行配置。", "action": "PREPARE_ENVIRONMENT",
-            }
         label = "准备环境" if not has_installation else "补齐缺失文件"
-        if not missing_bytes and cached_files:
-            reason = "字节已经在本机缓存里，只差落到实例目录；这次不需要下载。"
-        else:
-            reason = ("本机还没有这套资源（需要下载约 %.1f GiB）；也可以手动下载后放进来。"
-                      % (missing_bytes / 1024 ** 3)) if missing_bytes else "本机还没有这套资源。"
+        reason = ("本机还没有这套资源（需要下载约 %.1f GiB）；也可以手动下载后放进来。"
+                  % (missing_bytes / 1024 ** 3)) if missing_bytes else "本机还没有这套资源。"
         return "MISSING", "本机还没有这套资源。", {
             "code": "FILES_MISSING", "label": label, "reason": reason, "action": "PREPARE_ENVIRONMENT",
         }

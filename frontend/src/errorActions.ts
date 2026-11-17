@@ -88,6 +88,11 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   CHARACTER_NAME_ALREADY_IN_USE: { reason: '这个名字已绑定另一张人物素材', action: { label: '去素材页核对', target: 'assets-stage' } },
   OUTPUT_DIRECTORY_BUSY: { reason: '有活动任务，输出目录暂不能迁移', action: { label: '查看活动任务', target: 'setup-env' } },
   SHOT_SUBMISSION_OUTCOME_UNKNOWN: { reason: '上一次外部提交结果还没核对', why: '可能已发出的请求不会自动重发；先核对原任务，再决定是否重拍。', action: { label: '去进度页核对', target: 'run-stage' } },
+  INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED: {
+    reason: '安装计划的批准回执与当前计划对不上',
+    why: '再点一次「一键准备」会重新批准同一份计划并从停下的步骤继续；已完成的步骤与已下载的字节都会保留。',
+    action: { label: '重新发起一键准备', target: 'setup-env' },
+  },
 };
 
 /** 把服务端 blocker 映射为可行动条目；未知码保留原文，不编造动作。 */

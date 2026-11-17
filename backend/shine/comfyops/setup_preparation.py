@@ -27,6 +27,7 @@ database lock that the rest of the workbench needs.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -345,6 +346,11 @@ def _code_of(exc: Exception) -> str:
         return detail[:120]
     if isinstance(detail, dict):
         return str(detail.get("code") or "")[:120] or type(exc).__name__
+    # 安装链的拒绝是裸 ValueError，具名码就在 message 里；报类名会让页面
+    # 只剩「ValueError」，人读不到原因，也挂不上恢复指引。
+    message = str(exc)
+    if re.fullmatch(r"[A-Z][A-Z0-9_]{3,119}", message):
+        return message
     return type(exc).__name__
 
 
@@ -565,7 +571,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                                        project_id=task.get("project_id"),
                                        variant_id=request.get("variant_id") if capability == "h3" else None)
         missing = report.get("missing_files") or []
-        components = sorted({row["component_id"] for row in missing})
+        # 已核验但尚未落位的字节也要进计划：计划对缓存命中下载 0 字节，
+        # 执行的是本地放置。显示层的「缺件」只指需要外取的字节，两者同源于
+        # capability_report 的一次分类，不是两套缺件判定。
+        unplaced = report.get("unplaced_files") or []
+        components = sorted({row["component_id"] for row in missing}
+                            | {row["component_id"] for row in unplaced})
         if capability == "h3":
             from shine.comfyops.setup_summary import runtime_closure_gap
             with factory() as db:

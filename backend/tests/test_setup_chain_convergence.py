@@ -127,7 +127,10 @@ def test_a_verified_search_candidate_is_reused_instead_of_downloaded(tmp_path, a
 
     report = _report(factory, settings, installation)
     assert report["facts"]["FILES_VERIFIED"] is True
-    assert report["cached_files"] == 1
+    # 已核验的缓存字节不是「缺件」：它只欠一次本地落位（执行者的计划），
+    # 卡片不得在「文件已就绪并核验」旁边再报缺少文件。
+    assert report["missing_files"] == []
+    assert [row["relative_path"] for row in report["unplaced_files"]] == ["w.safetensors"]
     assert report["missing_bytes"] == 0, "字节已在本机，下载字节必须是 0"
 
     with factory() as db:

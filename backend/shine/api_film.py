@@ -1547,7 +1547,7 @@ def generate_storyboard(
             # seconds" rather than a generic connection label. They are read
             # from this same record, never invented by the display layer.
             timeout_s = task.trace.get("network_timeout_s")
-            if isinstance(timeout_s, (int, float)) and not isinstance(timeout_s, bool) and timeout_s > 0:
+            if isinstance(timeout_s, int | float) and not isinstance(timeout_s, bool) and timeout_s > 0:
                 rejection["network_timeout_s"] = timeout_s
             phase = task.trace.get("phase")
             if isinstance(phase, str) and phase:

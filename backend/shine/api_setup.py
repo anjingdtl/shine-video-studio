@@ -1950,11 +1950,17 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     plans = []
     for capability, report in reports.items():
         missing = report.get("missing_files") or []
-        components = sorted({row["component_id"] for row in missing})
+        # 计划组件 = 需外取 + 需本地落位（同源一次分类）；下载体积只算需外取
+        # 的字节，与卡片「缺少 N 个文件（X GiB）」同一个数，不再各算一套。
+        unplaced = report.get("unplaced_files") or []
+        components = sorted({row["component_id"] for row in missing}
+                            | {row["component_id"] for row in unplaced})
+        closure: set[str] = set()
         if capability == "h3":
             # One plan covers the bare-machine closure: weights plus the runtime
             # (source / wheels / node packs) the instance ladder will install.
-            components = sorted(set(components) | set(gap["missing_components"]))
+            closure = set(gap["missing_components"])
+            components = sorted(set(components) | closure)
         from shine.comfyops.setup_summary import IMAGE_CATALOG
         catalog = (deployment.load_deployment_catalog(IMAGE_CATALOG)
                    if capability == "image" else deployment.load_default_catalog())
@@ -1963,11 +1969,12 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
             "capability": capability,
             "label": report["label"],
             "catalog": report.get("catalog"),
-            "download_bytes": sum(int(f.get("size") or 0)
-                                  for cid in components for f in cmap.get(cid, {}).get("files", [])),
+            "download_bytes": int(report.get("missing_bytes") or 0) + sum(
+                int(f.get("size") or 0)
+                for cid in closure for f in cmap.get(cid, {}).get("files", [])),
             "components": components,
-            "files": sum(len(cmap.get(cid, {}).get("files", [])) for cid in components),
-            "needs_download": bool(components),
+            "files": len(missing) + sum(len(cmap.get(cid, {}).get("files", [])) for cid in closure),
+            "needs_download": bool(missing),
             "needs_recipe": capability in {"h3", "image"},
             "starts_services": bool(body.verify_runtime) and capability == "h3",
             "changes_external_installation": False,
