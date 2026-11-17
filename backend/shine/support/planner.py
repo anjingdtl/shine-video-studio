@@ -24,12 +24,17 @@ MAX_PLAN_STEPS = 8
 SHOOTABLE_STATES = {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING"}
 
 _INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("production", ("准备", "开拍", "开始生成", "开始拍摄", "开始生产", "把它拍", "生成第一集", "拍第一集")),
+    ("production", ("准备", "开拍", "开始生成", "开始拍摄", "开始生产", "把它拍", "生成第一集", "拍第一集",
+                    "前置条件")),
     ("materials", ("缺失素材", "缺素材", "素材没准备", "备料", "素材准备")),
     ("release", ("释放", "显存不足", "显卡", "GPU", "占用资源", "显卡显存")),
-    ("parameters", ("调参", "参数", "二次采样", "RelayVSR", "超分", "采样", "画质")),
+    ("parameters", ("调参", "参数", "生产策略", "策略", "二次采样", "RelayVSR", "超分", "采样", "画质")),
+    ("literary_scripts", ("分集剧本", "文学剧本", "分集文学", "生成剧本", "剧本生成")),
+    ("switch_basis", ("切换底稿", "切换原文", "更改底稿", "换底稿", "正式底稿")),
+    ("outline", ("故事大纲", "大纲")),
+    ("control", ("暂停", "继续", "取消生产", "停止生产", "取消任务")),
     ("create_project", ("新建项目", "建立项目", "创建一个项目", "建个项目", "建立一个", "建一个", "创建项目")),
-    ("import_document", ("导入", "上传小说", "导入小说", "导入文本")),
+    ("import_document", ("导入", "上传小说", "导入小说", "导入文本", "导入原文")),
     ("diagnose", ("为什么", "失败", "报错", "诊断", "原因", "怎么回事")),
     ("knowledge", ("是什么", "怎么用", "有什么区别", "介绍", "支持吗", "能不能")),
 )
@@ -51,16 +56,60 @@ _STEP_LABELS = {
     "NOT_SUPPORTED": "当前不对接",
 }
 
+_LANGUAGE_WORDS: tuple[tuple[str, str], ...] = (
+    ("粤语", "yue"),
+    ("广东话", "yue"),
+    ("国语", "zh"),
+    ("普通话", "zh"),
+    ("中文", "zh"),
+    ("英语", "en"),
+    ("英文", "en"),
+    ("日语", "ja"),
+    ("日文", "ja"),
+)
+
+_TITLE_PATTERNS = (
+    re.compile(r"名叫\s*[《「“\"]?([^》」”\"，。,\.\s]{1,60})"),
+    re.compile(r"叫做\s*[《「“\"]?([^》」”\"，。,\.\s]{1,60})"),
+    re.compile(r"名称为\s*[《「“\"]?([^》」”\"，。,\.\s]{1,60})"),
+    re.compile(r"[《「“\"]([^》」”\"]{1,60})[》」”\"]"),
+)
+
+
+def extract_title(text: str) -> str | None:
+    """Only a title the person actually said; never invented."""
+    for pattern in _TITLE_PATTERNS:
+        match = pattern.search(text or "")
+        if match:
+            value = match.group(1).strip()
+            if value and value not in {"短剧", "项目", "一个项目"}:
+                return value[:120]
+    return None
+
+
+def extract_language(text: str) -> str | None:
+    lowered = (text or "").casefold()
+    for word, code in _LANGUAGE_WORDS:
+        if word.casefold() in lowered:
+            return code
+    return None
+
+
+def _requested_orders(text: str) -> list[int]:
+    """The episode numbers the person actually named (1-based orders)."""
+    lowered = text or ""
+    digits = re.findall(r"第\s*([0-9]+)\s*集", lowered)
+    numerals = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    chinese = re.findall(r"第([一二两三四五六七八九十])\s*集", lowered)
+    return [int(value) for value in digits] + [numerals[value] for value in chinese]
+
 
 def _numeral_ids(text: str, episodes: list[dict[str, Any]]) -> list[str]:
     """Resolve "第一集/第3集/全部" against real episode orders."""
     lowered = text or ""
     if "全部" in lowered or "每一集" in lowered or "所有集" in lowered:
         return [row["episode_id"] for row in episodes]
-    digits = re.findall(r"第\s*([0-9]+)\s*集", lowered)
-    numerals = {"一": 1, "二": 2, "两": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-    chinese = re.findall(r"第([一二两三四五六七八九十])\s*集", lowered)
-    wanted = [int(value) for value in digits] + [numerals[value] for value in chinese]
+    wanted = _requested_orders(lowered)
     if not wanted:
         return []
     return [
@@ -70,6 +119,10 @@ def _numeral_ids(text: str, episodes: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _cited_ids(text: str, values: list[str]) -> list[str]:
+    return [value for value in values if value and value in (text or "")]
+
+
 def _project(db, project_id: str | None) -> Project:
     if not project_id:
         raise ValueError("PROJECT_REQUIRED")
@@ -77,6 +130,19 @@ def _project(db, project_id: str | None) -> Project:
     if project is None:
         raise ValueError("PROJECT_NOT_FOUND")
     return project
+
+
+def _only_project(db) -> str | None:
+    """Resolve "这个项目" only when the ledger is unambiguous.
+
+    A session created before the first project exists has no project binding;
+    with exactly one project in the ledger there is no guess to make.  Two or
+    more projects stay ambiguous and the plan asks which one.
+    """
+    from sqlalchemy import select
+
+    rows = list(db.scalars(select(Project).limit(2)).all())
+    return rows[0].id if len(rows) == 1 else None
 
 
 def _step_title(action_kind: str | None, fallback: str) -> str:
@@ -89,7 +155,23 @@ def _step_title(action_kind: str | None, fallback: str) -> str:
         "managed_release": "释放受管渲染服务",
         "setup_repair": "补齐真实环境",
         "setup_reconcile": "核验并登记已有文件",
+        "document_switch_basis": "切换正式原文底稿",
+        "production_control": "控制生产任务",
+        "literary_scripts_generate": "生成文学分集剧本",
+        "story_outline_generate": "生成故事大纲",
     }.get(action_kind or "", fallback)
+
+
+def _project_required(intent: str, notice: str) -> dict[str, Any]:
+    return {
+        "intent": intent,
+        "summary": "需要先选定项目。",
+        "project_id": None,
+        "steps": [],
+        "requires_input": ["project_id"],
+        "notice": notice,
+        "bounded": True,
+    }
 
 
 def _production_plan(db, *, request: str, project_id: str, episode_ids: list[str] | None) -> dict[str, Any]:
@@ -98,14 +180,11 @@ def _production_plan(db, *, request: str, project_id: str, episode_ids: list[str
     project = _project(db, project_id)
     overview = build_overview(db, project)
     episodes = list(overview.get("episodes") or [])
-    selected = [row for row in episodes if not episode_ids or row["episode_id"] in set(episode_ids)]
-    if not selected:
+    selected = [row for row in episodes if episode_ids and row["episode_id"] in set(episode_ids)]
+    if not selected and not episode_ids:
+        selected = [row for row in episodes if row["episode_id"] in set(_numeral_ids(request, episodes))]
+    if episode_ids and not selected:
         raise ValueError("EPISODE_SCOPE_REQUIRED")
-
-    # Resolve "第一集" from the real plan order when the caller did not name ids.
-    resolved = _numeral_ids(request, episodes)
-    if resolved and not episode_ids:
-        selected = [row for row in episodes if row["episode_id"] in set(resolved)]
 
     steps: list[dict[str, Any]] = [
         {
@@ -116,12 +195,68 @@ def _production_plan(db, *, request: str, project_id: str, episode_ids: list[str
             "state_label": _STEP_LABELS["READ_ONLY"],
             "evidence": [
                 f"{row.get('title') or row['episode_id']}：{row.get('state_label') or row['state']}"
-                for row in selected[:6]
+                for row in (selected or episodes)[:6]
             ],
             "readback": "GET /api/v1/projects/{project_id}/journey",
             "reason": "状态来自既有导演台账，不新建第二套状态。",
         }
     ]
+
+    if not selected:
+        named = sorted(set(_requested_orders(request)))
+        if named and not episodes:
+            steps.append(
+                {
+                    "order": 2,
+                    "title": "项目还没有分集",
+                    "capability_id": None,
+                    "state": "BLOCKED",
+                    "state_label": _STEP_LABELS["BLOCKED"],
+                    "evidence": ["导演台账里还没有分集；没有可供检查的第一集。"],
+                    "reason": "先生成故事大纲与分集剧本/导演分镜，再检查开拍前置条件。",
+                }
+            )
+            return {
+                "intent": "PRODUCTION",
+                "summary": f"项目还没有分集，无法检查第 {', '.join(str(value) for value in named)} 集。",
+                "project_id": project_id,
+                "steps": steps[:MAX_PLAN_STEPS],
+                "requires_input": [],
+                "notice": "不会凭空创建分集或猜测集号；请先完成文学与分镜阶段。",
+                "bounded": True,
+            }
+        steps.append(
+            {
+                "order": 2,
+                "title": "明确要操作的集数" if not named else "目标集不存在",
+                "capability_id": None,
+                "state": "HUMAN_REQUIRED" if not named else "BLOCKED",
+                "state_label": _STEP_LABELS["HUMAN_REQUIRED" if not named else "BLOCKED"],
+                "evidence": [
+                    *(
+                        [f"当前项目分集：{', '.join(str(row.get('order')) for row in episodes[:12])}"]
+                        if named
+                        else []
+                    ),
+                    "只说「开始生成」不会默认选择全部可开拍集。",
+                ],
+                "reason": (
+                    "请明确第几集，或明确说「全部」；计划不会静默扩大范围。"
+                    if not named
+                    else "当前项目里没有你点名的集；不会猜测集号。"
+                ),
+            }
+        )
+        return {
+            "intent": "PRODUCTION",
+            "summary": "先明确这次要操作哪些集。" if not named else "项目里没有你点名的集。",
+            "project_id": project_id,
+            "steps": steps[:MAX_PLAN_STEPS],
+            "requires_input": ["episode_ids"],
+            "notice": "不会默认选择全部集；请在计划里填写或改说「全部」。",
+            "bounded": True,
+        }
+
     shootable = [row for row in selected if row["state"] in SHOOTABLE_STATES]
     pending: list[dict[str, Any]] = []
     for row in selected:
@@ -211,20 +346,13 @@ def _production_plan(db, *, request: str, project_id: str, episode_ids: list[str
                 "再重新预览这一集的开拍授权。"
             )
 
-    requires: list[str] = []
-    if not selected:
-        requires.append("episode_ids")
-    summary = (
-        f"共 {len(selected)} 集：{len(shootable)} 集可开拍，{len(pending)} 个前置步骤需要处理。"
-        if selected
-        else "还没有可操作的分集。"
-    )
+    summary = f"共 {len(selected)} 集：{len(shootable)} 集可开拍，{len(pending)} 个前置步骤需要处理。"
     return {
         "intent": "PRODUCTION",
         "summary": summary,
         "project_id": project_id,
         "steps": steps[:MAX_PLAN_STEPS],
-        "requires_input": requires,
+        "requires_input": [],
         "notice": "计划只是只读建议；每个可执行步骤仍需单独预览并确认，才会调用原执行器。",
         "bounded": True,
     }
@@ -337,7 +465,7 @@ def _parameter_plan(db, *, project_id: str | None) -> dict[str, Any]:
     payload = contracts(db, project_id)
     return {
         "intent": "PARAMETERS",
-        "summary": f"可调合同 {len(payload['contracts'])} 组。",
+        "summary": f"可调合同 {len(payload['contracts'])} 组；调参不会自动开拍。",
         "project_id": project_id,
         "steps": [
             {
@@ -355,7 +483,8 @@ def _parameter_plan(db, *, project_id: str | None) -> dict[str, Any]:
                 "capability_id": None,
                 "state": "HUMAN_REQUIRED",
                 "state_label": _STEP_LABELS["HUMAN_REQUIRED"],
-                "reason": "参数差异必须先由你确认；`/support/parameters/preview` 只返回 diff，不写配置。",
+                "reason": "参数差异必须先由你确认；`/support/parameters/preview` 只返回 diff，"
+                "不写配置，也不会自动开拍。",
                 "requires_confirmation": "PREVIEW",
             },
         ],
@@ -365,7 +494,15 @@ def _parameter_plan(db, *, project_id: str | None) -> dict[str, Any]:
     }
 
 
-def _create_plan(*, project_id: str | None) -> dict[str, Any]:
+def _create_plan(*, request: str, project_id: str | None) -> dict[str, Any]:
+    title = extract_title(request)
+    language = extract_language(request)
+    params: dict[str, Any] = {}
+    if title:
+        params["title"] = title
+    if language:
+        params["language"] = language
+    ready = bool(title)
     return {
         "intent": "CREATE_PROJECT",
         "summary": "可以创建一个空项目；不会自动导入原文或冻结风格。",
@@ -375,15 +512,20 @@ def _create_plan(*, project_id: str | None) -> dict[str, Any]:
                 "order": 1,
                 "title": "创建影视项目",
                 "capability_id": "project_create",
-                "state": "READY",
-                "state_label": _STEP_LABELS["READY"],
-                "action": {"kind": "project_create", "params": {}},
+                "state": "READY" if ready else "HUMAN_REQUIRED",
+                "state_label": _STEP_LABELS["READY" if ready else "HUMAN_REQUIRED"],
+                "evidence": [f"标题来自你的原话：{title}"] if title else [],
+                "action": {"kind": "project_create", "params": params},
                 "readback": "GET /api/v1/projects/{project_id}",
                 "requires_confirmation": "PREVIEW",
-                "reason": "标题等参数需要你补充；创建后仍是空项目。",
+                "reason": (
+                    "标题已从你的原话提取；创建后仍是空项目。"
+                    if title
+                    else "还需要一个项目标题；补齐后即可预览。"
+                ),
             }
         ],
-        "requires_input": ["title"],
+        "requires_input": [] if ready else ["title"],
         "notice": "创建不会覆盖已有项目；也不代表环境已就绪。",
         "bounded": True,
     }
@@ -399,8 +541,11 @@ def _import_plan(*, project_id: str | None) -> dict[str, Any]:
                 "order": 1,
                 "title": "导入原文",
                 "capability_id": "document_import_text",
-                "state": "READY" if project_id else "BLOCKED",
-                "state_label": _STEP_LABELS["READY" if project_id else "BLOCKED"],
+                # The text itself is the person's own file/content and is never
+                # generated by the model, so the step waits for them to supply
+                # it in the panel instead of pretending to be ready.
+                "state": "HUMAN_REQUIRED" if project_id else "BLOCKED",
+                "state_label": _STEP_LABELS["HUMAN_REQUIRED" if project_id else "BLOCKED"],
                 "action": {"kind": "document_import_text", "params": {"project_id": project_id or ""}},
                 "readback": "GET /api/v1/projects/{project_id}/script-basis",
                 "requires_confirmation": "PREVIEW",
@@ -411,8 +556,284 @@ def _import_plan(*, project_id: str | None) -> dict[str, Any]:
                 ),
             }
         ],
-        "requires_input": ["text"],
+        "requires_input": ([] if project_id else ["project_id"]) + ["text"],
         "notice": "导入不会自动生成大纲；生成大纲仍需下一步授权。",
+        "bounded": True,
+    }
+
+
+def _outline_plan(db, *, project_id: str) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from shine.models import ProjectDocument
+
+    project = _project(db, project_id)
+    documents = list(
+        db.scalars(
+            select(ProjectDocument)
+            .where(ProjectDocument.project_id == project.id)
+            .order_by(ProjectDocument.created_at.desc())
+        ).all()
+    )
+    if not documents:
+        return {
+            "intent": "OUTLINE",
+            "summary": "项目还没有原文底稿，无法生成故事大纲。",
+            "project_id": project_id,
+            "steps": [
+                {
+                    "order": 1,
+                    "title": "先导入原文",
+                    "capability_id": "document_import_text",
+                    "state": "HUMAN_REQUIRED",
+                    "state_label": _STEP_LABELS["HUMAN_REQUIRED"],
+                    "action": {"kind": "document_import_text", "params": {"project_id": project_id}},
+                    "reason": "请在计划里粘贴原文或选择本地文件；模型不会替你编写正文。",
+                }
+            ],
+            "requires_input": ["text"],
+            "notice": "大纲必须基于你自己的原文。",
+            "bounded": True,
+        }
+    return {
+        "intent": "OUTLINE",
+        "summary": "可以用当前底稿生成故事大纲；确认大纲仍由你亲自完成。",
+        "project_id": project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": "以当前正式底稿生成故事大纲",
+                "capability_id": "story_outline_generate",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": [f"底稿：{documents[0].filename}"],
+                "action": {"kind": "story_outline_generate", "params": {"project_id": project_id}},
+                "readback": "GET /api/v1/projects/{project_id}/story-preparation",
+                "requires_confirmation": "EXECUTE_GUARDED",
+                "reason": "复用持久大纲任务；模型角色未配置时会由原门禁具名拒绝。",
+            },
+            {
+                "order": 2,
+                "title": "确认大纲",
+                "capability_id": None,
+                "state": "HUMAN_REQUIRED",
+                "state_label": _STEP_LABELS["HUMAN_REQUIRED"],
+                "reason": "大纲是创作方向的裁决，必须由你在导演页确认。",
+            },
+        ],
+        "requires_input": [],
+        "notice": "生成大纲不等于确认大纲。",
+        "bounded": True,
+    }
+
+
+def _control_plan(db, *, request: str, project_id: str | None) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from shine.production.models import ProductionRun
+
+    query = select(ProductionRun).order_by(ProductionRun.created_at.desc())
+    if project_id:
+        query = query.where(ProductionRun.project_id == project_id)
+    runs = [
+        row
+        for row in db.scalars(query).all()
+        if str(row.status) not in {"COMPLETED", "FAILED", "CANCELLED", "SUPERSEDED"}
+    ]
+    if not runs:
+        return {
+            "intent": "CONTROL",
+            "summary": "当前没有可暂停/继续/取消的真实生产任务。",
+            "project_id": project_id,
+            "steps": [],
+            "requires_input": [],
+            "notice": "不会创建一个假任务来满足控制请求。",
+            "bounded": True,
+        }
+    cited = _cited_ids(request, [row.id for row in runs])
+    if len(cited) == 1:
+        runs = [row for row in runs if row.id == cited[0]]
+    elif len(runs) > 1:
+        return {
+            "intent": "CONTROL",
+            "summary": f"有 {len(runs)} 个在途生产任务，需要先选定一个。",
+            "project_id": project_id,
+            "steps": [],
+            "requires_input": ["run_id"],
+            "notice": "不会一次控制多个任务。",
+            "bounded": True,
+        }
+    run = runs[0]
+    if "暂停" in (request or ""):
+        operation = "pause"
+    elif "取消" in (request or "") or "停止" in (request or ""):
+        operation = "cancel"
+    elif "继续" in (request or "") or "恢复" in (request or ""):
+        operation = "resume"
+    else:
+        return {
+            "intent": "CONTROL",
+            "summary": "请说明是暂停、继续还是取消。",
+            "project_id": run.project_id,
+            "steps": [],
+            "requires_input": ["operation"],
+            "notice": "只支持 pause/resume/cancel。",
+            "bounded": True,
+        }
+    return {
+        "intent": "CONTROL",
+        "summary": f"将{ {'pause': '暂停', 'resume': '继续', 'cancel': '取消'}[operation] }这一个生产任务。",
+        "project_id": run.project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": f"{ {'pause': '暂停', 'resume': '继续', 'cancel': '取消'}[operation] }生产任务",
+                "capability_id": "production_control",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": [f"Run {run.id}：{run.status}"],
+                "action": {"kind": "production_control", "params": {"run_id": run.id, "operation": operation}},
+                "readback": "GET /api/v1/production-runs/{run_id}",
+                "requires_confirmation": "EXECUTE_GUARDED",
+                "gpu": True,
+                "reason": "只操作这一个已存在的 Run；复用原状态机与版本校验。",
+            }
+        ],
+        "requires_input": [],
+        "notice": "不会创建新任务，也不会取消其它运行。",
+        "bounded": True,
+    }
+
+
+def _literary_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
+    from shine.director import pipeline
+
+    project = _project(db, project_id)
+    plan = pipeline.current_volume_plan(db, project.id)
+    volumes = list((plan.payload_json or {}).get("volumes") or []) if plan else []
+    if not volumes:
+        return {
+            "intent": "LITERARY_SCRIPTS",
+            "summary": "还没有已确认的分集方案，无法生成分集剧本。",
+            "project_id": project_id,
+            "steps": [
+                {
+                    "order": 1,
+                    "title": "先确认分集方案",
+                    "capability_id": None,
+                    "state": "HUMAN_REQUIRED",
+                    "state_label": _STEP_LABELS["HUMAN_REQUIRED"],
+                    "reason": "请在原导演页生成并确认分集方案与圣经，再回来生成分集剧本。",
+                }
+            ],
+            "requires_input": [],
+            "notice": "不会跳过文学门禁直接生成剧本。",
+            "bounded": True,
+        }
+    cited = _cited_ids(request, [str(row.get("volume_id")) for row in volumes])
+    if len(cited) == 1:
+        volume = next(row for row in volumes if str(row.get("volume_id")) == cited[0])
+    elif len(volumes) == 1:
+        volume = volumes[0]
+    else:
+        return {
+            "intent": "LITERARY_SCRIPTS",
+            "summary": f"有 {len(volumes)} 卷，需要先选定一卷。",
+            "project_id": project_id,
+            "steps": [],
+            "requires_input": ["volume_id"],
+            "notice": "不会默认扩大全部卷。",
+            "bounded": True,
+        }
+    return {
+        "intent": "LITERARY_SCRIPTS",
+        "summary": f"为《{volume.get('title') or volume.get('volume_id')}》生成缺失的分节剧本。",
+        "project_id": project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": "生成文学分集剧本",
+                "capability_id": "literary_scripts_generate",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": [
+                    f"卷：{volume.get('title') or volume.get('volume_id')}",
+                    f"分节：{len(volume.get('sections') or [])}",
+                ],
+                "action": {
+                    "kind": "literary_scripts_generate",
+                    "params": {"project_id": project_id, "volume_id": volume.get("volume_id")},
+                },
+                "readback": "GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}",
+                "requires_confirmation": "EXECUTE_GUARDED",
+                "paid": True,
+                "reason": "只排队还没有确认剧本的分节，不覆盖已确认稿。",
+            }
+        ],
+        "requires_input": [],
+        "notice": "确认剧本仍由你在导演页完成。",
+        "bounded": True,
+    }
+
+
+def _switch_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
+    from sqlalchemy import select
+
+    from shine.models import ProjectDocument
+
+    project = _project(db, project_id)
+    documents = list(
+        db.scalars(
+            select(ProjectDocument)
+            .where(ProjectDocument.project_id == project.id)
+            .order_by(ProjectDocument.created_at.desc())
+        ).all()
+    )
+    candidates = [row for row in documents if row.id != project.current_document_id]
+    cited = _cited_ids(request, [row.id for row in candidates] + [row.filename for row in candidates])
+    if len(cited) == 1:
+        match = next(
+            row for row in candidates if row.id == cited[0] or row.filename == cited[0]
+        )
+    elif len(candidates) == 1:
+        match = candidates[0]
+    else:
+        return {
+            "intent": "SWITCH_BASIS",
+            "summary": (
+                "当前项目没有其它已导入文档可切换。"
+                if not candidates
+                else f"有 {len(candidates)} 份候选文档，需要先选定一份。"
+            ),
+            "project_id": project_id,
+            "steps": [],
+            "requires_input": [] if not candidates else ["document_id"],
+            "notice": "不会自动切换正式底稿。",
+            "bounded": True,
+        }
+    return {
+        "intent": "SWITCH_BASIS",
+        "summary": f"把《{match.filename}》切换为正式原文底稿。",
+        "project_id": project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": "切换正式原文底稿",
+                "capability_id": "document_switch_basis",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": [f"候选：{match.filename}"],
+                "action": {
+                    "kind": "document_switch_basis",
+                    "params": {"project_id": project_id, "document_id": match.id},
+                },
+                "readback": "GET /api/v1/projects/{project_id}/script-basis",
+                "requires_confirmation": "PREVIEW",
+                "reason": "只切换底稿指针；原文与其它文档不变。",
+            }
+        ],
+        "requires_input": [],
+        "notice": "旧导演包仍按原 id 可读。",
         "bounded": True,
     }
 
@@ -427,36 +848,36 @@ def build_plan(
 ) -> dict[str, Any] | None:
     """The bounded plan for this request, or ``None`` when no operation applies."""
     intent = detect_intent(request or "")
+    if project_id is None:
+        project_id = _only_project(db)
     if intent == "production":
         if not project_id:
-            return {
-                "intent": "PRODUCTION",
-                "summary": "需要先选定项目。",
-                "project_id": None,
-                "steps": [],
-                "requires_input": ["project_id"],
-                "notice": "拍摄必须绑定一个真实项目。",
-                "bounded": True,
-            }
+            return _project_required("PRODUCTION", "拍摄必须绑定一个真实项目。")
         return _production_plan(db, request=request, project_id=project_id, episode_ids=episode_ids)
     if intent == "materials":
         if not project_id:
-            return {
-                "intent": "MATERIALS",
-                "summary": "需要先选定项目。",
-                "project_id": None,
-                "steps": [],
-                "requires_input": ["project_id"],
-                "notice": "素材缺口按项目查询。",
-                "bounded": True,
-            }
+            return _project_required("MATERIALS", "素材缺口按项目查询。")
         return _materials_plan(db, project_id=project_id, episode_ids=episode_ids)
     if intent == "release":
         return _release_plan(db, project_id=project_id)
     if intent == "parameters":
         return _parameter_plan(db, project_id=project_id)
+    if intent == "literary_scripts":
+        if not project_id:
+            return _project_required("LITERARY_SCRIPTS", "分集剧本按项目生成。")
+        return _literary_plan(db, request=request, project_id=project_id)
+    if intent == "switch_basis":
+        if not project_id:
+            return _project_required("SWITCH_BASIS", "底稿按项目切换。")
+        return _switch_plan(db, request=request, project_id=project_id)
+    if intent == "outline":
+        if not project_id:
+            return _project_required("OUTLINE", "故事大纲按项目生成。")
+        return _outline_plan(db, project_id=project_id)
+    if intent == "control":
+        return _control_plan(db, request=request, project_id=project_id)
     if intent == "create_project":
-        return _create_plan(project_id=project_id)
+        return _create_plan(request=request, project_id=project_id)
     if intent == "import_document":
         return _import_plan(project_id=project_id)
     return None

@@ -1,13 +1,27 @@
 # Shine AI 管家 V2.0 工程实施报告
 
-- 日期：2026-11-16
+- 初版：2026-11-16；远端源码验收缺陷修复轮：2026-11-17
 - 建设依据：`docs/SHINE_AI_COPILOT_V2_KNOWLEDGE_AUTOMATION_DIAGNOSTICS_PLAN_20261116.md`
   （方案提交 `3c84c9eedbed1a672ef267d42e26004fe1a7a1c5`，在 V2 分支 cherry-pick 为 `e9198d2`）
 - V1 基线：`feat/shine-ai-copilot-support-agent-v1` @ `82df4b534c12609cced97c6cbaf7a1391d3632bf`（PR #55，仍是 V2 的 PR base）
 - V2 分支：`feat/shine-ai-copilot-v2-full-capabilities`
 - 独立 Worktree：`/workspace/.worktrees/shine-copilot-v2`
+- 本轮验收基线 HEAD：`fd02e7f7e3c62d76de205ff61634c0b6cd4bab8f`；修复提交见 PR #56 最新 commit
 - `origin/main` 基线：`a2ea6af`（V2 未直接改 main，也未把 V2 堆叠到 PR #55 分支）
 - 迁移：V2 未新增表；复用 `f180f0010004`（V1 的动作级指纹列）
+
+## 0. 本轮（远端验收缺陷修复）变更摘要
+
+| 编号 | 缺陷 | 修复 | 关键文件 |
+| --- | --- | --- | --- |
+| P0-01 | 顶层 `project_id` 与 `params.project_id` 不一致时未拒绝，动作可能作用到错误项目 | 新增唯一规范化 `resolve_target_project()`：区分会话项目/当前项目/动作目标项目；多于一个不同值即 `ActionInvalid`；`preview_action`/`approve_action`/执行器三处使用同一个 canonical `target_project_id`；`project_create` 不继承当前项目；历史授权在 approve 时重算并置 `EXPIRED`+`TARGET_PROJECT_CONFLICT`；私有工作流跨项目复制在预览即拒绝 | `backend/shine/support/actions.py` |
+| P0-02 | 前端给所有动作统一追加 `project_id`，导致不接受该字段的动作报错 | 新增 `actionPayload()`：按 Capability Registry 白名单过滤参数；作用域与执行参数分离；`managed_release` 只传 `only`；`project_create` 不传当前项目；已声明的目标项目不被静默改写；后端注册表参数改为真实白名单并按 action_id 去重覆盖 | `frontend/src/components/ShineCopilot.tsx`、`backend/shine/support/capability_catalog.py` |
+| P1-01 | 自然语言只按关键词选类别，产生空参数计划 | 规则抽取标题/语言/集数/操作目标；新增受 Schema 约束的 `nlu.enrich_plan()`（只补齐已注册动作的 title/description/language，LLM 不可用静默回退，绝不编造 ID/正文） | `backend/shine/support/planner.py`、`backend/shine/support/nlu.py` |
+| P1-02 | 计划只读，多步骤仍需逐项点击 | 新增受控委托信封（存 `SupportSession.context_json`，无新表、无第二执行器）：顺序推进、预算门禁、人工步骤暂停、失败停止、UNKNOWN 不重提、取消不误伤已提交任务、刷新可恢复 | `backend/shine/support/delegation.py`、`backend/shine/api_support.py` |
+| P1-03 | 3 项已有正式 API 的操作未接入 | 新增真实动作 `document_switch_basis`（唯一执行者 `services.switch_script_basis`）、`production_control`（原 `production.runner` 的 pause/resume/cancel）、`literary_scripts_generate`（原 `pipeline.queue_scene_scripts`） | `actions.py`、`services.py`、`api_story.py`、`tools.py` |
+| P1-04 | 知识清单 `source_commit` 为空，无法真实验证版本 | 构建注入 `SHINE_BUILD_COMMIT` 或 `BUILD_INFO.json.source_commit`；未注入→UNKNOWN，一致→FRESH，不一致→STALE；打包脚本在 staging 生成清单，`--check` 进 CI，避免自引用死循环 | `project_knowledge.py`、`backend/scripts/generate_copilot_knowledge.py`、`scripts/build_test_package.ps1`、`.github/workflows/ci.yml` |
+| P1-05 | 调参预览可直接生成 `production_start` | `_preview_strategy` 只返回「待使用策略」：`proposed_action=null`、`apply_via=production_start`、`scope=NEXT_PRODUCTION_ONLY`，明确不会保存也不会自动开拍 | `backend/shine/support/parameters.py` |
+| P1-06 | 失败诊断缺少动作上下文 | `_public()` 输出 `failure_context`：action_id、目标项目、原任务 ID、原错误码、阶段、目标配置、已执行结果、指纹、可否重新预览 | `backend/shine/support/actions.py` |
 
 ## 1. 架构结论（与 V2 方案逐条对照）
 
@@ -27,12 +41,15 @@
 | --- | --- |
 | `backend/shine/support/project_knowledge.py` | 版本化项目百科：19 个真实模块条目、`IMPLEMENTED/PARTIAL/PLANNED/BLOCKED/NOT_SUPPORTED` 状态、来源路径/API/测试证据、BM25 风格离线检索、构建 SHA 绑定与 `FRESH/STALE/UNKNOWN` |
 | `backend/shine/support/official_docs.py` | ComfyUI / MiniMax-H3 官方来源元数据、许可与再分发策略（`SUMMARY_ONLY` / `LINK_ONLY`）、12 条自编短摘要、H3 官方能力与 Shine 本机能力的边界表 |
-| `backend/shine/support/capability_catalog.py` | 权威能力注册中心：10 个可委托动作、7 个只读能力、41 项 UI→API→执行者覆盖矩阵、人工确认/永久禁止/未接入清单与工程原因 |
-| `backend/shine/support/planner.py` | 有界只读计划：制作准备、素材缺口、显存释放、调参、建项目、导入原文；步骤只能指向注册能力或人工步骤 |
-| `backend/shine/support/parameters.py` | 用户级参数合同：项目口播语言、工作流参数映射副本、生产策略（变体/加速/二次采样/RelayVSR X2）；差异预览与 schema 校验，无写操作 |
+| `backend/shine/support/capability_catalog.py` | 权威能力注册中心：13 个可委托动作、7 个只读能力、44 项 UI→API→执行者覆盖矩阵、人工确认/永久禁止/未接入清单与工程原因；显式条目按 action_id 覆盖通用 fallback |
+| `backend/shine/support/planner.py` | 有界只读计划：建项目（标题/语言抽取）、导入原文、制作准备、素材缺口、显存释放、调参、建项目、导入原文、生产控制、分集剧本、切换底稿、故事大纲；步骤只能指向注册能力或人工步骤 |
+| `backend/shine/support/nlu.py` | 受 Schema 约束的结构化补参：只补齐已注册动作允许的 title/description/language；模型不能产生 action_id 或 API 路径；失败静默回退，不编造参数 |
+| `backend/shine/support/delegation.py` | 受控多步骤委托：授权范围、预算、顺序推进、人工暂停、失败停止、UNKNOWN 不重提、取消不误伤；只保存原任务引用，不建生产队列 |
+| `backend/tests/test_support_copilot_v3.py` | 本轮新增 27 项：P0-01 跨项目、P0-02 参数合同、NL 抽取、导入、委托续跑/UNKNOWN、调参、知识构建版本、注册表 |
+| `backend/shine/support/parameters.py` | 用户级参数合同：项目口播语言、工作流参数映射副本、生产策略（变体/加速/二次采样/RelayVSR X2）；差异预览与 schema 校验，无写操作；策略只作为「待使用策略」 |
 | `backend/shine/support/knowledge_manifest.json` | 知识清单与内容哈希（构建时由脚本重新生成并记录提交号） |
-| `backend/scripts/generate_copilot_knowledge.py` | 构建/发布时重建知识清单：版本、来源提交、内容哈希 |
-| `docs/SHINE_AI_COPILOT_V2_OPERATION_MATRIX_20261116.md` | 全业务操作覆盖矩阵（455 条后端路由的审计结论与 41 项操作映射） |
+| `backend/scripts/generate_copilot_knowledge.py` | 构建/发布时重建知识清单：版本、来源提交、内容哈希；`--check` 校验真实构建产物 |
+| `docs/SHINE_AI_COPILOT_V2_OPERATION_MATRIX_20261116.md` | 全业务操作覆盖矩阵（469 条方法级路由的审计结论与 44 项操作映射） |
 
 ### 2.2 扩展
 
@@ -59,13 +76,13 @@
 
 | 状态 | 数量 | 含义 |
 | --- | --- | --- |
-| GUARDED | 14 | 可由自然语言委托，但必须预览 + 用户确认 |
+| GUARDED | 17 | 可由自然语言委托，但必须预览 + 用户明确授权 |
 | READ_ONLY | 11 | 只读查询/百科/计划 |
 | HUMAN_REQUIRED | 11 | 风格冻结、主资产、备料决策、镜头确认、审片交付等必须人工 |
-| NOT_SUPPORTED | 5 | 镜头逐字编辑、候选图批量生成、字幕逐句编辑、节点图数值改写、外部发布/暂停取消等，附工程原因 |
-| 合计 | 41 | 逐页面操作矩阵（覆盖导演模式、素材中心、设置、成片库、全局） |
+| NOT_SUPPORTED | 5 | 镜头逐字编辑、候选图批量生成、字幕逐句编辑、节点图数值改写、外部发布，附工程原因 |
+| 合计 | 44 | 逐页面操作矩阵（覆盖全局、导演模式、素材中心、设置、成片库） |
 
-后端共 455 条路由（装饰器统计）。覆盖率不是「全部可代理」的同义词：未列入矩阵的操作不计入覆盖率，NOT_SUPPORTED 项不提供假动作。
+后端共 469 条方法级路由操作 / 431 个唯一路径（FastAPI 应用实测）。覆盖率不是「全部可代理」的同义词：未列入矩阵的操作不计入覆盖率，NOT_SUPPORTED 项不提供假动作。
 
 ## 4. 用户操作链路
 
@@ -73,18 +90,21 @@
 自然语言 / 失败卡片
 → IntentRouter（百科 / 诊断 / 操作）
 → EvidenceSnapshot（既有裁决 + 台账）
-→ ProjectKnowledgeIndex（版本绑定）
-→ OfficialDocsIndex（参考 + H3 边界）
-→ BoundedPlanner（≤8 步、只读）
+→ BoundedPlanner（≤8 步、只读；规则抽取标题/语言/集数/目标）
+→ NluEnricher（LLM Gateway，受 JSON Schema 约束，只补已注册动作的文本参数）
 → CapabilityRegistry（action_id + schema + 原执行者）
-→ 预览（差异/资源/门禁）→ 用户确认
+→ 唯一 canonical target_project_id（名称 → 实际 ID）
+→ 预览（差异/资源/门禁）→ 用户明确授权
+→ 受控委托（顺序推进；预算；人工步骤暂停；失败停止；UNKNOWN 不重提）
 → 原服务/原 Worker/原 Run 引擎
 → 回读原任务/原裁决 → 成功 / 失败 / 待核对
 → 无法处理：受控脱敏 MD
 ```
 
-- 重复点击、刷新、网络重试由 `request_key` + `attempt_no` + `atomic claim` + `target_fingerprint` 挡住。
-- UNKNOWN 外部结果不自动重发；开拍前占用判定仍 fail-closed。
+- 自然语言无法确定必要参数时（例如只说了「开始生成」），计划明确 `requires_input`，不默认扩大集数、不产生开拍动作。
+- 原文导入必须由用户在本机选择文件或粘贴文本；模型不会重写、重传或替换用户正文。
+- 重复点击、刷新、网络重试由 `request_key` + `attempt_no` + `atomic claim` + `target_fingerprint` 挡住；并发相同的预览会复用同一个授权单。
+- 委托只保存授权范围、预算与原任务引用；刷新/重启后通过 `refresh` 读取原任务状态继续，UNKNOWN 不自动重发。
 - 执行器拒绝时，动作进入 `REFUSED` 并保存原错误码；用户可在原页面重新预览。
 
 ## 5. 安全边界
@@ -97,17 +117,20 @@
 
 ## 6. 验证结果摘要
 
-- 后端定向：`tests/test_support_agent.py` 55 项 + `tests/test_support_copilot_v2.py` 24 项全部通过。
-- 后端八分片全量：共 **2998** 项参与，**8/8 退出码 0**（分片 371 / 369 / 383 / 497 / 326 / 355 / 402 / 295）。
-- 前端：79 个测试文件 / **407 项** Vitest 全部通过；`tsc -b` 与 `vite build` 通过（仅既有 chunk>500kB 提示）。
+- 后端定向：`tests/test_support_agent.py` 55 项 + `tests/test_support_copilot_v2.py` 24 项 + `tests/test_support_copilot_v3.py` 27 项全部通过。
+- 后端八分片全量：**3025 项、0 失败、178 跳过、8/8 退出码 0**（分片 310/438/357/486/354/369/400/311）。
+- 前端：79 个测试文件 / **412 项** Vitest 全部通过；`tsc -b` 与 `vite build` 通过（仅既有 chunk>500kB 提示）。
 - Ruff：`shine`、`tests`、`scripts` 全部通过。
-- 迁移：V2 未新增迁移；`f180f0010004` 空库升级成功，旧库/Windows 迁移测试继续通过。
+- 迁移：V2 未新增迁移；`f180f0010004` 空库升级成功（health `schema_up_to_date=true`），旧库/Windows 迁移测试继续通过。
+- 浏览器：Chromium/Playwright 真实四句用户故事通过（创建项目 → 导入原文 → 第一集开拍检查 → 生产策略）；见验收报告 §7。
 - 真实硬件：Windows 真机、真实 ComfyUI/GPU、真实 H3、安装包实机、启动器离线诊断（S29）仍为 NOT_RUN/BLOCKED，未伪造通过。
 
 ## 7. 明确未完成 / 边界
 
-1. 镜头逐字改写、字幕逐句编辑、候选图批量生成、暂停/取消生产：API 存在，但缺少稳定的自然语言合同与回读验证，V2 标记 NOT_SUPPORTED。
-2. 付费预算：目录标注 paid，复用既有 LLM/任务预算与 completion cap；未新增货币额度系统。
-3. 知识索引的提交号需在发布构建时由 `generate_copilot_knowledge.py` 重新生成；未记录提交号时状态为 UNKNOWN，回答会明确提示。
-4. S29 启动器离线诊断未实现，本轮未重构启动器。
-5. Windows/ComfyUI/H3 真机验收未执行。
+1. 镜头逐字改写、字幕逐句编辑、候选图批量生成、工作流节点图数值级改写、对外发布：API 或产品能力缺少稳定的自然语言合同与回读验证，标记 NOT_SUPPORTED 并给出原因；需要用户在对应页面亲自操作。
+2. 原文导入：必须由用户提供本机文件或文本；AI 只调用正式导入执行者，绝不生成或替换用户小说正文。
+3. 付费预算：目录标注 paid，复用既有 LLM/任务预算与 completion cap；委托预算限制 GPU/集数/付费动作次数，但未新增货币额度系统。
+4. 知识版本：开发检出未注入构建提交号时状态为 UNKNOWN（明确提示）；发布构建由 `generate_copilot_knowledge.py --commit` 与 `BUILD_INFO.json` 绑定，CI 用 `--check` 校验真实清单，避免 Git 提交与清单自引用。
+5. 生产暂停/继续/取消依赖真实 `ProductionRun` 状态；本环境无真实运行任务，只验证了拒绝/回读合同。
+6. S29 启动器离线诊断未实现，本轮未重构启动器。
+7. Windows/ComfyUI/H3 真机验收未执行（NOT_RUN）。

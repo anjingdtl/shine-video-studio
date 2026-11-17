@@ -17,6 +17,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from shine.support.actions import _ALLOWED_PARAMS
 from shine.support.tools import ACTION_SPECS, READ_TOOLS
 
 CATALOG_VERSION = "shine-copilot-capabilities-2026.11.16-v2"
@@ -69,7 +70,7 @@ _EXISTING_ACTIONS: tuple[Capability, ...] = tuple(
         page="基础配置",
         tier="PREVIEW",
         executor=spec.executor,
-        params=("project_id",),
+        params=tuple(sorted(_ALLOWED_PARAMS.get(spec.kind, ("project_id",)))),
         readback="/api/v1/setup/verdict",
         reversible="NO",
         status="GUARDED",
@@ -78,7 +79,21 @@ _EXISTING_ACTIONS: tuple[Capability, ...] = tuple(
     for spec in ACTION_SPECS.values()
 )
 
-CAPABILITIES: tuple[Capability, ...] = _EXISTING_ACTIONS + (
+_EXPLICIT_CAPABILITIES: tuple[Capability, ...] = (
+    Capability(
+        action_id="managed_release",
+        label="停止本工作台拥有的渲染服务并释放显存",
+        module="comfyops",
+        page="基础配置",
+        tier="PREVIEW",
+        executor="shine.comfyops.renderer_release.release_managed_processes_guarded",
+        params=("only",),
+        readback="/api/v1/setup/verdict",
+        reversible="NO",
+        scope="MACHINE",
+        status="GUARDED",
+        note="只释放有归属证明的服务；不传项目，也不会强停外部 ComfyUI。",
+    ),
     Capability(
         action_id="project_create",
         label="创建影视项目",
@@ -186,6 +201,63 @@ CAPABILITIES: tuple[Capability, ...] = _EXISTING_ACTIONS + (
         "不替用户确认风格、主资产或审片。",
         gates=("STYLE_FROZEN", "EPISODE_PLAN_CONFIRMED", "PACKAGE_READY"),
     ),
+    Capability(
+        action_id="document_switch_basis",
+        label="切换正式原文底稿",
+        module="documents",
+        page="导演模式",
+        tier="PREVIEW",
+        executor="shine.services.switch_script_basis",
+        params=("project_id", "document_id"),
+        preconditions=("项目存在", "文档已导入且属于该项目"),
+        readback="GET /api/v1/projects/{project_id}/script-basis",
+        reversible="YES",
+        scope="PROJECT",
+        status="GUARDED",
+        examples=("把第二版原文切换成正式底稿",),
+        note="只切换底稿指针；不改写原文、不删除其它文档，旧包仍可按 id 读取。",
+    ),
+    Capability(
+        action_id="production_control",
+        label="暂停/继续/取消生产任务",
+        module="production",
+        page="导演模式",
+        tier="EXECUTE_GUARDED",
+        executor="shine.director.run_engine",
+        params=("run_id", "operation"),
+        preconditions=("Run 存在", "操作属于 pause/resume/cancel"),
+        readback="GET /api/v1/production-runs/{run_id}",
+        reversible="CONDITIONAL",
+        gpu=True,
+        scope="RUN",
+        status="GUARDED",
+        examples=("暂停当前生产任务", "取消第二集的生产"),
+        note="只操作一个已存在的 Run；复用原状态机与版本校验，不新建队列。",
+    ),
+    Capability(
+        action_id="literary_scripts_generate",
+        label="生成文学分集剧本",
+        module="pipeline",
+        page="导演模式",
+        tier="EXECUTE_GUARDED",
+        executor="shine.director.pipeline.queue_scene_scripts",
+        params=("project_id", "volume_id"),
+        preconditions=("分集方案已确认", "大纲与圣经已就绪", "分集剧本角色已配置"),
+        readback="GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}",
+        reversible="NO",
+        paid=True,
+        scope="PROJECT",
+        status="GUARDED",
+        examples=("把第一集的文学剧本生成出来",),
+        note="复用原流水线任务；只排队还没有确认剧本的分节，不覆盖已确认稿。",
+        gates=("VOLUME_PLAN_CONFIRMED", "OUTLINE_CONFIRMED", "BIBLE_CONFIRMED"),
+    ),
+)
+
+# Explicit rows override the generic fallback (same action_id), so every action
+# advertises its real parameter contract instead of a blanket project_id.
+CAPABILITIES: tuple[Capability, ...] = tuple(
+    {row.action_id: row for row in (_EXISTING_ACTIONS + _EXPLICIT_CAPABILITIES)}.values()
 )
 
 
@@ -303,13 +375,13 @@ MATRIX: tuple[dict[str, str], ...] = (
     {"area": "全局", "operation": "新建项目", "api": "POST /api/v1/projects", "executor": "shine.services.create_project", "ai_status": "GUARDED", "ai_action": "project_create"},
     {"area": "全局", "operation": "切换/查看项目", "api": "GET /api/v1/projects, GET /api/v1/projects/{id}", "executor": "projects ledger", "ai_status": "READ_ONLY", "ai_action": "read_project_journey"},
     {"area": "全局", "operation": "导入小说/剧本", "api": "POST /api/v1/projects/{id}/documents", "executor": "shine.services.import_project_document", "ai_status": "GUARDED", "ai_action": "document_import_text"},
-    {"area": "全局", "operation": "切换正式底稿", "api": "POST /api/v1/projects/{id}/script-basis", "executor": "api_story.choose_script_basis", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
+    {"area": "全局", "operation": "切换正式底稿", "api": "POST /api/v1/projects/{id}/script-basis", "executor": "shine.services.switch_script_basis", "ai_status": "GUARDED", "ai_action": "document_switch_basis"},
     {"area": "全局", "operation": "查看项目设置", "api": "GET /api/v1/projects/{id}", "executor": "projects ledger", "ai_status": "READ_ONLY", "ai_action": "read_project_journey"},
     {"area": "全局", "operation": "修改项目语言", "api": "PATCH /api/v1/projects/{id}/settings", "executor": "shine.services.update_project_settings", "ai_status": "GUARDED", "ai_action": "project_settings_update"},
     {"area": "导演模式", "operation": "七阶段旅程", "api": "GET /api/v1/projects/{id}/journey", "executor": "director.overview.build_overview", "ai_status": "READ_ONLY", "ai_action": "read_project_journey"},
     {"area": "导演模式", "operation": "生成故事大纲", "api": "POST /api/v1/projects/{id}/story-preparation/outlines", "executor": "materialprep.story.queue_outline", "ai_status": "GUARDED", "ai_action": "story_outline_generate"},
     {"area": "导演模式", "operation": "修订/确认故事大纲", "api": "POST /api/v1/projects/{id}/director/outline/revision, /confirm", "executor": "api_streamline", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
-    {"area": "导演模式", "operation": "生成分集剧本", "api": "POST /api/v1/projects/{id}/pipeline/volumes/{volume_id}/scripts", "executor": "pipeline", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
+    {"area": "导演模式", "operation": "生成分集剧本", "api": "POST /api/v1/projects/{id}/pipeline/volumes/{volume_id}/scripts", "executor": "shine.director.pipeline.queue_scene_scripts", "ai_status": "GUARDED", "ai_action": "literary_scripts_generate"},
     {"area": "导演模式", "operation": "生成/确认分镜书", "api": "POST /api/v1/projects/{id}/director/storyboard-book[/confirm]", "executor": "api_streamline", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "导演模式", "operation": "生成导演分镜", "api": "POST /api/v1/projects/{id}/director/storyboard/generate", "executor": "director.streamline.queue_director_storyboard", "ai_status": "GUARDED", "ai_action": "storyboard_generate"},
     {"area": "导演模式", "operation": "查看逐集镜头", "api": "GET /api/v1/projects/{id}/director/storyboard/episodes/{episode_id}/shots", "executor": "director.streamline.episode_shot_table", "ai_status": "READ_ONLY", "ai_action": "read_project_journey"},
@@ -319,13 +391,16 @@ MATRIX: tuple[dict[str, str], ...] = (
     {"area": "导演模式", "operation": "备料决策与提交", "api": "POST /api/v1/projects/{id}/director/materials/commit", "executor": "materialprep.service", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "导演模式", "operation": "确认导演包", "api": "POST /api/v1/director-packages/{package_id}/confirm", "executor": "director.package.confirm_package", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "导演模式", "operation": "开始真实拍摄", "api": "POST /api/v1/projects/{id}/director/production/start", "executor": "director.streamline.start_director_production", "ai_status": "GUARDED", "ai_action": "production_start"},
-    {"area": "导演模式", "operation": "暂停/继续/取消生产", "api": "POST /api/v1/production-runs/{run_id}/pause|resume|cancel", "executor": "production.runner", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
+    {"area": "导演模式", "operation": "暂停/继续/取消生产", "api": "POST /api/v1/production-runs/{run_id}/pause|resume|cancel", "executor": "shine.director.run_engine", "ai_status": "GUARDED", "ai_action": "production_control"},
     {"area": "导演模式", "operation": "查看生产进度/阻塞", "api": "GET /api/v1/production-runs/{run_id}[/blockers]", "executor": "production ledger", "ai_status": "READ_ONLY", "ai_action": "read_production_run"},
     {"area": "导演模式", "operation": "审片与交付", "api": "GET/POST /api/v1/projects/{id}/deliveries", "executor": "media.delivery", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "素材中心", "operation": "搜索/复用素材", "api": "GET /api/v1/projects/{id}/asset-center/search", "executor": "asset_center search", "ai_status": "READ_ONLY", "ai_action": "read_missing_materials"},
     {"area": "素材中心", "operation": "候选图生成", "api": "POST /api/v1/projects/{id}/candidate-assets/generate", "executor": "candidate generation", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
     {"area": "素材中心", "operation": "候选图人工确认", "api": "POST /api/v1/candidate-assets/{identity}/promote", "executor": "asset promote", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "素材中心", "operation": "素材任务进度/失败原因", "api": "GET /api/v1/projects/{id}/material-tasks", "executor": "material ledger", "ai_status": "READ_ONLY", "ai_action": "read_task_failure"},
+    {"area": "成片库", "operation": "字幕逐句编辑与导出审批", "api": "PUT /api/v1/projects/{id}/director/storyboard/shots/{shot_id}/subtitles", "executor": "api_streamline", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
+    {"area": "成片库", "operation": "对外发布/分享", "api": "—", "executor": "—", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
+    {"area": "设置", "operation": "工作流节点图数值级改写", "api": "workflow JSON", "executor": "—", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
     {"area": "设置", "operation": "查看环境裁决", "api": "GET /api/v1/setup/verdict", "executor": "api_setup.setup_verdict", "ai_status": "READ_ONLY", "ai_action": "—"},
     {"area": "设置", "operation": "一键整备缺失文件", "api": "POST /api/v1/setup/prepare/execute", "executor": "comfyops.setup_preparation.enqueue", "ai_status": "GUARDED", "ai_action": "setup_repair"},
     {"area": "设置", "operation": "核验/登记已有文件", "api": "POST /api/v1/setup/reconcile", "executor": "comfyops.setup_reconcile.reconcile_installation", "ai_status": "GUARDED", "ai_action": "setup_reconcile"},

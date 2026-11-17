@@ -8,13 +8,46 @@ import { currentCopilotFault, faultKey, faultLabel, subscribeCopilotFault, type 
 
 type Fact = { key: string; value: string; source: string };
 
-type RecommendedAction = {
+export type RecommendedAction = {
   kind: string;
   label: string;
   reason: string;
   requires_authorization: boolean;
   params: Record<string, unknown>;
 };
+
+export type CapabilityInfo = {
+  action_id: string;
+  params?: string[];
+  scope?: string;
+};
+
+/** Build the preview payload from the capability registry, never from habit.
+ *
+ *  Every action has its own parameter contract: `managed_release` takes `only`,
+ *  `project_create` takes no project, and a project-scoped action may inherit
+ *  the current project only when its contract actually declares that field.
+ *  The scope sent alongside is separate from the executor parameters.
+ */
+export function actionPayload(
+  action: Pick<RecommendedAction, 'kind' | 'params'>,
+  capabilities: Record<string, CapabilityInfo>,
+  activeProjectId?: string | null,
+): { params: Record<string, unknown>; scopeProjectId: string | null } {
+  const capability = capabilities[action.kind];
+  const declared = Array.isArray(capability?.params) ? capability!.params! : null;
+  const params: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(action.params || {})) {
+    if (declared && !declared.includes(key)) continue;
+    if (value === undefined || value === null || value === '') continue;
+    params[key] = value;
+  }
+  if (declared && declared.includes('project_id') && !params.project_id && activeProjectId) {
+    params.project_id = activeProjectId;
+  }
+  const scopeProjectId = capability?.scope === 'PROJECT' ? activeProjectId || null : null;
+  return { params, scopeProjectId };
+}
 
 type PlanStep = {
   order: number;
@@ -206,6 +239,12 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [webEnabled, setWebEnabled] = useState(false);
   const [togglingWeb, setTogglingWeb] = useState(false);
   const [showEvidence, setShowEvidence] = useState<Record<string, boolean>>({});
+  const [capabilities, setCapabilities] = useState<Record<string, CapabilityInfo>>({});
+  const [planInputs, setPlanInputs] = useState<Record<string, Record<string, string>>>({});
+  const [approvedSteps, setApprovedSteps] = useState<Record<string, number[]>>({});
+  const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
+  const [delegation, setDelegation] = useState<Record<string, unknown> | null>(null);
+  const [delegating, setDelegating] = useState(false);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionRef = useRef<CopilotSession | null>(null);
@@ -231,6 +270,25 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const payload = await api<{ capabilities?: CapabilityInfo[] }>('/support/capabilities/actions');
+        if (cancelled) return;
+        const map: Record<string, CapabilityInfo> = {};
+        for (const row of payload.capabilities || []) map[row.action_id] = row;
+        setCapabilities(map);
+      } catch {
+        // The registry is a contract aid; a failure must not block diagnosis.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   useEffect(() => {
@@ -372,14 +430,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     setReport(null);
     setLastAction(action);
     try {
+      const payload = actionPayload(action, capabilities, active.projectId);
       const result = await api<{ action: ActionState; reused: boolean }>('/support/actions/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           kind: action.kind,
-          params: { ...action.params, project_id: active.projectId || undefined },
+          params: payload.params,
           session_id: session?.id || null,
-          project_id: active.projectId || null,
+          project_id: payload.scopeProjectId,
         }),
       });
       setPreview(result.action);
@@ -557,9 +616,90 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     );
   };
 
+  const delegatePlan = async (message: CopilotMessage) => {
+    if (!session || delegating) return;
+    const plan = message.payload?.plan;
+    const steps = plan?.steps || [];
+    const autoOrders = steps.filter((step) => step.state === 'READY' && step.action).map((step) => step.order);
+    const selected = approvedSteps[message.id] ?? autoOrders;
+    if (!selected.length) {
+      setError('请先勾选要纳入本次授权的步骤。');
+      return;
+    }
+    setDelegating(true);
+    setError('');
+    try {
+      const result = await api<{ delegation: Record<string, unknown> }>('/support/plans/delegate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          session_id: session.id,
+          approved_orders: selected,
+          budget: { max_episodes: 1, max_gpu_actions: allowGpu[message.id] ? 1 : 0 },
+          confirm: true,
+        }),
+      });
+      setDelegation(result.delegation);
+      setNotice('已按你勾选的范围委托；每一步仍由原执行器完成。');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '委托没有开始。');
+    } finally {
+      setDelegating(false);
+    }
+  };
+
+  const refreshDelegation = async () => {
+    if (!session) return;
+    try {
+      const result = await api<{ delegation: Record<string, unknown> }>(
+        `/support/sessions/${session.id}/delegation/refresh`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ session_id: session.id }),
+        },
+      );
+      setDelegation(result.delegation);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法读取委托进度。');
+    }
+  };
+
+  const cancelDelegation = async () => {
+    if (!session) return;
+    try {
+      const result = await api<{ delegation: Record<string, unknown> }>(
+        `/support/sessions/${session.id}/delegation/cancel`,
+        { method: 'POST' },
+      );
+      setDelegation(result.delegation);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法取消委托。');
+    }
+  };
+
   const renderPlan = (message: CopilotMessage) => {
     const plan = message.payload?.plan;
     if (!plan || !plan.steps?.length) return null;
+    const inputs = planInputs[message.id] || {};
+    const autoOrders = plan.steps.filter((step) => step.state === 'READY' && step.action).map((step) => step.order);
+    const selected = approvedSteps[message.id] ?? autoOrders;
+    const editable = (step: PlanStep) =>
+      Boolean(step.action) && step.state === 'HUMAN_REQUIRED'
+      && ((step.action!.kind === 'document_import_text')
+        || (step.action!.kind === 'project_create' && !step.action!.params?.title));
+    const mergedParams = (step: PlanStep) => ({
+      ...(step.action?.params || {}),
+      ...Object.fromEntries(Object.entries(inputs).filter(([, value]) => value.trim())),
+    });
+    const readyToPreview = (step: PlanStep) => {
+      if (step.action?.kind === 'document_import_text') return Boolean((inputs.text || '').trim());
+      if (step.action?.kind === 'project_create') {
+        return Boolean((inputs.title || String(step.action.params?.title || '')).trim());
+      }
+      return true;
+    };
+    const hasGpu = plan.steps.some((step) => step.action?.kind === 'production_start');
     return (
       <div className="copilot-plan" aria-label="操作计划">
         <div className="copilot-plan-head">
@@ -573,24 +713,127 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
               <b>{step.title}</b>
               {step.reason && <small>{step.reason}</small>}
               {step.evidence && step.evidence.length > 0 && <em>{step.evidence.slice(0, 2).join(' · ')}</em>}
-              {step.action && step.state === 'READY' && (
-                <button
-                  type="button"
-                  className="copilot-link"
-                  onClick={() => void previewAction({
-                    kind: step.action!.kind,
-                    label: step.title,
-                    reason: step.reason || '来自只读计划；仍需预览并确认。',
-                    requires_authorization: true,
-                    params: step.action!.params,
-                  })}
-                >
-                  预览这一步
-                </button>
+              {step.action?.kind === 'project_create' && (step.state !== 'READY' || !step.action.params?.title) && (
+                <label className="copilot-plan-input">
+                  项目名称
+                  <input
+                    type="text"
+                    value={inputs.title ?? ''}
+                    placeholder="例如：雾港回声"
+                    onChange={(event) => setPlanInputs((prev) => ({
+                      ...prev,
+                      [message.id]: { ...(prev[message.id] || {}), title: event.target.value },
+                    }))}
+                  />
+                </label>
+              )}
+              {step.action?.kind === 'document_import_text' && (
+                <div className="copilot-plan-input">
+                  <label>
+                    原文文本
+                    <textarea
+                      value={inputs.text ?? ''}
+                      placeholder="粘贴你自己的原文；模型不会重写或补写正文。"
+                      onChange={(event) => setPlanInputs((prev) => ({
+                        ...prev,
+                        [message.id]: { ...(prev[message.id] || {}), text: event.target.value },
+                      }))}
+                    />
+                  </label>
+                  <label>
+                    或选择本地文件
+                    <input
+                      type="file"
+                      accept=".txt,.md,.docx"
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        if (!file) return;
+                        if (file.size > 20 * 1024 * 1024) {
+                          setError('文件超过 20MB，请在导演页使用正式上传。');
+                          return;
+                        }
+                        const reader = new FileReader();
+                        reader.onload = () => {
+                          setPlanInputs((prev) => ({
+                            ...prev,
+                            [message.id]: {
+                              ...(prev[message.id] || {}),
+                              text: String(reader.result || ''),
+                              filename: file.name,
+                            },
+                          }));
+                        };
+                        reader.readAsText(file);
+                      }}
+                    />
+                  </label>
+                </div>
+              )}
+              {step.action && (step.state === 'READY' || editable(step)) && (
+                <div className="copilot-plan-actions">
+                  {step.state === 'READY' && (
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(step.order)}
+                        onChange={(event) => setApprovedSteps((prev) => ({
+                          ...prev,
+                          [message.id]: event.target.checked
+                            ? [...new Set([...(prev[message.id] ?? autoOrders), step.order])]
+                            : (prev[message.id] ?? autoOrders).filter((order) => order !== step.order),
+                        }))}
+                      />
+                      纳入本次授权
+                    </label>
+                  )}
+                  <button
+                    type="button"
+                    className="copilot-link"
+                    disabled={!readyToPreview(step)}
+                    onClick={() => void previewAction({
+                      kind: step.action!.kind,
+                      label: step.title,
+                      reason: step.reason || '来自只读计划；仍需预览并确认。',
+                      requires_authorization: true,
+                      params: mergedParams(step),
+                    })}
+                  >
+                    预览这一步
+                  </button>
+                </div>
               )}
             </li>
           ))}
         </ol>
+        {hasGpu && (
+          <label className="copilot-plan-actions">
+            <input
+              type="checkbox"
+              checked={Boolean(allowGpu[message.id])}
+              onChange={(event) => setAllowGpu((prev) => ({ ...prev, [message.id]: event.target.checked }))}
+            />
+            允许本次委托执行会占用 GPU 的步骤（仍受原生产门禁约束）
+          </label>
+        )}
+        <div className="copilot-plan-actions">
+          <button type="button" className="copilot-action" disabled={delegating} onClick={() => void delegatePlan(message)}>
+            {delegating ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />}
+            授权并推进已勾选步骤
+          </button>
+        </div>
+        {delegation && (
+          <div className="copilot-delegation" aria-label="委托进度">
+            <b>委托状态：{String(delegation.status || '')}</b>
+            {Array.isArray(delegation.steps) && (delegation.steps as { title?: string; state?: string; message?: string }[]).map((step, index) => (
+              <small key={index}>{step.title || `步骤 ${index + 1}`}：{step.state}{step.message ? `（${step.message}）` : ''}</small>
+            ))}
+            {delegation.stop_reason ? <small>停止原因：{String(delegation.stop_reason)}</small> : null}
+            <div className="copilot-plan-actions">
+              <button type="button" className="copilot-link" onClick={() => void refreshDelegation()}>刷新进度</button>
+              <button type="button" className="copilot-link" onClick={() => void cancelDelegation()}>取消未提交步骤</button>
+            </div>
+          </div>
+        )}
         <p className="copilot-authorization">{plan.notice}</p>
       </div>
     );

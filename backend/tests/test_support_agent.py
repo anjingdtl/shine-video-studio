@@ -49,6 +49,9 @@ def test_tool_registry_has_no_shell_or_source_write_capability():
         "story_outline_generate",
         "storyboard_generate",
         "production_start",
+        "document_switch_basis",
+        "production_control",
+        "literary_scripts_generate",
     }
     with pytest.raises(ToolDenied):
         tool_spec("run_shell")

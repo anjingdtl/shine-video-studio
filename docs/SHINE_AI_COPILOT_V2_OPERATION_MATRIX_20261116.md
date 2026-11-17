@@ -1,35 +1,34 @@
 # Shine AI 管家 V2.0 全业务操作覆盖矩阵
 
-- 日期：2026-11-16
+- 初版：2026-11-16；远端验收修复复核：2026-11-17
 - 能力目录版本：`shine-copilot-capabilities-2026.11.16-v2`
-- 后端路由总数（装饰器统计，`api_*.py` + `main.py`）：**455**
-- 矩阵操作数：**41**
-- 说明：本矩阵是覆盖率审计，不是「全部可代理」的宣称。未列入矩阵的操作不计入覆盖率；标为 NOT_SUPPORTED 的操作附工程原因。
+- 后端 FastAPI 方法级路由操作：469；唯一路径：431；矩阵操作：44
+- 审计口径：真实 UI → 正式 API → 参数 Schema → 原业务门禁 → 唯一执行者 → 回读接口 → AI 能力状态。未列入矩阵的操作不计入覆盖率；NOT_SUPPORTED 不提供假动作。
 
 ## 1. 统计
 
 | AI 状态 | 数量 | 含义 |
 | --- | --- | --- |
-| COVERED | 0 | 可由自然语言委托 |
-| READ_ONLY | 11 | 可查询，不可修改 |
-| GUARDED | 14 | 需预览并明确授权后委托 |
-| HUMAN_REQUIRED | 11 | 必须人工确认（AI 只解释） |
-| NOT_SUPPORTED | 5 | 当前未接入，附工程原因 |
+| COVERED | 0 | 自然语言可直接委托（当前无此级业务写操作） |
+| READ_ONLY | 11 | 可查询、可解释，不可修改 |
+| GUARDED | 17 | 需预览差异并由用户明确授权后委托原执行者 |
+| HUMAN_REQUIRED | 11 | 必须由人亲自确认，AI 只准备事实与解释 |
+| NOT_SUPPORTED | 5 | 当前未接入，附真实工程原因 |
 
-## 2. 全页面操作矩阵（UI → 原 API → 原执行者 → AI 状态）
+## 2. 全页面操作矩阵
 
 | 区域 | 用户操作 | 原 API | 原执行者 | AI 状态 | AI 动作 |
 | --- | --- | --- | --- | --- | --- |
 | 全局 | 新建项目 | `POST /api/v1/projects` | `shine.services.create_project` | GUARDED | project_create |
 | 全局 | 切换/查看项目 | `GET /api/v1/projects, GET /api/v1/projects/{id}` | `projects ledger` | READ_ONLY | read_project_journey |
 | 全局 | 导入小说/剧本 | `POST /api/v1/projects/{id}/documents` | `shine.services.import_project_document` | GUARDED | document_import_text |
-| 全局 | 切换正式底稿 | `POST /api/v1/projects/{id}/script-basis` | `api_story.choose_script_basis` | NOT_SUPPORTED | — |
+| 全局 | 切换正式底稿 | `POST /api/v1/projects/{id}/script-basis` | `shine.services.switch_script_basis` | GUARDED | document_switch_basis |
 | 全局 | 查看项目设置 | `GET /api/v1/projects/{id}` | `projects ledger` | READ_ONLY | read_project_journey |
 | 全局 | 修改项目语言 | `PATCH /api/v1/projects/{id}/settings` | `shine.services.update_project_settings` | GUARDED | project_settings_update |
 | 导演模式 | 七阶段旅程 | `GET /api/v1/projects/{id}/journey` | `director.overview.build_overview` | READ_ONLY | read_project_journey |
 | 导演模式 | 生成故事大纲 | `POST /api/v1/projects/{id}/story-preparation/outlines` | `materialprep.story.queue_outline` | GUARDED | story_outline_generate |
 | 导演模式 | 修订/确认故事大纲 | `POST /api/v1/projects/{id}/director/outline/revision, /confirm` | `api_streamline` | HUMAN_REQUIRED | — |
-| 导演模式 | 生成分集剧本 | `POST /api/v1/projects/{id}/pipeline/volumes/{volume_id}/scripts` | `pipeline` | NOT_SUPPORTED | — |
+| 导演模式 | 生成分集剧本 | `POST /api/v1/projects/{id}/pipeline/volumes/{volume_id}/scripts` | `shine.director.pipeline.queue_scene_scripts` | GUARDED | literary_scripts_generate |
 | 导演模式 | 生成/确认分镜书 | `POST /api/v1/projects/{id}/director/storyboard-book[/confirm]` | `api_streamline` | HUMAN_REQUIRED | — |
 | 导演模式 | 生成导演分镜 | `POST /api/v1/projects/{id}/director/storyboard/generate` | `director.streamline.queue_director_storyboard` | GUARDED | storyboard_generate |
 | 导演模式 | 查看逐集镜头 | `GET /api/v1/projects/{id}/director/storyboard/episodes/{episode_id}/shots` | `director.streamline.episode_shot_table` | READ_ONLY | read_project_journey |
@@ -39,13 +38,16 @@
 | 导演模式 | 备料决策与提交 | `POST /api/v1/projects/{id}/director/materials/commit` | `materialprep.service` | HUMAN_REQUIRED | — |
 | 导演模式 | 确认导演包 | `POST /api/v1/director-packages/{package_id}/confirm` | `director.package.confirm_package` | HUMAN_REQUIRED | — |
 | 导演模式 | 开始真实拍摄 | `POST /api/v1/projects/{id}/director/production/start` | `director.streamline.start_director_production` | GUARDED | production_start |
-| 导演模式 | 暂停/继续/取消生产 | `POST /api/v1/production-runs/{run_id}/pause|resume|cancel` | `production.runner` | NOT_SUPPORTED | — |
+| 导演模式 | 暂停/继续/取消生产 | `POST /api/v1/production-runs/{run_id}/pause|resume|cancel` | `shine.director.run_engine` | GUARDED | production_control |
 | 导演模式 | 查看生产进度/阻塞 | `GET /api/v1/production-runs/{run_id}[/blockers]` | `production ledger` | READ_ONLY | read_production_run |
 | 导演模式 | 审片与交付 | `GET/POST /api/v1/projects/{id}/deliveries` | `media.delivery` | HUMAN_REQUIRED | — |
 | 素材中心 | 搜索/复用素材 | `GET /api/v1/projects/{id}/asset-center/search` | `asset_center search` | READ_ONLY | read_missing_materials |
 | 素材中心 | 候选图生成 | `POST /api/v1/projects/{id}/candidate-assets/generate` | `candidate generation` | NOT_SUPPORTED | — |
 | 素材中心 | 候选图人工确认 | `POST /api/v1/candidate-assets/{identity}/promote` | `asset promote` | HUMAN_REQUIRED | — |
 | 素材中心 | 素材任务进度/失败原因 | `GET /api/v1/projects/{id}/material-tasks` | `material ledger` | READ_ONLY | read_task_failure |
+| 成片库 | 字幕逐句编辑与导出审批 | `PUT /api/v1/projects/{id}/director/storyboard/shots/{shot_id}/subtitles` | `api_streamline` | NOT_SUPPORTED | — |
+| 成片库 | 对外发布/分享 | `—` | `—` | NOT_SUPPORTED | — |
+| 设置 | 工作流节点图数值级改写 | `workflow JSON` | `—` | NOT_SUPPORTED | — |
 | 设置 | 查看环境裁决 | `GET /api/v1/setup/verdict` | `api_setup.setup_verdict` | READ_ONLY | — |
 | 设置 | 一键整备缺失文件 | `POST /api/v1/setup/prepare/execute` | `comfyops.setup_preparation.enqueue` | GUARDED | setup_repair |
 | 设置 | 核验/登记已有文件 | `POST /api/v1/setup/reconcile` | `comfyops.setup_reconcile.reconcile_installation` | GUARDED | setup_reconcile |
@@ -62,26 +64,27 @@
 | 全局 | 任务失败诊断 | `jobs/job_attempts + /setup/verdict` | `support.diagnostics` | READ_ONLY | read_task_failure |
 | 全局 | 生成工程问题报告 | `POST /api/v1/support/reports` | `support.reports.generate_report` | GUARDED | generate_support_report |
 
-## 3. 可由自然语言委托的动作（Capability Registry）
+> 调参与开拍严格分离：策略预览只返回「待使用策略」与差异（`proposed_action=null`、`apply_via=production_start`、`scope=NEXT_PRODUCTION_ONLY`），不会自动生成开拍动作；真正开拍必须另一次资源影响展示与授权。
 
-| action_id | 名称 | 页面 | 权限 | 执行者 | 参数 | 回读 | 可逆 | GPU | 付费 |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `setup_repair` | 补齐真实制作环境 | 基础配置 | PREVIEW | `shine.comfyops.setup_preparation.enqueue` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `setup_reconcile` | 重新核验并登记已存在的本机文件 | 基础配置 | PREVIEW | `shine.comfyops.setup_reconcile.reconcile_installation` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `managed_release` | 停止本工作台拥有的渲染服务并释放显存 | 基础配置 | PREVIEW | `shine.comfyops.renderer_release.release_managed_processes_guarded` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `workflow_user_copy` | 创建用户级工作流副本 | 基础配置 | PREVIEW | `shine.api_comfy.create_workflow_profile` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `project_create` | 创建影视项目 | 基础配置 | PREVIEW | `shine.services.create_project` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `document_import_text` | 导入原文文本 | 基础配置 | PREVIEW | `shine.services.import_project_document` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `project_settings_update` | 修改项目用户级设置 | 基础配置 | PREVIEW | `shine.services.update_project_settings` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `story_outline_generate` | 生成故事大纲 | 基础配置 | PREVIEW | `shine.materialprep.story.queue_outline` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `storyboard_generate` | 生成导演分镜 | 基础配置 | PREVIEW | `shine.director.streamline.queue_director_storyboard` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `production_start` | 开始真实拍摄选定集 | 基础配置 | PREVIEW | `shine.director.streamline.start_director_production` | project_id | `/api/v1/setup/verdict` | NO | False | False |
-| `project_create` | 创建影视项目 | 导演模式 | PREVIEW | `shine.services.create_project` | title, description, language | `GET /api/v1/projects/{project_id}` | NO | False | False |
-| `document_import_text` | 导入原文文本 | 导演模式 | PREVIEW | `shine.services.import_project_document` | project_id, filename, text | `GET /api/v1/projects/{project_id}/script-basis` | NO | False | False |
-| `project_settings_update` | 修改项目语言等用户级设置 | 设置 | PREVIEW | `shine.services.update_project_settings` | project_id, language | `GET /api/v1/projects/{project_id}` | YES | False | False |
-| `story_outline_generate` | 生成故事大纲 | 导演模式 | EXECUTE_GUARDED | `shine.materialprep.story.queue_outline` | project_id, document_id, locked_facts, pacing | `GET /api/v1/projects/{project_id}/story-preparation` | NO | False | True |
-| `storyboard_generate` | 生成导演分镜 | 导演模式 | EXECUTE_GUARDED | `shine.director.streamline.queue_director_storyboard` | project_id, plan_version | `GET /api/v1/projects/{project_id}/director/storyboard/state` | NO | False | True |
-| `production_start` | 开始真实拍摄选中的集 | 导演模式 | EXECUTE_GUARDED | `shine.director.streamline.start_director_production` | project_id, episode_ids, workflow_profile_id, strategy | `GET /api/v1/production-runs/{run_id}` | CONDITIONAL | True | False |
+## 3. 可委托动作（Capability Registry）
+
+| action_id | 名称 | 层级 | 作用域 | 参数合同 | 回读 | 可逆 | GPU | 付费 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `setup_repair` | 补齐真实制作环境 | PREVIEW | PROJECT | capabilities, deep_scan, installation_path, port, project_id, variant_id, verify_runtime | `/api/v1/setup/verdict` | NO | NO | NO |
+| `setup_reconcile` | 重新核验并登记已存在的本机文件 | PREVIEW | PROJECT | adopt, capability, installation_path, port, project_id, variant_id | `/api/v1/setup/verdict` | NO | NO | NO |
+| `managed_release` | 停止本工作台拥有的渲染服务并释放显存 | PREVIEW | MACHINE | only | `/api/v1/setup/verdict` | NO | NO | NO |
+| `workflow_user_copy` | 创建用户级工作流副本 | PREVIEW | PROJECT | name, parameter_overrides, project_id, source_profile_id | `/api/v1/setup/verdict` | NO | NO | NO |
+| `project_create` | 创建影视项目 | PREVIEW | MACHINE | title, description, language | `GET /api/v1/projects/{project_id}` | NO | NO | NO |
+| `document_import_text` | 导入原文文本 | PREVIEW | PROJECT | project_id, filename, text | `GET /api/v1/projects/{project_id}/script-basis` | NO | NO | NO |
+| `project_settings_update` | 修改项目语言等用户级设置 | PREVIEW | PROJECT | project_id, language | `GET /api/v1/projects/{project_id}` | YES | NO | NO |
+| `story_outline_generate` | 生成故事大纲 | EXECUTE_GUARDED | PROJECT | project_id, document_id, locked_facts, pacing | `GET /api/v1/projects/{project_id}/story-preparation` | NO | NO | YES |
+| `storyboard_generate` | 生成导演分镜 | EXECUTE_GUARDED | PROJECT | project_id, plan_version | `GET /api/v1/projects/{project_id}/director/storyboard/state` | NO | NO | YES |
+| `production_start` | 开始真实拍摄选中的集 | EXECUTE_GUARDED | PROJECT | project_id, episode_ids, workflow_profile_id, strategy | `GET /api/v1/production-runs/{run_id}` | CONDITIONAL | YES | NO |
+| `document_switch_basis` | 切换正式原文底稿 | PREVIEW | PROJECT | project_id, document_id | `GET /api/v1/projects/{project_id}/script-basis` | YES | NO | NO |
+| `production_control` | 暂停/继续/取消生产任务 | EXECUTE_GUARDED | RUN | run_id, operation | `GET /api/v1/production-runs/{run_id}` | CONDITIONAL | YES | NO |
+| `literary_scripts_generate` | 生成文学分集剧本 | EXECUTE_GUARDED | PROJECT | project_id, volume_id | `GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}` | NO | NO | YES |
+
+前端只按本表白名单构造参数：不再给所有动作统一追加 `project_id`；`managed_release` 只传 `only`；`project_create` 不传当前项目；`production_control` 只传 `run_id/operation`；动作自带的目标项目不会被当前项目静默改写。
 
 ## 4. 只读能力
 
@@ -123,4 +126,6 @@
 
 ## 7. 覆盖结论
 
-核心导演链路（创建项目、导入原文、故事大纲、导演分镜、真实开拍、生产进度、失败诊断、受管释放、环境整备与对账、工作流副本、用户级调参、工程报告）已具备可委托动作；创作确认、风格冻结、主资产、备料决策、审片交付仍由人工完成；镜头逐字编辑、候选图批量生成、暂停/取消生产等尚无稳定自然语言合同，已标记 NOT_SUPPORTED 并说明依赖。全部写动作仍走「预览 → 用户确认 → 原执行者 → 权威回读」。
+核心导演链路（创建项目、导入原文、切换正式底稿、故事大纲、分集剧本、导演分镜、真实开拍、生产暂停/继续/取消、生产进度、失败诊断、受管释放、环境整备与对账、工作流副本、用户级调参、工程报告）已具备可委托动作；创作确认、风格冻结、主资产、备料决策、审片交付仍由人工完成；镜头逐字编辑、候选图批量生成、字幕逐句编辑、节点图数值改写、外部发布仍无稳定自然语言合同。
+
+全部写动作仍走「预览 → 用户明确授权 → 原执行者 → 权威回读」；项目级动作使用唯一已校验的 `target_project_id`，跨项目声明一律拒绝，历史授权不能跨项目复用。

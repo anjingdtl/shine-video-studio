@@ -343,7 +343,18 @@ def handle_message(
             word in content.casefold() for word in ("h3", "ref2va", "comfyui", "comfy", "minimax")
         ):
             official_answer = official_docs.search(content, limit=3)
-        if intent in {"production", "materials", "release", "parameters", "create_project", "import_document"}:
+        if intent in {
+            "production",
+            "materials",
+            "release",
+            "parameters",
+            "create_project",
+            "import_document",
+            "literary_scripts",
+            "switch_basis",
+            "outline",
+            "control",
+        }:
             try:
                 plan = planner.build_plan(
                     db,
@@ -352,6 +363,10 @@ def handle_message(
                     project_id=session.project_id,
                     episode_ids=None,
                 )
+                if plan is not None and gateway is not None:
+                    from shine.support import nlu
+
+                    plan = nlu.enrich_plan(db, gateway, plan=plan, text=content)
             except ValueError as exc:
                 plan_error = str(exc)
             except Exception as exc:  # noqa: BLE001 - a broken plan must not break diagnosis
@@ -592,6 +607,7 @@ def handle_message(
         evidence_ids=[snapshot.get("evidence_id")] if snapshot.get("evidence_id") else [],
     )
     session.context_json = {
+        **(session.context_json if isinstance(session.context_json, dict) else {}),
         "snapshot": snapshot,
         "last_diagnosis": diagnosis,
         "last_evidence_id": snapshot.get("evidence_id"),

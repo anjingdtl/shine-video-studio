@@ -343,21 +343,6 @@ def _preview_strategy(
         raise ParameterError("PARAMETER_VALUE", str(exc)[:300]) from exc
     draft = strategy.model_dump(mode="json")
     diff = _diff(base, draft)
-    proposed = None
-    requires = []
-    if diff:
-        if project_id and episode_ids:
-            proposed = {
-                "kind": "production_start",
-                "label": "按新策略开始真实拍摄",
-                "params": {
-                    "project_id": project_id,
-                    "episode_ids": list(episode_ids),
-                    "strategy": draft,
-                },
-            }
-        else:
-            requires.append("episode_ids")
     variants = {row["variant_id"]: row for row in model_variant_options()}
     chosen = variants.get(strategy.model_variant_id)
     return {
@@ -366,15 +351,23 @@ def _preview_strategy(
         "diff": diff,
         "draft": draft,
         "strategy_sha256": strategy.strategy_sha256(),
-        "proposed_action": proposed,
-        "requires_input": requires,
+        # Tuning is not shooting.  A strategy only exists inside the next
+        # production submission, so nothing is saved and no action is proposed.
+        "proposed_action": None,
+        "pending_strategy": draft,
+        "apply_via": "production_start",
+        "scope": "NEXT_PRODUCTION_ONLY",
+        "requires_input": ["episode_ids", "production_start_authorization"] if diff else [],
         "reversible": "NO",
         "hardware_note": (
             "该变体没有已验证记录，执行器会按原门禁拒绝或具名阻断。"
             if chosen and not chosen.get("verified")
             else "变体已验证记录存在，但仍以开拍时的真实门禁为准。"
         ),
-        "notes": "策略只在下一次开拍冻结；不会改动当前已通过的镜头版本。",
+        "notes": (
+            "这是一份待使用策略，尚未保存也不会自动开拍；只有你在开拍时再次明确授权，"
+            "它才会随那次生产提交冻结。不会替换已通过的镜头版本，也不会静默更换 MiniMax-H3 视频核心。"
+        ),
     }
 
 

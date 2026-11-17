@@ -542,7 +542,10 @@ def test_v237_v240_end_to_end_create_import_then_outline_refusal_is_recoverable(
     message = body["session"]["messages"][-1]
     plan = message["payload"]["plan"]
     assert plan["intent"] == "CREATE_PROJECT"
-    assert plan["requires_input"] == ["title"]
+    assert plan["requires_input"] == []
+    step = plan["steps"][0]
+    assert step["state"] == "READY"
+    assert step["action"]["params"]["title"] == "雾港回声"
     # The assistant may propose the capability; it must not have executed it.
     with factory() as db:
         assert len(db.scalars(select(SupportAction)).all()) == 0

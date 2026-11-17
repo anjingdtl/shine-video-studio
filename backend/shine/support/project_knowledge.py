@@ -353,22 +353,43 @@ def _content_digest() -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
+
+
 def build_commit_from_env() -> str | None:
-    """The build's own commit, when the package/bootstrapper injected it."""
+    """The build's own commit, when the package/bootstrapper injected it.
+
+    ``SHINE_BUILD_COMMIT`` wins; otherwise the packaged ``BUILD_INFO.json`` at
+    the package/repo root is read.  A source checkout without either is UNKNOWN,
+    never "assume HEAD" (which would make the manifest self-referential).
+    """
     value = (os.environ.get("SHINE_BUILD_COMMIT") or "").strip()
-    return value if re.fullmatch(r"[0-9a-f]{7,40}", value) else None
+    if _COMMIT_RE.fullmatch(value):
+        return value
+    root = Path(__file__).resolve().parents[3]
+    for candidate in (root / "BUILD_INFO.json", root.parent / "BUILD_INFO.json"):
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        commit = str(payload.get("source_commit") or "").strip()
+        if _COMMIT_RE.fullmatch(commit):
+            return commit
+    return None
 
 
-def _manifest() -> dict[str, Any]:
+def _manifest(path: Path | None = None) -> dict[str, Any]:
     try:
-        return json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        return json.loads((path or MANIFEST_PATH).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
 
 
-def index_metadata(build_commit: str | None = None) -> dict[str, Any]:
+def index_metadata(
+    build_commit: str | None = None, manifest_path: Path | None = None
+) -> dict[str, Any]:
     """Version binding between this knowledge and the running build."""
-    manifest = _manifest()
+    manifest = _manifest(manifest_path)
     recorded = str(manifest.get("source_commit") or "") or None
     recorded_version = str(manifest.get("knowledge_version") or "") or None
     recorded_digest = str(manifest.get("content_sha256") or "") or None
@@ -382,6 +403,9 @@ def index_metadata(build_commit: str | None = None) -> dict[str, Any]:
     elif recorded_version != KNOWLEDGE_VERSION or recorded_digest != digest:
         state = "STALE"
         reasons.append("知识清单内容与运行版本不一致，已按过期资料处理。")
+    elif not recorded:
+        state = "UNKNOWN"
+        reasons.append("知识清单未写入来源提交号（开发检出），无法证明知识版本与当前代码一致。")
     elif not observed:
         state = "UNKNOWN"
         reasons.append("当前构建未注入提交号，无法证明知识版本与当前代码一致。")

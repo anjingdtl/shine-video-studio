@@ -178,6 +178,32 @@ def create_project(
     return project
 
 
+def switch_script_basis(db, project, document, *, actor: str = "user") -> bool:
+    """The single executor for switching the production basis.
+
+    Only an already-imported document of the same project may become the basis;
+    packages confirmed against the previous basis stay readable by id.
+    """
+    if document.project_id != project.id:
+        raise ValueError("CROSS_PROJECT_DOCUMENT")
+    changed = project.current_document_id != document.id
+    if changed:
+        previous = project.current_document_id
+        project.current_document_id = document.id
+        add_audit(
+            db,
+            actor,
+            "SCRIPT_BASIS_SELECTED",
+            "project_document",
+            document.id,
+            {"previous_document_id": previous, "sha256": document.sha256},
+            project_id=project.id,
+        )
+        db.commit()
+        db.refresh(project)
+    return changed
+
+
 def update_project_settings(
     db: Session,
     project: Project,

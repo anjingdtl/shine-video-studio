@@ -18,9 +18,11 @@ from sqlalchemy import select
 from shine.api_common import DBSession, app_settings, llm_gateway
 from shine.api_operator import Operator
 from shine.config import Settings
+from shine.models import utcnow
 from shine.support import actions as action_service
 from shine.support import agent as agent_service
 from shine.support import capability_catalog, official_docs, project_knowledge
+from shine.support import delegation as delegation_service
 from shine.support import parameters as parameter_service
 from shine.support import planner as planner_service
 from shine.support import reports as report_service
@@ -65,6 +67,9 @@ class ActionPreviewRequest(BaseModel):
         "story_outline_generate",
         "storyboard_generate",
         "production_start",
+        "document_switch_basis",
+        "production_control",
+        "literary_scripts_generate",
     ]
     params: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=36)
@@ -100,6 +105,19 @@ class ActionApproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     preview_hash: str = Field(min_length=16, max_length=64)
     confirm: bool = False
+
+
+class PlanDelegateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=36)
+    approved_orders: list[int] = Field(min_length=1, max_length=8)
+    budget: dict = Field(default_factory=dict)
+    confirm: bool = False
+
+
+class PlanDelegateAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=36)
 
 
 class ReportCreate(BaseModel):
@@ -188,12 +206,14 @@ def support_plan_preview(
     db: DBSession,
 ):
     """Bounded read-only plan; no executor is called here."""
+    session = _require_session(db, body.session_id) if body.session_id else None
+    project_id = body.project_id or (session.project_id if session is not None else None)
     try:
         plan = planner_service.build_plan(
             db,
             settings,
             request=body.request,
-            project_id=body.project_id,
+            project_id=project_id,
             episode_ids=body.episode_ids or None,
         )
     except ValueError as exc:
@@ -204,6 +224,18 @@ def support_plan_preview(
             "这句话没有匹配到可执行计划；可以直接提问，管家会先诊断或检索项目百科。",
             409,
         )
+    if session is not None:
+        # Only the read-only plan and the person's explicit scope are stored;
+        # delegation walks this list later and still previews every step.
+        session.context_json = {
+            **(session.context_json or {}),
+            "last_plan": {
+                **plan,
+                "episode_ids": list(body.episode_ids or []),
+                "stored_at": utcnow().isoformat(),
+            },
+        }
+        db.commit()
     return {
         "plan": plan,
         "capabilities": {
@@ -212,6 +244,78 @@ def support_plan_preview(
         },
         "notice": "计划是只读建议；每个可执行步骤仍要预览并明确确认。",
     }
+
+
+@router.post("/plans/delegate")
+def support_plan_delegate(
+    body: PlanDelegateRequest,
+    request: Request,
+    actor: Operator,
+    settings: SettingsDep,
+    db: DBSession,
+    gateway: GatewayDep,
+):
+    if not body.confirm:
+        raise _http("CONFIRMATION_REQUIRED", "必须明确确认授权范围后才会推进计划。", 400)
+    session = _require_session(db, body.session_id)
+    try:
+        payload = delegation_service.create(
+            db,
+            settings,
+            request.app.state.session_factory,
+            session=session,
+            approved_orders=list(body.approved_orders),
+            budget=body.budget,
+            actor=actor,
+            gateway=gateway,
+        )
+    except delegation_service.DelegationError as exc:
+        raise _http(exc.code, exc.message, 409) from exc
+    db.commit()
+    return {"delegation": payload}
+
+
+@router.get("/sessions/{session_id}/delegation")
+def support_delegation_get(session_id: str, db: DBSession):
+    session = _require_session(db, session_id)
+    payload = delegation_service.get(session)
+    if payload is None:
+        raise _http("DELEGATION_NOT_FOUND", "当前会话还没有委托。", 404)
+    return {"delegation": payload}
+
+
+@router.post("/sessions/{session_id}/delegation/refresh")
+def support_delegation_refresh(
+    session_id: str,
+    body: PlanDelegateAction,
+    request: Request,
+    actor: Operator,
+    settings: SettingsDep,
+    db: DBSession,
+    gateway: GatewayDep,
+):
+    session = _require_session(db, session_id)
+    payload = delegation_service.refresh(
+        db,
+        settings,
+        request.app.state.session_factory,
+        session=session,
+        actor=actor,
+        gateway=gateway,
+    )
+    db.commit()
+    return {"delegation": payload}
+
+
+@router.post("/sessions/{session_id}/delegation/cancel")
+def support_delegation_cancel(session_id: str, db: DBSession):
+    session = _require_session(db, session_id)
+    try:
+        payload = delegation_service.cancel(session=session)
+    except delegation_service.DelegationError as exc:
+        raise _http(exc.code, exc.message, 409) from exc
+    db.commit()
+    return {"delegation": payload}
 
 
 @router.get("/parameters/contracts")

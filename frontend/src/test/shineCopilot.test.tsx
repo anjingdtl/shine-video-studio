@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ShineCopilot } from '../components/ShineCopilot';
+import { ShineCopilot, actionPayload, type CapabilityInfo } from '../components/ShineCopilot';
 import { clearCopilotFault, reportCopilotFault } from '../copilotContext';
 import { StudioStub, jsonResponse, type Route } from './studioStub';
 
@@ -443,5 +443,67 @@ describe('ShineCopilot', () => {
     expect(await screen.findByText(/涉及集数：1/)).toBeTruthy();
     const call = stub.calls.find((entry) => /\/support\/actions\/preview$/.test(entry.url));
     expect(call?.body).toMatchObject({ kind: 'production_start' });
+  });
+});
+
+describe('action preview contracts', () => {
+  const registry = (rows: CapabilityInfo[]) => Object.fromEntries(rows.map((row) => [row.action_id, row]));
+
+  const capabilities = registry([
+    { action_id: 'managed_release', params: ['only'], scope: 'MACHINE' },
+    { action_id: 'project_create', params: ['description', 'language', 'title'], scope: 'MACHINE' },
+    { action_id: 'document_import_text', params: ['filename', 'project_id', 'text'], scope: 'PROJECT' },
+    { action_id: 'project_settings_update', params: ['language', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'story_outline_generate', params: ['document_id', 'locked_facts', 'pacing', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'storyboard_generate', params: ['plan_version', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'production_start', params: ['episode_ids', 'project_id', 'strategy', 'workflow_profile_id'], scope: 'PROJECT' },
+    { action_id: 'document_switch_basis', params: ['document_id', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'production_control', params: ['operation', 'run_id'], scope: 'RUN' },
+    { action_id: 'literary_scripts_generate', params: ['project_id', 'volume_id'], scope: 'PROJECT' },
+    { action_id: 'workflow_user_copy', params: ['name', 'parameter_overrides', 'project_id', 'source_profile_id'], scope: 'PROJECT' },
+    { action_id: 'setup_repair', params: ['capabilities', 'project_id', 'verify_runtime'], scope: 'PROJECT' },
+  ]);
+
+  it('never injects project_id into actions that do not accept it', () => {
+    const release = actionPayload({ kind: 'managed_release', params: { only: ['comfy', 'replicate'] } }, capabilities, 'p1');
+    expect(release).toEqual({ params: { only: ['comfy', 'replicate'] }, scopeProjectId: null });
+
+    const control = actionPayload({ kind: 'production_control', params: { run_id: 'r1', operation: 'pause' } }, capabilities, 'p1');
+    expect(control).toEqual({ params: { run_id: 'r1', operation: 'pause' }, scopeProjectId: null });
+  });
+
+  it('does not force the current project onto project_create', () => {
+    const created = actionPayload({ kind: 'project_create', params: { title: '雾港回声' } }, capabilities, 'p1');
+    expect(created.params).toEqual({ title: '雾港回声' });
+    expect(created.scopeProjectId).toBeNull();
+  });
+
+  it('keeps an explicit target project instead of the active one', () => {
+    const preview = actionPayload(
+      { kind: 'project_settings_update', params: { language: 'en', project_id: 'p2' } },
+      capabilities,
+      'p1',
+    );
+    expect(preview.params.project_id).toBe('p2');
+    expect(preview.scopeProjectId).toBe('p1');
+  });
+
+  it('inherits the current project only when the contract declares project_id', () => {
+    const storyboard = actionPayload({ kind: 'storyboard_generate', params: {} }, capabilities, 'p1');
+    expect(storyboard.params).toEqual({ project_id: 'p1' });
+    expect(storyboard.scopeProjectId).toBe('p1');
+
+    const release = actionPayload({ kind: 'managed_release', params: { only: [] } }, capabilities, 'p1');
+    expect(release.params.project_id).toBeUndefined();
+    expect(release.scopeProjectId).toBeNull();
+  });
+
+  it('drops fields the registry does not declare', () => {
+    const preview = actionPayload(
+      { kind: 'document_import_text', params: { project_id: 'p1', text: '正文', filename: 'a.txt', rogue: 'x' } },
+      capabilities,
+      'p1',
+    );
+    expect(preview.params).toEqual({ project_id: 'p1', text: '正文', filename: 'a.txt' });
   });
 });

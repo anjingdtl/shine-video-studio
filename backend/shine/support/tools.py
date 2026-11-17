@@ -141,6 +141,30 @@ ACTION_SPECS: dict[str, ActionSpec] = {
         mutates=True,
         description="复用导演包与 Run 引擎；相同选择返回同一运行，不另建生产队列。",
     ),
+    "document_switch_basis": ActionSpec(
+        kind="document_switch_basis",
+        label="切换正式原文底稿",
+        tier=ToolTier.CONFIRM,
+        executor="shine.services.switch_script_basis",
+        mutates=True,
+        description="只在一份已导入的项目文档之间切换；原文内容与其它文档不变。",
+    ),
+    "production_control": ActionSpec(
+        kind="production_control",
+        label="暂停/继续/取消生产任务",
+        tier=ToolTier.CONFIRM,
+        executor="shine.director.run_engine",
+        mutates=True,
+        description="只操作一个已存在的 Run；复用原状态机与版本校验，不新建队列。",
+    ),
+    "literary_scripts_generate": ActionSpec(
+        kind="literary_scripts_generate",
+        label="生成文学分集剧本",
+        tier=ToolTier.CONFIRM,
+        executor="shine.director.pipeline.queue_scene_scripts",
+        mutates=True,
+        description="复用原流水线任务；只排队缺失分节剧本，不覆盖已确认剧本。",
+    ),
 }
 
 FORBIDDEN_CAPABILITIES: dict[str, str] = {
