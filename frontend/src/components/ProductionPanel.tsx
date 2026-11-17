@@ -146,7 +146,8 @@ export default function ProductionPanel({ jobs, system, busy, scenario, setScena
                 <span className={`job-mode ${job.provider === 'comfyui' ? 'real' : ''}`}>{label(providerLabels, job.provider)}</span>
                 {job.generation_mode && <span className="job-mode">{label(modeLabels, job.generation_mode)}</span>}
                 {job.request.self_review_scope === 'basic' && <span className="job-mode">基础自审</span>}
-                {job.acceptance_status && <span className="job-mode">{label(acceptanceLabels, job.acceptance_status)}</span>}
+                {job.acceptance_status && <span className="job-mode">{job.acceptance_status === 'pending_review'
+                  ? '最终验收在⑦后期成片' : label(acceptanceLabels, job.acceptance_status)}</span>}
                 {job.stale && <span className="job-stale">内容已更新，待复核</span>}
               </div>
               <span>{label(statusLabels, job.status)}{job.failure_code ? ` · ${label(failureLabels, job.failure_code)}` : ''}</span>

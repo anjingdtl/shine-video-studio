@@ -94,7 +94,8 @@ export function EpisodeCards({ episodes, onAction, compact }: {
             ? <button type="button" className="btn-secondary" onClick={() => onAction(episode)}>
                 {episode.next_action.label}
               </button>
-            : <span className="muted">{episode.next_action?.label ?? '等待下一步'}</span>}
+            : <span className="muted">{episode.next_action?.label
+              ?? (episode.state === 'DELIVERED' ? '到「后期成片」播放并确认' : '等待下一步')}</span>}
         </footer>
       </article>;
     })}
@@ -136,12 +137,14 @@ const FALLBACK_OPTIONS: StrategyOptions = {
   upscale: [],
 };
 
-export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage, onRefresh, onNavigate, onGoSetup }: {
+export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, onMessage, onRefresh, onNavigate, onGoSetup }: {
   projectId: string;
   overview: DirectorOverview | null;
   demo: boolean;
   /** package：第⑤步只做拍摄方案与开拍；run：第⑥步只看真实生产进度。 */
   mode: 'package' | 'run';
+  /** 与 App 的投影跟读同节奏：运行卡不能比集卡旧。 */
+  refreshEpoch?: number;
   onMessage?: (message: string, tone?: 'success' | 'error') => void;
   onRefresh?: () => void;
   onNavigate?: (page: 'package' | 'run') => void;
@@ -203,7 +206,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, onMessage,
       .then((row) => { if (!cancelled) setRun(row); })
       .catch(() => { if (!cancelled) setRun(null); });
     return () => { cancelled = true; };
-  }, [activeRunId]);
+  }, [activeRunId, refreshEpoch]);
 
   // 模型版本状态直接来自基础配置的台账：不在这里另算一套「验收」。
   useEffect(() => {

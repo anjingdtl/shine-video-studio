@@ -1839,3 +1839,21 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `test_director_streamline.py`（落镜故障具名 / 落镜重试零模型调用 / SUPERSEDED 指针不设闸）、
   既有 `test_a_truncated_retry_does_not_drop_the_lesson_it_was_told`。
   前端 `vitest` 435 例全绿。
+
+## 2026-11-17 ⑥页投影实时收敛与验收提示归位（用户报障：拍完仍显示拍摄中/没有当前有效成片）
+
+- **⑥ 的集卡、右轨、运行卡必须同读一份实时事实**。App 层 journey/overview 此前只在
+  手动刷新/动作回调时重读，而 jobs 有 3s 轮询：后台运行完成后运行卡是新的、集卡与
+  右轨却停在旧事实（「拍摄中 0/6」「还没有当前有效成片」×6）——一套事实多处显示的
+  反例。现在 `productionMoving`（本次 run 活跃，或存在排队/生成中任务）驱动每 5s
+  跟读 journey/overview，停止后再收敛读一次；`DirectorShootPanel` 的运行卡经
+  `refreshEpoch` 同节奏刷新。跟读只更新事实、不重置 loading 态；读失败保留上一次
+  真实投影，手动重试另有入口。没有运行时不启动跟读（不空转请求）。
+- **最终验收的提示与动作只在⑦后期成片（与成片库）**。⑥ 任务明细的 `pending_review`
+  徽标改为指向事实「最终验收在⑦后期成片」；⑥ 集卡已交付的 footer 由「等待下一步」
+  改为指针「到『后期成片』播放并确认」；run 模式分支不再渲染验收徽标/「观看并确认」。
+  ⑦ 的待审清单、「观看并确认」与按镜网格不变。
+- 回归：`frontend/src/test/productionProjectionRefresh.test.tsx`（2 例：后台完成后
+  三处一起收敛、无运行不轮询）。前端全量 vitest 77 文件 / 393 例、tsc、build 全绿；
+  真实浏览器复测⑥全绿（7/7 阶段、6/6 镜、已交付 1 集、右轨无待处理），⑦验收入口齐备。
+- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

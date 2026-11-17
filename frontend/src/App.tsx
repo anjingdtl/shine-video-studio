@@ -311,6 +311,41 @@ function App() {
       .catch(() => { if (alive) setOverview(null); });
     return () => { alive = false; };
   }, [projectId, dataEpoch, journeyRetry, directorPackageId]);
+  /** 生产还在推进 = 本次运行仍活跃，或还有排队/生成中的任务。
+   *  推进期间按固定间隔跟读同一份权威投影（journey/overview），停止后再收敛读一次：
+   *  ⑥ 的集卡、右轨与运行卡不能各自保留不同时刻的旧事实——后台拍完了，页面还写
+   *  「拍摄中 / 没有当前有效成片」就是一套事实多处显示的反例。 */
+  const productionMoving = useMemo(() => {
+    if (overview?.run?.active) return true;
+    return jobs.some((job) => ['PLANNED', 'READY', 'QUEUED', 'SUBMITTING', 'RUNNING', 'QC_PENDING']
+      .includes(job.status));
+  }, [overview, jobs]);
+  const [projectionEpoch, setProjectionEpoch] = useState(0);
+  const wasMoving = useRef(false);
+  useEffect(() => {
+    if (!projectId) return;
+    if (productionMoving) {
+      wasMoving.current = true;
+      const timer = window.setInterval(() => setProjectionEpoch((n) => n + 1), 5000);
+      return () => window.clearInterval(timer);
+    }
+    if (wasMoving.current) {
+      wasMoving.current = false;
+      setProjectionEpoch((n) => n + 1);
+    }
+  }, [productionMoving, projectId]);
+  /** 跟读只更新事实，不重置 loading 态：读失败保留上一次真实投影，手动重试另有入口。 */
+  useEffect(() => {
+    if (!projectId || projectionEpoch === 0) return;
+    let alive = true;
+    getJourney(projectId, directorPackageId ? { packageId: directorPackageId } : undefined)
+      .then((row) => { if (alive) { setJourney(row); setJourneyState('ready'); setJourneyError(''); } })
+      .catch(() => undefined);
+    getDirectorOverview(projectId, { packageId: directorPackageId })
+      .then((row) => { if (alive) setOverview(row); })
+      .catch(() => undefined);
+    return () => { alive = false; };
+  }, [projectId, projectionEpoch, directorPackageId]);
   const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
   ), [journey]);
@@ -1036,6 +1071,7 @@ function App() {
                 projectId={projectId}
                 mode="run"
                 overview={overview}
+                refreshEpoch={dataEpoch + projectionEpoch}
                 demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}

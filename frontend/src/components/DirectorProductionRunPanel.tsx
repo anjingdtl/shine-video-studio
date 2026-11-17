@@ -800,18 +800,9 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             </div>}
             {episode.delivered_artifact_id && <div className="run-ep-media">
               <video src={`${API}/deliveries/${episode.delivered_artifact_id}/media`} controls preload="none" />
+              {/* 最终验收的提示与动作只在⑦后期成片（与成片库）；⑥只展示产物。 */}
               <div className="row run-ep-acceptance">
                 <OpenVideoFolderButton artifactId={episode.delivered_artifact_id} />
-                <span className={`run-badge ${acceptanceLabel(episode.acceptance).tone}`}>
-                  {acceptanceLabel(episode.acceptance).text}
-                </span>
-                {episode.delivered_sha256 && <button type="button" className="btn-secondary"
-                  onClick={() => setAcceptTarget({
-                    artifactId: episode.delivered_artifact_id!,
-                    sha256: episode.delivered_sha256!,
-                    title: episode.title || episode.episode_id,
-                    acceptance: episode.acceptance ?? null,
-                  })}>观看并确认</button>}
               </div>
             </div>}
           </li>)}
