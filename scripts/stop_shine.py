@@ -167,8 +167,10 @@ def stop_manifest(manifest_path: Path, *, runner=None, identity=None, classify=N
                         f"[refused] pid {pid}: the recorded process is still running "
                         "but cannot be verified"
                     )
-                else:
+                elif verdict == UNKNOWN:
                     print(f"[refused] pid {pid}: liveness unavailable")
+                else:
+                    print(f"[refused] pid {pid}: unclassified liveness verdict")
                 remaining.append(owner)
                 continue
             if current is None:
@@ -210,6 +212,86 @@ def stop_manifest(manifest_path: Path, *, runner=None, identity=None, classify=N
     return 0
 
 
+def _supervisor_health_proof(port, pid, data_dir: Path) -> bool:
+    """Legacy supervisor records carry no birth identity.
+
+    The recorded port's own health must name this installation's supervisor,
+    this data directory and the recorded PID before anything may stop it.
+    Loopback only, and never through the host proxy.
+    """
+    import urllib.request
+
+    if not isinstance(port, int):
+        return False
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        with opener.open(f"http://127.0.0.1:{port}/health", timeout=3) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        payload.get("role") == "supervisor"
+        and payload.get("pid") == pid
+        and payload.get("repo_root") == str(REPO_ROOT)
+        and os.path.abspath(payload.get("data_dir") or "") == os.path.abspath(data_dir)
+    )
+
+
+def stop_supervisor(data_dir: Path, *, runner=None, identity=None) -> int:
+    """Finish the resident supervisor through the same verified stop executor.
+
+    The supervisor lives outside ``processes.json`` so a restart never kills
+    it mid-flight; a *full* stop must still finish it, because it runs on this
+    checkout's venv and holds site-packages DLLs that ``uv sync`` has to
+    replace (the remote ``_brotli…pyd`` os error 5 launch failure).  Ownership
+    is the recorded birth identity, or — for legacy records — the health proof
+    above.  An unprovable record is retained, never blind-killed.
+    """
+    record_path = data_dir / "run" / "supervisor.json"
+    if not record_path.is_file():
+        return 0
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        print(f"[refused] supervisor record at {record_path} is unreadable; reconcile manually")
+        return 1
+    pid = record.get("pid")
+    if not isinstance(pid, int):
+        print("[refused] supervisor record has no PID; reconcile manually")
+        return 1
+    identity = identity or process_identity
+    owners = _process_owners(record.get("owners") or [])
+    if not owners:
+        birth = record.get("birth")
+        if not birth:
+            if not _supervisor_health_proof(record.get("port"), pid, data_dir):
+                print(f"[refused] supervisor pid {pid}: ownership cannot be proven; left running")
+                return 1
+            try:
+                birth = identity(pid)
+            except ValueError:
+                birth = None
+            if not birth:
+                print(f"[refused] supervisor pid {pid}: liveness unavailable; left running")
+                return 1
+        owners = [{"pid": pid, "birth": birth}]
+    staging = data_dir / "run" / "supervisor-stop.json"
+    staging.write_text(
+        json.dumps({"processes": [{"name": "supervisor", "owners": owners}]}),
+        encoding="utf-8",
+    )
+    result = stop_manifest(staging, runner=runner, identity=identity)
+    if result == 0:
+        record_path.unlink(missing_ok=True)
+        staging.unlink(missing_ok=True)
+        return 0
+    unresolved = json.loads(staging.read_text(encoding="utf-8"))
+    record["owners"] = unresolved["processes"][0]["owners"]
+    record_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
+    staging.unlink(missing_ok=True)
+    return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -230,10 +312,17 @@ def main() -> int:
 
 def _stop_with_manifest(data_dir: Path) -> int:
     manifest = data_dir / "run" / "processes.json"
-    if not manifest.is_file():
+    result = 0
+    if manifest.is_file():
+        result = stop_manifest(manifest)
+    else:
         print(f"No process manifest at {manifest}; nothing to stop.")
-        return 0
-    result = stop_manifest(manifest)
+    # The supervisor belongs to this installation's stack: same venv, same
+    # site-packages.  A supervisor-initiated stop/restart keeps itself alive
+    # through the marker; every other full stop finishes it here, in the one
+    # stop executor, so a later dependency sync never meets a locked DLL.
+    if os.environ.get("SHINE_STOP_KEEP_SUPERVISOR") != "1":
+        result = stop_supervisor(data_dir) or result
     # WAL is durable on its own. A checkpoint after shutdown avoids racing active
     # writers; it is housekeeping, not a claim that force termination is graceful.
     database = data_dir / "shine.db"

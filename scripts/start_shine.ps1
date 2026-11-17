@@ -204,6 +204,10 @@ function Test-RecordedWebAlive($Record) {
 }
 
 $manifestPath = Join-Path $env:SHINE_DATA_DIR 'run/processes.json'
+# The supervisor lives outside the manifest, but it runs on this checkout's
+# venv: a leftover one holds site-packages DLLs that uv sync must replace.
+# The residual reconcile below therefore also recognises its record.
+$supervisorRecordPath = Join-Path $env:SHINE_DATA_DIR 'run/supervisor.json'
 
 function Save-StackManifest([string]$Path, [object[]]$Entries) {
     # Write the manifest atomically (temp file on the same volume, then a
@@ -252,7 +256,7 @@ $startupGuard = Enter-ShineStartupGuard -DataDir $env:SHINE_DATA_DIR
 $existingWebPort = $null
 $started = @()
 try {
-    if (Test-Path $manifestPath) {
+    if ((Test-Path $manifestPath) -or (Test-Path $supervisorRecordPath)) {
         $record = $null
         try { $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $record = $null }
         $apiAlive = $false
@@ -329,8 +333,13 @@ try {
         # against the actual interpreter used by API, migration and Worker.
         if ($Install -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint) -or
             -not (Test-ShineCheckoutPython $venvPython $repoRoot)) {
-            Invoke-Native 'Python dependency installation' {
-                & uv sync --project (Join-Path $repoRoot 'backend') --locked
+            try {
+                Invoke-Native 'Python dependency installation' {
+                    & uv sync --project (Join-Path $repoRoot 'backend') --locked
+                }
+            } catch {
+                Write-Host "若上一步报「拒绝访问 / os error 5」：本安装仍有进程占用依赖文件（含常驻 supervisor）。同一条停止命令 scripts/stop_shine.py 会身份核验收尾它们，再重试本启动入口；不需要 bootstrap.ps1。" -ForegroundColor Yellow
+                throw
             }
             if (-not (Test-ShineCheckoutPython $venvPython $repoRoot)) {
                 throw "The Python environment cannot load this checkout: $($stackSettings.BackendEnv)"

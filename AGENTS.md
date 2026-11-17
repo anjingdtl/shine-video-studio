@@ -1966,3 +1966,26 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   （3 例）。前端全量 80 文件 / 402 例、tsc、build、Ruff 干净；后端定向 9 模块全绿。
 - **真机边界**：报障截图来自远端旧包；本轮无新真实 H3 出片，远端 DOWNLOAD 停步是否
   在新包复现待真机复测。改动未触及 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-17 supervisor 归入同一停止链（远端报障：uv sync 替换 brotli 时 os error 5）
+
+- **残栈 supervisor 是依赖替换的锁持有者**。它故意不在 `processes.json`（重启不被
+  自己杀掉），但完整停止此前也不收尾它：它用本 checkout 的 venv 持有 site-packages
+  DLL，下次 `uv sync --locked` 换包即「拒绝访问 (os error 5)」，唯一启动入口停死并被
+  误导向 bootstrap.ps1。
+- **一个停止执行者**：`stop_shine.py` 新增 `stop_supervisor`，复用同一条
+  `stop_manifest` 身份核验停止路径；归属证明 = 记录里的 birth（新记录写入 birth 与
+  repo_root），旧记录用记录端口自己的 `/health`（role/pid/repo_root/data_dir，
+  health 新增 pid）证明后才停；证明不了就保留记录、不碰进程。
+- **自发起停止带保留标记**：supervisor 的 `_run_stop`/`_run_restart`（含重启时拉起的
+  start_shine 子进程）带 `SHINE_STOP_KEEP_SUPERVISOR=1`，重启不会杀掉驱动重启的自己；
+  用户双击启动不带标记，残栈 supervisor 必须被收尾。
+- **启动器残栈收尾认 `supervisor.json`**：没有 manifest 但有 supervisor 记录时也先走
+  同一条 stop_shine 收尾再 `uv sync`；依赖失败给具名指引（占用依赖文件→同一条停止
+  命令收尾→重试本入口），不再误导 bootstrap。
+- 回归：`backend/tests/test_supervisor_stop_convergence.py`（6 例，含真实进程停止、
+  旧记录 health 证明、拒绝保留、标记传递、启动器契约）；隔离目录真机验收
+  `.local-acceptance/sup-stop-20261117/accept.ps1`（首启→页面级停止留 supervisor→
+  无 manifest 再启必须先收尾 supervisor→完整停止后记录与端口全清）。
+- 顺带：`stop_shine.py` 的 `UNKNOWN` 判定显名化（它是模块对外契约，测试用作 classify
+  结论），不再是被 Ruff 报-unused 的悬空导入。

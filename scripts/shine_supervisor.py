@@ -25,7 +25,10 @@ Safety contract:
     series / runs / GPU leases / installing attempts / deliveries) via the
     product idle gates — never a silent kill of an in-flight render;
   * stop and start reuse the identity-verified ``stop_shine.py`` and the
-    idempotent ``start_shine.ps1``; no PID-only kill is introduced here.
+    idempotent ``start_shine.ps1``; no PID-only kill is introduced here;
+  * a full stop also finishes this supervisor (same venv, same site-packages),
+    through ``stop_shine.py``'s verified stop; stops this process initiates
+    carry ``SHINE_STOP_KEEP_SUPERVISOR=1`` so a restart never kills itself.
 """
 
 from __future__ import annotations
@@ -166,7 +169,8 @@ def _run_stop(data_dir: Path, kind: str) -> None:
             [sys.executable, str(REPO_ROOT / "scripts" / "stop_shine.py"),
              "--data-dir", str(data_dir)],
             capture_output=True, text=True, timeout=180,
-            env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
+            env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0",
+                 "SHINE_STOP_KEEP_SUPERVISOR": "1"},
         )
         if stop.returncode not in (0, 1):
             with _LOCK:
@@ -232,7 +236,8 @@ def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
                 [sys.executable, str(REPO_ROOT / "scripts" / "stop_shine.py"),
                  "--data-dir", str(data_dir)],
                 stdout=stop_out, stderr=subprocess.STDOUT, timeout=180,
-                env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
+                env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0",
+                     "SHINE_STOP_KEEP_SUPERVISOR": "1"},
             )
             if stop.returncode not in (0, 1):
                 # 1 = unresolved identities retained for reconciliation; still
@@ -250,7 +255,10 @@ def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
                 ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(launcher),
                  "-ApiPort", str(api_port), "-WebPort", str(web_port)],
                 stdout=start_out, stderr=subprocess.STDOUT, timeout=600,
-                env={**os.environ, "SHINE_DATA_DIR": str(data_dir)},
+                env={**os.environ, "SHINE_DATA_DIR": str(data_dir),
+                     # The launcher's residual reconcile must not finish the
+                     # supervisor that is driving this very restart.
+                     "SHINE_STOP_KEEP_SUPERVISOR": "1"},
             )
         ok = start.returncode == 0
         with _LOCK:
@@ -584,6 +592,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/health":
             api_port, web_port = self._stack_ports()
             self._send(200, {"status": "ok", "role": "supervisor",
+                             "pid": os.getpid(),
                              "repo_root": str(REPO_ROOT),
                              "data_dir": str(self.data_dir),
                              "api_port": api_port, "web_port": web_port}, origin)
@@ -718,9 +727,15 @@ def main() -> int:
     Handler.web_port = args.web_port
     Handler.idle_minutes = args.idle_shutdown_minutes
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    # Recorded outside processes.json so stop_shine.py never kills the supervisor.
+    # Recorded outside processes.json so a restart never kills the supervisor
+    # mid-flight; a full stop finishes it through stop_shine.py's verified stop
+    # (birth identity here, health proof for legacy records).
+    from shine.comfyops.installer import process_identity
+
     (data_dir / "run" / "supervisor.json").write_text(
-        json.dumps({"pid": os.getpid(), "port": args.port, "data_dir": str(data_dir)}, indent=2),
+        json.dumps({"pid": os.getpid(), "birth": process_identity(os.getpid()),
+                    "port": args.port, "data_dir": str(data_dir),
+                    "repo_root": str(REPO_ROOT)}, indent=2),
         encoding="utf-8",
     )
     threading.Thread(target=_watchdog, args=(data_dir, args.idle_shutdown_minutes),
