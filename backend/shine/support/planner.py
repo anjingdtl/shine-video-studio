@@ -34,6 +34,7 @@ _INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("outline", ("故事大纲", "大纲")),
     ("control", ("暂停", "继续", "取消生产", "停止生产", "取消任务")),
     ("create_project", ("新建项目", "建立项目", "创建一个项目", "建个项目", "建立一个", "建一个", "创建项目")),
+    ("web_search", ("联网检索", "联网搜索", "网络搜索", "联网开关", "开启联网", "关闭联网")),
     ("import_document", ("导入", "上传小说", "导入小说", "导入文本", "导入原文")),
     ("diagnose", ("为什么", "失败", "报错", "诊断", "原因", "怎么回事")),
     ("knowledge", ("是什么", "怎么用", "有什么区别", "介绍", "支持吗", "能不能")),
@@ -531,6 +532,37 @@ def _create_plan(*, request: str, project_id: str | None) -> dict[str, Any]:
     }
 
 
+def _web_search_plan(*, request: str, project_id: str | None) -> dict[str, Any]:
+    lowered = request or ""
+    disabled = any(word in lowered for word in ("关闭", "禁用", "关掉", "停止联网"))
+    enabled = not disabled
+    return {
+        "intent": "WEB_SEARCH",
+        "summary": f"可以把管家的联网检索{'关闭' if disabled else '开启'}；只改检索开关。",
+        "project_id": project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": "关闭管家联网检索" if disabled else "开启管家联网检索",
+                "capability_id": "support_web_search_update",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": ["官方资料仍只作参考证据，不执行下载或脚本。"],
+                "action": {
+                    "kind": "support_web_search_update",
+                    "params": {"web_search": enabled},
+                },
+                "readback": "GET /api/v1/support/preferences",
+                "requires_confirmation": "PREVIEW",
+                "reason": "只写一个本机偏好；不会触发任何生产任务。",
+            }
+        ],
+        "requires_input": [],
+        "notice": "联网检索开关只影响 AI 管家自身的检索，不代表本机已支持官方能力。",
+        "bounded": True,
+    }
+
+
 def _import_plan(*, project_id: str | None) -> dict[str, Any]:
     return {
         "intent": "IMPORT_DOCUMENT",
@@ -838,7 +870,7 @@ def _switch_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
     }
 
 
-def build_plan(
+def _build_plan_raw(
     db,
     settings,
     *,
@@ -878,6 +910,83 @@ def build_plan(
         return _control_plan(db, request=request, project_id=project_id)
     if intent == "create_project":
         return _create_plan(request=request, project_id=project_id)
+    if intent == "web_search":
+        return _web_search_plan(request=request, project_id=project_id)
     if intent == "import_document":
         return _import_plan(project_id=project_id)
     return None
+
+
+def _bind_contracts(plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Attach the packaged contract to every planned action (V2.1).
+
+    Planning never invents a capability, and a capability whose contract does
+    not belong to this build is shown as BLOCKED with the plain-language notice
+    instead of pretending it can be previewed.
+    """
+    if not plan:
+        return plan
+    from shine.support import contracts as contract_registry
+
+    for step in plan.get("steps") or []:
+        action = step.get("action") or {}
+        kind = action.get("kind")
+        if not kind:
+            continue
+        state = contract_registry.execution_state(str(kind))
+        action["contract"] = {
+            "action_id": kind,
+            "state": state["state"],
+            "contract_digest": state.get("contract_digest"),
+            "contract_revision": state.get("contract_revision"),
+        }
+        if not state["executable"] and step.get("state") in {"READY", "COVERED"}:
+            step["state"] = "BLOCKED"
+            step["notice"] = state["notice"]
+    return plan
+
+
+def identify_plan(plan: dict[str, Any], episode_ids: list[str] | None = None) -> dict[str, Any]:
+    """Give a previewed/chat plan its immutable identity.
+
+    Only semantic plan content and the explicitly previewed scope are hashed,
+    never a storage timestamp, so re-rendering the same plan is stable while any
+    changed step produces a new identity.
+    """
+    from shine.copilot.contracts import canonical, digest
+
+    scope = list(episode_ids if episode_ids is not None else plan.get("episode_ids") or [])
+    core = {
+        "intent": plan.get("intent"),
+        "project_id": plan.get("project_id"),
+        "episode_ids": scope,
+        "steps": plan.get("steps") or [],
+        "requires_input": plan.get("requires_input") or [],
+    }
+    plan_hash = digest(canonical(core))
+    return {
+        **plan,
+        "episode_ids": scope,
+        "plan_id": f"plan-{plan_hash[:16]}",
+        "plan_hash": plan_hash,
+    }
+
+
+def build_plan(
+    db,
+    settings,
+    *,
+    request: str,
+    project_id: str | None = None,
+    episode_ids: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """The bounded plan for this request, or ``None`` when no operation applies."""
+    return _bind_contracts(
+        _build_plan_raw(
+            db,
+            settings,
+            request=request,
+            project_id=project_id,
+            episode_ids=episode_ids,
+        )
+    )

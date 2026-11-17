@@ -98,6 +98,45 @@ describe('ShineCopilot', () => {
     expect(screen.getByLabelText('开启联网检索（仅官方文档）')).toBeTruthy();
   });
 
+  it('shows a plain-language build notice when the knowledge matches this version', async () => {
+    stub = routeBase([
+      {
+        method: 'GET',
+        pattern: /\/support\/capabilities\/actions/,
+        respond: () => jsonResponse({
+          capabilities: [{ action_id: 'setup_repair', params: ['capabilities'], scope: 'MACHINE' }],
+          build: { state: 'FRESH', notice: 'AI 管家知识已匹配当前版本。', user_notice: 'AI 管家知识已匹配当前版本。' },
+        }),
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ShineCopilot pageId="setup" pageLabel="基础配置" needsSetup />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    expect(await screen.findByText('AI 管家知识已匹配当前版本。')).toBeTruthy();
+  });
+
+  it('explains a stale contract in user words without exposing hashes', async () => {
+    stub = routeBase([
+      {
+        method: 'GET',
+        pattern: /\/support\/capabilities\/actions/,
+        respond: () => jsonResponse({
+          capabilities: [],
+          build: {
+            state: 'STALE',
+            notice: '合同指纹不一致 contract digest 0xabc',
+            user_notice: '这个操作在当前版本已经调整，请重新确认。',
+          },
+        }),
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ShineCopilot pageId="setup" pageLabel="基础配置" needsSetup />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    expect(await screen.findByText('这个操作在当前版本已经调整，请重新确认。')).toBeTruthy();
+    expect(screen.queryByText(/0xabc/)).toBeNull();
+  });
+
   it('asks a real diagnostic question and shows evidence plus offline notice', async () => {
     stub = routeBase();
     const user = userEvent.setup();

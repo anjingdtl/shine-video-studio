@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
+from shine.copilot.declarations import WRITE_ACTIONS
+
 
 class ToolDenied(RuntimeError):
     """The requested capability is not registered or not permitted."""
@@ -60,111 +62,32 @@ READ_TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("generate_support_report", ToolTier.CONFIRM, "在受控目录生成脱敏 Markdown 报告"),
 )
 
+
+def _action_tier(permission_tier: str) -> ToolTier:
+    if permission_tier == "READ":
+        return ToolTier.READ
+    if permission_tier in {"PREVIEW", "EXECUTE_GUARDED"}:
+        return ToolTier.CONFIRM
+    return ToolTier.FORBIDDEN
+
+
+#: The write registry is *derived* from the single capability declaration, so a
+#: new action cannot be executable in one place and unknown in another.
 ACTION_SPECS: dict[str, ActionSpec] = {
-    "setup_repair": ActionSpec(
-        kind="setup_repair",
-        label="补齐真实制作环境",
-        tier=ToolTier.CONFIRM,
-        executor="shine.comfyops.setup_preparation.enqueue",
+    row.action_id: ActionSpec(
+        kind=row.action_id,
+        label=row.label,
+        tier=_action_tier(row.permission_tier),
+        executor=row.executor or "",
         mutates=True,
-        description="复用统一安装器的持久准备任务，不会启动第二套安装器。",
-    ),
-    "setup_reconcile": ActionSpec(
-        kind="setup_reconcile",
-        label="重新核验并登记已存在的本机文件",
-        tier=ToolTier.CONFIRM,
-        executor="shine.comfyops.setup_reconcile.reconcile_installation",
-        mutates=True,
-        description="复用现有回执、只对变化文件计算哈希，不修改别人的 ComfyUI。",
-    ),
-    "managed_release": ActionSpec(
-        kind="managed_release",
-        label="停止本工作台拥有的渲染服务并释放显存",
-        tier=ToolTier.CONFIRM,
-        executor="shine.comfyops.renderer_release.release_managed_processes_guarded",
-        mutates=True,
-        description="仅释放有归属证明且没有生产任务的服务；外部 ComfyUI 不会被强停。",
-    ),
-    "workflow_user_copy": ActionSpec(
-        kind="workflow_user_copy",
-        label="创建用户级工作流副本",
-        tier=ToolTier.CONFIRM,
-        executor="shine.api_comfy.create_workflow_profile",
-        mutates=True,
-        description="复制工作流为用户级副本并走既有校验；不修改 Git 跟踪的内置模板。",
-    ),
-    "project_create": ActionSpec(
-        kind="project_create",
-        label="创建影视项目",
-        tier=ToolTier.CONFIRM,
-        executor="shine.services.create_project",
-        mutates=True,
-        description="只创建一个空项目，不导入原文、不冻结风格。",
-    ),
-    "document_import_text": ActionSpec(
-        kind="document_import_text",
-        label="导入原文文本",
-        tier=ToolTier.CONFIRM,
-        executor="shine.services.import_project_document",
-        mutates=True,
-        description="与界面导入同一解析、去重与落库；不自动切换正式底稿。",
-    ),
-    "project_settings_update": ActionSpec(
-        kind="project_settings_update",
-        label="修改项目用户级设置",
-        tier=ToolTier.CONFIRM,
-        executor="shine.services.update_project_settings",
-        mutates=True,
-        description="走与 PATCH 设置路由同一个服务；不触碰冻结风格与生产合同。",
-    ),
-    "story_outline_generate": ActionSpec(
-        kind="story_outline_generate",
-        label="生成故事大纲",
-        tier=ToolTier.CONFIRM,
-        executor="shine.materialprep.story.queue_outline",
-        mutates=True,
-        description="复用持久大纲任务与既有角色路由；大纲确认仍由用户亲自完成。",
-    ),
-    "storyboard_generate": ActionSpec(
-        kind="storyboard_generate",
-        label="生成导演分镜",
-        tier=ToolTier.CONFIRM,
-        executor="shine.director.streamline.queue_director_storyboard",
-        mutates=True,
-        description="复用持久分镜任务；缺风格/大纲/分集方案时由原门禁具名拒绝。",
-    ),
-    "production_start": ActionSpec(
-        kind="production_start",
-        label="开始真实拍摄选定集",
-        tier=ToolTier.CONFIRM,
-        executor="shine.director.streamline.start_director_production",
-        mutates=True,
-        description="复用导演包与 Run 引擎；相同选择返回同一运行，不另建生产队列。",
-    ),
-    "document_switch_basis": ActionSpec(
-        kind="document_switch_basis",
-        label="切换正式原文底稿",
-        tier=ToolTier.CONFIRM,
-        executor="shine.services.switch_script_basis",
-        mutates=True,
-        description="只在一份已导入的项目文档之间切换；原文内容与其它文档不变。",
-    ),
-    "production_control": ActionSpec(
-        kind="production_control",
-        label="暂停/继续/取消生产任务",
-        tier=ToolTier.CONFIRM,
-        executor="shine.director.run_engine",
-        mutates=True,
-        description="只操作一个已存在的 Run；复用原状态机与版本校验，不新建队列。",
-    ),
-    "literary_scripts_generate": ActionSpec(
-        kind="literary_scripts_generate",
-        label="生成文学分集剧本",
-        tier=ToolTier.CONFIRM,
-        executor="shine.director.pipeline.queue_scene_scripts",
-        mutates=True,
-        description="复用原流水线任务；只排队缺失分节剧本，不覆盖已确认剧本。",
-    ),
+        description=row.description,
+    )
+    for row in WRITE_ACTIONS
+}
+
+#: Server-side parameter whitelist, derived from the same declarations.
+ACTION_PARAMS: dict[str, tuple[str, ...]] = {
+    row.action_id: row.param_names() for row in WRITE_ACTIONS
 }
 
 FORBIDDEN_CAPABILITIES: dict[str, str] = {

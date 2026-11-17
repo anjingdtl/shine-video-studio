@@ -52,6 +52,7 @@ def test_tool_registry_has_no_shell_or_source_write_capability():
         "document_switch_basis",
         "production_control",
         "literary_scripts_generate",
+        "support_web_search_update",
     }
     with pytest.raises(ToolDenied):
         tool_spec("run_shell")

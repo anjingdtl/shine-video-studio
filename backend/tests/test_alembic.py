@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180f0010004"
+HEAD_REVISION = "f180f0010005"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -109,6 +109,7 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
             "support_sessions",
             "support_messages",
             "support_actions",
+            "support_delegations",
             "support_reports",
         }.issubset(tables)
         action_columns = {row[1] for row in connection.execute("PRAGMA table_info(support_actions)")}
@@ -119,6 +120,19 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
             "original_task_id",
             "target_fingerprint",
         }.issubset(action_columns)
+        delegation_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(support_delegations)")
+        }
+        assert {
+            "id", "session_id", "plan_id", "plan_hash", "authorization_key",
+            "status", "payload",
+        }.issubset(delegation_columns)
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(support_delegations)")
+        }
+        assert any("authorization" in name for name in indexes) or any(
+            row[2] for row in connection.execute("PRAGMA index_list(support_delegations)")
+        )
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
     finally:
         connection.close()

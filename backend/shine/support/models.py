@@ -84,6 +84,34 @@ class SupportAction(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class SupportDelegation(Base):
+    """Persistent, idempotent authorization for one previewed multi-step plan.
+
+    This is authorization metadata, not a second production system: every step
+    is still executed by ``support.actions`` through the original executor.
+    """
+
+    __tablename__ = "support_delegations"
+    __table_args__ = (
+        UniqueConstraint("authorization_key", name="uq_support_delegation_authorization"),
+        Index("ix_support_delegations_session_created", "session_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    session_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    plan_id: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    plan_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: Digest of session + plan identity + approved orders + budget.  A repeated
+    #: authorization of the same delegation returns the same row.
+    authorization_key: Mapped[str] = mapped_column(String(96), nullable=False)
+    status: Mapped[str] = mapped_column(String(24), default="RUNNING", nullable=False)
+    stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    waiting_action_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
 class SupportReport(Base):
     __tablename__ = "support_reports"
     __table_args__ = (Index("ix_support_reports_fingerprint", "fingerprint"),)

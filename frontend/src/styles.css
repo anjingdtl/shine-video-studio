@@ -2513,6 +2513,8 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-error{display:flex;gap:6px;align-items:flex-start;padding:7px 8px;border-radius:7px;background:var(--danger-bg);color:var(--danger-deep);font-size:var(--fs-caption);line-height:1.55}
 .copilot-error svg{flex:none;margin-top:1px}
 .copilot-notice{margin:0;font-size:var(--fs-caption);color:var(--muted);line-height:1.55}
+.copilot-build{display:flex;align-items:center;gap:6px;margin:0 0 9px;padding:6px 8px;border-radius:6px;background:var(--sand-bg);color:var(--sand-ink);font-size:var(--fs-caption);line-height:1.5}
+.copilot-build svg{flex:none}
 .copilot-compose{border-top:1px solid var(--line-soft);padding:9px 11px 7px;background:var(--surface-2)}
 .copilot-suggestions{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:7px}
 .copilot-suggestions button{min-height:28px;padding:0 9px;border:1px solid var(--line-2);border-radius:16px;background:var(--paper);color:var(--ink-2);font-size:var(--fs-caption)}

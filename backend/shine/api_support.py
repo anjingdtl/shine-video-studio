@@ -22,6 +22,7 @@ from shine.models import utcnow
 from shine.support import actions as action_service
 from shine.support import agent as agent_service
 from shine.support import capability_catalog, official_docs, project_knowledge
+from shine.support import contracts as contract_registry
 from shine.support import delegation as delegation_service
 from shine.support import parameters as parameter_service
 from shine.support import planner as planner_service
@@ -56,21 +57,9 @@ class MessageCreate(BaseModel):
 
 class ActionPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal[
-        "setup_repair",
-        "setup_reconcile",
-        "managed_release",
-        "workflow_user_copy",
-        "project_create",
-        "document_import_text",
-        "project_settings_update",
-        "story_outline_generate",
-        "storyboard_generate",
-        "production_start",
-        "document_switch_basis",
-        "production_control",
-        "literary_scripts_generate",
-    ]
+    #: Validated against the packaged capability contracts, never a second
+    #: hand-kept literal list (V2.1).
+    kind: str = Field(min_length=1, max_length=48)
     params: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=36)
     project_id: str | None = Field(default=None, max_length=36)
@@ -110,6 +99,10 @@ class ActionApproveRequest(BaseModel):
 class PlanDelegateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: str = Field(min_length=1, max_length=36)
+    #: The exact plan the person previewed.  A button rendered for an older
+    #: plan must never authorize the newest one.
+    plan_id: str | None = Field(default=None, max_length=48)
+    plan_hash: str | None = Field(default=None, max_length=64)
     approved_orders: list[int] = Field(min_length=1, max_length=8)
     budget: dict = Field(default_factory=dict)
     confirm: bool = False
@@ -135,6 +128,10 @@ class PreferenceUpdate(BaseModel):
 
 def _http(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
+
+
+def _identify_plan(plan: dict, episode_ids: list[str]) -> dict:
+    return planner_service.identify_plan(plan, episode_ids)
 
 
 def _require_session(db, session_id: str):
@@ -198,6 +195,36 @@ def support_capability_actions():
     return capability_catalog.catalog_payload()
 
 
+@router.get("/build")
+def support_build(request: Request):
+    """One build identity: knowledge index, capability contracts and routes.
+
+    This is the endpoint a person/UI checks to know whether the copilot's
+    knowledge and contracts belong to this installed version.  It never
+    executes anything and never scans the worktree.
+    """
+    identity = contract_registry.build_identity(openapi=request.app.openapi())
+    live = contract_registry.live_api_digest(request.app)
+    api_matches = bool(identity.get("api_schema_digest")) and identity["api_schema_digest"] == live
+    state = identity["state"]
+    if state == "FRESH" and not api_matches:
+        state = "STALE"
+        identity["reasons"].append("运行中的 API 请求合同与打包合同不一致，已按过期合同处理。")
+    identity["state"] = state
+    identity["api_matches"] = api_matches
+    identity["live_api_digest"] = live
+    identity["action_states"] = {
+        row.action_id: contract_registry.execution_state(row.action_id)["state"]
+        for row in capability_catalog.CAPABILITIES
+    }
+    identity["notice"] = (
+        "AI 管家知识与能力合同已匹配当前版本。"
+        if state == "FRESH"
+        else "；".join(identity["reasons"]) or "无法证明知识与能力合同属于当前版本。"
+    )
+    return identity
+
+
 @router.post("/plans/preview")
 def support_plan_preview(
     body: PlanPreviewRequest,
@@ -224,20 +251,18 @@ def support_plan_preview(
             "这句话没有匹配到可执行计划；可以直接提问，管家会先诊断或检索项目百科。",
             409,
         )
+    identified = _identify_plan(plan, list(body.episode_ids or []))
     if session is not None:
-        # Only the read-only plan and the person's explicit scope are stored;
-        # delegation walks this list later and still previews every step.
+        # Only the read-only plan, its immutable identity and the person's
+        # explicit scope are stored; delegation walks this list later and still
+        # previews every step.
         session.context_json = {
             **(session.context_json or {}),
-            "last_plan": {
-                **plan,
-                "episode_ids": list(body.episode_ids or []),
-                "stored_at": utcnow().isoformat(),
-            },
+            "last_plan": {**identified, "stored_at": utcnow().isoformat()},
         }
         db.commit()
     return {
-        "plan": plan,
+        "plan": identified,
         "capabilities": {
             "version": capability_catalog.CATALOG_VERSION,
             "coverage": capability_catalog.catalog_payload()["matrix_totals"],
@@ -264,10 +289,13 @@ def support_plan_delegate(
             settings,
             request.app.state.session_factory,
             session=session,
+            plan_id=body.plan_id,
+            plan_hash=body.plan_hash,
             approved_orders=list(body.approved_orders),
             budget=body.budget,
             actor=actor,
             gateway=gateway,
+            app=request.app,
         )
     except delegation_service.DelegationError as exc:
         raise _http(exc.code, exc.message, 409) from exc
@@ -278,7 +306,7 @@ def support_plan_delegate(
 @router.get("/sessions/{session_id}/delegation")
 def support_delegation_get(session_id: str, db: DBSession):
     session = _require_session(db, session_id)
-    payload = delegation_service.get(session)
+    payload = delegation_service.get(db, session)
     if payload is None:
         raise _http("DELEGATION_NOT_FOUND", "当前会话还没有委托。", 404)
     return {"delegation": payload}
@@ -302,6 +330,7 @@ def support_delegation_refresh(
         session=session,
         actor=actor,
         gateway=gateway,
+        app=request.app,
     )
     db.commit()
     return {"delegation": payload}
@@ -311,7 +340,7 @@ def support_delegation_refresh(
 def support_delegation_cancel(session_id: str, db: DBSession):
     session = _require_session(db, session_id)
     try:
-        payload = delegation_service.cancel(session=session)
+        payload = delegation_service.cancel(db=db, session=session)
     except delegation_service.DelegationError as exc:
         raise _http(exc.code, exc.message, 409) from exc
     db.commit()
@@ -329,6 +358,7 @@ def support_parameter_contracts(db: DBSession, project_id: str | None = None):
 @router.post("/parameters/preview")
 def support_parameter_preview(
     body: ParameterPreviewRequest,
+    request: Request,
     actor: Operator,
     settings: SettingsDep,
     db: DBSession,
@@ -363,9 +393,12 @@ def support_parameter_preview(
                 actor=actor,
                 session_id=body.session_id,
                 project_id=project_id,
+                app=request.app,
             )
         except action_service.ActionInvalid as exc:
             raise _http(exc.code, exc.message, 400) from exc
+        except action_service.ActionBlocked as exc:
+            raise _http(exc.code, exc.message, 423) from exc
         except ToolDenied as exc:
             raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
     return {
@@ -396,6 +429,7 @@ def support_parameter_confirm(
             preview_hash=body.preview_hash,
             actor=actor,
             gateway=gateway,
+            app=request.app,
         )
     except action_service.ActionUnknown as exc:
         raise _http(exc.code, exc.message, 404) from exc
@@ -550,6 +584,7 @@ def support_session_events(session_id: str, db: DBSession, since: str | None = N
 @router.post("/actions/preview")
 def support_action_preview(
     body: ActionPreviewRequest,
+    request: Request,
     actor: Operator,
     settings: SettingsDep,
     db: DBSession,
@@ -563,9 +598,12 @@ def support_action_preview(
             actor=actor,
             session_id=body.session_id,
             project_id=body.project_id,
+            app=request.app,
         )
     except action_service.ActionInvalid as exc:
         raise _http(exc.code, exc.message, 400) from exc
+    except action_service.ActionBlocked as exc:
+        raise _http(exc.code, exc.message, 423) from exc
     except ToolDenied as exc:
         raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
     return {"action": preview, "reused": reused}
@@ -592,6 +630,7 @@ def support_action_approve(
             preview_hash=body.preview_hash,
             actor=actor,
             gateway=gateway,
+            app=request.app,
         )
     except action_service.ActionUnknown as exc:
         raise _http(exc.code, exc.message, 404) from exc

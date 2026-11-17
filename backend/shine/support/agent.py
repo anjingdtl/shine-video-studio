@@ -349,6 +349,7 @@ def handle_message(
             "release",
             "parameters",
             "create_project",
+            "web_search",
             "import_document",
             "literary_scripts",
             "switch_basis",
@@ -367,6 +368,8 @@ def handle_message(
                     from shine.support import nlu
 
                     plan = nlu.enrich_plan(db, gateway, plan=plan, text=content)
+                if plan is not None:
+                    plan = planner.identify_plan(plan)
             except ValueError as exc:
                 plan_error = str(exc)
             except Exception as exc:  # noqa: BLE001 - a broken plan must not break diagnosis

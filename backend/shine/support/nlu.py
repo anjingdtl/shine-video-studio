@@ -3,28 +3,17 @@
 The model may only fill a *small, closed set* of text fields on actions that are
 already registered.  It cannot choose a new action, produce an API path, invent
 an id, rewrite the user's novel, or bypass any gate.  When the gateway is not
-available the plan is returned unchanged: a missing title stays missing instead
+available the plan is returned unchanged: a missing field stays missing instead
 of being guessed.
+
+The fillable field set and its constraints are derived from the one capability
+declaration + original request schema, so a new optional text parameter needs
+no second hand-kept list here.
 """
 from __future__ import annotations
 
 import json
 from typing import Any
-
-FILLABLE: dict[str, tuple[str, ...]] = {
-    "project_create": ("title", "description", "language"),
-    "project_settings_update": ("language",),
-}
-
-SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "title": {"type": "string", "minLength": 1, "maxLength": 120},
-        "description": {"type": "string", "maxLength": 2000},
-        "language": {"type": "string", "enum": ["zh", "yue", "en", "ja"]},
-    },
-}
 
 _SYSTEM = (
     "你是 Shine AI 管家的参数抽取器。只允许为已经注册的动作补齐用户明确说过的文本参数。"
@@ -33,8 +22,32 @@ _SYSTEM = (
 )
 
 
-def _allowed(kind: str) -> tuple[str, ...]:
-    return FILLABLE.get(kind, ())
+def fillable() -> dict[str, dict[str, Any]]:
+    from shine.copilot.params import fillable_contract
+
+    return fillable_contract()
+
+
+def _allowed(kind: str) -> list[str]:
+    return sorted((fillable().get(kind) or {}).keys())
+
+
+def _schema_for(fields: dict[str, Any]) -> dict[str, Any]:
+    properties: dict[str, Any] = {}
+    for name, contract in fields.items():
+        entry: dict[str, Any] = {"type": "string"}
+        if contract.get("enum"):
+            entry["enum"] = list(contract["enum"])
+        if contract.get("max_length"):
+            entry["maxLength"] = int(contract["max_length"])
+        if contract.get("min_length"):
+            entry["minLength"] = int(contract["min_length"])
+        properties[name] = entry
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": properties,
+    }
 
 
 def enrich_plan(db, gateway, *, plan: dict[str, Any], text: str) -> dict[str, Any]:
@@ -48,14 +61,15 @@ def enrich_plan(db, gateway, *, plan: dict[str, Any], text: str) -> dict[str, An
             continue
         action = step.get("action") or {}
         kind = str(action.get("kind") or "")
-        if kind not in FILLABLE:
+        fields = fillable().get(kind) or {}
+        if not fields:
             continue
         payload = {
             "request": text,
             "action": kind,
             "known_params": action.get("params") or {},
             "missing": plan.get("requires_input") or [],
-            "allowed_fields": list(_allowed(kind)),
+            "allowed_fields": sorted(fields),
         }
         try:
             response = gateway.complete_for_role(
@@ -63,7 +77,7 @@ def enrich_plan(db, gateway, *, plan: dict[str, Any], text: str) -> dict[str, An
                 "support_agent",
                 system=_SYSTEM,
                 user=json.dumps(payload, ensure_ascii=False),
-                schema=SCHEMA,
+                schema=_schema_for(fields),
             )
         except Exception:  # noqa: BLE001 - the rule-based plan remains authoritative
             return plan
@@ -75,21 +89,20 @@ def enrich_plan(db, gateway, *, plan: dict[str, Any], text: str) -> dict[str, An
         if not isinstance(parsed, dict):
             continue
         params = dict(action.get("params") or {})
-        allowed = _allowed(kind)
         changed = False
-        for field in allowed:
+        from shine.copilot.params import ParamError, validate_param_value
+
+        for field in fields:
             value = parsed.get(field)
             if not isinstance(value, str) or not value.strip():
                 continue
-            value = value.strip()
-            limit = 2000 if field == "description" else 120
-            if len(value) > limit:
-                continue
-            if field == "language" and value not in {"zh", "yue", "en", "ja"}:
+            try:
+                clean = validate_param_value(kind, field, value.strip())
+            except ParamError:
                 continue
             if field in params and params[field]:
                 continue
-            params[field] = value
+            params[field] = clean
             changed = True
         if not changed:
             continue

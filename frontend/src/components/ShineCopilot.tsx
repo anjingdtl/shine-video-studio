@@ -19,7 +19,23 @@ export type RecommendedAction = {
 export type CapabilityInfo = {
   action_id: string;
   params?: string[];
+  param_contract?: Array<{
+    name: string;
+    type: string;
+    required: boolean;
+    binding: string;
+    max_length?: number | null;
+    enum?: unknown[];
+    default?: unknown;
+  }>;
   scope?: string;
+};
+
+/** The installed build's knowledge/contract binding, in plain language. */
+type BuildInfo = {
+  state: string;
+  notice?: string;
+  user_notice?: string;
 };
 
 /** Build the preview payload from the capability registry, never from habit.
@@ -64,6 +80,8 @@ type PlanStep = {
 type CopilotPlan = {
   intent: string;
   summary: string;
+  plan_id?: string;
+  plan_hash?: string;
   steps: PlanStep[];
   requires_input: string[];
   notice: string;
@@ -240,6 +258,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [togglingWeb, setTogglingWeb] = useState(false);
   const [showEvidence, setShowEvidence] = useState<Record<string, boolean>>({});
   const [capabilities, setCapabilities] = useState<Record<string, CapabilityInfo>>({});
+  const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [planInputs, setPlanInputs] = useState<Record<string, Record<string, string>>>({});
   const [approvedSteps, setApprovedSteps] = useState<Record<string, number[]>>({});
   const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
@@ -277,11 +296,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     let cancelled = false;
     void (async () => {
       try {
-        const payload = await api<{ capabilities?: CapabilityInfo[] }>('/support/capabilities/actions');
+        const payload = await api<{
+          capabilities?: CapabilityInfo[];
+          build?: BuildInfo;
+        }>('/support/capabilities/actions');
         if (cancelled) return;
         const map: Record<string, CapabilityInfo> = {};
         for (const row of payload.capabilities || []) map[row.action_id] = row;
         setCapabilities(map);
+        setBuildInfo(payload.build ?? null);
       } catch {
         // The registry is a contract aid; a failure must not block diagnosis.
       }
@@ -634,6 +657,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: session.id,
+          plan_id: plan?.plan_id,
+          plan_hash: plan?.plan_hash,
           approved_orders: selected,
           budget: { max_episodes: 1, max_gpu_actions: allowGpu[message.id] ? 1 : 0 },
           confirm: true,
@@ -912,6 +937,12 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
           </div>
 
           <div className="copilot-scroll" ref={scrollRef}>
+            {buildInfo && (
+              <p className="copilot-build" role="status">
+                <ShieldCheck size={13} aria-hidden="true" />
+                {buildInfo.user_notice || buildInfo.notice || '无法确认 AI 管家的知识版本。'}
+              </p>
+            )}
             {!session && !busy && (
               <div className="copilot-intro">
                 <p>我能读懂这台电脑上的真实环境与任务记录，帮你判断下一步。</p>
