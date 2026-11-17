@@ -474,14 +474,17 @@ class ControlledDownloader:
                 yield response
             return
         logger.warning("installer_mirror_fallback file=%s host=%s", spec.relative_path, urlsplit(url).hostname)
-        with self._stream_mirror(url, offset, end) as response:
+        with self._stream_mirror(spec, url, offset, end) as response:
             yield response
 
     @contextmanager
-    def _stream_mirror(self, url, offset, end):
-        # The mirror redirects cached files to itself and LFS objects to HF's
-        # signed endpoint. Only those hosts may be followed, and the original
-        # Range is preserved on every hop.
+    def _stream_mirror(self, spec, url, offset, end):
+        # The mirror redirects cached files to itself and LFS objects either to
+        # HF's signed endpoint or back to the primary origin, which then hops to
+        # its CDN.  The followed set is therefore the mirror entries plus the
+        # per-file redirect chain the human already approved; anything else is
+        # refused.  The original Range is preserved on every hop.
+        allowed = set(MIRROR_REDIRECT_HOSTS) | set(spec.redirect_hosts or [])
         for hop in range(6):
             with self.transport.stream(url, offset, end=end) as response:
                 if response.status_code not in {301, 302, 303, 307, 308}:
@@ -493,7 +496,7 @@ class ControlledDownloader:
                 if not location:
                     raise ValueError("DOWNLOAD_REDIRECT_LOCATION_MISSING")
                 target = urljoin(url, location)
-                check_url(target, set(MIRROR_REDIRECT_HOSTS), signed_query=True)
+                check_url(target, allowed, signed_query=True)
                 url = target
 
     def _open_primary(self, spec: PackageFile, offset, end):

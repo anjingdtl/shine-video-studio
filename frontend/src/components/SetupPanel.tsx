@@ -4,6 +4,7 @@ import { api, timeoutSignal, knownFreeBytes, startWorker, type SetupVerdict } fr
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
+import { MachineProgressBanner } from './MachineProgressBanner';
 import { ApiError } from '../api';
 import { WorkerValidationGate } from './WorkerValidationGate';
 import { VariantRecommendationCard } from './VariantRecommendation';
@@ -294,6 +295,7 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
   includeImageCapability?: boolean;
 }) {
   const [checked, setChecked] = useState(false);
+  const [prepTick, setPrepTick] = useState(0);
   const [progress, setProgress] = useState('');
   const [existingRoots, setExistingRoots] = useState<string[]>([]);
   const [existingPath, setExistingPath] = useState('');
@@ -898,10 +900,11 @@ function activateRuntime() {    const candidate = runtime?.candidate;
         制作环境的唯一完整入口。检测、核验、登记、下载、绑定、运行合同与真实
         试镜都在这一处收束；下面的专业设置只作为排查工具，不再独立判定「已就绪」。
       */}
+      <MachineProgressBanner refreshEpoch={refreshEpoch + prepTick} />
       <SetupCenter
         projectId={projectId}
         refreshEpoch={refreshEpoch}
-        onRefresh={onRefresh}
+        onPrepSubmitted={() => setPrepTick((n) => n + 1)}
       />
 
       {/*

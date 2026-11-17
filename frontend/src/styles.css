@@ -2440,6 +2440,12 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .setup-missing ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:3px;max-height:220px;overflow:auto}
 .setup-missing ul li{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:.72rem;color:var(--muted)}
 .setup-missing ul li span{color:var(--ink-soft)}
+.machine-progress{display:flex;align-items:center;gap:12px;border:1px solid var(--line-2);border-radius:10px;background:var(--surface-2);padding:10px 14px;margin:0 0 14px}
+.machine-progress .meter{flex:1 1 auto;min-width:160px}
+.machine-progress-text{display:flex;flex-direction:column;gap:2px;min-width:0}
+.machine-progress-text b{font-size:var(--fs-body)}
+.machine-progress-text span{font-size:var(--fs-caption);color:var(--muted-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.machine-progress-live{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-caption);color:var(--muted-2);white-space:nowrap}
 .setup-preparation{border:1px solid var(--line-2);border-radius:10px;background:var(--surface-2);padding:10px 12px;display:flex;flex-direction:column;gap:5px}
 .setup-preparation>span{font-size:var(--fs-caption);color:var(--muted-2)}
 .setup-preparation ol{list-style:none;margin:4px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:8px}

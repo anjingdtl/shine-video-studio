@@ -585,6 +585,8 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.services import add_audit
 
     for capability, components, catalog_file in plans_needed:
+        # create_install_plan 自己提交建计划；批准与审计必须显式提交，
+        # 否则会话关闭即回滚，queue_install_attempt 读到的仍是 AWAITING_APPROVAL。
         with factory() as db:
             free = disk_info(settings.data_dir).get("free_bytes", 0)
             body = InstallPlanRequest(
@@ -613,6 +615,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                       "installation_plan", plan_id,
                       {"task_id": task.get("task_id"), "capability": capability},
                       project_id=task.get("project_id"))
+            db.commit()
             digest = row.sha256
         attempt_id, _reused = queue_install_attempt(
             factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED")

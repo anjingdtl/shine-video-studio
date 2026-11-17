@@ -1251,37 +1251,9 @@ def setup_verdict(settings: SettingsDep, db: DBSession):
     the machine forward, so the badge and both configuration pages cannot
     tell different stories.
     """
-    from shine.comfyops.runtime_configuration import resolve_runtime, runtime_report
-    from shine.comfyops.service_validation import _worker_online
-    from shine.models import AppSetting
-    from shine.production_mode import summarize_production_mode
+    from shine.production_mode import machine_verdict
 
-    try:
-        effective = resolve_runtime(db, settings)
-    except HTTPException as exc:
-        effective, runtime_error = None, str(exc.detail)
-    else:
-        runtime_error = None
-    report = runtime_report(db, settings)
-    mode = summarize_production_mode(
-        db, settings,
-        effective=effective, runtime_error=runtime_error,
-        worker_online=_worker_online(db, settings),
-        renderer_online=False,
-    )
-    return {
-        "mode": mode["mode"],
-        "label": mode["label"],
-        "detail": mode["detail"],
-        "action": mode["action"],
-        "code": mode["code"],
-        "runtime_status": report.get("status"),
-        "runtime_error": report.get("error"),
-        "services_verified": bool(report.get("services_verified")),
-        "validation_blockers": list((report.get("service_validation") or {}).get("blockers") or []),
-        "has_active_runtime": db.get(AppSetting, "deployment-runtime-active") is not None,
-        "has_candidate_runtime": db.get(AppSetting, "deployment-runtime-candidate") is not None,
-    }
+    return machine_verdict(db, settings)
 
 
 @router.get('/managed-processes')

@@ -146,7 +146,10 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
 
     ``adopt`` is the single authorization this function can consume.  Without
     it the installation is only *read*: discovered, hashed, registered.  Nothing
-    about the user's own ComfyUI tree is written, moved or terminated.
+    about the user's own ComfyUI tree is written, moved or terminated — the one
+    additive exception is RelayVSR's pinned weights (user ruling 2026-11-17):
+    the upscale runs on that core, so they are placed into its models directory;
+    existing files are never overwritten or deleted.
 
     ``variant_id`` names the H3 stack the person chose: the bytes are then
     verified against that variant's own catalog, never the default one.
@@ -186,6 +189,29 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
         result = verify_models(report, report["snapshot"])
         verified = list(result.get("verified") or [])
         rejected = list(result.get("rejected") or [])
+        # 手动收料目录属于同一条收料链：整备链与独立入口都经这个执行者，
+        # 不再只有单独 API 认识 manual-downloads（否则一键整备仍会重排下载）。
+        manual = manual_files_reconcile(db, settings, capability=capability, actor=actor)
+        verified.extend(manual.get("imported") or [])
+        # 已入缓存的字节本身就是核验证据（与 capability_report 同一读法）：
+        # 收料函数跳过已缓存文件，重复核验不得因此把 complete 翻回 false。
+        cache_root = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+        seen = {(row["component_id"], row["relative_path"], row["sha256"], row["size"])
+                for row in verified}
+        for component in catalog.get("components") or []:
+            for item in component.get("files") or []:
+                tup = (component["component_id"], item["relative_path"], item["sha256"], item["size"])
+                if tup not in seen and (cache_root / str(item["sha256"])).is_file():
+                    verified.append({"component_id": tup[0], "relative_path": tup[1],
+                                     "sha256": tup[2], "size": tup[3],
+                                     "source": str(cache_root / str(item["sha256"]))})
+                    seen.add(tup)
+        # RelayVSR 精修跑在既有 ComfyUI 核心上（2026-11-17 用户裁定）：已核验字节
+        # 必须加性落位到该安装的 models 目录，readiness 与执行读同一个根。
+        # 只加钉住文件：同名不同字节拒绝覆盖，已存在则跳过。
+        served_placed: list[str] = []
+        if capability == "relayvsr":
+            served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
         candidate_paths = {row["path"] for row in candidates}
         candidate_dirs = [Path(row["path"]).parent for row in candidates]
         registered = register_verified_packages(db, verified, catalog, root=report["root"],
@@ -227,6 +253,8 @@ def reconcile_installation(db, settings, *, path: str, project_id: str | None = 
             "missing_components": sorted({row[0] for row in required - verified_keys}),
             "scan_candidates": len(candidates),
             "cached_from_scan": [row["sha256"] for row in imported],
+            "manual_imported_bytes": manual.get("imported_bytes", 0),
+            "served_root_placed": served_placed,
             "downloaded_bytes": 0,
             "copied_bytes": sum(int(row.get("size") or 0) for row in imported),
             "user_install_modified": False,
@@ -372,3 +400,49 @@ def manual_files_reconcile(db, settings, *, capability: str = "h3",
         "absent": absent,
         "imported_bytes": sum(row["size"] for row in imported),
     }
+
+
+def _place_relayvsr_served(db, settings, catalog: dict, served_root: Path, *, actor: str) -> list[str]:
+    """Additively place verified RelayVSR bytes where the executing ComfyUI loads.
+
+    User ruling 2026-11-17: RelayVSR post-production runs on the existing ComfyUI
+    core, so its install target is that core's models directory — the same root
+    ``relayvsr_readiness`` and the upscale graph read.  Only pinned files are
+    added: identical bytes skip, different bytes are refused by name and never
+    overwritten or deleted.
+    """
+    from shine.services import add_audit
+
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+    placed: list[str] = []
+    refused: list[dict] = []
+    for component in catalog.get("components") or []:
+        for item in component.get("files") or []:
+            sha = str(item.get("sha256") or "")
+            source = cache / sha
+            target = served_root / str(item["relative_path"])
+            if not source.is_file():
+                continue
+            if target.is_file():
+                try:
+                    same = target.stat().st_size == int(item["size"]) and _hash_file(target) == sha
+                except OSError:
+                    same = False
+                if not same:
+                    refused.append({"path": str(target), "code": "SERVED_TARGET_BYTES_DIFFER"})
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            partial = target.with_name(target.name + ".shine-partial")
+            shutil.copyfile(source, partial)
+            if _hash_file(partial) != sha:
+                partial.unlink(missing_ok=True)
+                refused.append({"path": str(target), "code": "SERVED_COPY_HASH_MISMATCH"})
+                continue
+            partial.replace(target)
+            placed.append(str(item["relative_path"]))
+    if placed or refused:
+        add_audit(db, actor, "SETUP_RELAYVSR_SERVED_ROOT_PLACED", "deployment",
+                  catalog.get("catalog_id") or "relayvsr",
+                  {"served_root": str(served_root), "placed": placed, "refused": refused})
+        db.commit()
+    return placed

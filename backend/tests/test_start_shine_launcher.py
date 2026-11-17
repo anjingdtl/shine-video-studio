@@ -29,13 +29,15 @@ def test_every_started_child_redirects_stdin_to_the_empty_device():
     # is a real empty file that every child reads EOF from.
     assert "Get-ShineEmptyStdin" in text, "the launcher must prepare an empty stdin file"
     assert "stdin.empty" in text
-    # 两个后台启动点（服务栈与常驻监督进程）都必须带上 stdin 重定向，
+    # 唯一启动执行者：New-ShineProcess 统一把 stdin 指向空设备；服务栈与
+    # 常驻监督进程都必须经它（或包装它的 Start-ShineProcess）拉起，
     # 否则父 shell 一退就断管道，子进程死于未处理的 EPIPE。
-    for marker in ("Start-Process @startArgs", "Start-Process @supArgs"):
+    assert "function New-ShineProcess" in text
+    head = text.index("function New-ShineProcess")
+    window = text[head:head + 2500]
+    assert "RedirectStandardInput" in window, "New-ShineProcess must redirect stdin to the empty device"
+    for marker in ("Start-ShineProcess 'api'", "New-ShineProcess 'supervisor'"):
         assert marker in text, marker
-        window = text[max(0, text.index(marker) - 2000): text.index(marker)]
-        assert "RedirectStandardInput" in window, (
-            f"{marker} must redirect stdin to the empty device")
     # 旧写法（只重定向输出与错误）必须已经不在了。
     assert "-RedirectStandardOutput $stdout -RedirectStandardError $stderr" not in text
 

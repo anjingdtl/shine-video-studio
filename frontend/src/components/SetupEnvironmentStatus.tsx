@@ -3,6 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, RefreshCw, X,
 } from 'lucide-react';
 import { api, json } from '../api';
+import type { SetupVerdict } from '../api';
 
 /**
  * 「制作环境」的唯一事实视图。
@@ -103,7 +104,15 @@ export type SetupSummary = {
     steps: PreparationStep[]; done?: number; total?: number;
     message?: string | null; error?: string | null;
   };
+  /** 与 /setup/verdict 同一份裁决（summary 内计算一次，各处只读）。 */
+  verdict?: SetupVerdict;
+  machine_progress?: MachineProgress;
   manual_download_root: string;
+};
+
+/** 机器级唯一进度投影：服务端汇总既有台账，前端只渲染。 */
+export type MachineProgress = {
+  active: boolean; percent: number; label: string; detail: string; source: string;
 };
 
 const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr', 'relayvsr'];
@@ -316,6 +325,11 @@ export function SetupEnvironmentStatus({
                   onClick={() => onPrepare?.(key, summary as SetupSummary)}>
                   <Download size={12} /> 下载安装缺文件
                 </button>;
+              }
+              // RelayVSR 没有「绑定」这一步：权重落位后，真实验证就是后期精修本身。
+              // 给一个空转的绑定按钮只会让人以为坏了。
+              if (key === 'relayvsr') {
+                return <p className="run-hint">权重已落位到本机 ComfyUI；在「⑦ 后期成片」对成片执行一次精修即真实验证。</p>;
               }
               // 文件已齐但运行未核验：交给同一个「一键准备」后台任务核对运行
               // 合同 / 真实出图小样。首次真实 H3 运行走「开拍」，不在这里空点试镜。

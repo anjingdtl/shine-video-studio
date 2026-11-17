@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 import pytest
 
@@ -159,3 +160,97 @@ def test_a_moved_verified_file_stops_counting_as_found(tmp_path, api, monkeypatc
     assert after["facts"]["FILES_FOUND"] is False, "旧登记不能替代当前文件证据"
     assert after["facts"]["FILES_VERIFIED"] is False
     assert [row["relative_path"] for row in after["missing_files"]] == ["w.safetensors"]
+
+
+def test_manual_staging_is_consumed_by_the_same_reconcile_executor(tmp_path, api, monkeypatch):
+    """手动收料目录必须被整备链的核验执行者消费，而不是只有独立 API 认识它。
+
+    真机复现（2026-11-17）：用户把完整权重放进 manual-downloads 后点一键整备，
+    RECONCILE 仍报缺件并重排下载——收料函数没挂进 reconcile_installation。
+    """
+    client, factory, settings = api
+    catalog = _catalog()
+    monkeypatch.setattr(setup_summary, "_catalog_for", lambda capability: catalog)
+    from shine.comfyops import setup_reconcile
+
+    monkeypatch.setattr(setup_reconcile, "_capability_catalog", lambda capability: catalog)
+    installation = _installation(tmp_path / "ComfyUI")
+    staging = Path(settings.comfyops_dir) / "manual-downloads"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "w.safetensors").write_bytes(PAYLOAD)
+
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="h3")
+    assert first["complete"] is True, first
+    assert first["manual_imported_bytes"] == len(PAYLOAD)
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache" / SHA
+    assert cache.is_file(), "收料必须进入既有内容地址缓存"
+    assert (staging / "w.safetensors").is_file(), "原件留在原处，不被搬走"
+
+    # 重复核验：缓存已是证据，complete 不得翻回 false。
+    with factory() as db:
+        again = setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="h3")
+    assert again["complete"] is True, again
+    report = _report(factory, settings, installation)
+    assert report["facts"]["FILES_VERIFIED"] is True
+    # 缓存字节仍需放置（本地复制），但不再欠任何下载字节。
+    with factory() as db:
+        plan = deployment.create_install_plan(db, settings, catalog, ["minimax-h3-test"], None, None)
+    assert plan.payload["download_bytes"] == 0
+    assert plan.payload["cached_bytes"] == len(PAYLOAD)
+
+
+def test_relayvsr_places_verified_bytes_into_the_served_models_root(tmp_path, api, monkeypatch):
+    """用户裁定 2026-11-17：RelayVSR 权重加性落位到执行它的 ComfyUI models 目录。
+
+    复现：落位写 isolated-packages 而 readiness/精修读收编 ComfyUI 的 models，
+    卡片②永远「跑不通」、按钮空转。落位必须与读取同根，且绝不覆盖已有文件。
+    """
+    client, factory, settings = api
+    catalog = _catalog()
+    from shine.comfyops import setup_reconcile
+
+    monkeypatch.setattr(setup_reconcile, "_capability_catalog", lambda capability: catalog)
+    installation = _installation(tmp_path / "ComfyUI")
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / SHA).write_bytes(PAYLOAD)
+
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    target = Path(installation["root"]) / "models" / "w.safetensors"
+    assert target.is_file() and target.read_bytes() == PAYLOAD
+    assert first["served_root_placed"] == ["w.safetensors"]
+
+    mtime = target.stat().st_mtime_ns
+    with factory() as db:
+        setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    assert target.stat().st_mtime_ns == mtime, "重复核验不得重写已落位文件"
+
+    target.write_bytes(b"evil")
+    with factory() as db:
+        third = setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    assert target.read_bytes() == b"evil", "同名不同字节拒绝覆盖，保留用户文件"
+    assert third["served_root_placed"] == []
+
+
+def test_presence_accepts_family_prefixed_relative_paths(tmp_path, api):
+    """RelayVSR 清单的 relative_path 带 family 前缀；presence 不得叠双层目录。
+
+    复现：权重已正确落位 models/diffusion_models/…，卡片仍报「缺 2 个文件」，
+    因为 presence 拼成 models/diffusion_models/diffusion_models/…。
+    """
+    client, factory, settings = api
+    catalog = _catalog()
+    catalog["components"][0]["files"][0]["relative_path"] = "diffusion_models/w.safetensors"
+    models = tmp_path / "models"
+    (models / "diffusion_models").mkdir(parents=True)
+    (models / "diffusion_models" / "w.safetensors").write_bytes(PAYLOAD)
+    presence = setup_summary.model_file_presence(models, catalog)
+    assert presence["missing"] == []
+    assert presence["present"], presence

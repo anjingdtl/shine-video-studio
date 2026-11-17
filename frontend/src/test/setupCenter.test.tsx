@@ -41,26 +41,26 @@ async function detect() {
 
 describe('制作环境：检测快照与候选下载', () => {
   it('打开就自动检测，不需要先找检测入口', async () => {
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(1);
     expect(stub.callsOf('GET', /setup\/summary/).length).toBeGreaterThan(0);
   });
 
   it('切页回来重新读取，不把浏览器快照当资格判定', async () => {
-    const first = render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    const first = render(<SetupCenter projectId="proj-1" />);
     await detect();
     first.unmount();
     expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(1);
 
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await waitFor(() => expect(stub.callsOf('GET', /setup\/environment/)).toHaveLength(2));
     expect(screen.getByText(/上次检测/)).toBeTruthy();
   });
 
   it('已有一套权重不锁死候选：候选可选、BLOCKED 仍禁用', async () => {
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     const candidate = screen.getByRole('radio', { name: /低显存候选/ });
     expect(candidate).toBeEnabled();
@@ -75,7 +75,7 @@ describe('制作环境：检测快照与候选下载', () => {
       blockers: [], upstream: { required_bytes: 0 },
     }) });
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     const found = screen.getByText('本机已找到权重');
     expect(found.className).toContain('cap-found-warn');
@@ -106,7 +106,7 @@ describe('制作环境：检测快照与候选下载', () => {
       },
       port: { status: 'OK', port: 8188, selected: 8189, identity: 'FOREIGN_PROCESS' },
     }) });
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.getByRole('group', { name: '基础工具补装' })).toHaveTextContent('FFmpeg + FFprobe');
     expect(screen.getByText(/服务端口 8189/)).toBeTruthy();
@@ -122,7 +122,7 @@ describe('制作环境：检测快照与候选下载', () => {
       repair_plan: { plan_id: 'toolrepair-' + 'd'.repeat(32), status: 'NOTHING_TO_REPAIR',
         download_bytes: 0, packages: [] },
     }) });
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
     expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
@@ -159,7 +159,7 @@ describe('制作环境：检测快照与候选下载', () => {
         },
       }],
     }) });
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
 
     expect(screen.getByText('本机已核验 · 已绑定')).toBeTruthy();
@@ -183,7 +183,7 @@ describe('页面直连执行旁路已收掉', () => {
         },
       },
     })) });
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.queryByText(/真实试镜一次/)).toBeNull();
     expect(screen.getByRole('button', { name: /一键绑定渲染器并核对运行合同/ })).toBeTruthy();
@@ -197,7 +197,7 @@ describe('页面直连执行旁路已收掉', () => {
     stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
       status: 'QUEUED', task_id: 'setup-img', steps: ['TOOL_REPAIR', 'RECONCILE', 'DOWNLOAD', 'IMAGE_VERIFY'] }) });
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('button', { name: /交给后台验证出图/ }));
     await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1), { timeout: 20000 });

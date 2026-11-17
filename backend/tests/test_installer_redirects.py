@@ -610,3 +610,48 @@ def test_missing_approved_mirror_falls_back_to_official_without_guessing(monkeyp
     downloader = ControlledDownloader(MIRROR_HOSTS, HTTPTransport(), source_preference="MIRROR_FIRST")
     assert downloader.download(file, tmp_path).read_bytes() == b"data"
     assert len(calls) == 2 and calls[0].startswith("https://hf-mirror.com/") and calls[1] == file.url
+
+
+def test_mirror_bounce_back_follows_the_approved_primary_chain(monkeypatch, tmp_path):
+    """hf-mirror 308 回指主源、主源再 302 到其 CDN：这条链必须能走通。
+
+    真机复现（2026-11-17 RelayVSR）：镜像回退只认 {hf-mirror, cas-bridge}，
+    回弹到 huggingface.co / us.aws.cdn.hf.co 被拒 UNTRUSTED_DOWNLOAD_URL，
+    下载永远停在 4MiB。镜像回退应复用该文件已批准的 redirect_hosts。
+    """
+    file = spec(["huggingface.co", "us.aws.cdn.hf.co"])
+    calls = []
+    signed = "https://us.aws.cdn.hf.co/xet/file?Signature=transient"
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        calls.append(url)
+        if url == file.url and len(calls) <= 3:
+            raise httpx.ConnectError("unreachable")
+        if url.startswith("https://hf-mirror.com/"):
+            yield httpx.Response(308, headers={"location": file.url})
+        elif url == file.url:
+            yield httpx.Response(302, headers={"location": signed})
+        else:
+            yield httpx.Response(200, content=b"data")
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    hosts = MIRROR_HOSTS | {"us.aws.cdn.hf.co"}
+    assert ControlledDownloader(hosts, HTTPTransport()).download(file, tmp_path).read_bytes() == b"data"
+    assert calls[-1] == signed
+
+
+def test_mirror_bounce_back_still_refuses_hosts_outside_both_sets(monkeypatch, tmp_path):
+    file = spec(["huggingface.co", "us.aws.cdn.hf.co"])
+
+    @contextmanager
+    def stream(method, url, **kwargs):
+        if url == file.url:
+            raise httpx.ConnectError("unreachable")
+        yield httpx.Response(308, headers={"location": "https://evil.example/x?Signature=private"})
+
+    monkeypatch.setattr(httpx, "stream", stream)
+    hosts = MIRROR_HOSTS | {"us.aws.cdn.hf.co"}
+    with pytest.raises(ValueError, match="UNTRUSTED_DOWNLOAD_URL"):
+        ControlledDownloader(hosts, HTTPTransport()).download(file, tmp_path)
+    assert not list(tmp_path.iterdir())

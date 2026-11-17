@@ -6,7 +6,6 @@ import {
 import { api, json, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
-import { Meter } from './Meter';
 import { ResourceScanCard } from './ResourceScanCard';
 import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
 import type { CapabilityKey as EnvironmentKey, SetupSummary } from './SetupEnvironmentStatus';
@@ -214,11 +213,12 @@ function verdictLine(variants: VariantRecommendation | null): string {
 type Props = {
   projectId: string;
   refreshEpoch?: number;
-  onRefresh: () => void | Promise<void>;
   onNeedProject?: () => void;
+  /** 整备提交成功的通知：页面级进度条据此立即跟读同一份 summary。 */
+  onPrepSubmitted?: () => void;
 };
 
-export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
+export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Props) {
   // 打开页面就自动检测：不再要求先点「检测本机」才看到环境。
   // 结果存快照只是为了不空屏；资格判定永远来自服务端。
   const [restored] = useState<DetectionSnapshot | null>(() => readSnapshot());
@@ -248,6 +248,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   const [force, setForce] = useState({ h3: false, image: false, vlm: false, asr: false, relayvsr: false });
   const [redownloadPrompt, setRedownloadPrompt] = useState<null | CapabilityKey>(null);
   const [running, setRunning] = useState<{ label: string; note: string } | null>(null);
+  /** 提交整备后只刷新整备投影，不重跑整页检测。 */
+  const [prepEpoch, setPrepEpoch] = useState(0);
   const [result, setResult] = useState('');
   /** 每项能力各自的结论：一项没准备好，不影响其它项。 */
   const [outcomes, setOutcomes] = useState<CapabilityOutcome[]>([]);
@@ -261,28 +263,29 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
 
   useEffect(() => { writeSnapshot({ variantId, caps }); }, [variantId, caps]);
 
+  // 裁决在 summary 里算一次（与 /setup/verdict 同一函数）；这里只读，不再单独请求。
+  useEffect(() => { if (summary?.verdict) setSetupVerdict(summary.verdict); }, [summary]);
+
   const loadImage = useCallback(async () => {
     try { setImage(await api<ImageReadiness>('/setup/image-readiness')); } catch { /* 保持上次结果 */ }
   }, []);
 
-  const detect = useCallback(async (rescan = false) => {
+  const detect = useCallback(async () => {
     setPhase('detecting');
     setProblem('');
     setResult('');
     try {
-      const [environment, disk, state, ready, existing, imageState, variantRows, catalogRows, verdict] = await Promise.all([
+      const [environment, disk, state, ready, existing, imageState, variantRows, catalogRows] = await Promise.all([
         api<EnvReport>('/setup/environment'),
         api<Storage>('/setup/storage'),
         api<RuntimeState>('/setup/runtime'),
         api<Readiness>('/setup/readiness'),
-        api<{ installations: string[] }>(`/setup/existing-installations${rescan ? '?rescan=true' : ''}`),
+        api<{ installations: string[] }>('/setup/existing-installations'),
         api<ImageReadiness>('/setup/image-readiness').catch(() => null),
         api<VariantRecommendation>('/setup/variant-recommendations'),
         api<CatalogSummary>('/setup/catalog').catch(() => null),
-        api<SetupVerdict>('/setup/verdict').catch(() => null),
       ]);
-      // 作品 id 在首屏是异步到达的：没有作品时不去问「已采用的安装」，
-      // 等 id 到了 effect 会重新检测一次。
+      // 作品 id 在首屏是异步到达的：没有作品时不去问「已采用的安装」。
       const availability = projectId
         ? await api<{ adopted_root?: string | null; variants?: VariantAvailability[] }>(
           `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
@@ -291,19 +294,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       if (!mounted.current) return;
       setEnv(environment); setStorage(disk); setRuntime(state); setReadiness(ready);
       setImage(imageState); setVariants(variantRows); setCatalog(catalogRows);
-      setSetupVerdict(verdict);
       setAdoptedRoot(availability?.adopted_root ?? null);
       setAvailabilityRows(availability?.variants ?? null);
-      const root = existing.installations?.[0];
-      let main: ExistingScan | null = null;
-      if (root) {
-        // 只读展示用的检测明细；缺件与下载判定读后端 summary.capabilities，
-        // 不在浏览器另算一套，也不再为出图重复 inspect 第二遍。
-        main = await api<ExistingScan>('/setup/existing-installations/inspect',
-          json('POST', { path: root }));
-      }
-      if (!mounted.current) return;
-      setScan(main);
       const preferred = variantRows.recommended.find((row) => row.auto_download_allowed)
         ?? variantRows.recommended[0] ?? variantRows.candidates[0];
       setVariantId((current) => current || preferred?.variant_id || '');
@@ -311,10 +303,22 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
       setDetectedAt(stamp);
       writeSnapshot({
         detectedAt: stamp, env: environment, storage: disk, runtime: state, readiness: ready,
-        scan: main, variants: variantRows, image: imageState,
-        catalog: catalogRows, adoptedRoot: availability?.adopted_root ?? null,
+        variants: variantRows, image: imageState, catalog: catalogRows,
+        adoptedRoot: availability?.adopted_root ?? null,
       });
       setPhase('ready');
+      // 只读展示明细异步补：inspect 与方案可用性不得把进度条、回执和报错
+      // 锁在「检测中」分支里。深搜的唯一入口是检索卡的「重新检索」。
+      const root = existing.installations?.[0];
+      if (root) {
+        void api<ExistingScan>('/setup/existing-installations/inspect', json('POST', { path: root }))
+          .then((row) => {
+            if (!mounted.current) return;
+            setScan(row);
+            writeSnapshot({ scan: row });
+          })
+          .catch(() => {});
+      }
     } catch (error) {
       if (!mounted.current) return;
       setProblem(error instanceof Error ? error.message : String(error));
@@ -336,23 +340,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     if (epochRef.current === refreshEpoch) return;
     epochRef.current = refreshEpoch;
     // 「刷新全部状态」是用户主动动作：才重新检索磁盘；平时切页只读持久化事实。
-    void detect(true);
+    void detect();
   }, [refreshEpoch, detect]);
-
-  // 作品 id 异步到达或切换时，只补一个轻量的「已采用安装 / 方案事实」读取，
-  // 不重跑检测。
-  useEffect(() => {
-    if (!projectId || phase !== 'ready') return;
-    let alive = true;
-    api<{ adopted_root?: string | null; variants?: VariantAvailability[] }>(
-      `/setup/variant-availability?project_id=${encodeURIComponent(projectId)}`,
-    ).then((row) => {
-      if (!alive) return;
-      setAdoptedRoot(row.adopted_root ?? null);
-      setAvailabilityRows(row.variants ?? null);
-    }).catch(() => {});
-    return () => { alive = false; };
-  }, [projectId, phase]);
 
   const allVariants = useMemo(() => {
     if (!variants) return [];
@@ -456,6 +445,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     if (row.key === 'image') return `确认下载素材出图权重（约 ${gib(row.bytes)}）`;
     if (row.key === 'vlm') return `确认下载画面审片权重（约 ${gib(row.bytes)}）`;
     if (row.key === 'asr') return `确认下载语音核对权重（约 ${gib(row.bytes)}）`;
+    if (row.key === 'relayvsr') return `确认准备 RelayVSR 精修权重（约 ${gib(row.bytes)}）`;
     if (selectedVariant && !selectedVariant.auto_download_allowed) return '确认准备 H3 候选模型';
     return `确认准备 H3 权重（约 ${gib(row.bytes)}）`;
   }, [capabilityRows, pendingRepair, selectedVariant]);
@@ -466,9 +456,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
   // the other - legal - capabilities).
   const canPrepare = !envBlocked && !running && !!storage && !storage.requires_selection
     && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
-  /** 后台准备是否在推进：它不依赖这个页面，所以按钮文案要如实说明。 */
-  const preparation = summary?.preparation;
-  const preparing = preparation?.status === 'QUEUED' || preparation?.status === 'RUNNING';
 
   /**
    * 一次授权 → 后台持续推进。
@@ -504,7 +491,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
         }));
       setResult(`已交给后台准备（${task.steps.length} 步）：检索复用、核验登记、下载缺项、运行配置、`
         + '服务核验与真实小样会连续完成。可以离开这个页面，回到这里会看到最新进度。');
-      await onRefresh();
+      // 只刷新整备投影（能力卡读同一份 summary）；不触发整页重检测，
+      // 否则回执与进度会被「检测中」分支吞掉。
+      setPrepEpoch((n) => n + 1);
+      onPrepSubmitted?.();
       await loadImage();
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error));
@@ -541,7 +531,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
 
     <SetupEnvironmentStatus
       projectId={projectId}
-      refreshEpoch={refreshEpoch}
+      refreshEpoch={refreshEpoch + prepEpoch}
       variantId={selectedVariant?.variant_id ?? null}
       onSummary={setSummary}
       onGoSettings={() => window.setTimeout(() => document.getElementById('setup')?.scrollIntoView({ block: 'start' }), 40)}
@@ -549,6 +539,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
     />
 
     <ResourceScanCard />
+
+    {/* 回执、提交中提示与报错不挂在检测分支下：检测再慢，用户点了什么、
+        后台接没接住，都必须立刻可见。整备进度由能力卡的同一份 summary 投影。 */}
+    {running && <p className="run-hint" role="status">{running.label}{running.note ? ` · ${running.note}` : ''}</p>}
+    {result && <p className="ok-line" role="status">{result}</p>}
+    {problem && phase !== 'error' && <p className="form-error" role="alert">{problem}</p>}
 
     {phase === 'error' && <p className="form-error" role="alert">检测没有完成：{problem}</p>}
     {phase === 'detecting' && <p className="run-hint">正在读取显卡、显存、磁盘和已有安装…</p>}
@@ -729,14 +725,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
         <button type="button" className="btn-text" onClick={() => setConfirming(false)}>取消</button>
       </div>}
 
-      {running && <p className="run-hint" role="status">{running.label}{running.note ? ` · ${running.note}` : ''}</p>}
-      {preparing && <div className="setup-progress" role="status" data-testid="setup-background">
-        <Meter value={preparation?.done ?? 0} max={preparation?.total || 1}
-          label={`后台整备：${preparation?.current ?? '排队中'}`}
-          count={`${preparation?.done ?? 0}/${preparation?.total ?? 0} 步`} tone="busy" />
-        <p className="run-hint">{preparation?.message ?? '关闭页面也会继续'}（与顶部工作栈状态同源）</p>
-      </div>}
-      {result && <p className="ok-line" role="status">{result}</p>}
       {outcomes.length > 0 && <ul className="setup-outcomes" aria-label="各项能力的准备结论">
         {outcomes.map((row) => <li key={row.key} className={`setup-outcome-${row.status.toLowerCase()}`}>
           <b>{row.label}</b>
@@ -750,7 +738,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onRefresh }: Props) {
           <em>{row.note}</em>
         </li>)}
       </ul>}
-      {problem && phase === 'ready' && <p className="form-error" role="alert">{problem}</p>}
 
       {image?.configured && <div className="setup-image-test">
         <div>

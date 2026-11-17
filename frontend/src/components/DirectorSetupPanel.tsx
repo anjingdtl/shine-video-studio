@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, Cpu, Image as ImageIcon, Loader2, Mic, MonitorCheck, ShieldCheck, Sparkles, Wand2 } from 'lucide-react';
 import { api, json, type AgentRoute, type Project, type ProviderProfile, type SystemStatus, type WorkflowProfile } from '../api';
 import { SetupCenter } from './SetupCenter';
+import { MachineProgressBanner } from './MachineProgressBanner';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { GuideTip } from './GuideTip';
@@ -76,6 +77,7 @@ export default function DirectorSetupPanel({
   system, refreshEpoch, onRefresh,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
+  const [prepTick, setPrepTick] = useState(0);
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
   const [advisory, setAdvisory] = useState<{ VLM?: Advisory; ASR?: Advisory }>({});
@@ -170,6 +172,8 @@ export default function DirectorSetupPanel({
       <button className="btn-secondary" onClick={() => void onRefresh()}>刷新全部状态</button>
     </section>
 
+    <MachineProgressBanner refreshEpoch={refreshEpoch + prepTick} />
+
     <section className="setup-status-grid">
       <div className={`setup-status ${ready ? 'ok' : 'pending'}`}>
         <div className="setup-status-icon"><Cpu size={16} /></div>
@@ -214,7 +218,8 @@ export default function DirectorSetupPanel({
         下载、实例创建、登记、核验与激活，与专家层共用同一服务端事实，
         不建第二套安装器，也不重复渲染状态区。
       */}
-      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch} onRefresh={onRefresh}
+      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch}
+        onPrepSubmitted={() => setPrepTick((n) => n + 1)}
         onNeedProject={createProject} />
       <OutputDirectoryPanel />
     </div>}

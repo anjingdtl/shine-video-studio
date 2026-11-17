@@ -87,7 +87,7 @@ describe('C-01：一次提交后台任务，浏览器不做全局一刀切', () 
   it('只准备素材出图时，把 image 能力一次性交给后台任务', async () => {
     stub = new StudioStub([...routesNoH3(), ...prepareRoutes()]);
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).not.toBeChecked();
@@ -100,8 +100,8 @@ describe('C-01：一次提交后台任务，浏览器不做全局一刀切', () 
     // 浏览器不再自己驱动安装计划，也不做全局四站诊断。
     expect(stub.callsOf('POST', /setup\/install-plan/)).toHaveLength(0);
     expect(stub.callsOf('GET', /setup\/connectivity$/)).toHaveLength(0);
-    // 界面显示后台整备进度，而不是替后端下结论。
-    expect(await screen.findByTestId('setup-background')).toBeTruthy();
+    // 界面显示后台整备在推进（能力卡文字投影）；顶部机器进度条在页面级渲染。
+    expect(await screen.findByText(/正在后台准备/)).toBeTruthy();
   });
 });
 
@@ -109,7 +109,7 @@ describe('C-02：H3 方案只约束 H3 能力', () => {
   it('没有可安装 H3 方案的机器仍能准备独立能力', async () => {
     stub = new StudioStub([...routesNoH3(), ...prepareRoutes()]);
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
@@ -140,7 +140,7 @@ describe('C-03：文件已核验不冒充能力就绪', () => {
       progress: [], primary_capability: 'h3', action_required: null, blockers: [],
       preparation: { status: 'IDLE', task_id: null, current: null, steps: [], message: null },
     }) });
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(await screen.findByText('文件已就绪并核验')).toBeTruthy();
     expect(screen.getByText(/跑不通/)).toBeTruthy();

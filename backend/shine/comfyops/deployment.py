@@ -9,6 +9,7 @@ and no generated configuration ever claims runtime acceptance by itself.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -106,11 +107,22 @@ class DeploymentCatalog(BaseModel):
     total_bytes: int = Field(ge=0)
 
 
+#: Validated catalogs keyed by file version (mtime_ns + size).  The validation
+#: walks every pinned URL and path; repeating it per projection call made one
+#: page load take seconds.  A changed file version revalidates immediately, so
+#: this caches work, not conclusions.
+_CATALOG_CACHE: dict[str, tuple[int, int, dict]] = {}
+
+
 def load_deployment_catalog(name: str = "h3-ref2va-windows-x64") -> dict:
     """Strictly validate the committed catalog and return the parsed dict."""
     path = CATALOG_DIR / f"{name}.json"
     if not path.is_file():
         raise HTTPException(404, "DEPLOYMENT_CATALOG_MISSING")
+    stat = path.stat()
+    hit = _CATALOG_CACHE.get(name)
+    if hit is not None and hit[0] == stat.st_mtime_ns and hit[1] == stat.st_size:
+        return copy.deepcopy(hit[2])
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -132,7 +144,8 @@ def load_deployment_catalog(name: str = "h3-ref2va-windows-x64") -> dict:
                 safe_target(Path("_catalog_path_validation_root"), file_entry.relative_path)
             except ValueError as exc:
                 raise HTTPException(409, f"UNSAFE_CATALOG_PATH: {file_entry.relative_path}") from exc
-    return raw
+    _CATALOG_CACHE[name] = (stat.st_mtime_ns, stat.st_size, raw)
+    return copy.deepcopy(raw)
 
 
 def load_default_catalog_path() -> Path:

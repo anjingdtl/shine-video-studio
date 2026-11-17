@@ -112,7 +112,7 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     });
 
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
 
     // 只勾素材出图：先取消默认勾选的 H3 视频生成。
@@ -142,7 +142,7 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     });
 
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
@@ -164,7 +164,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     });
 
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
 
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).toBeChecked();
@@ -199,7 +199,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     });
 
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
@@ -216,7 +216,7 @@ describe('按钮按实际选择命名', () => {
   it('只勾素材出图时，下载量与按钮只包含素材出图', async () => {
     stub = new StudioStub(routes4070());
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('button', { name: /确认下载素材出图权重/ })).toBeEnabled();
@@ -228,7 +228,7 @@ describe('按钮按实际选择命名', () => {
   it('多个能力同时选择时，显示分项下载量', async () => {
     // H3 权重不在本机时，H3 与素材出图是两项待准备的能力。
     stub = new StudioStub(routes4070({ h3FilesPresent: false }));
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.getByRole('button', { name: '确认整备所选能力' })).toBeEnabled();
     const breakdown = screen.getByRole('list', { name: '分项下载量' });
@@ -271,7 +271,7 @@ describe('CASE-06：结构化错误不再渲染成 [object Object]', () => {
 describe('本机已有 H3 文件时的诚实表述', () => {
   it('文件已找到不等于生产就绪', async () => {
     stub = new StudioStub(routes4070());
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.getByText(/本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件/)).toBeTruthy();
   });

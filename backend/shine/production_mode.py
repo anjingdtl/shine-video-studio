@@ -140,3 +140,45 @@ def summarize_production_mode(db, settings, *, effective, runtime_error, worker_
         "running_jobs": int(running_real),
         "series_active": int(series_active),
     }
+
+
+def machine_verdict(db, settings, *, report: dict | None = None) -> dict:
+    """The one verdict composition every surface reads.
+
+    The badge, both configuration pages and the machine progress bar must not
+    gather these inputs themselves: doing so is how three surfaces ended up
+    telling three stories about one machine.  ``/setup/verdict`` and
+    ``/setup/summary`` both call this function.  A caller that already computed
+    ``runtime_report`` passes it in so the identity chain is walked once.
+    """
+    from fastapi import HTTPException
+
+    from shine.comfyops.runtime_configuration import resolve_runtime, runtime_report
+    from shine.comfyops.service_validation import _worker_online
+
+    try:
+        effective = resolve_runtime(db, settings)
+    except HTTPException as exc:
+        effective, runtime_error = None, str(exc.detail)
+    else:
+        runtime_error = None
+    report = report if report is not None else runtime_report(db, settings)
+    mode = summarize_production_mode(
+        db, settings,
+        effective=effective, runtime_error=runtime_error,
+        worker_online=_worker_online(db, settings),
+        renderer_online=False,
+    )
+    return {
+        "mode": mode["mode"],
+        "label": mode["label"],
+        "detail": mode["detail"],
+        "action": mode["action"],
+        "code": mode["code"],
+        "runtime_status": report.get("status"),
+        "runtime_error": report.get("error"),
+        "services_verified": bool(report.get("services_verified")),
+        "validation_blockers": list((report.get("service_validation") or {}).get("blockers") or []),
+        "has_active_runtime": db.get(AppSetting, "deployment-runtime-active") is not None,
+        "has_candidate_runtime": db.get(AppSetting, "deployment-runtime-candidate") is not None,
+    }

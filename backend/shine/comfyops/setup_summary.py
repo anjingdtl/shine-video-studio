@@ -151,9 +151,17 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
                 # ComfyUI's own aliases: text encoders also live in clip/.
                 folders = (family, "clip") if family == "text_encoders" else (family,)
                 for folder in folders:
-                    candidate = base / folder / relative
-                    if candidate.is_file():
-                        target = candidate
+                    # 清单的 relative_path 有两种约定：带 family 前缀（RelayVSR
+                    # 按 HF 仓库路径）与不带（H3/出图）。已带前缀时不再叠一层，
+                    # 否则落位正确的文件永远被判缺件。
+                    candidates = [base / folder / relative]
+                    if relative.parts and relative.parts[0] == folder:
+                        candidates.append(base / relative)
+                    for candidate in candidates:
+                        if candidate.is_file():
+                            target = candidate
+                            break
+                    if target is not None:
                         break
             ok = False
             if target is not None:
@@ -752,9 +760,10 @@ def summary(db, settings, *, project_id: str | None = None,
     from shine.comfyops.runtime_configuration import runtime_report
 
     try:
-        runtime_verified = bool(runtime_report(db, settings).get("services_verified"))
+        report = runtime_report(db, settings)
     except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
-        runtime_verified = False
+        report = {}
+    runtime_verified = bool(report.get("services_verified"))
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
                                variant_id=variant_id if key == "h3" else None,
@@ -767,6 +776,9 @@ def summary(db, settings, *, project_id: str | None = None,
     blockers = sorted({row.get("code") for key, row in capabilities.items()
                        for row in (row.get("advisories") or [])
                        if isinstance(row, dict) and row.get("code")})
+    from shine.production_mode import machine_verdict
+
+    verdict = machine_verdict(db, settings, report=report or None)
     return {
         "snapshot_version": SNAPSHOT_VERSION,
         "computed_at": utcnow().isoformat(),
@@ -779,8 +791,106 @@ def summary(db, settings, *, project_id: str | None = None,
         "action_required": action_required,
         "blockers": blockers,
         "preparation": preparation_state(db),
+        "verdict": verdict,
+        "machine_progress": machine_progress(db, progress=progress, verdict=verdict),
         "manual_download_root": str(Path(settings.comfyops_dir) / "manual-downloads"),
     }
+
+
+def _scan_fraction(db) -> float:
+    from shine.comfyops import resource_discovery
+
+    scan = resource_discovery.read_state(db).get("scan") or {}
+    coverage = scan.get("coverage") or {}
+    total = len(coverage) + len(scan.get("queue") or [])
+    if not total:
+        return 0.0
+    done = len([row for row in coverage.values() if row.get("status") == "DONE"])
+    return min(1.0, done / total)
+
+
+def _active_install_attempt(db):
+    from shine.comfyops.models import InstallationAttempt
+
+    return db.scalars(select(InstallationAttempt).where(
+        InstallationAttempt.status.in_(["QUEUED", "SUBMIT_INTENT", "INSTALLING"]))).first()
+
+
+def _download_fraction(db) -> float:
+    attempt = _active_install_attempt(db)
+    if attempt is None or not attempt.total_bytes:
+        return 0.0
+    return min(1.0, (attempt.confirmed_bytes or 0) / attempt.total_bytes)
+
+
+def _bytes_label(n: int) -> str:
+    if n >= 1024 ** 3:
+        return f"{n / 1024 ** 3:.2f} GiB"
+    if n >= 1024 ** 2:
+        return f"{n / 1024 ** 2:.1f} MiB"
+    return f"{n / 1024:.0f} KiB"
+
+
+def _download_detail(db, prefix: str) -> str:
+    """Live bytes/speed so a hours-long download still visibly moves."""
+    attempt = _active_install_attempt(db)
+    if attempt is None or not attempt.total_bytes:
+        return prefix
+    text = f"{prefix} · 已下载 {_bytes_label(attempt.confirmed_bytes or 0)} / {_bytes_label(attempt.total_bytes)}"
+    if attempt.speed_bps:
+        text += f" · {_bytes_label(attempt.speed_bps)}/s"
+    return text
+
+
+def machine_progress(db, *, progress: list[dict], verdict: dict) -> dict[str, Any]:
+    """The top bar's single projection of "what is this machine doing now".
+
+    Only existing ledgers are read: the preparation task, the resource scan and
+    the installation attempts.  No new state is introduced and no second
+    scheduler is implied.  100% is reserved for the one production verdict
+    saying READY; while work moves, the percent is that work's own progress
+    and the label names the step, so the bar never looks dead and never claims
+    readiness it has not proven.
+    """
+    from shine.comfyops import resource_discovery
+
+    phases = progress or []
+    done_phases = len([row for row in phases if row.get("state") == "DONE"])
+    ready_fraction = round(100 * done_phases / len(phases)) if phases else 0
+    idle_percent = 100 if verdict.get("mode") in {"READY", "RUNNING"} else min(99, ready_fraction)
+
+    prep = preparation_state(db)
+    if prep.get("status") in {"QUEUED", "RUNNING"}:
+        steps = prep.get("steps") or []
+        total = len(steps) or 1
+        done = prep.get("done") or 0
+        current = prep.get("current")
+        fraction = 0.0
+        if current == "DOWNLOAD":
+            fraction = _download_fraction(db)
+        elif current == "SCAN":
+            fraction = _scan_fraction(db)
+        label = next((row.get("label") for row in steps if row.get("id") == current), None) or "后台整备"
+        detail = prep.get("message") or "关闭页面也会继续"
+        if current == "DOWNLOAD":
+            detail = _download_detail(db, detail)
+        return {"active": True, "percent": min(99, round(100 * (done + fraction) / total)),
+                "label": label, "detail": detail,
+                "source": "preparation"}
+    scan = resource_discovery.read_state(db).get("scan") or {}
+    if scan.get("status") in {"QUEUED", "RUNNING"}:
+        return {"active": True, "percent": min(99, round(100 * _scan_fraction(db))),
+                "label": "深搜本机已有资源", "detail": scan.get("message") or "检索进行中（关闭页面也会继续）",
+                "source": "scan"}
+    attempt = _active_install_attempt(db)
+    if attempt is not None:
+        return {"active": True, "percent": min(99, round(100 * _download_fraction(db))),
+                "label": f"下载并安装 {attempt.current_component or '缺失文件'}",
+                "detail": _download_detail(db, f"{attempt.current_file or '准备中'} · 关闭页面也会继续"),
+                "source": "download"}
+    return {"active": False, "percent": idle_percent,
+            "label": verdict.get("label") or "制作环境",
+            "detail": verdict.get("detail") or "", "source": "idle"}
 
 
 def _next_action(installation: dict, capabilities: dict[str, dict], *,

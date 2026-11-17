@@ -36,7 +36,7 @@ describe('核验已有文件不再走页面直调', () => {
     stub = new StudioStub(baseRoutes());
     stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(reconcileSummary()) });
     const user = userEvent.setup();
-    render(<SetupCenter projectId="proj-1" onRefresh={vi.fn()} />);
+    render(<SetupCenter projectId="proj-1" />);
     await detect();
 
     await user.click(await screen.findByRole('button', { name: '核验已有文件' }));

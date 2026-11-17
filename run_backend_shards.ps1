@@ -14,6 +14,11 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $env:CODEBUDDY_SAFE_DELETE_ENABLED = '0'
+# 宿主 NO_PROXY 可能含 [::1] 这类带方括号条目：httpx 会拒绝建客户端，
+# 环回真实 HTTP 用例（renderer_supervisor / v13_e2e 等）整片假失败。
+# 回归入口统一去掉，与 AGENTS.md 的 env -u NO_PROXY 口径一致。
+Remove-Item Env:NO_PROXY -ErrorAction SilentlyContinue
+Remove-Item Env:no_proxy -ErrorAction SilentlyContinue
 # 一个共享的 temproot 会让 8 个进程抢同一批 pytest-N 编号目录，10 次抢不到就整体报错。
 $env:PYTEST_DEBUG_TEMPROOT = ''
 
