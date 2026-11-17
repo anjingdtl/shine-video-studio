@@ -83,9 +83,21 @@
 3. `SECOND_START_OK`：无 manifest 再启，启动器先收尾旧 supervisor（旧 pid 已死）再同步。
 4. `STOP_OK`：完整停止后 supervisor 记录、manifest 消失，端口不再监听。
 
-### 4.2 启动器四条（`.local-acceptance/launcher-4-20261117/accept4.ps1`）
+### 4.2 启动器四条（`.local-acceptance/launcher-4-20261117/p1.ps1 / p2.ps1 / p3.ps1`，串行）
 
-（结果待补：干净重启 / 默认端口被占自动换 port / 半启动残栈收尾 / 停止身份核验。）
+1. `P1_START_OK` / `P1_STOP_OK`：干净启动后 API `/health` 与 Web `/` 均 200（curl 环回免代理）；
+   停止退出码 0，manifest 与 supervisor 记录消失，端口不再监听。
+2. `P2_OK api=8001 web=5174 foreign8000=alive` / `P2_STOP_OK`：8000 上放一个自己的空目录
+   静态服务（绝不服务仓库根），启动器自动换到 8001/5174、未声称「已在运行」、未碰占用者；
+   停止后释放占用者。
+3. `P3_OK web restarted on 5174` / `P3_STOP_OK`：只杀 Web（记录身份）后再启动，启动器报
+   `WARNING … missing: Web; reconciling it first`，身份核验收尾残栈后 Web 恢复 200、
+   旧 pid 已死；停止后记录与端口全清。
+
+如实记录：启动器为日常数据目录保留默认端口，故三个探针实际都落在 8001/5174；P2 的
+「默认端口被占」另叠加自有 8000 占用者，结论不变。此前两版整脚本验收失败的原因是
+验收方法而非产品缺陷：本机控制台重定向吞掉子进程输出，以及一次并行清理在验收运行中
+删除了 manifest（`Get-Content processes.json` 报不存在）。改为串行短探针后一次通过。
 
 偏差如实记录：入口链为 `启动 Shine 工作台.cmd → start_dev.ps1 → start_shine.ps1`；
 `start_dev.ps1` 无 DataDir 参数，双击会落在用户默认数据目录，故四条验收在隔离目录
