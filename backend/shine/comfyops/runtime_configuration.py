@@ -97,9 +97,16 @@ def _recorded_roots(recipe: dict, settings) -> list[tuple[Path, Path]]:
 
 
 def _anchored(value: str, roots: list[tuple[Path, Path]]) -> str:
-    """The same file, found where it lives *now* (the recorded copy is gone)."""
+    """The same file, found where *this* data directory keeps it.
+
+    The current location wins whenever it holds the file: a recipe that was
+    recorded in another directory describes that directory's bookkeeping, not
+    the one this process serves.  The recorded path is the fallback for a file
+    that only exists where it was recorded (a partial copy, or a root that has
+    not moved at all).
+    """
     path = Path(str(value))
-    if not path.is_absolute() or path.exists():
+    if not path.is_absolute():
         return str(value)
     for old, new in roots:
         try:

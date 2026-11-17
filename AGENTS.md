@@ -1922,3 +1922,12 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   「仓库启动器升级不算环境变化」「重新封印后搬家仍 READY」）。行为级基线红→绿用
   `.local-acceptance/_repro_relocation.py`（只用 `resolve_runtime`/`runtime_report`）。
   验收记录见 `docs/ACCEPTANCE_20261117_R4_RUNTIME_IDENTITY_RELOCATION.md`。
+- **锚定的裁决是「当前数据目录优先」**。`_anchored` 只要求「当前 `<data>/comfyops` 下
+  有对应文件」就用它，不再先看记录路径是否存在——否则「刚复制完、源目录还在」的迁移
+  中间态会继续指回旧目录（实测报 `ADOPTED_RUNTIME_DATA_ROOT_INVALID`）。记录路径只在
+  当前目录缺这份文件（部分复制）时回退。
+- **生产数据目录不放在 `.local-acceptance/`**。那里是验收隔离目录（`SHINE_DATA_DIR=
+  .local-acceptance/<轮次>`），语义是「可按轮次清理」。日常运行目录用独立位置
+  （本机现为 `D:/Shine/data`）；迁移用 `robocopy /E` 复制、逐项比对文件数与字节后
+  再删源，改 `.env` 的 `SHINE_DATA_DIR` 即完成。删源前确认库里没有素材路径引用旧目录
+  （素材按相对路径存于 `<data>/assets`）。

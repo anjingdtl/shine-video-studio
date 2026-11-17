@@ -243,6 +243,27 @@ def test_an_upgraded_bootstrap_is_not_an_environment_change(tmp_path):
     assert same_configuration(stored, other_instance, settings=settings) is False
 
 
+def test_the_current_data_directory_wins_while_the_recorded_one_still_exists(tmp_path):
+    """复制完还没删源时，也要读当前目录那份，而不是继续用记录里的旧目录。"""
+    from shine.comfyops.runtime_configuration import _anchored
+
+    old = tmp_path / "old" / "comfyops"
+    new = tmp_path / "new" / "comfyops"
+    for root in (old, new):
+        (root / "setup").mkdir(parents=True)
+    (old / "setup" / "manifest.json").write_text("old", encoding="utf-8")
+    (new / "setup" / "manifest.json").write_text("new", encoding="utf-8")
+    roots = [(old, new)]
+
+    assert _anchored(str(old / "setup" / "manifest.json"), roots) == str(new / "setup" / "manifest.json")
+
+    # 只有旧位置有这份文件时，才回退到记录位置（部分复制的情形）。
+    (old / "setup" / "extra.json").write_text("old", encoding="utf-8")
+    assert _anchored(str(old / "setup" / "extra.json"), roots) == str(old / "setup" / "extra.json")
+    # 当前目录之外的路径（机器安装）永不改写。
+    assert _anchored(r"F:\machine\ComfyUI\main.py", roots) == r"F:\machine\ComfyUI\main.py"
+
+
 def test_a_resealed_validation_is_not_invalidated_by_the_directory(prep, candidate):
     """在新位置重新封印一次服务证据，之后搬家仍判为同一套配置。"""
     client, factory, settings = prep

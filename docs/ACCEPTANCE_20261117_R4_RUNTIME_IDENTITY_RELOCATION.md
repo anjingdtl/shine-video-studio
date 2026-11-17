@@ -227,3 +227,75 @@ test_director_streamline :: 旧 scope 包并存时的计划投影（EPISODE_PLAN
 4. **配方字节仍算配置事实**：如果在新位置「重新生成」一份配方（内容因路径而变），
    `recipe_sha256` 会变，此时需要重新验证服务一次。这是有意的：配方变了就是新配置。
 5. 本轮未改导演链路、素材链路与字幕链路，不触发 VLM 重校准义务。
+
+---
+
+## 8 · 实战迁移：把生产数据目录从验收副本里搬出来
+
+### 8.1 为什么副本里会有数据目录
+
+`.local-acceptance/<轮次>` 是历次验收的**隔离数据目录**：验收时用
+`SHINE_DATA_DIR=.local-acceptance/<轮次>` 起一套独立服务，这样验收不会污染
+`.local-data`，也方便按轮次整体归档或丢弃。`witch-main-20261111` 就是 11-11
+那轮「放开那个女巫」主流程穿测的隔离目录，里面是**真实项目数据**
+（四个项目：两集穿测 1112、十章完整穿测 1111、收尾真实短镜验证1114、验收样片）。
+
+问题出在后来 `.env` 把 `SHINE_DATA_DIR` 固定成了它 —— 一次性验收目录就这样被
+当成了日常生产数据目录。**功能上没问题**（绝对路径可用），但有三处实际风险：
+
+1. `.local-acceptance/` 在 `.gitignore` 里，语义是「可按轮次清理」——哪天清理验收产物，
+   项目数据一起没了；
+2. 与「再做一轮验收就要新建一个目录」的用法冲突，容易误读误删；
+3. 目录含义混乱：一个叫「验收副本」的位置，实际承担了生产职责。
+
+### 8.2 迁移
+
+| 项 | 值 |
+|----|----|
+| 源 | `F:\...\shine-video-studio\.local-acceptance\witch-main-20261111`（675 文件 / 0.98GB） |
+| 目标 | `D:\Shine\data`（非系统盘、554GB 空闲、与代码库分离，不会被 `git clean` 或清理验收目录波及） |
+| 方式 | `robocopy /E /COPY:DAT`，源与目标文件数、字节数逐项比对一致后才删源 |
+| 配置 | `.env` 的 `SHINE_DATA_DIR=D:\Shine\data`（`start_dev.ps1` 会读这一行） |
+
+删源前的安全检查：库内只有 `app_settings`（配置身份、`handoff:*` 审计）与
+`installation_plans.payload.storage_root` 引用旧目录，**没有一条素材路径**——
+素材按相对路径存在 `<data>/assets`，随复制一起走。
+
+### 8.3 迁移暴露的一个真实缺陷（已修）
+
+第一次迁移后 `resolve: BLOCKED ACTIVE_RUNTIME_CONFIGURATION_CHANGED` →
+`ADOPTED_RUNTIME_DATA_ROOT_INVALID`。原因：`_anchored` 原来的条件是
+「**记录路径已不存在**才映射」，而迁移刚做完、源目录还在，于是它继续指回 F:。
+
+裁决改成**当前数据目录优先**：只要当前 `<data>/comfyops` 下存在对应文件，就用它；
+记录路径只在「当前目录没有这份文件」（部分复制）时才作为回退。
+
+```python
+for old, new in roots:
+    if path.is_relative_to(old):
+        moved = new / path.relative_to(old)
+        if moved.exists():
+            return str(moved)      # 当前数据目录优先，不再看旧路径是否存在
+```
+
+### 8.4 迁移后的验证
+
+```
+$ backend/.venv/Scripts/python.exe scripts/check_runtime_identity.py
+data_dir: D:\Shine\data
+comfyops: D:\Shine\data\comfyops
+resolve : OK  provider= comfyui  recipe= D:\Shine\data\comfyops\setup\managed_recipe.json
+report  : ACTIVE / comfyui / None / services_verified= True
+```
+
+这是最硬的一次验收：**跨盘迁移 + 源目录已删除 + 台账里全是旧绝对路径**，
+真实制作仍然就绪。关联测试组（配置身份 / 激活 / 服务验证 / 镜像渲染器 / 新机整备 /
+变体摘要，共 72 例）全绿，`test_runtime_identity_relocation` 增至 9 例。
+
+### 8.5 顺带清掉的历史临时目录
+
+`F:\ClaudeWorkSpace\.pytest-tmp\pytest-of-Administrator` 下积了 46 个 `pytest-N`
+目录（11-14 ~ 11-17，都是这几轮全量 `pytest` 留下的用例临时目录）。已全部清空。
+注意它们统计出来的 121GB 是 **junction 重复计数**，实际并不占盘——清完 F: 可用空间
+没有变化（118.4GB），真实空间要看 `Get-PSDrive`，不要信 MSYS 的 `df`。
+
