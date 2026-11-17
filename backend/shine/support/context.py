@@ -34,6 +34,7 @@ PAGE_IDS = frozenset(
         "library",
         "setup",
         "advanced",
+        "copilot",
         "asset-center",
         "unknown",
     }

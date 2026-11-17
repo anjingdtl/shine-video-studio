@@ -398,7 +398,7 @@ describe('ShineCopilot', () => {
     await user.click(screen.getByLabelText('打开 AI 管家'));
     await user.click(await screen.findByLabelText('开启联网检索（仅官方文档）'));
     expect(await screen.findByText(/联网检索已开启/)).toBeTruthy();
-    const call = stub.calls.find((entry) => /\/support\/preferences$/.test(entry.url));
+    const call = stub.calls.find((entry) => entry.method === 'POST' && /\/support\/preferences$/.test(entry.url));
     expect(call?.body).toMatchObject({ web_search: true });
   });
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -30,6 +30,7 @@ from shine.support import reports as report_service
 from shine.support.context import build_evidence_snapshot
 from shine.support.diagnostics import diagnose_snapshot, suggested_questions
 from shine.support.knowledge import local_version_facts, search_local, search_official_web
+from shine.support.memory import profile as memory_profile
 from shine.support.models import SupportAction, SupportReport
 from shine.support.tools import ToolDenied, read_tool_names
 
@@ -122,8 +123,17 @@ class ReportCreate(BaseModel):
 
 
 class PreferenceUpdate(BaseModel):
+    """V2.2 unified profile; the original ``web_search`` field stays compatible."""
+
     model_config = ConfigDict(extra="forbid")
-    web_search: bool
+    web_search: bool | None = None
+    assistant_nickname: str | None = Field(default=None, max_length=20)
+    user_salutation: str | None = Field(default=None, max_length=20)
+    startup_memory: str | None = Field(default=None, max_length=4000)
+    memory_enabled: bool | None = None
+    auto_memory_enabled: bool | None = None
+    remote_memory_processing_consent: bool | None = None
+    remote_context_consent: bool | None = None
 
 
 def _http(code: str, message: str, status: int = 400) -> HTTPException:
@@ -139,6 +149,31 @@ def _require_session(db, session_id: str):
     if row is None:
         raise _http("SESSION_NOT_FOUND", "AI 管家会话不存在或已被清理。", 404)
     return row
+
+
+def _schedule_memory_extraction(
+    background: BackgroundTasks,
+    request: Request,
+    settings: Settings,
+    db,
+    session,
+    gateway,
+) -> None:
+    """Queue a batched distillation after the answer, never before it."""
+    from shine.support import memory as memory_service
+
+    try:
+        due = memory_service.auto_extract_due(db, session, gateway=gateway)
+    except Exception:  # noqa: BLE001 - memory must never break a chat turn
+        return
+    if due.get("due"):
+        background.add_task(
+            memory_service.extract_background,
+            request.app.state.session_factory,
+            settings,
+            session.id,
+            gateway,
+        )
 
 
 @router.get("/capabilities")
@@ -497,18 +532,24 @@ def support_knowledge(
 
 @router.get("/preferences")
 def support_preferences(db: DBSession):
-    return {"web_search": agent_service.web_search_enabled(db)}
+    """One profile: identity, startup pre-read, privacy and the legacy switch."""
+    return memory_profile.preferences_payload(db)
 
 
 @router.post("/preferences")
 def support_preferences_update(body: PreferenceUpdate, actor: Operator, db: DBSession):
-    return agent_service.set_web_search(db, enabled=body.web_search, actor=actor)
+    updates = body.model_dump(exclude_unset=True, exclude_none=True)
+    try:
+        return memory_profile.update_preferences(db, updates=updates, actor=actor)
+    except memory_profile.ProfileInvalid as exc:
+        raise _http(exc.code, exc.message, 400) from exc
 
 
 @router.post("/sessions", status_code=201)
 def support_session_create(
     body: SessionCreate,
     request: Request,
+    background: BackgroundTasks,
     actor: Operator,
     settings: SettingsDep,
     db: DBSession,
@@ -533,6 +574,7 @@ def support_session_create(
             db, settings, session, body.question.strip(), actor=actor, gateway=gateway
         )
         payload = result["session"]
+        _schedule_memory_extraction(background, request, settings, db, session, gateway)
     return {
         "session": payload,
         "diagnosis": (result or {}).get("diagnosis"),
@@ -552,6 +594,8 @@ def support_session_get(session_id: str, db: DBSession):
 def support_session_message(
     session_id: str,
     body: MessageCreate,
+    request: Request,
+    background: BackgroundTasks,
     actor: Operator,
     settings: SettingsDep,
     db: DBSession,
@@ -561,6 +605,7 @@ def support_session_message(
     result = agent_service.handle_message(
         db, settings, session, body.content, actor=actor, gateway=gateway
     )
+    _schedule_memory_extraction(background, request, settings, db, session, gateway)
     return result
 
 

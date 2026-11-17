@@ -5,6 +5,12 @@ import {
 } from 'lucide-react';
 import { API, api } from '../api';
 import { currentCopilotFault, faultKey, faultLabel, subscribeCopilotFault, type CopilotFault } from '../copilotContext';
+import {
+  getCopilotProfile,
+  loadCopilotProfile,
+  subscribeCopilotProfile,
+  type CopilotProfile,
+} from '../copilotProfile';
 
 type Fact = { key: string; value: string; source: string };
 
@@ -249,6 +255,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [fault, setFault] = useState<CopilotFault | null>(() => currentCopilotFault());
+  const [profile, setProfile] = useState<CopilotProfile>(() => getCopilotProfile());
   const [preview, setPreview] = useState<ActionState | null>(null);
   const [lastAction, setLastAction] = useState<RecommendedAction | null>(null);
   const [approving, setApproving] = useState(false);
@@ -287,8 +294,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   };
 
   useEffect(() => {
+    const unsubscribe = subscribeCopilotProfile(setProfile);
+    void loadCopilotProfile();
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     if (!open) return;
     inputRef.current?.focus();
+    void loadCopilotProfile();
   }, [open]);
 
   useEffect(() => {
@@ -884,25 +898,26 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     );
   };
 
+  const nickname = profile.assistant_nickname || 'AI 管家';
   return (
     <>
       <button
         type="button"
         className={`copilot-fab ${open ? 'open' : ''}`}
-        aria-label={open ? '收起 AI 管家' : '打开 AI 管家'}
+        aria-label={open ? `收起 ${nickname}` : `打开 ${nickname}`}
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
         {open ? <X size={18} /> : <Sparkles size={18} />}
-        <span>AI 管家</span>
+        <span>{nickname}</span>
         {!open && needsSetup && <i className="copilot-dot" aria-hidden="true" />}
       </button>
 
       {open && (
-        <section className="copilot-panel" role="dialog" aria-modal="false" aria-label="Shine AI 管家">
+        <section className="copilot-panel" role="dialog" aria-modal="false" aria-label={`Shine ${nickname}`}>
           <header className="copilot-head">
             <div>
-              <b><Sparkles size={14} aria-hidden="true" /> SHINE AI 管家</b>
+              <b><Sparkles size={14} aria-hidden="true" /> SHINE {nickname}</b>
               <span>{pageLabel} · 只读诊断{faultLabel(fault) ? ` · 已绑定 ${faultLabel(fault)}` : ''}</span>
             </div>
             <div className="copilot-head-tools">
