@@ -3108,7 +3108,7 @@
   ],
   "digests": {
     "api_contract": "e15f83855fc8717a59b1bce50f1a1cce0be9169235de86ec39462035a3e01560",
-    "api_schema": "1baa0c631103c6e7524c6a66b68bf024a1b9792eafc762c8e4c4cb81eacb57ed",
+    "api_schema": "29bd6d06b2629896db32c79a5273c9e8162363695c30c5d44304bcd7a1cce2c9",
     "contracts": "132effb00d87e2684c0ea109966647ce9060e5d95d15b49e7a75f61da6789dbf"
   },
   "discovered": [
@@ -3686,6 +3686,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/projects/{}/material-preparation/entity-catalog",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/projects/{}/material-preparation/generation-progress",
       "status": "DISCOVERED"
     },
     {
