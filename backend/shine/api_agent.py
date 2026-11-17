@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from shine.agents.planner import HeuristicScriptPlanner, LLMScriptPlanner, ShotPlanner, build_context
 from shine.agents.runtime import ProducerAgentRuntime
-from shine.agents.script import ScriptParseError, parse_document
+from shine.agents.script import ScriptParseError
 from shine.agents.tools import AssetView
 from shine.api_common import DBSession, llm_gateway, secret_store
 from shine.llm.base import LLMError, LLMNotConfigured
@@ -26,12 +26,15 @@ from shine.schemas import (
     ShotProposal,
     StyleBible,
 )
-from shine.security import safe_filename, sha256_bytes
-from shine.services import add_audit, create_shot_record, require_project
+from shine.services import (
+    MAX_SCRIPT_BYTES,
+    add_audit,
+    create_shot_record,
+    import_project_document,
+    require_project,
+)
 
 router = APIRouter(prefix="/api/v1", tags=["agent"])
-
-MAX_SCRIPT_BYTES = 20 * 1024 * 1024
 SecretDependency = Annotated[SecretStore, Depends(secret_store)]
 
 
@@ -96,47 +99,17 @@ def _project_context(db, project) -> Any:
 @router.post("/projects/{project_id}/documents", status_code=201)
 async def upload_document(project_id: str, db: DBSession, file: Annotated[UploadFile, File()]) -> dict[str, Any]:
     project = require_project(db, project_id)
-    filename = safe_filename(file.filename)
     content = await file.read(MAX_SCRIPT_BYTES + 1)
-    if len(content) > MAX_SCRIPT_BYTES:
-        raise HTTPException(status_code=413, detail="Script documents are limited to 20 MiB")
     try:
-        parsed = parse_document(filename, content)
+        document, _created = import_project_document(
+            db,
+            project,
+            filename=file.filename or "upload",
+            content=content,
+            content_type=file.content_type,
+        )
     except ScriptParseError as exc:
         raise HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)}) from exc
-    digest = sha256_bytes(content)
-    duplicate = db.scalar(
-        select(ProjectDocument).where(ProjectDocument.project_id == project.id, ProjectDocument.sha256 == digest)
-    )
-    if duplicate:
-        return _document_data(duplicate)
-    document = ProjectDocument(
-        project_id=project.id,
-        filename=filename,
-        content_type=file.content_type or "application/octet-stream",
-        sha256=digest,
-        source_format=parsed.source_format,
-        text=parsed.text,
-        parsed=parsed.parsed or None,
-    )
-    db.add(document)
-    db.flush()
-    # The first script in an empty project is naturally its basis.  A later
-    # upload only becomes a candidate: switching the production source is an
-    # explicit action, never a side effect of importing a file.
-    if not project.current_document_id:
-        project.current_document_id = document.id
-    add_audit(
-        db,
-        "user",
-        "SCRIPT_DOCUMENT_IMPORTED",
-        "project_document",
-        document.id,
-        {"source_format": parsed.source_format, "sha256": digest, "text_length": len(parsed.text)},
-        project_id=project.id,
-    )
-    db.commit()
-    db.refresh(document)
     return _document_data(document)
 
 

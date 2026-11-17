@@ -54,7 +54,7 @@ def test_authoritative_text_role_catalog_matches_backend_roles_and_four_stage_pi
         BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE,
     }
     readiness = client.get("/api/v1/setup/llm-readiness").json()
-    assert readiness["role_count"] == 14
+    assert readiness["role_count"] == 15
     assert {row["role"] for row in readiness["roles"]} == expected
 
 

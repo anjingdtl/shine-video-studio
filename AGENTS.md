@@ -2011,3 +2011,27 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `dataDirIdentity.test.tsx`（新增 2）；定向后端 68 例、前端全量 81 文件/404 例、
   tsc/build/Ruff 全绿；隔离浏览器实测顶栏 `D:\Shine\data`、真实制作已就绪、14 个真实作品。
 - 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
+
+## Copilot V2.1 — mandatory contract rule (do not duplicate)
+
+The AI copilot's knowledge index and capability registry are **build outputs**, not
+hand-maintained lists. When you add or change a product capability:
+
+1. Implement the real business code and keep its Pydantic schema authoritative.
+2. Declare it once in `backend/shine/copilot/declarations.py`
+   (`WRITE_ACTIONS` / `READ_ACTIONS` / `FEATURES`). Reference the real route,
+   request model, single executor and read-back authority. Do **not** add a second
+   parameter schema, a second executor, a second scheduler or a second readiness
+   verdict.
+3. A new write action additionally needs a reviewed dispatcher binding in
+   `backend/shine/support/actions.py`; without it keep `availability="REVIEW_REQUIRED"`.
+4. Run `PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --write`
+   and commit the regenerated `support/generated/copilot_contracts.json` +
+   `knowledge_manifest.json`.
+5. `--check` must pass locally and in CI. A removed parameter, raised permission
+   tier, new GPU/paid cost, changed executor or changed route is **BREAKING**:
+   bump `contract_revision` and pass `--allow-breaking` only after review.
+6. Never edit the generated artefact by hand to grant a capability; the runtime
+   compares it with the packaged declarations and refuses mismatches.
+7. Never give the runtime copilot shell/git/pip/arbitrary HTTP/source-write tools,
+   and never let an unreviewed API become executable. Discovery is not permission.

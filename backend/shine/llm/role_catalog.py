@@ -80,6 +80,11 @@ TEXT_ROLE_CATALOG: tuple[TextRoleDefinition, ...] = (
         AgentRole.QC_REVIEWER, "文本质量审核", "工程与审查", "结构化文本审核", True,
         "structured_text", ("quality",), "检查结构化文本是否满足对应业务合同。",
     ),
+    TextRoleDefinition(
+        AgentRole.SUPPORT_AGENT, "AI 管家", "工程与审查", "本机 AI 管家", False,
+        "structured_text", ("support",),
+        "解释环境与任务证据；不可执行命令、修改源码或替代权威裁决。",
+    ),
 )
 
 TEXT_ROLES: tuple[str, ...] = tuple(item.role.value for item in TEXT_ROLE_CATALOG)
