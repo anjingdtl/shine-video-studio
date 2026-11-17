@@ -8,6 +8,7 @@ change the verdict or execute an action.
 """
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from typing import Any
 
@@ -240,6 +241,9 @@ def _compose_answer(
     advisory: str | None,
     investigation: dict[str, Any] | None = None,
     references: list[dict[str, Any]] | None = None,
+    *,
+    knowledge: dict[str, Any] | None = None,
+    plan: dict[str, Any] | None = None,
 ) -> str:
     facts = diagnosis.get("facts") or []
     lines = [f"【结论】{diagnosis.get('category_label')}：{diagnosis.get('symptom')}"]
@@ -256,6 +260,17 @@ def _compose_answer(
     if diagnosis.get("policy_refusal"):
         blocked = "、".join(diagnosis["policy_refusal"].get("blocked") or [])
         lines.append(f"【权限】已拒绝越权操作（{blocked}）；不会执行任何命令或修改源码。")
+    if knowledge and knowledge.get("citations"):
+        lines.append("【项目百科】")
+        for row in knowledge["citations"][:3]:
+            lines.append(f"- 【{row.get('status')}】{row.get('title')}：{row.get('summary')}")
+        metadata = knowledge.get("metadata") or {}
+        if metadata.get("state") != "FRESH":
+            lines.append(f"（知识版本提示：{metadata.get('notice')}）")
+    if plan and plan.get("steps"):
+        lines.append(f"【操作计划】{plan.get('summary')}")
+        for step in plan["steps"][:6]:
+            lines.append(f"{step.get('order')}. [{step.get('state_label')}] {step.get('title')}")
     external = [
         row for row in (references or []) if isinstance(row, dict) and row.get("url")
     ][:2]
@@ -302,6 +317,84 @@ def handle_message(
     readiness_code = (diagnosis.get("readiness_reference") or {}).get("code")
     investigation = investigate(db, settings, snapshot, content, code=readiness_code)
 
+    # V2 intent routing: the same question can be a diagnosis, a project
+    # knowledge question, or an operation request.  All three read the same
+    # facts; only the last one proposes a plan, and even that is read-only.
+    from shine.support import official_docs, planner, project_knowledge
+
+    intent = planner.detect_intent(content)
+    policy_refused = bool(diagnosis.get("policy_refusal"))
+    knowledge_answer: dict[str, Any] | None = None
+    official_answer: dict[str, Any] | None = None
+    plan: dict[str, Any] | None = None
+    plan_error: str | None = None
+    if not policy_refused:
+        if intent in {None, "knowledge", "parameters"}:
+            try:
+                knowledge_answer = project_knowledge.answer(content, limit=3)
+            except Exception as exc:  # noqa: BLE001 - knowledge failure is reported, not fatal
+                knowledge_answer = {
+                    "answered": False,
+                    "citations": [],
+                    "metadata": {"state": "UNKNOWN", "notice": type(exc).__name__},
+                    "unknown_reason": "项目百科读取失败。",
+                }
+        if intent in {"knowledge", "parameters"} or any(
+            word in content.casefold() for word in ("h3", "ref2va", "comfyui", "comfy", "minimax")
+        ):
+            official_answer = official_docs.search(content, limit=3)
+        if intent in {
+            "production",
+            "materials",
+            "release",
+            "parameters",
+            "create_project",
+            "import_document",
+            "literary_scripts",
+            "switch_basis",
+            "outline",
+            "control",
+        }:
+            try:
+                plan = planner.build_plan(
+                    db,
+                    settings,
+                    request=content,
+                    project_id=session.project_id,
+                    episode_ids=None,
+                )
+                if plan is not None and gateway is not None:
+                    from shine.support import nlu
+
+                    plan = nlu.enrich_plan(db, gateway, plan=plan, text=content)
+            except ValueError as exc:
+                plan_error = str(exc)
+            except Exception as exc:  # noqa: BLE001 - a broken plan must not break diagnosis
+                plan_error = type(exc).__name__
+
+    if plan and plan.get("steps"):
+        existing = {
+            (row.get("kind"), json.dumps(row.get("params") or {}, sort_keys=True, ensure_ascii=False))
+            for row in diagnosis.get("recommended_actions") or []
+        }
+        for step in plan["steps"]:
+            action = step.get("action")
+            if not action or step.get("state") != "READY":
+                continue
+            key = (action["kind"], json.dumps(action.get("params") or {}, sort_keys=True, ensure_ascii=False))
+            if key in existing:
+                continue
+            existing.add(key)
+            diagnosis.setdefault("recommended_actions", []).append(
+                {
+                    "kind": action["kind"],
+                    "label": step.get("title") or action["kind"],
+                    "reason": step.get("reason") or "来自只读计划；仍需预览并确认。",
+                    "requires_authorization": True,
+                    "params": action.get("params") or {},
+                }
+            )
+
     tool_trace: list[dict[str, Any]] = [
         {"tool": "read_setup_verdict", "status": "OK", "evidence_level": "LOCAL_AUTHORITY"},
         {
@@ -311,6 +404,26 @@ def handle_message(
         },
         {"tool": "read_support_context", "status": "OK", "evidence_level": "LOCAL_LEDGER"},
     ]
+    if knowledge_answer is not None:
+        tool_trace.append(
+            {
+                "tool": "search_project_knowledge",
+                "status": "OK" if knowledge_answer.get("citations") else "UNAVAILABLE",
+                "evidence_level": "VERSIONED_PROJECT_DOCS",
+            }
+        )
+    if official_answer is not None:
+        tool_trace.append(
+            {
+                "tool": "search_official_docs",
+                "status": "OK" if official_answer.get("results") else "UNAVAILABLE",
+                "evidence_level": "OFFICIAL_REFERENCE",
+            }
+        )
+    if plan is not None:
+        tool_trace.append(
+            {"tool": "read_project_journey", "status": "OK", "evidence_level": "LOCAL_LEDGER"}
+        )
     for step in investigation.get("steps") or []:
         tool_trace.append(
             {
@@ -437,9 +550,21 @@ def handle_message(
             }
         ),
     }
-    answer = _compose_answer(diagnosis, advisory, investigation, web.get("results"))
+    answer = _compose_answer(
+        diagnosis,
+        advisory,
+        investigation,
+        web.get("results"),
+        knowledge=knowledge_answer,
+        plan=plan,
+    )
     payload = {
         "diagnosis": diagnosis,
+        "intent": intent,
+        "project_knowledge": knowledge_answer,
+        "official_docs": official_answer,
+        "plan": plan,
+        "plan_error": plan_error,
         "investigation": {
             "steps": [
                 {
@@ -482,11 +607,15 @@ def handle_message(
         evidence_ids=[snapshot.get("evidence_id")] if snapshot.get("evidence_id") else [],
     )
     session.context_json = {
+        **(session.context_json if isinstance(session.context_json, dict) else {}),
         "snapshot": snapshot,
         "last_diagnosis": diagnosis,
         "last_evidence_id": snapshot.get("evidence_id"),
         "last_investigation": payload["investigation"],
         "last_references": payload["official_references"],
+        "last_intent": intent,
+        "last_plan": plan,
+        "last_knowledge": knowledge_answer,
     }
     session.updated_at = utcnow()
     from shine.services import add_audit
@@ -500,6 +629,10 @@ def handle_message(
         {
             "category": diagnosis.get("category"),
             "outcome": diagnosis.get("outcome"),
+            "intent": intent,
+            "plan_steps": len((plan or {}).get("steps") or []),
+            "knowledge_hits": len((knowledge_answer or {}).get("citations") or []),
+            "authority": "/api/v1/setup/verdict",
             "llm_status": llm_info.get("status"),
             "tools": [row["tool"] for row in tool_trace],
         },

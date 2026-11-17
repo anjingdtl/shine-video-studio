@@ -364,6 +364,20 @@ $buildInfo = [ordered]@{
 }
 [IO.File]::WriteAllText((Join-Path $staging 'BUILD_INFO.json'), ($buildInfo | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
+# Bind the copilot's project knowledge to this exact package build.  The source
+# commit is the commit the knowledge was generated from; the runtime compares it
+# with BUILD_INFO.json, so the manifest never has to contain its own commit.
+Push-Location (Join-Path $staging 'backend')
+try {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+    if (-not $python) { throw 'Python is required to bind the copilot knowledge manifest.' }
+    & $python.Source -m scripts.generate_copilot_knowledge --commit $commit
+    if ($LASTEXITCODE -ne 0) { throw "knowledge manifest generation failed ($LASTEXITCODE)" }
+} finally {
+    Pop-Location
+}
+
 # The manifest never describes itself: a file that lists its own hash can never
 # match. Resolve the count now that every document exists, substitute it, then
 # hash the final bytes once.

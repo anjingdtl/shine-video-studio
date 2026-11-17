@@ -5,7 +5,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ShineCopilot } from '../components/ShineCopilot';
+import { ShineCopilot, actionPayload, type CapabilityInfo } from '../components/ShineCopilot';
 import { clearCopilotFault, reportCopilotFault } from '../copilotContext';
 import { StudioStub, jsonResponse, type Route } from './studioStub';
 
@@ -361,5 +361,149 @@ describe('ShineCopilot', () => {
     expect(await screen.findByText(/联网检索已开启/)).toBeTruthy();
     const call = stub.calls.find((entry) => /\/support\/preferences$/.test(entry.url));
     expect(call?.body).toMatchObject({ web_search: true });
+  });
+
+  it('renders a bounded plan with knowledge citations and previews a plan step', async () => {
+    const planned = session({
+      messages: [
+        { id: 'u1', role: 'user', kind: 'message', content: '帮我把第一集准备好', payload: {}, evidence_ids: [], created_at: 't1' },
+        {
+          id: 'a2', role: 'assistant', kind: 'diagnosis',
+          content: '【结论】本机配置尚未就绪\n【操作计划】共 1 集：1 集可开拍。',
+          payload: {
+            diagnosis: diagnosis({ recommended_actions: [] }),
+            intent: 'production',
+            tool_trace: [
+              { tool: 'search_project_knowledge', status: 'OK' },
+              { tool: 'read_project_journey', status: 'OK' },
+            ],
+            project_knowledge: {
+              answered: true,
+              citations: [{
+                title: '导演模式七阶段', status: '已实现', summary: '从原文到大纲、分镜与交付。',
+                sources: ['backend/shine/director/overview.py'], verification: '有自动化测试',
+              }],
+              metadata: { state: 'UNKNOWN', notice: '当前构建未注入提交号，无法证明知识版本与当前代码一致。' },
+            },
+            plan: {
+              intent: 'PRODUCTION',
+              summary: '共 1 集：1 集可开拍，0 个前置步骤需要处理。',
+              steps: [
+                {
+                  order: 1, title: '读取项目与每集真实状态', capability_id: 'read_project_journey',
+                  state: 'READ_ONLY', state_label: '只读查询',
+                  evidence: ['第一集：可开拍'], reason: '状态来自既有导演台账。',
+                },
+                {
+                  order: 2, title: '开始真实拍摄选定集', capability_id: 'production_start',
+                  state: 'READY', state_label: '可执行（仍需预览并确认）',
+                  action: { kind: 'production_start', params: { project_id: 'p1', episode_ids: ['ep-1'] } },
+                  reason: '只有原 Run 引擎能决定是否开拍。',
+                },
+              ],
+              requires_input: [], notice: '计划只是只读建议；每个可执行步骤仍需单独预览并确认。', bounded: true,
+            },
+          },
+          evidence_ids: [], created_at: 't2',
+        },
+      ],
+    });
+    stub = new StudioStub([
+      { method: 'GET', pattern: /\/support\/context/, respond: () => context() },
+      { method: 'POST', pattern: /\/support\/sessions$/, respond: () => jsonResponse({ session: planned, diagnosis: diagnosis({ recommended_actions: [] }) }, 201) },
+      {
+        method: 'POST',
+        pattern: /\/support\/actions\/preview$/,
+        respond: () => jsonResponse({
+          action: {
+            id: 'p-action', kind: 'production_start', label: '开始真实拍摄', status: 'PREVIEWED',
+            preview_hash: 'hash-plan',
+            preview: {
+              summary: '把选中的集交给既有导演包与 Run 引擎开始真实拍摄。',
+              blocked: false,
+              episodes: [{ episode_id: 'ep-1', title: '第一集', state: 'READY_TO_SHOOT', state_label: '可开拍' }],
+              authorization_summary: '确认后按原门禁真实开拍（占用 GPU 并生成视频）。',
+            },
+            original_task_id: null, verification: {},
+          },
+          reused: false,
+        }),
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ShineCopilot pageId="director" pageLabel="导演模式" projectId="p1" />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    await user.click(await screen.findByText('帮我检查环境'));
+    expect(await screen.findByText('操作计划')).toBeTruthy();
+    expect(screen.getByText('开始真实拍摄选定集')).toBeTruthy();
+    expect(screen.getByText('只读查询')).toBeTruthy();
+    expect(screen.getByText('导演模式七阶段')).toBeTruthy();
+    expect(screen.getByText(/当前构建未注入提交号/)).toBeTruthy();
+    await user.click(screen.getByText('预览这一步'));
+    expect(await screen.findByText(/涉及集数：1/)).toBeTruthy();
+    const call = stub.calls.find((entry) => /\/support\/actions\/preview$/.test(entry.url));
+    expect(call?.body).toMatchObject({ kind: 'production_start' });
+  });
+});
+
+describe('action preview contracts', () => {
+  const registry = (rows: CapabilityInfo[]) => Object.fromEntries(rows.map((row) => [row.action_id, row]));
+
+  const capabilities = registry([
+    { action_id: 'managed_release', params: ['only'], scope: 'MACHINE' },
+    { action_id: 'project_create', params: ['description', 'language', 'title'], scope: 'MACHINE' },
+    { action_id: 'document_import_text', params: ['filename', 'project_id', 'text'], scope: 'PROJECT' },
+    { action_id: 'project_settings_update', params: ['language', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'story_outline_generate', params: ['document_id', 'locked_facts', 'pacing', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'storyboard_generate', params: ['plan_version', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'production_start', params: ['episode_ids', 'project_id', 'strategy', 'workflow_profile_id'], scope: 'PROJECT' },
+    { action_id: 'document_switch_basis', params: ['document_id', 'project_id'], scope: 'PROJECT' },
+    { action_id: 'production_control', params: ['operation', 'run_id'], scope: 'RUN' },
+    { action_id: 'literary_scripts_generate', params: ['project_id', 'volume_id'], scope: 'PROJECT' },
+    { action_id: 'workflow_user_copy', params: ['name', 'parameter_overrides', 'project_id', 'source_profile_id'], scope: 'PROJECT' },
+    { action_id: 'setup_repair', params: ['capabilities', 'project_id', 'verify_runtime'], scope: 'PROJECT' },
+  ]);
+
+  it('never injects project_id into actions that do not accept it', () => {
+    const release = actionPayload({ kind: 'managed_release', params: { only: ['comfy', 'replicate'] } }, capabilities, 'p1');
+    expect(release).toEqual({ params: { only: ['comfy', 'replicate'] }, scopeProjectId: null });
+
+    const control = actionPayload({ kind: 'production_control', params: { run_id: 'r1', operation: 'pause' } }, capabilities, 'p1');
+    expect(control).toEqual({ params: { run_id: 'r1', operation: 'pause' }, scopeProjectId: null });
+  });
+
+  it('does not force the current project onto project_create', () => {
+    const created = actionPayload({ kind: 'project_create', params: { title: '雾港回声' } }, capabilities, 'p1');
+    expect(created.params).toEqual({ title: '雾港回声' });
+    expect(created.scopeProjectId).toBeNull();
+  });
+
+  it('keeps an explicit target project instead of the active one', () => {
+    const preview = actionPayload(
+      { kind: 'project_settings_update', params: { language: 'en', project_id: 'p2' } },
+      capabilities,
+      'p1',
+    );
+    expect(preview.params.project_id).toBe('p2');
+    expect(preview.scopeProjectId).toBe('p1');
+  });
+
+  it('inherits the current project only when the contract declares project_id', () => {
+    const storyboard = actionPayload({ kind: 'storyboard_generate', params: {} }, capabilities, 'p1');
+    expect(storyboard.params).toEqual({ project_id: 'p1' });
+    expect(storyboard.scopeProjectId).toBe('p1');
+
+    const release = actionPayload({ kind: 'managed_release', params: { only: [] } }, capabilities, 'p1');
+    expect(release.params.project_id).toBeUndefined();
+    expect(release.scopeProjectId).toBeNull();
+  });
+
+  it('drops fields the registry does not declare', () => {
+    const preview = actionPayload(
+      { kind: 'document_import_text', params: { project_id: 'p1', text: '正文', filename: 'a.txt', rogue: 'x' } },
+      capabilities,
+      'p1',
+    );
+    expect(preview.params).toEqual({ project_id: 'p1', text: '正文', filename: 'a.txt' });
   });
 });

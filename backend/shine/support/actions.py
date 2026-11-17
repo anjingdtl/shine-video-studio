@@ -20,7 +20,9 @@ import json
 from datetime import datetime, timedelta
 from typing import Any
 
+from fastapi import HTTPException
 from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
 
 from shine.models import AppSetting, AuditEvent, new_id, utcnow
 from shine.support.context import build_evidence_snapshot, snapshot_revision
@@ -101,7 +103,56 @@ _ALLOWED_PARAMS: dict[str, frozenset[str]] = {
     "workflow_user_copy": frozenset(
         {"source_profile_id", "name", "parameter_overrides", "project_id"}
     ),
+    "project_create": frozenset({"title", "description", "language"}),
+    "document_import_text": frozenset({"project_id", "filename", "text"}),
+    "project_settings_update": frozenset({"project_id", "language"}),
+    "story_outline_generate": frozenset(
+        {"project_id", "document_id", "locked_facts", "pacing"}
+    ),
+    "storyboard_generate": frozenset({"project_id", "plan_version"}),
+    "production_start": frozenset(
+        {"project_id", "episode_ids", "workflow_profile_id", "strategy"}
+    ),
+    "document_switch_basis": frozenset({"project_id", "document_id"}),
+    "production_control": frozenset({"run_id", "operation"}),
+    "literary_scripts_generate": frozenset({"project_id", "volume_id"}),
 }
+
+#: Actions that always need a concrete project; the target may never be guessed.
+_PROJECT_SCOPED_KINDS = frozenset(
+    {
+        "document_import_text",
+        "project_settings_update",
+        "story_outline_generate",
+        "storyboard_generate",
+        "production_start",
+        "document_switch_basis",
+        "literary_scripts_generate",
+    }
+)
+#: Actions whose project is optional (the executor derives it from another
+#: identifier); a declared project must still be validated.
+_PROJECT_OPTIONAL_KINDS = frozenset(
+    {"setup_repair", "setup_reconcile", "workflow_user_copy", "production_control"}
+)
+#: Machine-level actions never inherit the current project.
+_MACHINE_SCOPED_KINDS = frozenset({"project_create", "managed_release"})
+
+#: Actions that do not compete for the GPU.  They must not be refused by the
+#: production/lease gate: a project import, a story outline or a setting edit
+#: does not touch the renderer.  Their own executors still enforce every gate.
+_NO_GPU_GATE: frozenset[str] = frozenset(
+    {
+        "project_create",
+        "document_import_text",
+        "project_settings_update",
+        "story_outline_generate",
+        "storyboard_generate",
+        "document_switch_basis",
+        "production_control",
+        "literary_scripts_generate",
+    }
+)
 
 
 def _validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -155,6 +206,63 @@ def _validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
             ):
                 raise ActionInvalid("only 必须是最多 10 个服务 id 的字符串列表。")
             clean[key] = list(value)
+        elif key == "title":
+            if not isinstance(value, str) or not value.strip() or len(value) > 120:
+                raise ActionInvalid("title 必须是长度不超过 120 的非空字符串。")
+            clean[key] = value.strip()
+        elif key == "description":
+            if not isinstance(value, str) or len(value) > 2000:
+                raise ActionInvalid("description 必须是不超过 2000 字符的字符串。")
+            clean[key] = value
+        elif key == "language":
+            if not isinstance(value, str) or not value.strip() or len(value) > 32:
+                raise ActionInvalid("language 必须是长度不超过 32 的字符串。")
+            clean[key] = value.strip()
+        elif key == "filename":
+            if not isinstance(value, str) or not value.strip() or len(value) > 200:
+                raise ActionInvalid("filename 必须是长度不超过 200 的字符串。")
+            clean[key] = value.strip()
+        elif key == "text":
+            if not isinstance(value, str) or not value.strip() or len(value) > 200_000:
+                raise ActionInvalid("text 必须是 1-200000 字符的原文；更长的文档请在界面上传文件。")
+            clean[key] = value
+        elif key == "locked_facts":
+            if not isinstance(value, list) or len(value) > 20 or not all(
+                isinstance(item, str) and len(item) <= 200 for item in value
+            ):
+                raise ActionInvalid("locked_facts 必须是最多 20 项的短文本列表。")
+            clean[key] = list(value)
+        elif key == "pacing":
+            if value not in {"compact", "balanced", "relaxed"}:
+                raise ActionInvalid("pacing 是 compact / balanced / relaxed 之一。")
+            clean[key] = value
+        elif key == "plan_version":
+            if value is not None and (not isinstance(value, int) or value < 1):
+                raise ActionInvalid("plan_version 必须是正整数。")
+            clean[key] = value
+        elif key in {"document_id", "run_id", "volume_id"}:
+            if not isinstance(value, str) or not value.strip() or len(value) > 80:
+                raise ActionInvalid(f"{key} 必须是长度不超过 80 的字符串。")
+            clean[key] = value.strip()
+        elif key == "operation":
+            if value not in {"pause", "resume", "cancel"}:
+                raise ActionInvalid("operation 是 pause / resume / cancel 之一。")
+            clean[key] = value
+        elif key == "episode_ids":
+            if not isinstance(value, list) or not 1 <= len(value) <= 32 or not all(
+                isinstance(item, str) and len(item) <= 80 for item in value
+            ):
+                raise ActionInvalid("episode_ids 必须是 1-32 个集 id。")
+            clean[key] = list(dict.fromkeys(value))
+        elif key == "strategy":
+            if not isinstance(value, dict) or not value:
+                raise ActionInvalid("strategy 必须是策略合同对象。")
+            from shine.strategy import GenerationStrategy
+
+            try:
+                clean[key] = GenerationStrategy.model_validate(value).model_dump(mode="json")
+            except ValueError as exc:
+                raise ActionInvalid(f"strategy 不符合既有策略合同：{str(exc)[:200]}") from exc
     return clean
 
 
@@ -172,10 +280,25 @@ def _action_occupancy(db, kind: str, params: dict[str, Any]) -> dict[str, Any]:
 
     Releasing idle managed services is the one action whose *purpose* is to
     clear a GPU lease, so it must not be refused by the generic lease gate.
-    Every other configuration change keeps the full fail-closed protection.
+    Configuration changes keep the full fail-closed protection.  User-level
+    edits that never touch the renderer report occupancy as *context* only: they
+    are still refused if the product's own executor says so, but a running
+    render must not make "import the novel" or "change the language" impossible.
+
+    ``production_start`` deliberately keeps the full gate: a second real shoot
+    must not be slipped past an active run.
     """
     if kind == "managed_release":
         return release_occupancy(db, only=set(params.get("only") or []) or None)
+    if kind in _NO_GPU_GATE:
+        occupancy = _occupancy(db)
+        return {
+            **occupancy,
+            "busy": False,
+            "advisory_busy": bool(occupancy.get("busy")),
+            "advisory_code": occupancy.get("code"),
+            "label": "不占用 GPU 的用户级操作；生产占用仅作提示。",
+        }
     return _occupancy(db)
 
 
@@ -373,6 +496,195 @@ def _release_target_facts(
     return {"targets": targets, "occupancy": occupancy_facts(db)}, None
 
 
+def _project_target_facts(db, project_id: str | None) -> tuple[dict[str, Any], str | None]:
+    from shine.models import Project
+
+    if not project_id:
+        return {}, None
+    project = db.get(Project, project_id)
+    if project is None:
+        return {}, "PROJECT_NOT_FOUND"
+    return {
+        "project": {
+            "id": project.id,
+            "language": project.language,
+            "frozen_style_version_id": project.frozen_style_version_id,
+            "current_document_id": project.current_document_id,
+        }
+    }, None
+
+
+def _document_target_facts(
+    db, project_id: str, text: str
+) -> tuple[dict[str, Any], str | None]:
+    from shine.models import Project, ProjectDocument
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return {}, "PROJECT_NOT_FOUND"
+    documents = db.scalars(
+        select(ProjectDocument)
+        .where(ProjectDocument.project_id == project_id)
+        .order_by(ProjectDocument.created_at)
+    ).all()
+    return {
+        "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "project": {
+            "id": project.id,
+            "current_document_id": project.current_document_id,
+            "language": project.language,
+        },
+        "documents": sorted(
+            [{"id": row.id, "sha256": row.sha256} for row in documents],
+            key=lambda item: item["id"],
+        ),
+    }, None
+
+
+def _outline_target_facts(db, project_id: str) -> tuple[dict[str, Any], str | None]:
+    from shine.materialprep import story
+    from shine.models import AgentRoute, Project, ProjectDocument, ProviderProfile
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return {}, "PROJECT_NOT_FOUND"
+    document = db.get(ProjectDocument, project.current_document_id) if project.current_document_id else None
+    if document is None:
+        return {}, "SCRIPT_DOCUMENT_MISSING"
+    latest = db.scalar(
+        select(story.AgentTaskRecord)
+        .where(
+            story.AgentTaskRecord.project_id == project_id,
+            story.AgentTaskRecord.role_id == story.OUTLINE_RUN,
+        )
+        .order_by(story.AgentTaskRecord.created_at.desc())
+        .limit(1)
+    )
+    route = db.scalar(select(AgentRoute).where(AgentRoute.role == "scriptwriter"))
+    profile = db.get(ProviderProfile, route.provider_profile_id) if route is not None else None
+    return {
+        "document": {"id": document.id, "sha256": document.sha256, "text_length": len(document.text)},
+        "latest_task": (
+            {"id": latest.id, "status": latest.status, "input_hash": latest.input_hash}
+            if latest is not None
+            else None
+        ),
+        "llm_role": {
+            "configured": bool(profile is not None and profile.enabled),
+            "profile_id": profile.id if profile is not None else None,
+            "model": profile.model if profile is not None else None,
+        },
+    }, None
+
+
+def _storyboard_target_facts(db, project_id: str, plan_version: int | None) -> tuple[dict[str, Any], str | None]:
+    from shine.director.models import DirectorEpisodePlan
+    from shine.models import AgentTaskRecord, Project, WorkflowProfile
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return {}, "PROJECT_NOT_FOUND"
+    query = select(DirectorEpisodePlan).where(DirectorEpisodePlan.project_id == project_id)
+    if plan_version is not None:
+        query = query.where(DirectorEpisodePlan.version == int(plan_version))
+    plan = db.scalar(query.order_by(DirectorEpisodePlan.version.desc()).limit(1))
+    latest = db.scalar(
+        select(AgentTaskRecord)
+        .where(
+            AgentTaskRecord.project_id == project_id,
+            AgentTaskRecord.role_id == "DIRECTOR_STORYBOARD_RUN",
+        )
+        .order_by(AgentTaskRecord.created_at.desc())
+        .limit(1)
+    )
+    return {
+        "project": {
+            "id": project.id,
+            "frozen_style_version_id": project.frozen_style_version_id,
+        },
+        "plan": (
+            {
+                "id": plan.id,
+                "version": plan.version,
+                "status": plan.status,
+                "payload_sha256": hashlib.sha256(_canonical(plan.payload or {}).encode()).hexdigest(),
+            }
+            if plan is not None
+            else None
+        ),
+        "latest_storyboard_task": (
+            {"id": latest.id, "status": latest.status} if latest is not None else None
+        ),
+        "workflow_profiles": sorted(
+            (
+                {"id": row.id, "name": row.name, "graph_sha256": row.graph_sha256}
+                for row in db.scalars(
+                    select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)
+                ).all()
+            ),
+            key=lambda item: item["id"],
+        ),
+    }, None
+
+
+def _production_target_facts(
+    db, project_id: str, episode_ids: list[str], params: dict[str, Any]
+) -> tuple[dict[str, Any], str | None]:
+    from shine.director.overview import build_overview
+    from shine.models import Project, WorkflowProfile
+    from shine.strategy import GenerationStrategy
+
+    project = db.get(Project, project_id)
+    if project is None:
+        return {}, "PROJECT_NOT_FOUND"
+    overview = build_overview(db, project)
+    selected = [
+        row
+        for row in (overview.get("episodes") or [])
+        if row.get("episode_id") in set(episode_ids)
+    ]
+    if not selected:
+        return {}, "EPISODE_NOT_IN_PLAN"
+    strategy_sha = None
+    if params.get("strategy"):
+        strategy_sha = GenerationStrategy.model_validate(params["strategy"]).strategy_sha256()
+    profile_facts = None
+    profile_id = params.get("workflow_profile_id")
+    if profile_id:
+        profile = db.get(WorkflowProfile, str(profile_id))
+        if profile is None:
+            return {}, "WORKFLOW_PROFILE_NOT_FOUND"
+        profile_facts = {
+            "id": profile.id,
+            "graph_sha256": profile.graph_sha256,
+            "validated_against": profile.validated_against,
+            "checkpoint_id": profile.checkpoint_id,
+        }
+    return {
+        "episodes": sorted(
+            (
+                {
+                    "id": row.get("episode_id"),
+                    "state": row.get("state"),
+                    "shots_confirmed": bool((row.get("shots") or {}).get("confirmed")),
+                    "shots_landed": int((row.get("shots") or {}).get("landed_count") or 0),
+                    "materials_missing": int((row.get("materials") or {}).get("missing_count") or 0),
+                    "package": {
+                        "id": (row.get("package") or {}).get("package_id"),
+                        "revision": (row.get("package") or {}).get("revision"),
+                        "startable": (row.get("package") or {}).get("startable"),
+                    },
+                }
+                for row in selected
+            ),
+            key=lambda item: str(item["id"]),
+        ),
+        "strategy_sha256": strategy_sha,
+        "workflow_profile": profile_facts,
+        "frozen_style_version_id": project.frozen_style_version_id,
+    }, None
+
+
 def _target_fingerprint(
     db, settings, kind: str, params: dict[str, Any], project_id: str | None
 ) -> tuple[str | None, dict[str, Any] | None, str | None]:
@@ -395,6 +707,93 @@ def _target_fingerprint(
         elif kind == "managed_release":
             scoped, reason = _release_target_facts(db, params)
             facts.update(scoped)
+        elif kind == "project_create":
+            facts.update({"title": params.get("title"), "language": params.get("language") or "Chinese"})
+        elif kind == "document_import_text":
+            scoped, reason = _document_target_facts(
+                db, str(params.get("project_id") or ""), str(params.get("text") or "")
+            )
+            facts.update(scoped)
+        elif kind == "project_settings_update":
+            scoped, reason = _project_target_facts(db, params.get("project_id"))
+            facts.update(scoped)
+            facts["requested_language"] = params.get("language")
+        elif kind == "story_outline_generate":
+            scoped, reason = _outline_target_facts(db, str(params.get("project_id") or ""))
+            facts.update(scoped)
+            facts["requested"] = {
+                "document_id": params.get("document_id"),
+                "locked_facts": params.get("locked_facts") or [],
+                "pacing": params.get("pacing") or "balanced",
+            }
+        elif kind == "storyboard_generate":
+            scoped, reason = _storyboard_target_facts(
+                db, str(params.get("project_id") or ""), params.get("plan_version")
+            )
+            facts.update(scoped)
+        elif kind == "production_start":
+            scoped, reason = _production_target_facts(
+                db,
+                str(params.get("project_id") or ""),
+                list(params.get("episode_ids") or []),
+                params,
+            )
+            facts.update(scoped)
+        elif kind == "document_switch_basis":
+            from shine.models import Project, ProjectDocument
+
+            project = db.get(Project, str(params.get("project_id") or ""))
+            document = db.get(ProjectDocument, str(params.get("document_id") or ""))
+            if project is None or document is None or document.project_id != project.id:
+                return None, facts, "TARGET_DOCUMENT_MISSING"
+            facts.update(
+                {
+                    "current_document_id": project.current_document_id,
+                    "document_id": document.id,
+                    "document_sha256": hashlib.sha256(document.text.encode("utf-8")).hexdigest(),
+                    "document_name": document.filename,
+                }
+            )
+        elif kind == "production_control":
+            from shine.production.models import ProductionRun
+
+            run = db.get(ProductionRun, str(params.get("run_id") or ""))
+            if run is None:
+                return None, facts, "PRODUCTION_RUN_NOT_FOUND"
+            facts.update(
+                {
+                    "run_id": run.id,
+                    "run_status": run.status,
+                    "state_version": run.state_version,
+                }
+            )
+        elif kind == "literary_scripts_generate":
+            from shine.director import pipeline
+            from shine.models import Project
+
+            project = db.get(Project, str(params.get("project_id") or ""))
+            if project is None:
+                return None, facts, "PROJECT_NOT_FOUND"
+            plan = pipeline.current_volume_plan(db, project.id)
+            if plan is None:
+                return None, facts, "PIPELINE_VOLUME_PLAN_NOT_CONFIRMED"
+            volume = next(
+                (
+                    item
+                    for item in (plan.payload_json or {}).get("volumes") or []
+                    if item.get("volume_id") == params.get("volume_id")
+                ),
+                None,
+            )
+            if volume is None:
+                return None, facts, "PIPELINE_VOLUME_NOT_IN_PLAN"
+            facts.update(
+                {
+                    "plan_sha256": plan.sha256,
+                    "volume_id": volume.get("volume_id"),
+                    "section_count": len(volume.get("sections") or []),
+                }
+            )
         else:
             return None, None, "UNKNOWN_KIND"
         if reason:
@@ -409,23 +808,86 @@ def _target_fingerprint(
         return None, None, type(exc).__name__
 
 
-def _validate_scope(db, *, kind: str, params: dict[str, Any], project_id: str | None) -> None:
-    """Project scoping is checked before a preview exists, not only at approval."""
+def resolve_target_project(
+    db, *, kind: str, params: dict[str, Any], project_id: str | None
+) -> str | None:
+    """The single, canonical project an action may touch.
+
+    Three identities exist and must not be mixed: the session/current project,
+    the explicitly declared project, and the project an action's own parameters
+    point at.  Every distinct declared value must agree; otherwise the action
+    is refused before a preview can be shown and before an approval can run.
+    """
     from shine.models import Project, WorkflowProfile
 
-    target_project = project_id or params.get("project_id")
-    if target_project and db.get(Project, str(target_project)) is None:
-        raise ActionInvalid("目标项目不存在。")
+    declared = {
+        str(value)
+        for value in (project_id, params.get("project_id"))
+        if isinstance(value, str) and value.strip()
+    }
+    if len(declared) > 1:
+        raise ActionInvalid("会话项目与动作目标项目不一致；已拒绝跨项目操作。")
+    canonical = next(iter(declared), None)
+    if kind in _MACHINE_SCOPED_KINDS:
+        # project_create creates a *new* project; managed_release targets
+        # processes, not a project.  Neither may inherit the current project.
+        return None
     if kind == "workflow_user_copy":
         source = db.get(WorkflowProfile, str(params.get("source_profile_id") or ""))
         if source is None:
             raise ActionInvalid("找不到要复制的工作流合同。")
-        if source.project_id is not None and target_project and source.project_id != target_project:
+        if source.project_id and canonical and canonical != source.project_id:
             raise ActionInvalid("不能把其它项目的私有工作流复制到当前项目。")
-        if source.project_id is None and target_project is None:
-            # A built-in template may become a machine-level copy; that copy
-            # still belongs to no project and is never a shared template.
-            pass
+        canonical = source.project_id or canonical
+    if kind == "production_control":
+        from shine.production.models import ProductionRun
+
+        run = db.get(ProductionRun, str(params.get("run_id") or ""))
+        if run is None:
+            raise ActionInvalid("找不到这次生产任务。")
+        if canonical and canonical != run.project_id:
+            raise ActionInvalid("生产任务不属于当前项目；已拒绝跨项目控制。")
+        canonical = run.project_id
+    if kind in _PROJECT_SCOPED_KINDS and not canonical:
+        raise ActionInvalid("这个动作必须明确指定目标项目。")
+    if canonical and db.get(Project, canonical) is None:
+        raise ActionInvalid("目标项目不存在。")
+    return canonical
+
+
+def _validate_scope(db, *, kind: str, params: dict[str, Any], project_id: str | None) -> None:
+    """Project scoping is checked before a preview exists, not only at approval."""
+    from shine.models import Project, WorkflowProfile
+
+    canonical = project_id
+    declared = params.get("project_id")
+    if canonical and declared and canonical != declared:
+        raise ActionInvalid("会话项目与动作目标项目不一致；已拒绝跨项目操作。")
+    target_project = canonical or declared
+    if target_project and db.get(Project, str(target_project)) is None:
+        raise ActionInvalid("目标项目不存在。")
+    if kind == "production_start":
+        from shine.director.overview import build_overview
+
+        if not target_project:
+            raise ActionInvalid("开始拍摄必须指定项目。")
+        project = db.get(Project, str(target_project))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        overview = build_overview(db, project)
+        known = {row["episode_id"] for row in (overview.get("episodes") or [])}
+        unknown = [item for item in (params.get("episode_ids") or []) if item not in known]
+        if unknown:
+            raise ActionInvalid(f"这些集不在当前分集方案里：{', '.join(unknown)}")
+        profile_id = params.get("workflow_profile_id")
+        if profile_id:
+            profile = db.get(WorkflowProfile, str(profile_id))
+            if profile is None:
+                raise ActionInvalid("选择的生成方案不存在。")
+            if profile.project_id is not None and profile.project_id != target_project:
+                raise ActionInvalid("选择的生成方案不属于这个作品。")
+        if params.get("workflow_profile_id") and params.get("strategy"):
+            raise ActionInvalid("生产策略与静态生成方案不能同时指定。")
 
 
 def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -567,6 +1029,254 @@ def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any
             "authorization_summary": "只新增副本并调用既有工作流校验；源合同和内置模板不会被修改，"
             "可在执行后回滚删除该副本。",
         }
+    if kind == "project_create":
+        return {
+            **common,
+            "summary": "创建一个空项目；不会导入原文、不会冻结风格、不会启动任何服务。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "target": {"title": params.get("title"), "language": params.get("language") or "Chinese"},
+            "will_create_project": True,
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后只新增一个空项目；可在项目页继续导入与创作。",
+        }
+    if kind == "document_import_text":
+        from shine.agents.script import parse_document
+        from shine.models import Project
+
+        project = db.get(Project, str(params.get("project_id") or ""))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        text = str(params.get("text") or "")
+        filename = str(params.get("filename") or "导入原文.txt")
+        try:
+            parsed = parse_document(filename, text.encode("utf-8"))
+        except Exception as exc:  # noqa: BLE001 - the parser's own refusal is shown
+            raise ActionInvalid(f"原文无法解析：{str(exc)[:200]}") from exc
+        return {
+            **common,
+            "summary": "按既有解析与去重规则导入这段原文；不会自动切换正式底稿。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "document": {
+                "filename": filename,
+                "source_format": parsed.source_format,
+                "text_length": len(parsed.text),
+            },
+            "will_switch_basis": bool(project.current_document_id is None),
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后与界面导入同样落库；重复内容会复用已有文档。",
+        }
+    if kind == "project_settings_update":
+        from shine.models import Project
+        from shine.services import canonical_project_language
+
+        project = db.get(Project, str(params.get("project_id") or ""))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        try:
+            language = canonical_project_language(str(params.get("language") or ""))
+        except Exception as exc:  # noqa: BLE001
+            raise ActionInvalid(str(getattr(exc, "detail", exc))[:240]) from exc
+        return {
+            **common,
+            "summary": "只修改项目的用户级设置（口播语言），不改冻结风格与生产合同。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "parameter_diff": [
+                {"key": "language", "before": project.language, "after": language}
+            ],
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后立即生效；如需恢复，可以再次预览改回原值。",
+        }
+    if kind == "story_outline_generate":
+        facts, reason = _outline_target_facts(db, str(params.get("project_id") or ""))
+        if reason:
+            raise ActionInvalid({"SCRIPT_DOCUMENT_MISSING": "项目还没有可用的原文底稿。",
+                                "PROJECT_NOT_FOUND": "目标项目不存在。"}.get(reason, reason))
+        route = facts.get("llm_role") or {}
+        return {
+            **common,
+            "summary": "用一个持久大纲任务把原文整理成大纲；相同底稿与参数不会重复调用模型。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "document": facts.get("document"),
+            "latest_task": facts.get("latest_task"),
+            "llm_role": route,
+            "blocked_by_role": not route.get("configured"),
+            "blocked_code": None if route.get("configured") else "TEXT_ROLE_NOT_READY",
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后只排队大纲任务；大纲确认仍由你在导演页完成。",
+        }
+    if kind == "storyboard_generate":
+        facts, reason = _storyboard_target_facts(
+            db, str(params.get("project_id") or ""), params.get("plan_version")
+        )
+        if reason:
+            raise ActionInvalid("目标项目不存在。" if reason == "PROJECT_NOT_FOUND" else reason)
+        missing: list[str] = []
+        if not (facts.get("project") or {}).get("frozen_style_version_id"):
+            missing.append("STYLE_NOT_FROZEN")
+        if not facts.get("plan"):
+            missing.append("EPISODE_PLAN_MISSING")
+        elif (facts.get("plan") or {}).get("status") != "CONFIRMED":
+            missing.append("EPISODE_PLAN_NOT_CONFIRMED")
+        return {
+            **common,
+            "summary": "按已确认的分集方案排队一个持久分镜任务；缺风格/方案时不会开始。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "plan": facts.get("plan"),
+            "latest_task": facts.get("latest_storyboard_task"),
+            "blocked": busy or bool(missing),
+            "blocked_code": occupancy["code"] if busy else (missing[0] if missing else None),
+            "blockers": missing,
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后只排队分镜任务；不会替你确认镜头或冻结风格。",
+        }
+    if kind == "production_start":
+        from shine.director.overview import build_overview
+        from shine.models import Project
+
+        project = db.get(Project, str(params.get("project_id") or ""))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        overview = build_overview(db, project)
+        selected = [
+            row
+            for row in (overview.get("episodes") or [])
+            if row.get("episode_id") in set(params.get("episode_ids") or [])
+        ]
+        blocked_episodes = [
+            {
+                "episode_id": row["episode_id"],
+                "state": row.get("state"),
+                "state_label": row.get("state_label"),
+                "next_action": (row.get("next_action") or {}).get("label"),
+                "materials_missing": int((row.get("materials") or {}).get("missing_count") or 0),
+            }
+            for row in selected
+            if row.get("state") not in {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING",
+                                        "REVIEW_READY", "DELIVERED"}
+        ]
+        return {
+            **common,
+            "summary": "把选中的集交给既有导演包与 Run 引擎开始真实拍摄；相同选择只会得到同一次运行。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "episodes": [
+                {
+                    "episode_id": row["episode_id"],
+                    "title": row.get("title"),
+                    "state": row.get("state"),
+                    "state_label": row.get("state_label"),
+                    "shots_confirmed": bool((row.get("shots") or {}).get("confirmed")),
+                    "materials_missing": int((row.get("materials") or {}).get("missing_count") or 0),
+                }
+                for row in selected
+            ],
+            "blocked": busy or bool(blocked_episodes),
+            "blocked_code": occupancy["code"] if busy else ("EPISODE_NOT_SHOOTABLE" if blocked_episodes else None),
+            "blocked_episodes": blocked_episodes,
+            "strategy": params.get("strategy"),
+            "workflow_profile_id": params.get("workflow_profile_id"),
+            "will_start_gpu": True,
+            "will_modify_user_comfyui": True,
+            "paid": False,
+            "authorization_summary": "确认后按原门禁真实开拍（占用 GPU 并生成视频）；不替用户确认风格、主资产或审片。",
+        }
+    if kind == "document_switch_basis":
+        from shine.models import Project, ProjectDocument
+
+        project = db.get(Project, str(params.get("project_id") or ""))
+        document = db.get(ProjectDocument, str(params.get("document_id") or ""))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        if document is None or document.project_id != project.id:
+            raise ActionInvalid("这份文档不属于当前项目。")
+        unchanged = project.current_document_id == document.id
+        return {
+            **common,
+            "summary": "把选中的已导入文档切换为正式原文底稿；不会改写或删除其它文档。",
+            "document": {
+                "id": document.id,
+                "filename": document.filename,
+                "words": len((document.text or "").strip()),
+            },
+            "current_basis_id": project.current_document_id,
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "blocked": busy or unchanged,
+            "blocked_code": occupancy["code"] if busy else ("BASIS_UNCHANGED" if unchanged else None),
+            "authorization_summary": "确认后只切换正式底稿；原文内容保持不变。",
+        }
+    if kind == "production_control":
+        from shine.production.models import ProductionRun
+
+        run = db.get(ProductionRun, str(params.get("run_id") or ""))
+        if run is None:
+            raise ActionInvalid("找不到这次生产任务。")
+        operation = params.get("operation")
+        return {
+            **common,
+            "summary": "暂停、继续或取消这次真实生产任务；只操作这一个已存在的 run。",
+            "run": {
+                "id": run.id,
+                "status": run.status,
+                "state_version": run.state_version,
+                "episode_ids": list(run.episode_ids or []),
+            },
+            "operation": operation,
+            "will_start_gpu": True,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后由既有 Run 引擎执行所选控制操作；不会改动其它任务。",
+        }
+    if kind == "literary_scripts_generate":
+        from shine.director import pipeline
+        from shine.models import Project
+
+        project = db.get(Project, str(params.get("project_id") or ""))
+        if project is None:
+            raise ActionInvalid("目标项目不存在。")
+        plan = pipeline.current_volume_plan(db, project.id)
+        if plan is None:
+            return {
+                **common,
+                "summary": "还没有已确认的分集方案，无法生成分集剧本。",
+                "blocked": True,
+                "blocked_code": "PIPELINE_VOLUME_PLAN_NOT_CONFIRMED",
+                "will_start_gpu": False,
+                "will_modify_user_comfyui": False,
+                "authorization_summary": "先生成并确认分集方案，再回来生成剧本。",
+            }
+        volume = next(
+            (
+                item
+                for item in (plan.payload_json or {}).get("volumes") or []
+                if item.get("volume_id") == params.get("volume_id")
+            ),
+            None,
+        )
+        if volume is None:
+            raise ActionInvalid("这一卷不在当前分集方案里。")
+        return {
+            **common,
+            "summary": "为这一卷里还没有确认剧本的分节排队文学剧本任务；不会覆盖已确认剧本。",
+            "volume": {
+                "volume_id": volume.get("volume_id"),
+                "title": volume.get("title"),
+                "section_count": len(volume.get("sections") or []),
+            },
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "paid": True,
+            "authorization_summary": "确认后只排队缺失的分节剧本任务，由既有流水线执行者生成。",
+        }
     raise ToolDenied(f"未知动作：{kind}")
 
 
@@ -585,10 +1295,33 @@ def _request_identity(kind: str, params: dict[str, Any], actor: str, project_id:
     ).hexdigest()
 
 
+def _failure_context(row: SupportAction) -> dict[str, Any]:
+    """Everything a person (or a report) needs to diagnose this exact failure."""
+    verification = row.verification or {}
+    raw = verification.get("reason") or row.last_error or ""
+    code = str(raw).split(":", 1)[0].strip()[:80] if raw else None
+    return {
+        "action_id": row.id,
+        "action_kind": row.kind,
+        "target_project_id": row.project_id,
+        "original_task_id": row.original_task_id,
+        "original_error_code": code,
+        "phase": row.status,
+        "target_preview": (row.preview or {}).get("summary"),
+        "snapshot_revision": row.snapshot_revision,
+        "target_fingerprint": row.target_fingerprint,
+        "executed_outcome": verification.get("outcome"),
+        "can_repreview": row.status
+        not in {"APPROVED", "DELEGATED", "EXECUTED"},
+        "raw_error": row.last_error,
+    }
+
+
 def _public(row: SupportAction) -> dict[str, Any]:
     return {
         "id": row.id,
         "session_id": row.session_id,
+        "project_id": row.project_id,
         "kind": row.kind,
         "label": ACTION_SPECS.get(row.kind).label if row.kind in ACTION_SPECS else row.kind,
         "status": row.status,
@@ -601,6 +1334,7 @@ def _public(row: SupportAction) -> dict[str, Any]:
         "original_task_id": row.original_task_id,
         "verification": row.verification,
         "last_error": row.last_error,
+        "failure_context": _failure_context(row),
         "created_at": row.created_at.isoformat(),
         "executor": action_spec(row.kind).executor,
     }
@@ -642,11 +1376,24 @@ def preview_action(
         session = db.get(SupportSession, session_id)
         if session is None:
             raise ActionInvalid("授权动作关联的会话不存在。")
-        if session.project_id and project_id and session.project_id != project_id:
+        if (
+            session.project_id
+            and project_id
+            and session.project_id != project_id
+            and kind not in _MACHINE_SCOPED_KINDS
+        ):
             raise ActionInvalid("授权动作与当前会话的项目不一致。")
-        project_id = project_id or session.project_id
-    _validate_scope(db, kind=kind, params=params, project_id=project_id)
-    request_key = _request_identity(kind, params, actor, project_id)
+        if kind not in _MACHINE_SCOPED_KINDS:
+            project_id = project_id or session.project_id
+    canonical = resolve_target_project(
+        db, kind=kind, params=params, project_id=project_id
+    )
+    if canonical and "project_id" in _ALLOWED_PARAMS[kind]:
+        params["project_id"] = canonical
+    else:
+        params.pop("project_id", None)
+    _validate_scope(db, kind=kind, params=params, project_id=canonical)
+    request_key = _request_identity(kind, params, actor, canonical)
 
     latest = db.scalar(
         select(SupportAction)
@@ -682,11 +1429,11 @@ def preview_action(
     identity = f"{request_key}:{attempt_no}"
 
     snapshot = build_evidence_snapshot(
-        db, settings, page_id="setup", project_id=project_id or params.get("project_id")
+        db, settings, page_id="setup", project_id=canonical
     )
     revision = snapshot_revision(snapshot)
     fingerprint, _, fingerprint_reason = _target_fingerprint(
-        db, settings, kind, params, project_id or params.get("project_id")
+        db, settings, kind, params, canonical
     )
     preview = _preflight(db, settings, kind, params)
     preview["snapshot_revision"] = revision
@@ -702,7 +1449,7 @@ def preview_action(
     row = SupportAction(
         id=new_id(),
         session_id=session_id,
-        project_id=project_id or params.get("project_id"),
+        project_id=canonical,
         kind=kind,
         status="PREVIEWED",
         request_key=request_key,
@@ -721,19 +1468,31 @@ def preview_action(
         verification={"outcome": "NOT_STARTED"},
     )
     db.add(row)
-    db.flush()
-    from shine.services import add_audit
+    try:
+        db.flush()
+        from shine.services import add_audit
 
-    add_audit(
-        db,
-        actor,
-        "SUPPORT_ACTION_PREVIEWED",
-        "support_action",
-        row.id,
-        {"kind": kind, "executor": spec.executor, "blocked": preview.get("blocked")},
-        project_id=row.project_id,
-    )
-    db.commit()
+        add_audit(
+            db,
+            actor,
+            "SUPPORT_ACTION_PREVIEWED",
+            "support_action",
+            row.id,
+            {"kind": kind, "executor": spec.executor, "blocked": preview.get("blocked")},
+            project_id=row.project_id,
+        )
+        db.commit()
+    except IntegrityError:
+        # Two identical previews can arrive at the same time (double click or a
+        # retry).  The request identity is the unique key, so the second caller
+        # adopts the winner instead of surfacing a 500.
+        db.rollback()
+        existing = db.scalar(
+            select(SupportAction).where(SupportAction.request_identity == identity)
+        )
+        if existing is None:
+            raise
+        return _public(existing), True
     return _public(row), False
 
 
@@ -866,6 +1625,23 @@ def _setup_task_state(db, task_id: str | None) -> tuple[dict[str, Any], str]:
     return current, str(current.get("status") or "UNKNOWN")
 
 
+def _blocked_from_executor(exc: HTTPException) -> ActionBlocked:
+    """Keep the executor's own refusal code instead of inventing a new one."""
+    detail = exc.detail
+    if isinstance(detail, dict):
+        code = str(detail.get("code") or f"HTTP_{exc.status_code}")
+        message = str(detail.get("message") or detail)[:240]
+    elif isinstance(detail, str) and detail.isupper() and " " not in detail:
+        # Several product gates raise a bare machine code (e.g.
+        # STORYBOARD_STYLE_NOT_FROZEN); keep it as the real refusal code.
+        code = detail
+        message = detail
+    else:
+        code = f"HTTP_{exc.status_code}"
+        message = str(detail)[:240]
+    return ActionBlocked(code, message)
+
+
 def _claim_approval(db, row: SupportAction, actor: str) -> bool:
     """Atomically move PREVIEWED → APPROVED exactly once."""
     result = db.execute(
@@ -885,6 +1661,7 @@ def approve_action(
     action_id: str,
     preview_hash: str,
     actor: str = "local-user",
+    gateway=None,
 ) -> tuple[dict[str, Any], bool]:
     row = db.get(SupportAction, action_id)
     if row is None:
@@ -898,10 +1675,46 @@ def approve_action(
         db.commit()
         raise ActionStale("预览已过期，请重新预览并授权。")
 
+    # The target project is recomputed from the stored envelope *and* the
+    # session's current project.  A database edit or a session switch after the
+    # preview must never redirect an already-authorized action to another
+    # project.
+    from shine.support.models import SupportSession
+
+    session_project = None
+    if row.session_id:
+        session = db.get(SupportSession, row.session_id)
+        session_project = session.project_id if session is not None else None
+    try:
+        canonical = resolve_target_project(
+            db,
+            kind=row.kind,
+            params=dict(row.params or {}),
+            project_id=session_project or row.project_id,
+        )
+    except ActionInvalid as exc:
+        row.status = "EXPIRED"
+        row.last_error = "TARGET_PROJECT_CONFLICT"
+        db.commit()
+        raise ActionBlocked(
+            "TARGET_PROJECT_CONFLICT",
+            exc.message,
+            details={"action_project_id": row.project_id, "session_project_id": session_project},
+        ) from exc
+    if canonical != row.project_id:
+        row.status = "EXPIRED"
+        row.last_error = "TARGET_PROJECT_CONFLICT"
+        db.commit()
+        raise ActionBlocked(
+            "TARGET_PROJECT_CONFLICT",
+            "动作目标项目与会话项目不一致；历史授权不能跨项目复用。",
+            details={"action_project_id": row.project_id, "canonical_project_id": canonical},
+        )
+
     # Facts are re-read before execution: an environment change between preview
     # and approval invalidates the old authorization instead of applying it.
     snapshot = build_evidence_snapshot(
-        db, settings, page_id="setup", project_id=row.project_id
+        db, settings, page_id="setup", project_id=canonical
     )
     if snapshot_revision(snapshot) != row.snapshot_revision:
         row.status = "EXPIRED"
@@ -1240,6 +2053,329 @@ def approve_action(
                 },
                 project_id=row.project_id,
             )
+        elif row.kind == "project_create":
+            from shine.services import create_project
+
+            try:
+                project = create_project(
+                    db,
+                    title=str(params.get("title") or ""),
+                    description=str(params.get("description") or ""),
+                    language=str(params.get("language") or "Chinese"),
+                    actor=actor,
+                )
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            except ValueError as exc:
+                raise ActionBlocked("PROJECT_CREATE_REFUSED", str(exc)[:240]) from exc
+            row.project_id = project.id
+            row.original_task_id = project.id
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/projects/{project_id}",
+                "created_project_id": project.id,
+                "title": project.title,
+                "language": project.language,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif row.kind == "document_import_text":
+            from shine.agents.script import ScriptParseError
+            from shine.models import Project
+            from shine.services import import_project_document
+
+            project = db.get(Project, str(params.get("project_id") or ""))
+            if project is None:
+                raise ActionBlocked("PROJECT_NOT_FOUND", "目标项目不存在，请重新预览。")
+            try:
+                document, created = import_project_document(
+                    db,
+                    project,
+                    filename=str(params.get("filename") or "导入原文.txt"),
+                    content=str(params.get("text") or "").encode("utf-8"),
+                    content_type="text/plain",
+                    actor=actor,
+                )
+            except ScriptParseError as exc:
+                raise ActionBlocked("SCRIPT_PARSE_FAILED", f"原文无法解析（{exc.code}）。") from exc
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            row.original_task_id = document.id
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/projects/{project_id}/script-basis",
+                "document_id": document.id,
+                "sha256": document.sha256,
+                "text_length": len(document.text),
+                "reused": not created,
+                "current_basis": project.current_document_id,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif row.kind == "project_settings_update":
+            from shine.models import Project
+            from shine.services import update_project_settings
+
+            project = db.get(Project, str(params.get("project_id") or ""))
+            if project is None:
+                raise ActionBlocked("PROJECT_NOT_FOUND", "目标项目不存在，请重新预览。")
+            previous = project.language
+            try:
+                update_project_settings(
+                    db,
+                    project,
+                    {"language": str(params.get("language") or "")},
+                    actor=actor,
+                )
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/projects/{project_id}",
+                "previous_language": previous,
+                "language": project.language,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif row.kind == "story_outline_generate":
+            from shine.llm.base import LLMError
+            from shine.materialprep import story
+            from shine.models import Project, ProjectDocument
+
+            if gateway is None:
+                raise ActionBlocked(
+                    "TEXT_ROLE_NOT_READY",
+                    "生成大纲需要「故事大纲」这一个文本角色已配置；其它角色不影响当前操作。",
+                )
+            project = db.get(Project, str(row.project_id or ""))
+            if project is None:
+                raise ActionBlocked("PROJECT_NOT_FOUND", "目标项目不存在，请重新预览。")
+            document_id = str(params.get("document_id") or project.current_document_id or "")
+            document = db.get(ProjectDocument, document_id)
+            if document is None or document.project_id != project.id:
+                raise ActionBlocked("SCRIPT_DOCUMENT_MISSING", "项目还没有可用的原文底稿，请先导入原文。")
+            if not document.text.strip():
+                raise ActionBlocked("STORY_DOCUMENT_EMPTY", "原文底稿是空的，无法整理大纲。")
+            try:
+                task = story.queue_outline(
+                    db,
+                    project.id,
+                    document,
+                    gateway,
+                    list(params.get("locked_facts") or []),
+                    params.get("pacing") or "balanced",
+                )
+            except LLMError as exc:
+                raise ActionBlocked(
+                    "TEXT_ROLE_NOT_READY",
+                    f"生成大纲需要「故事大纲」角色就绪（{getattr(exc, 'code', type(exc).__name__)}）。",
+                ) from exc
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            row.original_task_id = task.id
+            row.status = "DELEGATED"
+            row.verification = {
+                "outcome": "PENDING",
+                "executor": spec.executor,
+                "task_id": task.id,
+                "task_status": task.status,
+                "document_id": document.id,
+                "document_sha256": document.sha256,
+                "bound_at": utcnow().isoformat(),
+                "checked_at": utcnow().isoformat(),
+            }
+            add_audit(
+                db,
+                actor,
+                "SUPPORT_ACTION_TASK_BOUND",
+                "support_action",
+                row.id,
+                {"kind": row.kind, "task_id": task.id, "role": story.OUTLINE_RUN},
+                project_id=row.project_id,
+            )
+        elif row.kind == "storyboard_generate":
+            from shine.director.streamline import queue_director_storyboard
+
+            try:
+                value = queue_director_storyboard(
+                    db,
+                    str(row.project_id or ""),
+                    actor=actor,
+                    plan_version=params.get("plan_version"),
+                )
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            task_id = str(value.get("task_id") or "") or None
+            row.original_task_id = task_id
+            row.status = "DELEGATED"
+            row.verification = {
+                "outcome": "PENDING",
+                "executor": spec.executor,
+                "task_id": task_id,
+                "task_status": value.get("status"),
+                "episode_count": len(value.get("episodes") or []),
+                "bound_at": utcnow().isoformat(),
+                "checked_at": utcnow().isoformat(),
+            }
+            if task_id:
+                add_audit(
+                    db,
+                    actor,
+                    "SUPPORT_ACTION_TASK_BOUND",
+                    "support_action",
+                    row.id,
+                    {"kind": row.kind, "task_id": task_id},
+                    project_id=row.project_id,
+                )
+        elif row.kind == "production_start":
+            from shine.director.overview import build_overview
+            from shine.director.streamline import start_director_production
+            from shine.models import Project
+
+            project = db.get(Project, str(row.project_id or ""))
+            if project is None:
+                raise ActionBlocked("PROJECT_NOT_FOUND", "目标项目不存在，请重新预览。")
+            overview = build_overview(db, project)
+            selected = [
+                row_view
+                for row_view in (overview.get("episodes") or [])
+                if row_view.get("episode_id") in set(params.get("episode_ids") or [])
+            ]
+            not_shootable = [item for item in selected
+                             if item.get("state") not in {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING",
+                                                         "REVIEW_READY", "DELIVERED"}]
+            if not selected:
+                raise ActionBlocked("EPISODE_NOT_IN_PLAN", "选择的集不在当前分集方案里，请重新预览。")
+            if not_shootable:
+                detail = "；".join(
+                    f"{item.get('title') or item['episode_id']}：{item.get('state_label') or item.get('state')}"
+                    for item in not_shootable[:4]
+                )
+                raise ActionBlocked(
+                    "EPISODE_NOT_SHOOTABLE",
+                    f"选中的集还没准备好（{detail}）；先处理这些集，其它集不受影响。",
+                )
+            try:
+                value = start_director_production(
+                    db,
+                    project,
+                    settings=settings,
+                    episode_ids=list(params.get("episode_ids") or []),
+                    workflow_profile_id=params.get("workflow_profile_id"),
+                    strategy=params.get("strategy"),
+                    actor=actor,
+                )
+            except HTTPException as exc:
+                raise _blocked_from_executor(exc) from exc
+            run_id = str(value.get("run_id") or "") or None
+            row.original_task_id = run_id
+            row.status = "DELEGATED"
+            row.verification = {
+                "outcome": "PENDING",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/production-runs/{run_id}",
+                "run_id": run_id,
+                "run_status": value.get("run_status"),
+                "package_id": value.get("package_id"),
+                "package_revision": value.get("package_revision"),
+                "package_built": value.get("package_built"),
+                "created": value.get("created"),
+                "episode_ids": value.get("episode_ids"),
+                "bound_at": utcnow().isoformat(),
+                "checked_at": utcnow().isoformat(),
+            }
+            if run_id:
+                add_audit(
+                    db,
+                    actor,
+                    "SUPPORT_ACTION_TASK_BOUND",
+                    "support_action",
+                    row.id,
+                    {"kind": row.kind, "task_id": run_id, "run_status": value.get("run_status")},
+                    project_id=row.project_id,
+                )
+        elif row.kind == "document_switch_basis":
+            from shine.models import Project, ProjectDocument
+            from shine.services import switch_script_basis
+
+            project = db.get(Project, str(row.project_id or ""))
+            document = db.get(ProjectDocument, str(params.get("document_id") or ""))
+            if project is None:
+                raise ActionBlocked("PROJECT_NOT_FOUND", "目标项目不存在，请重新预览。")
+            if document is None or document.project_id != project.id:
+                raise ActionBlocked("TARGET_DOCUMENT_MISSING", "这份文档不属于当前项目。")
+            changed = switch_script_basis(db, project, document, actor=actor)
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/projects/{project_id}/script-basis",
+                "changed": changed,
+                "current_basis_id": document.id,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif row.kind == "production_control":
+            from shine.director import run_engine
+            from shine.production.models import ProductionRun
+
+            run_id = str(params.get("run_id") or "")
+            if db.get(ProductionRun, run_id) is None:
+                raise ActionBlocked("PRODUCTION_RUN_NOT_FOUND", "找不到这次生产任务。")
+            operation = str(params.get("operation") or "")
+            # Control operations open their own transaction in the original
+            # executor; riding this read transaction would hold a writer lock.
+            db.rollback()
+            if operation == "pause":
+                status = run_engine.pause_run(session_factory, run_id, worker_id=actor)
+            elif operation == "resume":
+                status = run_engine.resume_run(session_factory, run_id, actor=actor)
+            elif operation == "cancel":
+                status = run_engine.cancel_run(session_factory, run_id, actor=actor)
+            else:  # pragma: no cover - already validated
+                raise ActionBlocked("INVALID_OPERATION", "只支持暂停、继续或取消。")
+            db.expire_all()
+            row = db.get(SupportAction, action_id)
+            fresh = db.get(ProductionRun, run_id)
+            row.original_task_id = run_id
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/production-runs/{run_id}",
+                "operation": operation,
+                "run_status": status,
+                "state_version": fresh.state_version if fresh else None,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif row.kind == "literary_scripts_generate":
+            from shine.director import pipeline
+
+            if gateway is None:
+                raise ActionBlocked(
+                    "TEXT_ROLE_NOT_READY",
+                    "生成分集剧本需要「分集剧本」文本角色已配置。",
+                )
+            try:
+                tasks = pipeline.queue_scene_scripts(
+                    db, str(row.project_id or ""), str(params.get("volume_id") or ""), gateway
+                )
+            except ValueError as exc:
+                raise ActionBlocked(str(exc), f"原流水线拒绝：{exc}") from exc
+            db.commit()
+            task_ids = [task.id for task in tasks]
+            row.original_task_id = task_ids[0] if task_ids else None
+            row.status = "DELEGATED" if task_ids else "SUCCEEDED"
+            row.verification = {
+                "outcome": "PENDING" if task_ids else "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}",
+                "task_ids": task_ids,
+                "queued": len(task_ids),
+                "checked_at": utcnow().isoformat(),
+            }
         else:  # pragma: no cover - the registry above is exhaustive
             raise ToolDenied(f"未知动作：{row.kind}")
     except ActionBlocked as exc:
@@ -1442,6 +2578,191 @@ def refresh_action(db, settings, row: SupportAction) -> dict[str, Any]:
                 "checked_at": utcnow().isoformat(),
             },
         }
+        db.commit()
+        return _public(row)
+
+    if row.kind == "story_outline_generate":
+        if row.status != "DELEGATED":
+            return _public(row)
+        from shine.models import AgentTaskRecord
+
+        task = db.get(AgentTaskRecord, str(row.original_task_id or ""))
+        if task is None:
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "找不到这次大纲执行任务的记录，无法确认结果；请重新预览。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "attributed": False,
+                "executor": action_spec(row.kind).executor,
+                "checked_at": utcnow().isoformat(),
+            }
+        else:
+            status = str(task.status or "UNKNOWN")
+            row.verification = {
+                **(row.verification or {}),
+                "task_id": task.id,
+                "task_status": status,
+                "stage": (task.trace or {}).get("stage"),
+                "cursor": (task.trace or {}).get("cursor"),
+                "checked_at": utcnow().isoformat(),
+            }
+            if status == "SUCCEEDED":
+                row.status = "SUCCEEDED"
+                row.verification["outcome"] = "VERIFIED"
+                row.verification["note"] = "大纲已生成；确认大纲仍是用户在导演页的裁决。"
+            elif status in {"FAILED", "CANCELLED", "SUPERSEDED"}:
+                row.status = "FAILED" if status != "SUPERSEDED" else "SUPERSEDED"
+                row.last_error = f"原大纲任务状态 {status}。"
+                row.verification["outcome"] = "FAILED"
+            elif status == "NEEDS_REVIEW":
+                row.status = "NEEDS_REVIEW"
+                row.last_error = "大纲任务结果不确定，需要先核对，不能自动重试。"
+                row.verification["outcome"] = "UNKNOWN"
+        db.commit()
+        return _public(row)
+
+    if row.kind == "storyboard_generate":
+        if row.status != "DELEGATED":
+            return _public(row)
+        from shine.director.streamline import director_storyboard_state
+
+        try:
+            state = director_storyboard_state(db, str(row.project_id or ""))
+        except Exception as exc:  # noqa: BLE001 - unreadable progress is unknown
+            state = {"task_id": None, "status": None, "error": type(exc).__name__}
+        if not row.original_task_id or str(state.get("task_id") or "") != str(row.original_task_id):
+            # A newer storyboard run replaced this task's record; its result is
+            # not this authorization's result.
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "分镜记录已被新的任务取代或无法归属，本次授权不能借用它的结果。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "attributed": False,
+                "task_id": row.original_task_id,
+                "current_task_id": state.get("task_id"),
+                "checked_at": utcnow().isoformat(),
+            }
+        else:
+            status = str(state.get("status") or "UNKNOWN")
+            episodes = state.get("episodes") or []
+            blocked = [row_ep for row_ep in episodes if row_ep.get("status") == "BLOCKED"]
+            row.verification = {
+                **(row.verification or {}),
+                "task_id": state.get("task_id"),
+                "task_status": status,
+                "episode_count": len(episodes),
+                "blocked_episodes": [
+                    {"episode_id": item.get("episode_id"), "blocker": item.get("blocker")}
+                    for item in blocked[:5]
+                ],
+                "checked_at": utcnow().isoformat(),
+            }
+            if status in {"SUCCEEDED", "COMPLETED"} and not blocked:
+                row.status = "SUCCEEDED"
+                row.verification["outcome"] = "VERIFIED"
+                row.verification["note"] = "分镜已落库；确认镜头仍是用户在导演页的裁决。"
+            elif status in {"FAILED", "CANCELLED", "SUPERSEDED"}:
+                row.status = "FAILED" if status != "SUPERSEDED" else "SUPERSEDED"
+                row.last_error = f"原分镜任务状态 {status}。"
+                row.verification["outcome"] = "FAILED"
+            elif status in {"NEEDS_REVIEW", "UNKNOWN"} or blocked:
+                row.status = "NEEDS_REVIEW"
+                row.last_error = "分镜任务有未完成或结果不确定的集，需要先核对。"
+                row.verification["outcome"] = "UNKNOWN"
+            else:
+                row.verification["outcome"] = "PENDING"
+        db.commit()
+        return _public(row)
+
+    if row.kind == "production_start":
+        if row.status != "DELEGATED":
+            return _public(row)
+        from sqlalchemy import select as _select
+
+        from shine.production.models import TERMINAL_RUN_STATUSES, ProductionRun, ProductionRunEpisode
+
+        run = db.get(ProductionRun, str(row.original_task_id or ""))
+        if run is None:
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "找不到这次生产运行的记录，无法确认结果；请核对后再操作。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "attributed": False,
+                "authority": "GET /api/v1/production-runs/{run_id}",
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
+            return _public(row)
+        episodes = list(
+            db.scalars(_select(ProductionRunEpisode).where(ProductionRunEpisode.run_id == run.id)).all()
+        )
+        episode_status = sorted({str(item.status) for item in episodes})
+        delivered = all(item.status == "DELIVERED" for item in episodes) if episodes else False
+        row.verification = {
+            **(row.verification or {}),
+            "run_id": run.id,
+            "run_status": run.status,
+            "episode_count": len(episodes),
+            "episode_statuses": episode_status,
+            "delivered": delivered,
+            "checked_at": utcnow().isoformat(),
+        }
+        if run.status in TERMINAL_RUN_STATUSES:
+            if run.status == "COMPLETED" and delivered:
+                row.status = "SUCCEEDED"
+                row.verification["outcome"] = "VERIFIED"
+            elif run.status == "COMPLETED":
+                row.status = "NEEDS_REVIEW"
+                row.last_error = "拍摄已结束，但仍有集未完成审片/交付；这部分必须由你确认。"
+                row.verification["outcome"] = "PENDING_REVIEW"
+            else:
+                row.status = "FAILED"
+                row.last_error = f"原生产运行状态 {run.status}。"
+                row.verification["outcome"] = "FAILED"
+        else:
+            row.verification["outcome"] = "PENDING"
+        db.commit()
+        return _public(row)
+
+    if row.kind == "literary_scripts_generate":
+        if row.status != "DELEGATED":
+            return _public(row)
+        from shine.models import AgentTaskRecord
+
+        task_ids = [str(item) for item in (row.verification or {}).get("task_ids") or []]
+        tasks = (
+            list(db.scalars(select(AgentTaskRecord).where(AgentTaskRecord.id.in_(task_ids))).all())
+            if task_ids
+            else []
+        )
+        statuses = [str(task.status) for task in tasks]
+        row.verification = {
+            **(row.verification or {}),
+            "task_ids": task_ids,
+            "task_statuses": statuses,
+            "checked_at": utcnow().isoformat(),
+        }
+        if not task_ids or len(tasks) != len(task_ids):
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "分集剧本任务记录缺失，无法确认本次授权的结果，不能自动重试。"
+            row.verification["outcome"] = "UNKNOWN"
+        elif all(status == "SUCCEEDED" for status in statuses):
+            row.status = "SUCCEEDED"
+            row.verification["outcome"] = "VERIFIED"
+            row.verification["note"] = "分集剧本已由原流水线生成；确认剧本仍是用户在导演页的裁决。"
+        elif any(status in {"FAILED", "CANCELLED", "SUPERSEDED"} for status in statuses):
+            row.status = "FAILED"
+            row.last_error = "至少一个分集剧本任务失败或被取消。"
+            row.verification["outcome"] = "FAILED"
+        elif any(status == "NEEDS_REVIEW" for status in statuses):
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "分集剧本任务出现不确定结果，需要先核对，不能自动重提。"
+            row.verification["outcome"] = "UNKNOWN"
+        else:
+            row.verification["outcome"] = "PENDING"
         db.commit()
         return _public(row)
 

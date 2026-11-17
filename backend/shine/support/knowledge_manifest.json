@@ -1,0 +1,8 @@
+{
+  "knowledge_version": "shine-project-kb-2026.11.16-v2",
+  "source_commit": "",
+  "content_sha256": "da2e312f8ea637d0be098653c721591bd70fd32f37af2cf0106dbdcbeaeedadb",
+  "entry_count": 19,
+  "generated_at": "2026-11-16T15:06:54.974300+00:00",
+  "generator": "backend/scripts/generate_copilot_knowledge.py"
+}

@@ -16,7 +16,7 @@ from shine.materialprep import story
 from shine.materialprep.source_spans import segment_document
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
 from shine.schemas import APIModel
-from shine.services import add_audit, require_project
+from shine.services import add_audit, require_project, switch_script_basis
 
 router = APIRouter(prefix="/api/v1", tags=["long script preparation"])
 
@@ -87,13 +87,7 @@ def choose_script_basis(project_id: str, body: ScriptBasisRequest, actor: Operat
     """
     project = require_project(db, project_id)
     document = _document(db, project_id, body.document_id)
-    changed = project.current_document_id != document.id
-    if changed:
-        previous = project.current_document_id
-        project.current_document_id = document.id
-        add_audit(db, actor, "SCRIPT_BASIS_SELECTED", "project_document", document.id,
-                  {"previous_document_id": previous, "sha256": document.sha256}, project_id=project_id)
-    db.commit()
+    changed = switch_script_basis(db, project, document, actor=actor)
     db.refresh(project)
     return _basis_view(db, project) | {"changed": changed}
 
