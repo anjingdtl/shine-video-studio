@@ -153,6 +153,7 @@ font-family:'DM Sans','Noto Sans SC',sans-serif;color:var(--ink);background:var(
 .status-led.mock{background:var(--ok-led);box-shadow:0 0 0 3px var(--ok-led-bg)}
 .status-cluster{display:flex;align-items:center;gap:12px;padding:5px 9px;border:1px solid var(--line);border-radius:20px;background:var(--surface-2)}
 .status-cluster .service-status{gap:5px;font-size:var(--fs-caption)}
+.service-status-data{font:var(--fs-caption) var(--mono);color:var(--faint);max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mode-badge{font:var(--fs-caption) var(--mono);letter-spacing:.4px;color:var(--olive-mid);background:var(--mint-2);border:1px solid var(--line-2);padding:5px 8px;border-radius:20px}
 .mode-badge.real{color:var(--real-ink);background:var(--danger-bg);border-color:var(--danger-line)}
 .upload-stack{display:flex;flex-direction:column;gap:2px}

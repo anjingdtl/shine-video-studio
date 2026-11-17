@@ -653,6 +653,8 @@ function App() {
                 <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
                 <span className="service-status-text">{apiOnline ? '工作台后端在线' : systemChecked ? '工作台后端失联' : '正在检查工作台后端'}</span>
               </span>
+              {system?.data_dir && <span className="service-status-data"
+                title={`当前数据目录：${system.data_dir}`}>{system.data_dir}</span>}
               {systemChecked && (!apiOnline || reconnecting || !!projectsLoadError) && <button type="button" className="btn-secondary"
                 disabled={reconnecting}
                 title="后端未启动时，请先启动本机工作台"

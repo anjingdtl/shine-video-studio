@@ -309,7 +309,13 @@ export function timeoutSignal(ms: number): AbortSignal {
 /** 常驻监督进程（独立环回端口）：后台死掉时页面无法经 API 重启它自己，
  *  由监督进程执行「空闲门禁 → 身份核验停止 → 幂等启动」。端口可经
  *  localStorage 覆盖，默认与启动器一致。 */
+let discoveredSupervisorPort: number | null = null;
+/** 服务栈自己的 supervisor 记录是唯一事实；localStorage 与 8790 只作旧栈回退。 */
+export function noteSupervisorPort(port: number | null | undefined): void {
+  if (typeof port === 'number' && Number.isFinite(port) && port > 0) discoveredSupervisorPort = port;
+}
 export function supervisorPort(): number {
+  if (discoveredSupervisorPort) return discoveredSupervisorPort;
   const stored = Number(window.localStorage.getItem('shine-supervisor-port'));
   return Number.isFinite(stored) && stored > 0 ? stored : 8790;
 }
@@ -613,7 +619,8 @@ export type ProductionModeStatus = {
 };
 
 export type SystemStatus = {
-  api_online: boolean; worker_online: boolean; mock_provider_available: boolean;
+  api_online: boolean; data_dir: string; supervisor_port: number | null;
+  worker_online: boolean; mock_provider_available: boolean;
   h3_connected: boolean; render_mode: string; pending_jobs: number; running_jobs: number;
   failed_jobs: number; blocked_jobs: number; workers: WorkerStatus[]; last_error: string | null;
   production_mode: ProductionModeStatus;

@@ -26,6 +26,10 @@ if ($ApiPort -eq $WebPort -and -not $AutoPorts) { throw 'API and Web require dif
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'shine_local_config.ps1')
 $stackSettings = Get-ShineStackSettings $repoRoot $DataDir
+# The machine's default entry ports belong to the configured daily data
+# directory. Resolve it before any environment override so an isolated or
+# acceptance directory can be told apart from the daily one.
+$dailyDataDir = (Get-ShineStackSettings $repoRoot '').DataDir
 foreach ($entry in $stackSettings.Environment.GetEnumerator()) {
     [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
 }
@@ -39,6 +43,13 @@ if (-not $PSBoundParameters.ContainsKey('Provider')) {
 }
 $venvPython = $stackSettings.Python
 $env:SHINE_DATA_DIR = $stackSettings.DataDir
+# One entry, one owner: a non-daily directory must not take over the machine's
+# default ports even when they happen to be free, unless the operator pinned
+# ports explicitly. Otherwise every acceptance run hijacks the user's entry
+# the moment the daily stack is down.
+$reserveDefaultPorts = (-not $PSBoundParameters.ContainsKey('ApiPort')) -and
+    (-not $PSBoundParameters.ContainsKey('WebPort')) -and
+    ($env:SHINE_DATA_DIR -ne $dailyDataDir)
 $env:SHINE_BACKEND_ENV = $stackSettings.BackendEnv
 $env:UV_PROJECT_ENVIRONMENT = $stackSettings.BackendEnv
 # A venv supplies dependencies; the current checkout supplies the application.
@@ -312,15 +323,23 @@ try {
         # Installed copies and the packaged START_APP use -AutoPorts: a busy 8000 must
         # not make the only start button unusable. The chosen ports are printed and
         # recorded, so the browser and the stop command use the same ones.
-        if ($AutoPorts) {
+        if ($AutoPorts -or $reserveDefaultPorts) {
             $reviewPorts = @()
             if ($startReview) { $reviewPorts += $ReviewPort }
             if ($AdditionalReviewManifest) { $reviewPorts += $AdditionalReviewPort }
-            $resolvedApiPort = Get-FreeShinePort $ApiPort $reviewPorts
-            $reserved = @($resolvedApiPort) + $reviewPorts
-            $resolvedWebPort = Get-FreeShinePort $WebPort $reserved
+            $apiStart = $ApiPort
+            $webStart = $WebPort
+            $excluded = @()
+            if ($reserveDefaultPorts) {
+                $excluded = @($ApiPort, $WebPort)
+                $apiStart = $ApiPort + 1
+                $webStart = $WebPort + 1
+            }
+            $resolvedApiPort = Get-FreeShinePort $apiStart ($reviewPorts + $excluded)
+            $reserved = @($resolvedApiPort) + $reviewPorts + $excluded
+            $resolvedWebPort = Get-FreeShinePort $webStart $reserved
             if ($resolvedApiPort -ne $ApiPort -or $resolvedWebPort -ne $WebPort) {
-                Write-Host "Requested ports are busy; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
+                Write-Host "Requested ports are busy or reserved for the daily data directory; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
             }
             $ApiPort = $resolvedApiPort
             $WebPort = $resolvedWebPort

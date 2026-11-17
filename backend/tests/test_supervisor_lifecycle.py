@@ -89,6 +89,43 @@ def _post(base, path, origin=None, marker=True):
         return exc.code, json.loads(exc.read())
 
 
+def _get(base, path):
+    with urllib.request.urlopen(base + path, timeout=5) as response:
+        return json.loads(response.read())
+
+
+def test_health_withdraws_the_port_claim_when_the_stack_is_dead(server):
+    """残栈 supervisor 不得继续声明机器入口端口（验收接管事故的根因之一）。"""
+    base, _ = server
+    body = _get(base, "/health")
+    assert body["stack"] == "down"
+    assert body["api_port"] is None and body["web_port"] is None
+    assert _get(base, "/lifecycle")["stack_running"] is False
+
+
+def test_health_claims_ports_only_while_the_recorded_listener_lives(server):
+    import os
+
+    from shine.comfyops.installer import process_identity
+    base, data_dir = server
+    run = data_dir / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    birth = process_identity(os.getpid())
+    manifest = {"api_port": 8123, "web_port": 8124,
+                "processes": [{"name": "api", "listener_pid": os.getpid(),
+                               "owners": [{"pid": os.getpid(), "birth": birth}]}]}
+    (run / "processes.json").write_text(json.dumps(manifest), encoding="utf-8")
+    body = _get(base, "/health")
+    assert body["stack"] == "up"
+    assert (body["api_port"], body["web_port"]) == (8123, 8124)
+    assert _get(base, "/lifecycle")["stack_running"] is True
+    manifest["processes"][0]["listener_pid"] = 4_000_000
+    (run / "processes.json").write_text(json.dumps(manifest), encoding="utf-8")
+    body = _get(base, "/health")
+    assert body["stack"] == "down"
+    assert body["api_port"] is None
+
+
 def test_presence_requires_marker_and_loopback_origin(server):
     base, _ = server
     assert _post(base, "/presence", marker=False)[0] == 403

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  api, json, timeoutSignal, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
+  api, json, noteSupervisorPort, timeoutSignal, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
   type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion,
   type Shot, type Style, type StyleVersion, type SystemHealth, type SystemStatus, type WorkflowProfile,
 } from './api';
@@ -133,6 +133,7 @@ export function useStudio() {
       // 出现「后端失联」却「制作已就绪」的矛盾。现统一读 api_online。
       const status = await api<SystemStatus>('/system/status', { signal: timeoutSignal(8000), cache: 'no-store' });
       online = Boolean(status.api_online);
+      noteSupervisorPort(status.supervisor_port);
       if (probe === healthProbe.current) setSystem(status);
     } catch { /* A failed health probe means the API cannot be reached. */ }
     if (probe === healthProbe.current) {
@@ -143,8 +144,11 @@ export function useStudio() {
   }, []);
 
   const loadSystem = useCallback(async () => {
-    try { setSystem(await api<SystemStatus>('/system/status', { signal: timeoutSignal(8000), cache: 'no-store' })); }
-    catch { setSystem(null); }
+    try {
+      const status = await api<SystemStatus>('/system/status', { signal: timeoutSignal(8000), cache: 'no-store' });
+      noteSupervisorPort(status.supervisor_port);
+      setSystem(status);
+    } catch { setSystem(null); }
   }, []);
 
   const loadAudit = useCallback(async (id: string, offset = 0, signal?: AbortSignal) => {

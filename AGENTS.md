@@ -1989,3 +1989,25 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   无 manifest 再启必须先收尾 supervisor→完整停止后记录与端口全清）。
 - 顺带：`stop_shine.py` 的 `UNKNOWN` 判定显名化（它是模块对外契约，测试用作 classify
   结论），不再是被 Ruff 报-unused 的悬空导入。
+
+## 2026-11-17 端口归属与身份收敛轮（用户报障：验收残留接管日常入口、进度 20% 卡死）
+
+- **机器默认入口端口归日常配置的数据目录**。`start_shine.ps1` 用同一配置解析器解析
+  `$dailyDataDir`；非日常目录且未显式 `-ApiPort/-WebPort` 时 `$reserveDefaultPorts`
+  生效：候选排除 8000/5173、从 +1 起找空闲端口。验收/隔离实例哪怕端口空闲也不得
+  接管用户入口（事故根因：并行会话的 accept4 残留在日常栈倒下时占走 8000/5173，
+  浏览器读验收空台账，20% 永不动、「启用真实制作」只是跳转故无反应）。
+  实测：默认端口空闲时隔离实例让位 8002/5175。
+- **supervisor 栈死收回端口声明**。`shine_supervisor.py::_stack_live` 是唯一存活裁决
+  （记录的 API listener PID/birth 必须仍是同一进程）；`/health` 栈死时 `stack=down`、
+  `api_port/web_port=null`；`/lifecycle.stack_running` 与 watchdog 同读它。残栈
+  supervisor 不再永久声明入口端口。
+- **服务栈自报身份，监督流量跟随**。`/system/status` 增 `data_dir` 与
+  `supervisor_port`（读自己的 `run/supervisor.json`，唯一事实）；顶栏在线灯旁显示
+  当前数据目录；前端 `noteSupervisorPort` 使 presence/重启/停止跟随服务栈自己的
+  supervisor，硬编码 8790 降为旧栈回退。读错台账时人一眼可见。
+- 回归：`test_supervisor_lifecycle`（+2）、`test_supervisor_stop_convergence`（+1
+  端口保留契约）、`test_system_status_identity`（新增）、前端
+  `dataDirIdentity.test.tsx`（新增 2）；定向后端 68 例、前端全量 81 文件/404 例、
+  tsc/build/Ruff 全绿；隔离浏览器实测顶栏 `D:\Shine\data`、真实制作已就绪、14 个真实作品。
+- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。

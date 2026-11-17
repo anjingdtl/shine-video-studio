@@ -205,7 +205,7 @@ def _watchdog(data_dir: Path, minutes: float) -> None:
                 presence = dict(_PRESENCE)
             if busy_restart:
                 continue
-            stack_running = (data_dir / "run" / "processes.json").is_file()
+            stack_running = _stack_live(_read_manifest(data_dir))
             blockers = _stack_blockers(data_dir) if stack_running else []
             stop, reason = auto_stop_decision(
                 now=time.time(), last_seen=presence["last_seen"],
@@ -289,6 +289,29 @@ def _read_manifest(data_dir: Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
+
+
+def _stack_live(manifest: dict | None) -> bool:
+    """One liveness verdict: the recorded API listener must still be the same process.
+
+    A manifest alone is history. A supervisor whose stack died must withdraw
+    its claim on the machine's entry ports instead of advertising them forever.
+    """
+    from shine.comfyops.installer import process_identity
+    if not manifest:
+        return False
+    entry = next((row for row in manifest.get("processes", []) if row.get("name") == "api"), None)
+    if not entry:
+        return False
+    listener = entry.get("listener_pid")
+    birth = next((owner.get("birth") for owner in entry.get("owners", [])
+                  if owner.get("pid") == listener), None)
+    if not listener or not birth:
+        return False
+    try:
+        return process_identity(listener) == birth
+    except (OSError, ValueError):
+        return False
 
 
 def _worker_state(manifest: dict | None) -> str:
@@ -590,11 +613,13 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/health":
-            api_port, web_port = self._stack_ports()
+            live = _stack_live(_read_manifest(self.data_dir))
+            api_port, web_port = self._stack_ports() if live else (None, None)
             self._send(200, {"status": "ok", "role": "supervisor",
                              "pid": os.getpid(),
                              "repo_root": str(REPO_ROOT),
                              "data_dir": str(self.data_dir),
+                             "stack": "up" if live else "down",
                              "api_port": api_port, "web_port": web_port}, origin)
         elif path == "/restart-status":
             with _LOCK:
@@ -609,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
                 "ever_seen": presence["ever_seen"],
                 "last_seen_age_s": (time.time() - presence["last_seen"])
                 if presence["last_seen"] else None,
-                "stack_running": manifest is not None,
+                "stack_running": _stack_live(manifest),
                 "worker": _worker_state(manifest),
                 "last_stop": last_stop,
             }, origin)

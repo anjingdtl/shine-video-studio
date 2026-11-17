@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -662,7 +663,16 @@ def create_app(
         worker_online = any(worker.online for worker in workers)
         h3_connected = _h3_connected(effective)
         from shine.production_mode import summarize_production_mode
+        supervisor_port = None
+        try:
+            record = json.loads(
+                (settings.data_dir / "run" / "supervisor.json").read_text(encoding="utf-8-sig"))
+            supervisor_port = int(record["port"]) if record.get("port") else None
+        except (OSError, ValueError, TypeError, KeyError):
+            supervisor_port = None
         return SystemStatus(
+            data_dir=str(settings.data_dir),
+            supervisor_port=supervisor_port,
             worker_online=worker_online,
             mock_provider_available=True,
             h3_connected=h3_connected,

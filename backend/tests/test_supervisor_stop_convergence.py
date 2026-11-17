@@ -139,3 +139,14 @@ def test_launcher_reconciles_the_supervisor_record_before_dependency_sync():
     assert "本安装仍有进程占用依赖文件" in text, "依赖失败要给具名指引，不是 bootstrap 误导"
     assert "不需要 bootstrap.ps1" in text
     assert "SHINE_STOP_KEEP_SUPERVISOR" not in text, "用户双击启动不带保留标记：残栈 supervisor 必须被收尾"
+
+
+def test_launcher_reserves_the_machine_entry_ports_for_the_daily_data_directory():
+    """非日常数据目录不得占用机器默认入口，哪怕端口空闲（验收接管事故）。"""
+    text = (SCRIPTS / "start_shine.ps1").read_text(encoding="utf-8-sig")
+    assert "$dailyDataDir = (Get-ShineStackSettings $repoRoot '').DataDir" in text
+    assert "$reserveDefaultPorts = (-not $PSBoundParameters.ContainsKey('ApiPort')) -and" in text
+    assert "($env:SHINE_DATA_DIR -ne $dailyDataDir)" in text
+    assert "if ($AutoPorts -or $reserveDefaultPorts) {" in text
+    assert "$excluded = @($ApiPort, $WebPort)" in text, "默认端口必须从隔离目录的候选里排除"
+    assert "$apiStart = $ApiPort + 1" in text

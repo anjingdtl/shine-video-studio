@@ -111,7 +111,8 @@ export function productionMode(overrides: Partial<import('../api').ProductionMod
 }
 
 export const SYSTEM_STATUS = {
-  api_online: true, worker_online: true, mock_provider_available: true,
+  api_online: true, data_dir: 'D:\\Shine\\data', supervisor_port: 8790,
+  worker_online: true, mock_provider_available: true,
   h3_connected: false, render_mode: 'mock', pending_jobs: 0, running_jobs: 0,
   failed_jobs: 0, blocked_jobs: 0, workers: [], last_error: null,
   production_mode: PRODUCTION_MODE_DEMO,

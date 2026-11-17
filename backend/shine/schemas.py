@@ -686,6 +686,8 @@ class ProductionModeStatus(APIModel):
 
 class SystemStatus(APIModel):
     api_online: bool = True
+    data_dir: str
+    supervisor_port: int | None
     worker_online: bool
     mock_provider_available: bool
     h3_connected: bool
