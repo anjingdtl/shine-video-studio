@@ -855,7 +855,15 @@ def test_report_directory_symlink_is_rejected(api, tmp_path):
     root = report_root(settings)
     moved = tmp_path / "moved-reports"
     shutil.move(str(root), moved)
-    root.symlink_to(moved, target_is_directory=True)
+    try:
+        root.symlink_to(moved, target_is_directory=True)
+    except OSError as exc:
+        # Windows 非开发者模式且无 SeCreateSymbolicLinkPrivilege 时无法构造
+        # 符号链接夹具（WinError 1314）。这是环境能力缺失，不是裁决缺陷：
+        # 生产代码的 is_symlink 拒绝逻辑保持不变，具备特权的环境仍全量执行。
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege unavailable (WinError 1314)")
+        raise
     response = client.get(f"/api/v1/support/reports/{created.json()['report']['id']}")
     assert response.status_code == 400
 
