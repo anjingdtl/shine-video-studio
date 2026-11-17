@@ -38,14 +38,16 @@ import { describeBlocker, type ErrorActionTarget } from './errorActions';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getDirectorOverview, getJourney, presencePing, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
+import { ShineCopilot } from './components/ShineCopilot';
+import { CopilotSettingsPage } from './components/CopilotSettingsPage';
 import type { Asset, Project } from './api';
 
 /** 导演工作台是唯一入口。旧专业模式深链按用途映射到对应阶段或高级设置，
  *  不再保留第二套界面;安装器落地的 #setup 与旧 #v/… 书签都落到这里。 */
-type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'materials' | 'package' | 'run' | 'deliver' | 'library' | 'setup' | 'advanced';
+type DirectorPage = 'projects' | 'creative' | 'assets' | 'produce' | 'materials' | 'package' | 'run' | 'deliver' | 'library' | 'setup' | 'advanced' | 'copilot';
 const DIRECTOR_PAGE_LABELS: Record<DirectorPage, string> = {
   projects: '项目管理', creative: '创意与剧本', assets: '剧本统筹', produce: '镜头拆解', materials: '拍摄素材准备', package: '导演包',
-  run: '全片生产', deliver: '成片中心', library: '成片库', setup: '基础配置', advanced: '高级设置',
+  run: '全片生产', deliver: '成片中心', library: '成片库', setup: '基础配置', advanced: '高级设置', copilot: 'AI 管家配置',
 };
 /** 旧专业模式锚点 → 导演页面。环境整备一律回基础配置;细调与诊断进高级设置。 */
 const LEGACY_ANCHOR_PAGES: Record<string, DirectorPage> = {
@@ -565,18 +567,33 @@ function App() {
   const needsSetup = !!production && !['READY', 'RUNNING'].includes(production.mode);
 
   if (ui === 'assets') {
-    return <AssetsWorkspace
-      page={assetPage}
-      onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
-      onWorkspace={(space) => { if (space === 'director') leaveAssets(); else { setUi('director'); setDirectorPage('advanced'); window.history.pushState(null, '', '#d/advanced'); window.scrollTo({ top: 0 }); } }}
-      onOpenImageSetup={() => {
-        goToDirectorSetup();
-        window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
-      }}
-      projects={projects as Project[]}
-      projectId={projectId}
-      projectAssets={assets as Asset[]}
-    />;
+    return <>
+      <AssetsWorkspace
+        page={assetPage}
+        onNavigate={(page) => { setAssetPage(page); window.scrollTo({ top: 0 }); }}
+        onWorkspace={(space) => {
+          if (space === 'director') { leaveAssets(); return; }
+          const page: DirectorPage = space === 'copilot' ? 'copilot' : 'advanced';
+          setUi('director');
+          setDirectorPage(page);
+          window.history.pushState(null, '', `#d/${page}`);
+          window.scrollTo({ top: 0 });
+        }}
+        onOpenImageSetup={() => {
+          goToDirectorSetup();
+          window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
+        }}
+        projects={projects as Project[]}
+        projectId={projectId}
+        projectAssets={assets as Asset[]}
+      />
+      <ShineCopilot
+        pageId={`assets-${assetPage}`}
+        pageLabel="素材中心"
+        projectId={projectId || undefined}
+        needsSetup={needsSetup}
+      />
+    </>;
   }
 
   const workspaceReconnect = <div className="workspace-reconnect" aria-busy={reconnecting || restartPhase !== null}>
@@ -620,6 +637,10 @@ function App() {
           <button type="button" className={directorPage === 'advanced' ? 'active' : ''}
             onClick={() => goToDirectorPage('advanced')}>
             <SlidersHorizontal size={15} /><span>高级设置</span>
+          </button>
+          <button type="button" className={directorPage === 'copilot' ? 'active' : ''}
+            onClick={() => goToDirectorPage('copilot')}>
+            <Sparkles size={15} /><span>AI 管家配置</span>
           </button>
         </nav>
         <WorkStackMonitor />
@@ -805,8 +826,20 @@ function App() {
             </>}
           </div>}
 
+          {directorPage === 'copilot' && <>
+            {directorPageIntro(
+              'AI 管家配置',
+              <>让管家有名字、有记忆，也<em>只记住你允许的事。</em></>,
+              '身份、启动预读与长期记忆都保存在本机；记忆只是交流辅助，不改变正式业务裁决。',
+              <button type="button" className="btn-secondary" onClick={() => goToDirectorPage('projects')}>
+                <FolderKanban size={13} /> 回到项目管理
+              </button>,
+            )}
+            <CopilotSettingsPage projects={projects} projectId={projectId || ''} />
+          </>}
+
           <SchemaNotice />
-          {directorPage !== 'setup' && directorPage !== 'advanced' && !project && <section className="first-run card">
+          {directorPage !== 'setup' && directorPage !== 'advanced' && directorPage !== 'copilot' && !project && <section className="first-run card">
             <div className="first-run-art"><Clapperboard size={30} /></div>
             {projectsLoaded ? <>
               <h2>创建我的第一部AI短剧</h2>
@@ -844,7 +877,7 @@ function App() {
 
           {project && <>
             {/* 唯一的一条旅程：步骤、完成态、下一步提示和阻塞数都在这里。 */}
-            {directorPage !== 'setup' && directorPage !== 'projects' && directorPage !== 'advanced' && <JourneyRail
+            {directorPage !== 'setup' && directorPage !== 'projects' && directorPage !== 'advanced' && directorPage !== 'copilot' && <JourneyRail
               stages={DIRECTOR_STAGES}
               currentPage={directorPage}
               activeStageId={activeDirectorStage?.id ?? null}
@@ -856,7 +889,7 @@ function App() {
               onNavigate={(stage) => goToDirectorPage(stage.page, stage.id)}
               onRetry={() => setJourneyRetry((n) => n + 1)}
             />}
-            <div className="demo-ribbon-slot" hidden={directorPage === 'setup' || directorPage === 'advanced'}><DemoRibbon production={production ?? {
+            <div className="demo-ribbon-slot" hidden={directorPage === 'setup' || directorPage === 'advanced' || directorPage === 'copilot'}><DemoRibbon production={production ?? {
               mode: 'BLOCKED', label: '状态未知', detail: '暂无法确认制作环境。', action: null, code: null,
               render_provider: 'mock', runtime_status: 'NOT_ACTIVATED', renderer_online: false,
               worker_online: false, running_jobs: 0, series_active: 0,
@@ -1172,6 +1205,13 @@ function App() {
           </>}
         </div>
       </main>
+
+      <ShineCopilot
+        pageId={directorPage}
+        pageLabel={DIRECTOR_PAGE_LABELS[directorPage]}
+        projectId={projectId || undefined}
+        needsSetup={needsSetup}
+      />
 
       {helpOpen && <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="帮助" onClick={() => setHelpOpen(false)}>
         <div className="help-modal" onClick={(event) => event.stopPropagation()}>

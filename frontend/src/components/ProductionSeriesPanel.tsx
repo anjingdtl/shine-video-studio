@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { AlertTriangle, Clapperboard, Info, Layers, Link2, Play, Scissors, ShieldCheck, Square, Loader2, Wand2 } from 'lucide-react';
+import { AlertTriangle, Clapperboard, Info, Layers, Link2, Play, Scissors, ShieldCheck, Sparkles, Square, Loader2, Wand2 } from 'lucide-react';
 import { api, json, type Asset, type Job, type ProductionSeries, type Shot, type SystemStatus, type WorkflowProfile } from '../api';
+import { reportCopilotFault } from '../copilotContext';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
 import { continuityLabels, failureLabels, finalizationLabels, label, statusLabels } from '../constants';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
@@ -874,6 +875,17 @@ export default function ProductionSeriesPanel({
               {row.delivery_result && <small className="delivered">· 自动交付 v{row.delivery_result.version}（{row.delivery_result.review_state === 'all_passed' ? '来源审查通过' : '待审样片'}）</small>}
             </div>
             <div className="series-actions">
+              {(row.failure_code || row.status === 'NEEDS_REVIEW') && (
+                <button className="btn-secondary" onClick={() => reportCopilotFault({
+                  projectId: row.project_id,
+                  jobId: row.current_job_id || undefined,
+                  taskId: row.id,
+                  errorCode: row.failure_code || undefined,
+                  label: row.failure_code ? label(failureLabels, row.failure_code) : '生产批次待核对',
+                })}>
+                  <Sparkles size={12} /> 交给 AI 管家诊断
+                </button>
+              )}
               {row.status === 'COMPLETED' && row.provider === 'comfyui'
                 && <button className="btn-secondary" disabled={working}
                   onClick={() => void act(row.id, 'assemble')}>合成连续成片</button>}

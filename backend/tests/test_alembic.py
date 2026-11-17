@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180f0010001"
+HEAD_REVISION = "f180f0010006"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -105,6 +105,125 @@ def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):
         assert "generation_options" in provider_columns
         series_columns = {row[1] for row in connection.execute("PRAGMA table_info(production_series)")}
         assert "output_spec" in series_columns
+        assert {
+            "support_sessions",
+            "support_messages",
+            "support_actions",
+            "support_delegations",
+            "support_reports",
+        }.issubset(tables)
+        action_columns = {row[1] for row in connection.execute("PRAGMA table_info(support_actions)")}
+        assert {
+            "request_key",
+            "attempt_no",
+            "request_identity",
+            "original_task_id",
+            "target_fingerprint",
+        }.issubset(action_columns)
+        delegation_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(support_delegations)")
+        }
+        assert {
+            "id", "session_id", "plan_id", "plan_hash", "authorization_key",
+            "status", "payload",
+        }.issubset(delegation_columns)
+        assert {"copilot_memories", "copilot_memory_vectors"}.issubset(tables)
+        memory_columns = {row[1] for row in connection.execute("PRAGMA table_info(copilot_memories)")}
+        assert {
+            "id", "scope", "project_id", "content", "memory_type", "source",
+            "source_session_id", "source_message_ids", "content_hash",
+            "content_revision", "status", "embedding_revision", "deleted_at",
+        }.issubset(memory_columns)
+        vector_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(copilot_memory_vectors)")
+        }
+        assert {
+            "memory_id", "content_revision", "content_hash", "provider", "dim", "vector",
+        }.issubset(vector_columns)
+        indexes = {
+            row[1] for row in connection.execute("PRAGMA index_list(support_delegations)")
+        }
+        assert any("authorization" in name for name in indexes) or any(
+            row[2] for row in connection.execute("PRAGMA index_list(support_delegations)")
+        )
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
+    finally:
+        connection.close()
+
+
+def test_v21_database_upgrades_to_v22_without_losing_conversations(tmp_path, monkeypatch):
+    """A V2.1 user keeps sessions, messages and delegations; V2.2 is additive."""
+    db_path = tmp_path / "v21.db"
+    monkeypatch.setenv("SHINE_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
+    config = alembic_config(db_path)
+    command.upgrade(config, "f180f0010005")
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO projects (id, title, description, language, created_at) "
+            "VALUES ('p-v21', '旧用户项目', '', 'Chinese', ?)",
+            (now,),
+        )
+        connection.execute(
+            "INSERT INTO support_sessions (id, project_id, page_id, status, actor, context_json, "
+            "expires_at, created_at, updated_at) VALUES ('s-v21', 'p-v21', 'produce', 'OPEN', "
+            "'local-user', '{}', ?, ?, ?)",
+            (now, now, now),
+        )
+        connection.execute(
+            "INSERT INTO support_messages (id, session_id, role, kind, content, payload, "
+            "evidence_ids, created_at) VALUES ('m-v21', 's-v21', 'user', 'message', "
+            "'旧版对话内容', '{}', '[]', ?)",
+            (now,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    command.upgrade(config, "head")
+    connection = sqlite3.connect(db_path)
+    try:
+        assert connection.execute(
+            "SELECT project_id, status FROM support_sessions WHERE id = 's-v21'"
+        ).fetchone() == ("p-v21", "OPEN")
+        assert connection.execute(
+            "SELECT content FROM support_messages WHERE id = 'm-v21'"
+        ).fetchone()[0] == "旧版对话内容"
+        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        assert {"copilot_memories", "copilot_memory_vectors"}.issubset(tables)
+        assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
+    finally:
+        connection.close()
+
+
+def test_support_action_attempts_upgrade_keeps_existing_authorizations(tmp_path, monkeypatch):
+    db_path = tmp_path / "actions.db"
+    monkeypatch.setenv("SHINE_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
+    config = alembic_config(db_path)
+    command.upgrade(config, "f180f0010002")
+    now = datetime.now(UTC).replace(tzinfo=None).isoformat(sep=" ")
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            "INSERT INTO support_actions (id, session_id, project_id, kind, status, request_identity, "
+            "preview_hash, snapshot_revision, params, preview, actor, approved_at, original_task_id, "
+            "verification, last_error, created_at, updated_at) "
+            "VALUES ('sa-old', NULL, NULL, 'setup_repair', 'FAILED', 'legacy-key', ?, ?, '{}', '{}', "
+            "'local-user', NULL, 'setup-old', '{}', 'old failure', ?, ?)",
+            ("a" * 64, "b" * 64, now, now),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    command.upgrade(config, "head")
+    connection = sqlite3.connect(db_path)
+    try:
+        row = connection.execute(
+            "SELECT request_key, attempt_no, status, original_task_id FROM support_actions WHERE id = 'sa-old'"
+        ).fetchone()
+        assert row == ("legacy-key", 1, "FAILED", "setup-old")
         assert connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == HEAD_REVISION
     finally:
         connection.close()

@@ -367,6 +367,27 @@ $buildInfo = [ordered]@{
 }
 [IO.File]::WriteAllText((Join-Path $staging 'BUILD_INFO.json'), ($buildInfo | ConvertTo-Json -Depth 6), (New-Object Text.UTF8Encoding($false)))
 
+# Bind the copilot's project knowledge to this exact package build.  The source
+# commit is the commit the knowledge was generated from; the runtime compares it
+# with BUILD_INFO.json, so the manifest never has to contain its own commit.
+Push-Location (Join-Path $staging 'backend')
+try {
+    # The generator imports the real FastAPI app, so it needs the project's own
+    # interpreter. A PATH `python` has none of the backend dependencies and would
+    # fail the build for the wrong reason; the build machine already has
+    # backend/.venv beside the checkout (see the prerequisites at the top).
+    $python = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+    if (-not (Test-Path -LiteralPath $python)) {
+        throw 'backend/.venv/Scripts/python.exe is required to bind the copilot knowledge manifest; run: uv sync --project backend'
+    }
+    & $python -m scripts.generate_shine_copilot_contracts --commit $commit
+    if ($LASTEXITCODE -ne 0) { throw "copilot contract generation failed ($LASTEXITCODE)" }
+    & $python -m scripts.generate_shine_copilot_contracts --check --commit $commit
+    if ($LASTEXITCODE -ne 0) { throw "copilot contract verification failed ($LASTEXITCODE)" }
+} finally {
+    Pop-Location
+}
+
 # The manifest never describes itself: a file that lists its own hash can never
 # match. Resolve the count now that every document exists, substitute it, then
 # hash the final bytes once.

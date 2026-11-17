@@ -18,7 +18,7 @@ import re
 from typing import Any
 from urllib.parse import urlsplit
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.installer import process_identity
@@ -46,6 +46,14 @@ UNCERTAIN_STAGES = {"RECONCILE_REQUIRED"}
 # Missing either of them let a "release" kill a renderer whose attempt had
 # an unknown external outcome (audit R5).
 IN_FLIGHT_JOB_STATUSES = {"SUBMITTING", "SUBMITTED", "RUNNING", "QC_PENDING"}
+#: An attempt whose external result is not proven.  Stopping its renderer would
+#: destroy the evidence needed to reconcile it, so it is refused, never killed.
+UNRESOLVED_ATTEMPT_STATES = {
+    "submission_unknown",
+    "unknown",
+    "reconcile_required",
+    "uncertain",
+}
 
 
 def _image_work_in_flight(db) -> bool:
@@ -269,17 +277,35 @@ def managed_processes(db) -> list[dict[str, Any]]:
 
 def _lease_state(db, lease_id: str | None) -> dict[str, Any]:
     if not lease_id:
-        return {"lease_id": None, "lease_status": None, "job_status": None, "in_flight": False}
+        return {
+            "lease_id": None,
+            "lease_status": None,
+            "job_id": None,
+            "job_status": None,
+            "in_flight": False,
+            "unresolved_outcome": False,
+        }
     lease = db.get(ResourceLease, lease_id)
     owner = lease.owner if lease else None
     job_id = owner.removeprefix("h3:") if isinstance(owner, str) and owner.startswith("h3:") else None
     job = db.get(Job, job_id) if job_id else None
+    unresolved = False
+    if job_id:
+        unresolved = bool(
+            db.scalar(
+                select(func.count(JobAttempt.id)).where(
+                    JobAttempt.job_id == job_id,
+                    func.lower(JobAttempt.reconciliation_state).in_(UNRESOLVED_ATTEMPT_STATES),
+                )
+            )
+        )
     return {
         "lease_id": lease_id,
         "lease_status": lease.status if lease else None,
         "job_id": job_id,
         "job_status": job.status if job else None,
         "in_flight": bool(job and job.status in IN_FLIGHT_JOB_STATUSES),
+        "unresolved_outcome": unresolved,
     }
 
 
@@ -494,6 +520,14 @@ def release_managed_processes(
         facts = _live_facts(record)
         state = _state_of(record, facts)
         lease = _lease_state(db, record.get("lease_id"))
+        if lease.get("unresolved_outcome"):
+            refused.append({
+                "id": record.get("service_id") or record.get("instance_id") or record.get("key"),
+                "outcome": "unknown_outcome",
+                "reason": "an attempt's external result is not reconciled",
+                "lease_id": record.get("lease_id"),
+            })
+            continue
         entry = {
             "kind": "review" if record.get("prefix") == REVIEW_PREFIX else "renderer",
             "id": record.get("service_id") or record.get("instance_id") or record.get("key"),

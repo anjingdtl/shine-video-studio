@@ -30,7 +30,6 @@ from shine.api_subtitles import router as subtitles_router
 from shine.comfyops.runtime_configuration import resolve_runtime
 from shine.config import Settings
 from shine.db import make_engine, make_session_factory
-from shine.h3.spoken_language import SPOKEN_LANGUAGES, canonical_spoken_language
 from shine.media.artifacts import safe_asset_path
 from shine.models import (
     AgentArtifact,
@@ -101,6 +100,12 @@ from shine.services import (
     transition,
     update_style_draft,
 )
+from shine.services import (
+    create_project as create_project_record,
+)
+from shine.services import (
+    update_project_settings as apply_project_settings,
+)
 
 logger = logging.getLogger("shine")
 
@@ -120,26 +125,6 @@ class StyleDraftUpdate(StyleBible):
     """The style draft plus an explicit indication that its DSE source stays attached."""
 
     director_style_action: Literal["clear", "preserve"] = "clear"
-
-
-def _canonical_language(value: str) -> str:
-    """The project language in the one form the H3 prompt may use.
-
-    The prompt is written in English and states the spoken language in English,
-    so the language is normalised here.  A name written in another script is
-    refused with a clear message instead of silently breaking the rule pack
-    later, when the job is created.
-    """
-    canonical = canonical_spoken_language(value)
-    if canonical is None:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Project language must be written in English so it can be stated in the H3 prompt; "
-                f"allowed values are {', '.join(SPOKEN_LANGUAGES)}"
-            ),
-        )
-    return canonical
 
 
 def _project_data(project: Project) -> dict[str, Any]:
@@ -523,6 +508,12 @@ def create_app(
     app.include_router(pipeline_router)
     app.include_router(instances_router)
     app.include_router(setup_router)
+    from shine.api_support import router as support_router
+
+    app.include_router(support_router)
+    from shine.api_support_memory import router as support_memory_router
+
+    app.include_router(support_memory_router)
     from shine.api_director_styles import router as director_styles_router
 
     app.include_router(director_styles_router)
@@ -705,15 +696,12 @@ def create_app(
 
     @app.post("/api/v1/projects", status_code=201)
     def create_project(body: CreateProject, db: DBSession) -> dict[str, Any]:
-        project = Project(title=body.title.strip(), description=body.description,
-                          language=_canonical_language(body.language))
-        if not project.title:
-            raise HTTPException(status_code=422, detail="Project title cannot be blank")
-        db.add(project)
-        db.flush()
-        add_audit(db, "user", "PROJECT_CREATED", "project", project.id, project_id=project.id)
-        db.commit()
-        db.refresh(project)
+        project = create_project_record(
+            db,
+            title=body.title,
+            description=body.description,
+            language=body.language,
+        )
         logger.info("project_created id=%s", project.id)
         return jsonable_encoder(_project_data(project))
 
@@ -725,21 +713,7 @@ def create_app(
     def update_project_settings(project_id: str, body: ProjectSettings, db: DBSession) -> dict[str, Any]:
         project = require_project(db, project_id)
         updates = body.model_dump(exclude_unset=True, exclude_none=True)
-        if "language" in updates:
-            updates["language"] = _canonical_language(updates["language"])
-        for key, value in updates.items():
-            setattr(project, key, value)
-        add_audit(
-            db,
-            "user",
-            "PROJECT_SETTINGS_UPDATED",
-            "project",
-            project.id,
-            {"fields": sorted(updates)},
-            project_id=project.id,
-        )
-        db.commit()
-        db.refresh(project)
+        apply_project_settings(db, project, updates)
         return jsonable_encoder(_project_data(project))
 
     @app.post("/api/v1/projects/{project_id}/assets", status_code=201)
