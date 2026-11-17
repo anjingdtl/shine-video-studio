@@ -34,6 +34,7 @@ import argparse
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -158,18 +159,11 @@ def auto_stop_decision(*, now: float, last_seen: float | None, ever_seen: bool,
     return True, "页面已关闭且空闲超过宽限期"
 
 
-def _venv_python() -> Path:
-    python = REPO_ROOT / "backend" / ".venv" / "Scripts" / "python.exe"
-    if not python.is_file():  # posix dev checkout
-        python = REPO_ROOT / "backend" / ".venv" / "bin" / "python"
-    return python
-
-
 def _run_stop(data_dir: Path, kind: str) -> None:
     global _LAST_STOP
     try:
         stop = subprocess.run(
-            [str(_venv_python()), str(REPO_ROOT / "scripts" / "stop_shine.py"),
+            [sys.executable, str(REPO_ROOT / "scripts" / "stop_shine.py"),
              "--data-dir", str(data_dir)],
             capture_output=True, text=True, timeout=180,
             env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
@@ -181,7 +175,7 @@ def _run_stop(data_dir: Path, kind: str) -> None:
                               "ok": False}
             return
         release = subprocess.run(
-            [str(_venv_python()), str(REPO_ROOT / "scripts" / "release_residual_backends.py"),
+            [sys.executable, str(REPO_ROOT / "scripts" / "release_residual_backends.py"),
              "--data-dir", str(data_dir)],
             capture_output=True, text=True, timeout=300,
         )
@@ -220,7 +214,6 @@ def _watchdog(data_dir: Path, minutes: float) -> None:
 
 
 def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
-    python = _venv_python()
     log_dir = data_dir / "run" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -236,7 +229,7 @@ def _run_restart(data_dir: Path, api_port: int, web_port: int) -> None:
         with (log_dir / "restart.stop.log").open("w", encoding="utf-8") as stop_out, \
                 (log_dir / "restart.start.log").open("w", encoding="utf-8") as start_out:
             stop = subprocess.run(
-                [str(python), str(REPO_ROOT / "scripts" / "stop_shine.py"),
+                [sys.executable, str(REPO_ROOT / "scripts" / "stop_shine.py"),
                  "--data-dir", str(data_dir)],
                 stdout=stop_out, stderr=subprocess.STDOUT, timeout=180,
                 env={**os.environ, "SHINE_STARTUP_GUARD_HELD": "0"},
@@ -313,28 +306,30 @@ def _worker_state(manifest: dict | None) -> str:
 
 def _stop_worker(data_dir: Path) -> tuple[int, dict]:
     import stop_shine
-    manifest = _read_manifest(data_dir)
-    if not manifest:
-        return 409, {"code": "STACK_NOT_RUNNING"}
-    entry = next((row for row in manifest.get("processes", [])
-                  if row.get("name") == "worker"), None)
-    if not entry:
-        return 409, {"code": "WORKER_NOT_RECORDED"}
-    # A temporary single-entry manifest: the real record stays untouched, so a
-    # later whole-stack stop skips the gone worker and the next launcher start
-    # reconciles the half stack through its existing safe path.
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
-                                     encoding="utf-8") as handle:
-        json.dump({"processes": [entry]}, handle)
-        temp_path = Path(handle.name)
+    guard = stop_shine._acquire_startup_guard(data_dir)
     try:
-        result = stop_shine.stop_manifest(temp_path)
+        manifest = _read_manifest(data_dir)
+        if not manifest:
+            return 409, {"code": "STACK_NOT_RUNNING"}
+        entry = next((row for row in manifest.get("processes", [])
+                      if row.get("name") == "worker"), None)
+        if not entry:
+            return 409, {"code": "WORKER_NOT_RECORDED"}
+        # Use the same identity-verified stop path for the Worker entry.
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as handle:
+            json.dump({"processes": [entry]}, handle)
+            temp_path = Path(handle.name)
+        try:
+            result = stop_shine.stop_manifest(temp_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        if result != 0:
+            return 409, {"code": "WORKER_STOP_UNRESOLVED",
+                         "detail": "Worker 进程身份无法核验，未强行终止；请走对账。"}
+        _mark_worker_stopped(data_dir)
     finally:
-        temp_path.unlink(missing_ok=True)
-    if result != 0:
-        return 409, {"code": "WORKER_STOP_UNRESOLVED",
-                     "detail": "Worker 进程身份无法核验，未强行终止；请走对账。"}
-    _mark_worker_stopped(data_dir)
+        stop_shine._release_startup_guard(guard)
     return 200, {"status": "STOPPED",
                  "detail": "Worker 已停止，后台记录已同步为离线，可以继续服务核验。"}
 
@@ -370,50 +365,47 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
     import stop_shine
     import shine_processes
     from shine.comfyops.installer import process_identity
-    manifest = _read_manifest(data_dir)
-    if not manifest:
-        return 409, {"code": "STACK_NOT_RUNNING"}
-    if _worker_state(manifest) == "running":
-        return 409, {"code": "WORKER_ALREADY_RUNNING"}
-    if _worker_state(manifest) == "unknown":
-        return 409, {"code": "WORKER_STATE_UNVERIFIED"}
-    python = _venv_python()
-    log_dir = data_dir / "run" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "SHINE_DATA_DIR": str(data_dir), "PYTHONUNBUFFERED": "1"}
-    if manifest.get("database_url"):
-        env["SHINE_DATABASE_URL"] = manifest["database_url"]
-    if manifest.get("render_provider"):
-        env["SHINE_RENDER_PROVIDER"] = manifest["render_provider"]
-    out = open(log_dir / "worker.out.log", "ab")
-    err = open(log_dir / "worker.err.log", "ab")
-    try:
-        process = subprocess.Popen(
-            [str(python), "-m", "shine.worker"], cwd=str(REPO_ROOT), env=env,
-            stdout=out, stderr=err,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-    finally:
-        out.close()
-        err.close()
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline and process.poll() is None:
-        time.sleep(0.1)
-    if process.poll() is not None:
-        return 409, {"code": "WORKER_START_FAILED",
-                     "detail": "Worker 启动后立即退出，见 run/logs/worker.err.log。"}
-    birth = process_identity(process.pid)
-    owners = shine_processes.snapshot(process.pid, birth)
+    # Read the record, start and record the Worker under the same guard as a
+    # whole-stack stop. A concurrent stop must see the new Worker or finish
+    # before this request reads the manifest.
     guard = stop_shine._acquire_startup_guard(data_dir)
     try:
-        manifest = _read_manifest(data_dir) or manifest
+        manifest = _read_manifest(data_dir)
+        if not manifest:
+            return 409, {"code": "STACK_NOT_RUNNING"}
+        state = _worker_state(manifest)
+        if state == "running":
+            return 409, {"code": "WORKER_ALREADY_RUNNING"}
+        if state == "unknown":
+            return 409, {"code": "WORKER_STATE_UNVERIFIED"}
+        log_dir = data_dir / "run" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        env = {**os.environ, "SHINE_DATA_DIR": str(data_dir), "PYTHONUNBUFFERED": "1"}
+        if manifest.get("database_url"):
+            env["SHINE_DATABASE_URL"] = manifest["database_url"]
+        if manifest.get("render_provider"):
+            env["SHINE_RENDER_PROVIDER"] = manifest["render_provider"]
+        with (log_dir / "worker.out.log").open("ab") as out, (log_dir / "worker.err.log").open("ab") as err:
+            process = subprocess.Popen(
+                [sys.executable, "-m", "shine.worker"], cwd=str(REPO_ROOT), env=env,
+                stdout=out, stderr=err,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and process.poll() is None:
+            time.sleep(0.1)
+        if process.poll() is not None:
+            return 409, {"code": "WORKER_START_FAILED",
+                         "detail": "Worker 启动后立即退出，见 run/logs/worker.err.log。"}
+        birth = process_identity(process.pid)
+        owners = shine_processes.snapshot(process.pid, birth)
         entry = next((row for row in manifest.get("processes", [])
                       if row.get("name") == "worker"), None)
         if entry is None:
             entry = {"name": "worker"}
             manifest.setdefault("processes", []).append(entry)
         entry.update(pid=process.pid, birth=birth, owners=owners,
-                     command=f"{python} -m shine.worker")
+                     command=f"{sys.executable} -m shine.worker")
         path = data_dir / "run" / "processes.json"
         tmp = path.with_suffix(f".new-{os.getpid()}")
         tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -556,6 +548,10 @@ class Handler(BaseHTTPRequestHandler):
     def _origin(self) -> str | None:
         return self.headers.get("Origin")
 
+    def _stack_ports(self) -> tuple[int, int]:
+        manifest = _read_manifest(self.data_dir) or {}
+        return manifest.get("api_port") or self.api_port, manifest.get("web_port") or self.web_port
+
     def _refused_origin(self, origin: str | None) -> bool:
         if not _loopback_origin(origin):
             self._send(403, {"code": "SUPERVISOR_CROSS_ORIGIN_REFUSED"})
@@ -586,9 +582,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urlparse(self.path).path
         if path == "/health":
+            api_port, web_port = self._stack_ports()
             self._send(200, {"status": "ok", "role": "supervisor",
+                             "repo_root": str(REPO_ROOT),
                              "data_dir": str(self.data_dir),
-                             "api_port": self.api_port, "web_port": self.web_port}, origin)
+                             "api_port": api_port, "web_port": web_port}, origin)
         elif path == "/restart-status":
             with _LOCK:
                 self._send(200, dict(_STATE), origin)
@@ -696,7 +694,7 @@ class Handler(BaseHTTPRequestHandler):
             self._send(409, {"code": "STACK_BUSY", "detail": blocker}, origin)
             return
         threading.Thread(
-            target=_run_restart, args=(self.data_dir, self.api_port, self.web_port),
+            target=_run_restart, args=(self.data_dir, *self._stack_ports()),
             daemon=True,
         ).start()
         self._send(202, {"status": "RESTARTING"}, origin)

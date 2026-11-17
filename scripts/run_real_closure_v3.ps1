@@ -17,17 +17,17 @@
 #   8. the stack is stopped and the release of every owned resource is proved.
 param(
     [Parameter(Mandatory = $true)][string]$RunName,
+    [Parameter(Mandatory = $true)][string]$SourceDb,
+    [Parameter(Mandatory = $true)][string]$SecretSourceDir,
+    [Parameter(Mandatory = $true)][string]$SecretRef,
+    [Parameter(Mandatory = $true)][string]$ComfyRoot,
+    [Parameter(Mandatory = $true)][string]$ReviewManifest,
+    [Parameter(Mandatory = $true)][string]$ReviewRuntimePackages,
     [string]$Profile = 'local-h3-ref2va-pdd8-2img-1aud',
-    [string]$SourceDb = '',
-    [string]$SecretSourceDir = '',
-    [string]$SecretRef = 'dpapi:ffbf39c1-1a30-459b-8e4e-cca7ba10b3cd.secret',
     [int]$ApiPort = 8140,
     [int]$WebPort = 5183,
     [int]$Shots = 3,
     [int]$TimeoutMinutes = 180,
-    [string]$ComfyRoot = '',
-    [string]$ReviewManifest = '',
-    [string]$ReviewRuntimePackages = '',
     [string]$ReviewPython = '',
     [int]$MinRamMb = 4096,
     [int]$MinVramMb = 12000,
@@ -35,40 +35,32 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-# Maintainer script: never assume a personal ComfyUI checkout. A managed
-# new-machine install keeps it under <SHINE_DATA_DIR>/comfyops/instances/<id>/ComfyUI.
-if (-not $ComfyRoot) {
-    throw 'This is a maintainer acceptance script: pass -ComfyRoot with the ComfyUI directory on THIS machine.'
-}
-if (-not (Test-Path -LiteralPath $ComfyRoot)) { throw "ComfyRoot does not exist: $ComfyRoot" }
 # The tools in this script write progress to stderr.  PowerShell turns native
 # stderr into a terminating error, so every native call merges stderr into
 # stdout and is judged by its exit code instead.
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+$stackSettings = Get-ShineStackSettings $repoRoot
+$env:UV_PROJECT_ENVIRONMENT = $stackSettings.BackendEnv
+$env:PYTHONPATH = Join-Path $repoRoot 'backend'
+$ComfyRoot = (Resolve-Path -LiteralPath $ComfyRoot).Path
+$ReviewManifest = (Resolve-Path -LiteralPath $ReviewManifest).Path
+$ReviewRuntimePackages = (Resolve-Path -LiteralPath $ReviewRuntimePackages).Path
+$SourceDb = (Resolve-Path -LiteralPath $SourceDb).Path
+$SecretSourceDir = (Resolve-Path -LiteralPath $SecretSourceDir).Path
+if (-not $ReviewPython) {
+    $ReviewPython = Join-Path $ComfyRoot 'python_embeded/python.exe'
+}
+$ReviewPython = (Resolve-Path -LiteralPath $ReviewPython).Path
 $runDir = Join-Path $repoRoot ".local-acceptance/final-closure-v3/$RunName"
 $dataDir = Join-Path $runDir 'data'
 $logDir = Join-Path $runDir 'logs'
 New-Item -ItemType Directory -Force -Path $runDir, $logDir | Out-Null
 
-if (-not $ReviewManifest) {
-    $ReviewManifest = Join-Path $repoRoot '.local-acceptance/closeout-20261025/local-review-native-manifest-qwen-asr-20261030.json'
-}
-if (-not $ReviewRuntimePackages) {
-    $ReviewRuntimePackages = Join-Path $repoRoot '.local-acceptance/review-runtime-packages'
-}
-if (-not $ReviewPython) {
-    $ReviewPython = Join-Path $ComfyRoot 'python_embeded/python.exe'
-}
-foreach ($path in @($ReviewManifest, $ReviewRuntimePackages, $ReviewPython)) {
-    if (-not (Test-Path -LiteralPath $path)) { throw "Missing local review input: $path" }
-}
-if (-not $SourceDb) { $SourceDb = Join-Path $repoRoot '.local-acceptance/multishot-20261031/acceptance/shine.db' }
-if (-not (Test-Path -LiteralPath $SourceDb)) { throw "Missing the source master-asset database: $SourceDb" }
-
 # --- the managed renderer recipe -------------------------------------------
 $adapterDir = Join-Path $ComfyRoot 'ComfyUI/custom_nodes/shine_comfy_handoff'
-$adapterHash = & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -c @"
+$adapterHash = & $stackSettings.Python -c @"
 import hashlib, sys
 from pathlib import Path
 d = Path(sys.argv[1])
@@ -156,7 +148,7 @@ if ($ramFreeMb -lt $MinRamMb) {
 # repository or to the evidence directory.
 $operatorToken = [Convert]::ToBase64String((1..48 | ForEach-Object { Get-Random -Maximum 256 }))
 $operatorToken = 'acceptance-' + $operatorToken
-$tokenDigest = & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') -c @"
+$tokenDigest = & $stackSettings.Python -c @"
 import hashlib, sys
 print(hashlib.sha256(sys.argv[1].encode()).hexdigest())
 "@ $operatorToken
@@ -185,11 +177,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The workflow profiles could not be registered.' }
 
     Write-Host 'Seeding the real LLM provider over loopback...'
-    $secretDir = $SecretSourceDir
-    if (-not $secretDir) { $secretDir = Join-Path $repoRoot '.local-acceptance/closeout-20261025/secrets' }
-    if (-not (Test-Path -LiteralPath $secretDir)) { throw "The source secret store is missing: $secretDir" }
     & uv run --project (Join-Path $repoRoot 'backend') python (Join-Path $repoRoot 'scripts/seed_llm_provider.py') `
-        --api "http://127.0.0.1:$ApiPort" --source-secret-dir $secretDir --source-ref $SecretRef `
+        --api "http://127.0.0.1:$ApiPort" --source-secret-dir $SecretSourceDir --source-ref $SecretRef `
         --name 'minimax-agent-storyboard' --model 'MiniMax-M3.1-Flash' --evidence (Join-Path $runDir 'llm-provider-seed.json') `
         2>&1 | Tee-Object -FilePath (Join-Path $logDir 'llm-provider-seed.log')
     if ($LASTEXITCODE -ne 0) { throw 'The LLM provider seeding failed.' }

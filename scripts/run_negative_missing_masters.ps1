@@ -7,6 +7,7 @@
 # project whose masters are approved and locked.
 param(
     [Parameter(Mandatory = $true)][string]$RunName,
+    [Parameter(Mandatory = $true)][string]$ScriptPath,
     [int]$ApiPort = 8140,
     [int]$WebPort = 5183,
     [string]$ExpectMissing = 'CHAR_CHENMO',
@@ -17,6 +18,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+$venvPython = (Get-ShineStackSettings $repoRoot).Python
+$ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
 $runDir = Join-Path $repoRoot ".local-acceptance/final-closure-v3/$RunName"
 $dataDir = Join-Path $runDir 'data'
 $recipePath = Join-Path $runDir 'managed_recipe.json'
@@ -58,25 +62,24 @@ try {
     Write-Host "Submitting the negative script to project $projectId ..."
     # The crew provider is a hosted service, so the script text may only be
     # sent with the same explicit consent the workbench asks the user for.
-    $scriptPath = Join-Path $repoRoot '.local-acceptance/final-closure-v3/negative-missing-masters-script.md'
     $verifyArgs = @(
         (Join-Path $PSScriptRoot 'verify_negative_missing_masters.py'),
         '--api', "http://127.0.0.1:$ApiPort",
         '--project-id', $projectId,
-        '--script', $scriptPath,
+        '--script', $ScriptPath,
         '--out', $outDir,
         '--expect-missing', $ExpectMissing,
         '--expect-present', $ExpectPresent
     )
     if (-not $NoRemoteText) { $verifyArgs += '--allow-remote-text' }
-    & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') @verifyArgs `
+    & $venvPython @verifyArgs `
         2>&1 | Tee-Object -FilePath (Join-Path $outDir 'negative-run.log')
     $negativeExit = $LASTEXITCODE
 } finally {
     if ($started) {
         Write-Host 'Stopping the local stack...'
-        & (Join-Path $repoRoot 'backend/.venv/Scripts/python.exe') (Join-Path $PSScriptRoot 'stop_shine.py') `
-            --data-dir $dataDir 2>&1 | Tee-Object -FilePath (Join-Path $outDir 'stop-stack.log')
+        & (Join-Path $PSScriptRoot 'stop_shine.ps1') -DataDir $dataDir 2>&1 |
+            Tee-Object -FilePath (Join-Path $outDir 'stop-stack.log')
     }
     Remove-Item Env:SHINE_MANAGED_RECIPE -ErrorAction SilentlyContinue
     Remove-Item Env:SHINE_DATA_DIR -ErrorAction SilentlyContinue

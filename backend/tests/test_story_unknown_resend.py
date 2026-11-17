@@ -12,7 +12,7 @@ import pytest
 
 from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
-from shine.materialprep import story
+from shine.materialprep import scenes, story
 from shine.models import AgentTaskRecord
 from tests.test_material_scene_safety import setup_scene
 from tests.test_material_scenes import _prepare, _responder
@@ -118,8 +118,9 @@ def test_the_same_scene_may_not_be_asked_again_twice(api, monkeypatch):
 
 def test_two_scene_calls_keep_a_gap_between_them(api, monkeypatch):
     """One outline makes one call per scene; the calls must not be adjacent."""
-    client, factory, project, doc = setup_scene(
+    client, _factory, project, doc = setup_scene(
         api, monkeypatch, "场景一：房间\n阿德：出发。\n场景二：码头\n阿德：等船。")
+    monkeypatch.setattr(scenes, "MAX_SCENE_CHARS", 20)
     monkeypatch.setenv("SHINE_AGENT_STEP_DELAY_MS", "300")
     stamps = []
 
@@ -128,7 +129,8 @@ def test_two_scene_calls_keep_a_gap_between_them(api, monkeypatch):
         return _responder(messages, schema)
 
     client.app.state.mock_llm_responder = timed
-    _prepare(client, project, doc)
+    response = _prepare(client, project, doc)
+    assert response.status_code == 200, response.text
     assert len(stamps) == 2, stamps
     assert stamps[1] - stamps[0] >= 0.3, "two provider calls must keep a real gap"
 

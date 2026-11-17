@@ -22,28 +22,12 @@ $ErrorActionPreference = 'Stop'
 # native stderr into a terminating error, so those calls run with the
 # preference relaxed and are judged by their exit code instead.
 $PSNativeCommandUseErrorActionPreference = $false
-$explicitDataDir = [bool]$DataDir
-if ($ApiPort -eq $WebPort) { throw 'API and Web require different ports.' }
+if ($ApiPort -eq $WebPort -and -not $AutoPorts) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-# Bootstrap persists only these host-local paths. Never evaluate .env as code.
-$launchEnv = Join-Path $repoRoot '.env'
-if (Test-Path -LiteralPath $launchEnv) {
-    $ownedKeys = @('SHINE_DATA_DIR', 'SHINE_DATABASE_URL', 'SHINE_BOOTSTRAP_ROOT', 'SHINE_BACKEND_ENV', 'UV_CACHE_DIR',
-        'UV_PYTHON_INSTALL_DIR', 'PIP_CACHE_DIR', 'npm_config_cache', 'SHINE_RENDER_PROVIDER', 'SHINE_ENABLE_LOCAL_EXECUTION',
-        'SHINE_IDLE_SHUTDOWN_MINUTES', 'SHINE_ALLOW_SYSTEM_DRIVE')
-    foreach ($line in (Get-Content -LiteralPath $launchEnv)) {
-        if ($line -match '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$' -and $Matches[1] -in $ownedKeys) {
-            $key, $value = $Matches[1], $Matches[2].Trim()
-            if ($value.StartsWith("'") -or $value.StartsWith('"')) {
-                if ($value.Length -lt 2 -or $value[-1] -ne $value[0]) { throw "Invalid quoted local setting: $key" }
-                $value = $value.Substring(1, $value.Length - 2).Replace("\'", "'").Replace('\\', '\')
-            } else { $value = ($value -replace '[ \t]+#.*$', '').Trim() }
-            if ($value.Contains('${')) { throw "Use a resolved local value for $key; launcher does not expand .env expressions." }
-            if (-not [Environment]::GetEnvironmentVariable($key, 'Process')) {
-                [Environment]::SetEnvironmentVariable($key, $value, 'Process')
-            }
-        }
-    }
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+$stackSettings = Get-ShineStackSettings $repoRoot $DataDir
+foreach ($entry in $stackSettings.Environment.GetEnumerator()) {
+    [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
 }
 # The operator activates a managed configuration in the setup wizard, which
 # persists the renderer choice. Honor it on every later start unless the caller
@@ -53,9 +37,13 @@ if (-not $PSBoundParameters.ContainsKey('Provider')) {
     $persistedProvider = [Environment]::GetEnvironmentVariable('SHINE_RENDER_PROVIDER', 'Process')
     if ($persistedProvider -eq 'mock' -or $persistedProvider -eq 'comfyui') { $Provider = $persistedProvider }
 }
-$backendEnv = if ($env:SHINE_BACKEND_ENV) { $env:SHINE_BACKEND_ENV } else { Join-Path $repoRoot 'backend/.venv' }
-$venvPython = Join-Path $backendEnv 'Scripts/python.exe'
-if ($env:SHINE_BACKEND_ENV) { $env:UV_PROJECT_ENVIRONMENT = $backendEnv }
+$venvPython = $stackSettings.Python
+$env:SHINE_DATA_DIR = $stackSettings.DataDir
+$env:SHINE_BACKEND_ENV = $stackSettings.BackendEnv
+$env:UV_PROJECT_ENVIRONMENT = $stackSettings.BackendEnv
+# A venv supplies dependencies; the current checkout supplies the application.
+# Inherited PYTHONPATH and an old editable install must not select the backend.
+$env:PYTHONPATH = Join-Path $repoRoot 'backend'
 if ($env:SHINE_BOOTSTRAP_ROOT) {
     $bootstrapDrive = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($env:SHINE_BOOTSTRAP_ROOT)).TrimEnd('\')
     if ($bootstrapDrive -eq $env:SystemDrive -and $env:SHINE_ALLOW_SYSTEM_DRIVE -ne '1') {
@@ -93,11 +81,6 @@ if ($AdditionalReviewManifest) {
     $AdditionalReviewManifest = (Resolve-Path -LiteralPath $AdditionalReviewManifest).Path
 }
 
-if (-not $DataDir) {
-    $DataDir = if ($env:SHINE_DATA_DIR) { $env:SHINE_DATA_DIR } else { Join-Path $repoRoot '.local-data' }
-}
-$resolvedDataDir = Resolve-Path -LiteralPath $DataDir -ErrorAction SilentlyContinue
-$env:SHINE_DATA_DIR = if ($resolvedDataDir) { $resolvedDataDir.Path } else { [System.IO.Path]::GetFullPath($DataDir) }
 # The API, the Worker and the Web write their diagnostics to log files; a
 # block-buffered pipe would hide a stall until the process ends.
 $env:PYTHONUNBUFFERED = '1'
@@ -116,14 +99,32 @@ function Get-PortOwner([int]$Port) {
 }
 
 function Get-FreeShinePort([int]$Start, [int[]]$Exclude = @()) {
-    for ($port = $Start; $port -lt ($Start + 60); $port++) {
-        if ($Exclude -contains $port) { continue }
-        if (-not (Get-PortOwner $port)) { return $port }
+    $last = [Math]::Min(65535, $Start + 59)
+    for ($port = $Start; $port -le $last; $port++) {
+        if (($Exclude -contains $port) -or (Get-PortOwner $port)) { continue }
+        # The OS can reserve a port without reporting a listening process.
+        $probe = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $port)
+        try {
+            $probe.Start()
+            return $port
+        } catch [Net.Sockets.SocketException] {
+            continue
+        } finally {
+            $probe.Stop()
+        }
     }
-    throw "No free local port between $Start and $($Start + 59)."
+    throw "No free local port between $Start and $last."
 }
 
 $receiptPath = Join-Path $env:SHINE_DATA_DIR 'run/receipts.json'
+
+function Test-ShineSupervisor([int]$Port) {
+    try {
+        $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
+        return ($health.role -eq 'supervisor' -and $health.repo_root -eq $repoRoot -and
+            $health.data_dir -eq $env:SHINE_DATA_DIR)
+    } catch { return $false }
+}
 
 function Get-FileFingerprint([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
@@ -263,6 +264,9 @@ try {
             $workerAlive = Test-RecordedWorkerAlive $record
         }
         if ($record -and $apiAlive -and $webAlive -and $workerAlive) {
+            if ($record.repo_root -ne $repoRoot) {
+                throw "This data directory is serving another checkout: $($record.repo_root). Stop that stack before starting this checkout."
+            }
             # Deliberately no exit here: the guard must be released in the
             # finally below before this process may terminate.
             $existingWebPort = [int]$record.web_port
@@ -289,6 +293,9 @@ try {
                 $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
                 Move-Item -LiteralPath $manifestPath -Destination $archived -Force
                 Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
+                Get-ChildItem -LiteralPath (Split-Path -Parent $manifestPath) -Filter 'processes.unresolved-*.json' -File |
+                    Sort-Object Name -Descending | Select-Object -Skip 5 |
+                    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
             }
             if (Test-Path -LiteralPath $manifestPath) {
                 throw 'This data directory still has a process manifest. Stop or reconcile that stack before restarting.'
@@ -302,13 +309,12 @@ try {
         # not make the only start button unusable. The chosen ports are printed and
         # recorded, so the browser and the stop command use the same ones.
         if ($AutoPorts) {
-            $resolvedApiPort = if (Get-PortOwner $ApiPort) { Get-FreeShinePort $ApiPort } else { $ApiPort }
-            $reserved = @($resolvedApiPort)
-            if ($startReview) { $reserved += $ReviewPort }
-            if ($AdditionalReviewManifest) { $reserved += $AdditionalReviewPort }
-            $resolvedWebPort = if ((Get-PortOwner $WebPort) -or ($reserved -contains $WebPort)) {
-                Get-FreeShinePort $WebPort $reserved
-            } else { $WebPort }
+            $reviewPorts = @()
+            if ($startReview) { $reviewPorts += $ReviewPort }
+            if ($AdditionalReviewManifest) { $reviewPorts += $AdditionalReviewPort }
+            $resolvedApiPort = Get-FreeShinePort $ApiPort $reviewPorts
+            $reserved = @($resolvedApiPort) + $reviewPorts
+            $resolvedWebPort = Get-FreeShinePort $WebPort $reserved
             if ($resolvedApiPort -ne $ApiPort -or $resolvedWebPort -ne $WebPort) {
                 Write-Host "Requested ports are busy; using API $resolvedApiPort / Web $resolvedWebPort instead." -ForegroundColor Yellow
             }
@@ -319,19 +325,15 @@ try {
 
         $backendLock = Join-Path $repoRoot 'backend/uv.lock'
         $backendFingerprint = Get-FileFingerprint $backendLock
-        # A lock receipt only proves a past install. The editable install links
-        # this venv to the checkout it was created from, so a checkout that was
-        # moved or deleted leaves a venv that cannot import `shine` while the
-        # receipt still matches. Ask the interpreter itself, then resync.
-        $backendImportable = $true
-        if (Test-Path $backendEnv) {
-            & $venvPython -c 'import shine' 2>$null | Out-Null
-            $backendImportable = ($LASTEXITCODE -eq 0)
-        }
-        if ($Install -or -not (Test-Path $backendEnv) -or -not $backendImportable -or
-            -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint)) {
+        # The receipt pins dependencies, not the Python source. Check both
+        # against the actual interpreter used by API, migration and Worker.
+        if ($Install -or -not (Test-ShineReceipt 'backend_dependencies' $backendFingerprint) -or
+            -not (Test-ShineCheckoutPython $venvPython $repoRoot)) {
             Invoke-Native 'Python dependency installation' {
                 & uv sync --project (Join-Path $repoRoot 'backend') --locked
+            }
+            if (-not (Test-ShineCheckoutPython $venvPython $repoRoot)) {
+                throw "The Python environment cannot load this checkout: $($stackSettings.BackendEnv)"
             }
             Save-ShineReceipt 'backend_dependencies' @{ fingerprint = $backendFingerprint; command = 'uv sync --locked' }
         }
@@ -388,7 +390,7 @@ try {
         # The database that is actually migrated and used. It is derived from the
         # resolved data directory, so a copy database never points back at production
         # media while still sharing the production database file.
-        $databaseUrl = if ($env:SHINE_DATABASE_URL -and -not $explicitDataDir) { $env:SHINE_DATABASE_URL } else { "sqlite:///$((Join-Path $env:SHINE_DATA_DIR 'shine.db').Replace('\','/'))" }
+        $databaseUrl = $stackSettings.DatabaseUrl
         if (-not $databaseUrl.StartsWith('sqlite:///')) { throw 'The local launcher requires a SQLite database URL.' }
         $env:SHINE_DATABASE_URL = $databaseUrl
         $checkPorts = @($ApiPort, $WebPort)
@@ -399,9 +401,14 @@ try {
         Write-Host "Data directory: $env:SHINE_DATA_DIR"
         Write-Host "Database:       $databaseUrl"
 
-        $migrationLog = Join-Path $env:TEMP 'shine-alembic-upgrade.log'
+        $migrationLog = Join-Path $logDir 'migration.err.log'
         Invoke-Native 'Database migration' {
-            & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+            Push-Location -LiteralPath $repoRoot
+            try {
+                & $venvPython -m alembic -c (Join-Path $repoRoot 'backend/alembic.ini') upgrade head 2> $migrationLog
+            } finally {
+                Pop-Location
+            }
         }
         Get-Content $migrationLog -Tail 5 -ErrorAction SilentlyContinue | ForEach-Object { Write-Host $_ }
         Save-ShineReceipt 'database_migration' @{
@@ -464,7 +471,7 @@ try {
             return $path
         }
 
-        function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
+        function New-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
             $stdout = Join-Path $logDir "$Name.out.log"
             $stderr = Join-Path $logDir "$Name.err.log"
             # A child must never inherit the launcher's stdin.  When the parent
@@ -487,7 +494,11 @@ try {
                 # console handle.
                 $startArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
             }
-            $process = Start-Process @startArgs
+            return (Start-Process @startArgs)
+        }
+
+        function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
+            $process = New-ShineProcess $Name $FilePath $Arguments $WorkingDirectory
             $info = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
             $entry = [ordered]@{
                 name = $Name
@@ -495,8 +506,8 @@ try {
                 start_time = if ($info) { $info.StartTime.ToString('o') } else { $null }
                 birth = if ($info) { $info.StartTime.ToUniversalTime().ToFileTimeUtc().ToString() } else { $null }
                 working_dir = $WorkingDirectory
-                stdout_log = $stdout
-                stderr_log = $stderr
+                stdout_log = Join-Path $logDir "$Name.out.log"
+                stderr_log = Join-Path $logDir "$Name.err.log"
                 command = "$FilePath $($Arguments -join ' ')"
             }
             $script:started += $entry
@@ -614,33 +625,31 @@ try {
         # The resident supervisor lets the page restart a dead backend (the API
         # cannot restart itself). It is recorded in run/supervisor.json, NOT in
         # processes.json, so stop_shine.py never kills it mid-restart.
-        $supervisorAlive = $false
-        try {
-            $sup = Invoke-RestMethod "http://127.0.0.1:$SupervisorPort/health" -TimeoutSec 2
-            $supervisorAlive = ($sup.role -eq 'supervisor')
-        } catch { }
-        if (-not $supervisorAlive) {
-            $supLog = Join-Path $logDir 'supervisor.out.log'
-            $supErr = Join-Path $logDir 'supervisor.err.log'
-            $supArgs = @{
-                WindowStyle           = 'Hidden'
-                FilePath              = $venvPython
-                ArgumentList          = @(
-                    (Join-Path $PSScriptRoot 'shine_supervisor.py'),
-                    '--data-dir', $env:SHINE_DATA_DIR,
-                    '--port', "$SupervisorPort",
-                    '--api-port', "$ApiPort",
-                    '--web-port', "$WebPort"
-                )
-                WorkingDirectory      = $repoRoot
-                RedirectStandardOutput = $supLog
-                RedirectStandardError = $supErr
+        $supervisorRecord = Join-Path $runDir 'supervisor.json'
+        if (Test-Path -LiteralPath $supervisorRecord) {
+            try {
+                $saved = Get-Content -LiteralPath $supervisorRecord -Raw -Encoding UTF8 | ConvertFrom-Json
+                if ($saved.port) { $SupervisorPort = [int]$saved.port }
+            } catch { }
+        }
+        if (-not (Test-ShineSupervisor $SupervisorPort)) {
+            $SupervisorPort = Get-FreeShinePort $SupervisorPort @($ApiPort, $WebPort)
+            $arguments = @((Join-Path $PSScriptRoot 'shine_supervisor.py'), '--data-dir', $env:SHINE_DATA_DIR,
+                '--port', "$SupervisorPort", '--api-port', "$ApiPort", '--web-port', "$WebPort")
+            $supervisor = New-ShineProcess 'supervisor' $venvPython $arguments $repoRoot
+            $supervisorAlive = $false
+            for ($i = 0; $i -lt 20 -and -not $supervisor.HasExited; $i++) {
+                if (Test-ShineSupervisor $SupervisorPort) {
+                    $supervisorAlive = $true
+                    break
+                }
+                Start-Sleep -Milliseconds 250
             }
-            if ($PSVersionTable.PSVersion.Major -ge 6) {
-                $supArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
+            if ($supervisorAlive) {
+                Write-Host "Started supervisor on port $SupervisorPort (page can restart the stack)"
+            } else {
+                Write-Warning "The workbench started, but the supervisor is unavailable. See $(Join-Path $logDir 'supervisor.err.log')."
             }
-            Start-Process @supArgs | Out-Null
-            Write-Host "Started supervisor on port $SupervisorPort (page can restart the stack)"
         }
     }
 } catch {
@@ -669,7 +678,7 @@ Write-Host "Worker mode:    $Provider"
 Write-Host "Logs:           $logDir"
 Write-Host "Process record: $manifestPath"
 Write-Host ''
-Write-Host "Stop with:  `"$venvPython`" scripts/stop_shine.py --data-dir `"$env:SHINE_DATA_DIR`""
+Write-Host "Stop with:  .\scripts\stop_shine.ps1 -DataDir `"$env:SHINE_DATA_DIR`""
 if ($Provider -eq 'comfyui') {
     Write-Warning 'ComfyUI mode is configured. A queued job is only a real video after a real ComfyUI attempt produced an artifact that passed technical QC.'
 } else {

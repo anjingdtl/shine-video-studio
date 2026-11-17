@@ -156,6 +156,7 @@ def test_no_launch_persists_selected_paths_and_preserves_existing_default_data(
     (repo / 'scripts').mkdir(parents=True)
     (repo / 'config/deployment').mkdir(parents=True)
     shutil.copyfile(BOOTSTRAP, repo / 'scripts/bootstrap.ps1')
+    shutil.copyfile(REPO / 'scripts/shine_local_config.ps1', repo / 'scripts/shine_local_config.ps1')
     shutil.copyfile(REPO / 'config/deployment/tools-windows-x64.json',
                     repo / 'config/deployment/tools-windows-x64.json')
     initial_env = 'UNRELATED=preserve-me\n' + ('SHINE_ENABLE_LOCAL_EXECUTION=0\n' if execution_optout else '')

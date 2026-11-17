@@ -1,7 +1,8 @@
 # 启动器的 GitHub Actions 工作流
 
-这里存放 Shine Launcher 自己的持续集成工作流**源文件**。GitHub 只运行位于
-`.github/workflows/` 下的工作流，因此实际生效的副本由安装脚本放入：
+Windows x64 构建由 [GitHub Actions 工作流](../../../.github/workflows/launcher-windows.yml) 定义。EXE、SHA-256、构建信息和 ZIP 由对应 commit 的运行记录提供。仓库根的 `ShineLauncher.exe` 是有独立构建信息的快照，日常开发启动用 `启动 Shine 工作台.cmd`。
+
+本目录的 `launcher-release.yml` 是可选的签名发布模板。需要启用签名发布时，由维护者安装：
 
 ```powershell
 pwsh -File launcher/packaging/ci/install_workflows.ps1
@@ -12,20 +13,6 @@ pwsh -File launcher/packaging/ci/install_workflows.ps1
 ```powershell
 pwsh -File launcher/packaging/ci/install_workflows.ps1 -Verify
 ```
-
-## 文件
-
-| 文件 | 作用 |
-| --- | --- |
-| `launcher-windows.yml` | Windows x64 构建、单测、Clippy、Release EXE、smoke-check 与 self-test 自检、ZIP 打包与校验，并把验证过的 EXE 发布到 Clone 根目录 |
-| `launcher-release.yml` | 正式发布流程：从 tag 生成部署清单 → 用 GitHub Secret 中的私钥签名 → 用仓库内的公钥信任锚复核 → 产出签名清单。缺密钥时**失败关闭**，不发布未签名产物 |
-
-## 为什么源文件不直接放在 .github/workflows
-
-发布工作流需要向 `.github/workflows/` 写入文件。自动化身份（GitHub App）
-默认被限制在该目录之外，无法写入工作流目录本身；把源文件放在这里，由有仓库
-写权限的本地流程安装，既保留"启动器拥有自己的 CI 定义"这一结构，又不阻塞
-本次合入。
 
 ## 密钥
 

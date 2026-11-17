@@ -382,7 +382,11 @@ def test_an_ambiguous_identity_is_reported_but_does_not_block(api):
     """
     client, factory, _ = api
     project_id = _project(client)
-    document = _document(client, project_id, "场景一：\n林知远：你来了。\n\n场景二：\n林知远转身。\n")
+    # Each heading interval fits in one extraction unit, but both exceed the
+    # unit's budget together. A short script with two headings is read once.
+    document = _document(client, project_id,
+        "场景一：\n林知远：你来了。\n" + "林知远拾起刻字的铜怀表并把它收好。\n" * 140
+        + "场景二：\n四十岁上下、穿灰袍的林知远转身。\n" + "林知远沿着码头走向远处的船舱。\n" * 140)
 
     ambiguous = {
         **SCENE,
@@ -397,7 +401,9 @@ def test_an_ambiguous_identity_is_reported_but_does_not_block(api):
             }
         ],
     }
-    analyzed = _analyze(client, project_id, document, scenes=[SCENE, ambiguous], key="ambiguous").json()
+    response = _analyze(client, project_id, document, scenes=[SCENE, ambiguous], key="ambiguous")
+    assert response.status_code == 202, response.text
+    analyzed = response.json()
     assert analyzed["conflicts"], analyzed
     assert analyzed["conflicts"][0]["code"] == "MATERIAL_IDENTITY_AMBIGUOUS"
 

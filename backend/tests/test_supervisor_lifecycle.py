@@ -36,6 +36,28 @@ def test_auto_stop_decision_matrix():
     assert supervisor.auto_stop_decision(**{**base, "last_seen": now - 60})[0] is False
 
 
+def test_worker_start_reads_the_record_after_taking_the_stack_guard(tmp_path, monkeypatch):
+    import stop_shine
+
+    run = tmp_path / "run"
+    run.mkdir()
+    record = run / "processes.json"
+    record.write_text(json.dumps({"processes": []}))
+
+    def acquire_after_stack_stop(data_dir):
+        assert data_dir == tmp_path
+        record.unlink()
+        return None
+
+    monkeypatch.setattr(stop_shine, "_acquire_startup_guard", acquire_after_stack_stop)
+    monkeypatch.setattr(
+        supervisor.subprocess, "Popen",
+        lambda *args, **kwargs: pytest.fail("A stopped stack cannot start a new Worker"),
+    )
+    assert supervisor._start_worker(tmp_path) == (409, {"code": "STACK_NOT_RUNNING"})
+    assert not record.exists()
+
+
 @pytest.fixture()
 def server(tmp_path, monkeypatch):
     monkeypatch.setattr(supervisor, "_PRESENCE", {"last_seen": None, "ever_seen": False})

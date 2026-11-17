@@ -9,6 +9,7 @@ permission-restricted `0600` file on non-Windows hosts) and are never returned b
 | --- | --- | --- |
 | `SHINE_DATA_DIR` | `.local-data` | SQLite database, content-addressed user assets, artifacts, and secret files |
 | `SHINE_DATABASE_URL` | SQLite file under `SHINE_DATA_DIR` | Optional SQLAlchemy URL override |
+| `SHINE_BACKEND_ENV` | `backend/.venv` in a source checkout | Optional Windows dependency environment. The installer records the location on the selected disk. |
 | `SHINE_RENDER_PROVIDER` | `mock` | `mock` or `comfyui`. `comfyui` is only valid after local H3 acceptance |
 | `SHINE_COMFYUI_URL` | `http://127.0.0.1:8188` | Local ComfyUI API endpoint. It must point at this machine unless `SHINE_ALLOW_REMOTE_COMFYUI=1` is set |
 | `SHINE_ALLOW_REMOTE_COMFYUI` | unset | Explicit opt-in for a non-loopback ComfyUI. Reference bytes are uploaded to the renderer, so a remote renderer is a cloud transmission of user media |
@@ -22,6 +23,13 @@ permission-restricted `0600` file on non-Windows hosts) and are never returned b
 | `SHINE_ENABLE_LOCAL_EXECUTION` | unset | Explicit `1` enables approved Windows local install/instance execution; it does not approve a plan |
 | `SHINE_VOICE_SDK_PACKAGES` | unset | JSON mapping `design`, `base`, `asr`, `align` to exact installed ModelPackage IDs |
 | `SHINE_VOICE_ROLE_RUNTIMES` | unset | JSON mapping those roles to pinned direct Python/SDK/runtime directories and admission budgets; see the operator guide |
+
+On Windows, start and stop use process settings before repository `.env` settings.
+Configuration paths are relative to the repository. An explicit `-DataDir` is
+relative to the caller and selects the `shine.db` inside it. When a process
+overrides `SHINE_DATA_DIR`, any custom database URL for that run comes from the
+same process environment. The Python environment supplies dependencies while
+the launcher selects application source from the current repository.
 
 The API and Vite development server bind to `127.0.0.1`. General CRUD has no
 account login; protected operations require local human operator authentication

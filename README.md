@@ -157,16 +157,22 @@ are preserved. This is not a declaration of final film-quality acceptance.
 
 Requirements: Python 3.12, Astral `uv`, Node.js 20+ and npm. FFmpeg/FFprobe are optional but required for decode and silence QC. No API key, GPU, ComfyUI, or Codex runtime is needed for the Mock workflow.
 
-On Windows, open PowerShell in the repository:
+On Windows, double-click `启动 Shine 工作台.cmd`. With the required tools installed,
+the launcher synchronizes the pinned dependencies on first use. You can also start
+or stop the same stack from PowerShell in the repository:
 
 ```powershell
-if (!(Test-Path .env)) { Copy-Item .env.example .env }
-./scripts/check_environment.ps1
-./scripts/start_shine.ps1 -Install
+./scripts/start_shine.ps1 -AutoPorts -OpenBrowser
 ./scripts/check_health.ps1
+# To stop:
+./scripts/stop_shine.ps1
 ```
 
-`start_shine.ps1` performs the Alembic migration and opens separate API, worker, and Web windows. Use `-Provider comfyui` only after local H3 acceptance. Open `http://127.0.0.1:5173`; API health is `http://127.0.0.1:8000/health`, and system/worker status is `http://127.0.0.1:8000/api/v1/system/status`.
+The launcher applies Alembic migrations and starts the API, worker, and Web UI.
+Use `-Provider comfyui` only after local H3 acceptance. The launcher prints the
+actual loopback addresses. With the default ports, the Web UI is on
+`http://127.0.0.1:5173` and API health is on `http://127.0.0.1:8000/health`.
+If you use a different API port, set `SHINE_API_URL` before running `check_health.ps1`.
 
 To verify the whole local stack without touching an existing project database:
 
@@ -205,7 +211,8 @@ browser does not stop the run.
 To drive the same chain from a script against a local stack:
 
 ```powershell
-./scripts/run_real_acceptance.ps1 -RunName <run-name> -ComfyRoot <本机 ComfyUI 目录> `
+./scripts/run_real_acceptance.ps1 -RunName $runName -ComfyRoot $comfyPortableRoot `
+  -SourceDb $sourceDb -ReviewManifest $reviewManifest -ReviewRuntimePackages $reviewPackages `
   -Profile local-h3-ref2va-pdd8-2img-1aud -Shots 3
 ```
 
@@ -214,11 +221,14 @@ registers the real H3 workflow profiles, drives a real browser through the whole
 production chain and writes the evidence to `.local-acceptance/final-local-pass/`.
 The scripts need PowerShell 7.
 
-`run_real_acceptance.ps1` / `run_real_closure_v3.ps1` / `run_asr_qualification.ps1` are
-**maintainer** tools: they intentionally have no default ComfyUI path, because a package
-never knows where a tester keeps one. Pass `-ComfyRoot` / `-ReviewPython` explicitly; a
-managed new-machine install keeps ComfyUI under
-`<SHINE_DATA_DIR>\comfyops\instances\<id>\ComfyUI`.
+Set the example variables to inputs on the machine doing the acceptance. The two
+real production scripts take the root of a ComfyUI portable installation, the
+source asset database, and the review manifest and packages. Supply `-ReviewPython`
+if the review runtime uses a separate interpreter. `run_real_closure_v3.ps1` also
+takes `-SecretSourceDir` and `-SecretRef` for the local DPAPI store.
+`run_asr_qualification.ps1` takes the local review manifest, interpreter and
+packages plus the explicit TTS and Qwen3-ASR model and package paths.
+The negative master-asset test takes `-ScriptPath` and a prior run name.
 
 ## Tests and checks
 

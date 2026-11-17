@@ -11,7 +11,7 @@ never printed, logged or written to the evidence: only the HTTP status, the
 finish reason and the token usage are recorded.
 
     python scripts/probe_llm_generation_options.py \
-        --source-secret-dir .local-acceptance/closeout-20261025/secrets \
+        --source-secret-dir <local-secret-directory> \
         --source-ref dpapi:ffbf39c1-1a30-459b-8e4e-cca7ba10b3cd.secret
 """
 from __future__ import annotations

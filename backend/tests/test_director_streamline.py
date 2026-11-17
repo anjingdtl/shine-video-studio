@@ -1070,12 +1070,14 @@ def test_journey_follows_the_current_plan_beside_an_older_scoped_package(api):
     profile = register_workflow_profile(client, mode="Ref2VA")
     package = _confirmed_scoped_package(client, factory, project, profile, ["ep-01"])
 
-    # The finished episode moves on even while ep-02 is still pending: the gate
-    # covers the package's own scope, not the whole old plan.
+    # The package covers ep-01. The project journey reports the remaining
+    # storyboard work across the current plan while ep-01 stays ready.
     journey = client.get(f"/api/v1/projects/{project}/journey").json()
     stage = next(row for row in journey["stages"] if row["id"] == "storyboard")
-    assert not any(b["code"] == "EPISODE_PLAN_NOT_MATERIALIZED" for b in stage["blockers"])
-    assert stage["done"] is True, stage["blockers"]
+    pending = next(b for b in stage["blockers"] if b["code"] == "EPISODE_PLAN_NOT_MATERIALIZED")
+    assert pending["pending_section_count"] > 0
+    assert stage["done"] is False
+    assert stage["facts"]["ready_episode_ids"] == ["ep-01"]
 
     # Retry the blocked episode; landing auto-confirms it into a new plan version.
     state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()

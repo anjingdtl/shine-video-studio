@@ -342,30 +342,11 @@ if ($defaultManifest -and -not $CheckOnly) {
         $readPassword = { Get-ShineOperatorPasswordFile $operatorCredentialPath }
         Initialize-ShineOperator (Join-Path $repoRoot '.env') $readPassword
     }
-    if (-not $DataDir) {
-        if ($env:SHINE_DATA_DIR) { $DataDir = $env:SHINE_DATA_DIR }
-        else {
-            $existingEnvFile = Join-Path $repoRoot '.env'
-            $storedEnvironment = if (Test-Path -LiteralPath $existingEnvFile) {
-                Get-Content -LiteralPath $existingEnvFile -Raw -Encoding UTF8
-            } else { '' }
-            $storedDataDir = [regex]::Match($storedEnvironment, '(?m)^SHINE_DATA_DIR=([^\r\n]+)')
-            if ($storedDataDir.Success) {
-                $DataDir = $storedDataDir.Groups[1].Value.Trim()
-                if ($DataDir.StartsWith("'") -or $DataDir.StartsWith('"')) {
-                    if ($DataDir.Length -lt 2 -or $DataDir[-1] -ne $DataDir[0]) {
-                        throw 'Pass the resolved existing data directory with -DataDir; its quoted .env value is ambiguous.'
-                    }
-                    $DataDir = $DataDir.Substring(1, $DataDir.Length - 2).Replace("\'", "'").Replace('\\', '\')
-                } else { $DataDir = ($DataDir -replace '[ \t]+#.*$', '').Trim() }
-                if ($DataDir.Contains('${')) { throw 'Pass the resolved existing data directory with -DataDir; bootstrap does not expand .env expressions.' }
-                if (-not [IO.Path]::IsPathRooted($DataDir)) { $DataDir = Join-Path $repoRoot $DataDir }
-            } elseif (Test-Path -LiteralPath (Join-Path $repoRoot '.local-data')) {
-                $DataDir = Join-Path $repoRoot '.local-data'
-            } else { $DataDir = Join-Path $StorageRoot 'data' }
-        }
-    }
-    if (-not $explicitDataDir -and -not [IO.Path]::IsPathRooted($DataDir)) { $DataDir = Join-Path $repoRoot $DataDir }
+    . (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+    $stackSettings = Get-ShineStackSettings $repoRoot $DataDir
+    $legacyDataDir = Join-Path $repoRoot '.local-data'
+    $DataDir = if (-not $explicitDataDir -and -not $stackSettings.Environment.SHINE_DATA_DIR -and
+        (Test-Path -LiteralPath $legacyDataDir -PathType Container)) { $legacyDataDir } else { $stackSettings.DataDir }
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     $storagePreferences = Join-Path $DataDir 'deployment-storage.json'
     if (-not (Test-Path -LiteralPath $storagePreferences)) {

@@ -20,7 +20,7 @@ Usage (the stack must already be running):
 
     uv run --project backend --with playwright==1.62.0 python scripts/verify_real_production.py ^
         --api http://127.0.0.1:8000 --web http://127.0.0.1:5173 ^
-        --source-db .local-acceptance/multishot-20261031/acceptance/shine.db ^
+        --source-db <source-asset-database> ^
         --evidence-dir .local-acceptance/final-local-pass/<run> ^
         --profile local-h3-ref2va-pdd8-2img-1aud ^
         --operator-token "$env:SHINE_OPERATOR_TOKEN"

@@ -26,7 +26,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.data_dir:
         import os
 
-        os.environ["SHINE_DATA_DIR"] = str(Path(args.data_dir).resolve())
+        data_dir = Path(args.data_dir).resolve()
+        os.environ["SHINE_DATA_DIR"] = str(data_dir)
+        os.environ["SHINE_DATABASE_URL"] = f"sqlite:///{(data_dir / 'shine.db').as_posix()}"
 
     from fastapi import HTTPException
 

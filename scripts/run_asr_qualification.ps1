@@ -5,9 +5,13 @@
 # transcribes them and the raw responses are recorded next to the score.
 param(
     [Parameter(Mandatory = $true)][string]$EvidenceDir,
-    [string]$Manifest = '',
-    [string]$RuntimePackages = '',
-    [string]$ReviewPython = '',
+    [Parameter(Mandatory = $true)][string]$Manifest,
+    [Parameter(Mandatory = $true)][string]$RuntimePackages,
+    [Parameter(Mandatory = $true)][string]$ReviewPython,
+    [Parameter(Mandatory = $true)][string]$TtsPackages,
+    [Parameter(Mandatory = $true)][string]$TtsModel,
+    [Parameter(Mandatory = $true)][string]$QwenAsrPackages,
+    [Parameter(Mandatory = $true)][string]$QwenAsrModelRoot,
     [int]$AsrPort = 8117,
     [string]$AsrModel = 'local-qwen3-asr-0.6b',
     [int]$TimeoutMinutes = 90
@@ -16,27 +20,19 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$venvPython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
-
-if (-not $Manifest) {
-    $Manifest = Join-Path $repoRoot '.local-acceptance/closeout-20261025/local-review-native-manifest-20261026.json'
-}
-if (-not $RuntimePackages) {
-    $RuntimePackages = Join-Path $repoRoot '.local-acceptance/review-runtime-packages'
-}
-if (-not $ReviewPython) {
-    throw 'Maintainer script: pass -ReviewPython with the interpreter that owns the pinned review runtime on THIS machine.'
-}
-foreach ($path in @($Manifest, $RuntimePackages, $ReviewPython)) {
-    if (-not (Test-Path -LiteralPath $path)) { throw "Missing local review input: $path" }
-}
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+$venvPython = (Get-ShineStackSettings $repoRoot).Python
+$Manifest = (Resolve-Path -LiteralPath $Manifest).Path
+$RuntimePackages = (Resolve-Path -LiteralPath $RuntimePackages).Path
+$ReviewPython = (Resolve-Path -LiteralPath $ReviewPython).Path
 New-Item -ItemType Directory -Force -Path $EvidenceDir | Out-Null
 
 $executor = $null
 try {
     $script = Join-Path $repoRoot 'scripts/local_review_isolated_server.py'
+    $executorArguments = @($script, '--manifest', $Manifest, '--runtime-packages', $RuntimePackages, '--port', "$AsrPort")
     $executor = Start-Process -PassThru -WindowStyle Hidden -FilePath $ReviewPython -WorkingDirectory $repoRoot `
-        -ArgumentList @($script, '--manifest', $Manifest, '--runtime-packages', $RuntimePackages, '--port', "$AsrPort") `
+        -ArgumentList ($executorArguments | ForEach-Object { '"' + $_ + '"' }) `
         -RedirectStandardOutput (Join-Path $EvidenceDir 'asr-executor.out.log') `
         -RedirectStandardError (Join-Path $EvidenceDir 'asr-executor.err.log')
     $ready = $false
@@ -51,7 +47,9 @@ try {
     & $venvPython (Join-Path $PSScriptRoot 'qualify_local_asr.py') `
         --asr-base "http://127.0.0.1:$AsrPort" --evidence-dir $EvidenceDir `
         --asr-model $AsrModel --asr-python $ReviewPython `
-        --tts-python $ReviewPython 2> (Join-Path $EvidenceDir 'asr-qualification.err.log')
+        --tts-python $ReviewPython --tts-packages $TtsPackages --tts-model $TtsModel `
+        --qwen-asr-packages $QwenAsrPackages --qwen-asr-model-root $QwenAsrModelRoot `
+        2> (Join-Path $EvidenceDir 'asr-qualification.err.log')
     Get-Content (Join-Path $EvidenceDir 'asr-qualification.err.log') -Tail 20 -ErrorAction SilentlyContinue |
         ForEach-Object { Write-Host $_ }
     if ($LASTEXITCODE -ne 0) { throw 'The ASR qualification failed.' }

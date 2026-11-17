@@ -83,13 +83,24 @@ Never bundle official full-text guides without redistribution permission. Run
 1. Inspect current repo and upstream implementations/commit IDs before reuse; write `docs/upstream-audit.md`.
 2. Keep feature changes small, testable and recoverable. Do not alter locked product decisions without user confirmation.
 3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.
-4. Use feature branches/PRs for substantial changes where available; do not destroy history or silently force-push.
+4. Follow the user's specified checkout and branch. For direct work on `main`, keep changes in the current checkout, preserve unrelated local files, and use an ordinary push when authorized.
 5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
+
+### 新机安装、仓库搬迁与主分支交付
+
+- **源码以当前仓库为准。** 从入口脚本自身推导仓库根。外置虚拟环境只提供依赖，安装修复和运行使用同一个解释器，API、Worker 和迁移都从当前仓库加载 `shine`。复用依赖时用现有的安装回执和解释器核对这一点。
+- **配置读取和启停各有唯一实现。** Windows 路径由 `scripts/shine_local_config.ps1` 解析。数据目录按命令行 `-DataDir`、进程环境、当前仓库 `.env`、默认目录的顺序解析。显式 `-DataDir` 同步限定 SQLite 位置。开发入口、安装入口与监督进程都交给 `start_shine.ps1` 做整栈启动和存活裁决，停止沿用 `stop_shine.py` 的进程身份核对。整栈与单 Worker 启停共用同一把锁和 `processes.json`。
+- **路径按用途决定来源。** 仓库文件相对于仓库根，安装和数据文件相对于当前配置的根，机器专属输入由维护命令显式传入。`.local-acceptance/` 只作隔离验收输出。把绝对路径、旧 worktree、旧分支和个人 DB、模型、密钥引用限定在历史证据中，正式执行路径从当前配置或发布输入解析。
+- **锁文件和 CI 以公共仓库可用为准。** `backend/pyproject.toml` 与 `backend/uv.lock` 共同锁定公开 PyPI。检查锁文件的 registry、下载 URL 和版本变化，使用默认配置及 `uv --no-config sync --project backend --locked --dry-run` 验证。Windows Launcher 的有效构建定义在 `.github/workflows/launcher-windows.yml`，按触发 commit 上传构建产物。当前主分支由操作者授权的普通 push 更新。
+- **用实际启动验证路径。** 改安装、启动、依赖或发布后，从当前工作目录以外调用入口，使用含空格和中文的隔离路径，覆盖外置虚拟环境、端口被占用、半栈恢复和停止。核对实际源码、进程、SQLite 与 Web。全新缓存安装、复用依赖启动、打包校验与真实 H3 出片分别记录验收结果。安装包的临时解包只用于验证交付物。
 
 ### 全量回归执行方式（固定规则：后端 8 分片并行）
 
 后端全量 `pytest backend/tests -q` 单进程串行要 1.5 小时量级，**不允许**这样跑；本项目
 的全量回归一律按测试文件均分成 **8 个分片并行**执行，单次约 10 分钟。
+
+Windows 从当前仓库调用 `.\run_backend_shards.ps1 -WorkRoot <非系统盘上的隔离测试目录>`。
+脚本沿用当前仓库配置的 Python，每轮使用独立的临时目录，并记录 8 个分片的退出码与日志。
 
 ```bash
 cd <repo>
@@ -451,8 +462,8 @@ CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
 | --- | --- | --- |
 | `一键启动 Shine 视频工作台.lnk` | 日常双击 | 仓库路径、PowerShell 7 路径、脚本名/参数、图标变化时 |
 | `启动 Shine 工作台.cmd` | 快捷方式失效时的便携入口 | 脚本名/参数变化时 |
-| `scripts/start_dev.ps1` | 选择端口、收尾旧栈、调用 start_shine | 启动逻辑变化时 |
-| `scripts/start_shine.ps1` | 迁移数据库、启动 API/Worker/Web、写进程记录 | 服务启动逻辑变化时 |
+| `scripts/start_dev.ps1` | 调用 start_shine，处理桌面启动窗口 | 入口参数变化时 |
+| `scripts/start_shine.ps1` | 选择端口、收尾旧栈、迁移数据库、启动 API/Worker/Web、写进程记录 | 服务启动逻辑变化时 |
 
 **更新快捷方式**：运行 `scripts\update_dev_shortcut.ps1`（重建 lnk 的
 Target/Arguments/WorkingDirectory，保留原图标）。不要手写一个指向绝对路径的 lnk 后
@@ -1909,12 +1920,9 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   全部改走它，`identity["recipe"]` 这种「记录路径当可访问路径」的读法已删净。
 - **证据封条只封机器**。`configuration_fingerprint(identity)` 只含上面五项事实；
   读取时同时接受旧口径 `graph_hash(identity)`，旧证据继续有效，不逼操作员重验。
-- **钉死路径排查结论**：主仓代码/脚本/入库配置里**没有**指向其他 worktree、副本或
-  非主分支的路径；`git worktree list` 只有主仓一条，分支为 `main`。残留只在两处本机配置：
-  `.env` 的 `SHINE_DATA_DIR` 仍在 `.local-acceptance` 的验收副本里（未擅自改，待操作员裁定），
-  以及 shell 的 `PYTEST_DEBUG_TEMPROOT=F:/ClaudeWorkSpace/.pytest-tmp` 指向已占满的 F: 盘
-  （会让全量回归变成整片 `OSError: could not create numbered dir` 假失败，改到 C: 即恢复）。
-  `.env.example` 的写死绝对路径示例与本机 `.env` 里无消费者的 `SHINE_SETUP_RECIPE` 已删。
+- **钉死路径后续复验**沿用上面的「新机安装、仓库搬迁与主分支交付」处理方式。
+  R4 覆盖受管运行配方与安装事实。启动器、依赖锁、GitHub Actions 和维护脚本的复验见
+  [主仓可移植性验收](docs/ACCEPTANCE_20261117_MAIN_PORTABILITY.md)。
 - **固定规则（不再犯）**：修复与验证一律在**主仓原地、当前分支**上做，不新建 worktree、
   不新建副本、不把运行配置指向 `.local-acceptance`；记录进台账的绝对路径一律视为书签，
   下次启动按现状解析，不要拿它直接当可访问路径。

@@ -26,7 +26,6 @@ from pathlib import Path
 
 import httpx
 
-REPO = Path(__file__).resolve().parents[1]
 
 CASES = [
     {
@@ -241,25 +240,27 @@ def main() -> int:
     parser.add_argument("--asr-base", required=True, help="Base URL of a running local review executor")
     parser.add_argument("--asr-model", default="local-qwen3-asr-0.6b")
     parser.add_argument("--evidence-dir", required=True)
-    parser.add_argument("--tts-packages", default=str(REPO / ".local-acceptance/tts-runtime-packages"))
-    parser.add_argument("--tts-model", default=str(
-        REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
-               "/Qwen3-TTS-12Hz-1.7B-VoiceDesign-5ecdb673-cdn1"))
-    parser.add_argument("--tts-python", default="", help="Interpreter that owns the pinned TTS runtime")
+    parser.add_argument("--tts-packages", type=Path, required=True)
+    parser.add_argument("--tts-model", type=Path, required=True)
+    parser.add_argument("--tts-python", required=True, help="Interpreter that owns the pinned TTS runtime")
     parser.add_argument("--tts-device", default="cpu")
     parser.add_argument("--report", default="")
     parser.add_argument("--second-asr-base", default="", help="Optional second ASR endpoint for comparison")
     parser.add_argument("--second-asr-model", default="local-qwen3-asr-0.6b")
-    parser.add_argument("--qwen-asr-packages", default=str(REPO / ".local-acceptance/asr-runtime-packages"))
-    parser.add_argument("--qwen-asr-model-root", default=str(
-        REPO / ".local-acceptance/closeout-20261025/comfyops/isolated-packages"
-               "/Qwen3-ASR-0.6B-5eb14417-cdn1"))
-    parser.add_argument("--asr-python", default="",
+    parser.add_argument("--qwen-asr-packages", type=Path, required=True)
+    parser.add_argument("--qwen-asr-model-root", type=Path, required=True)
+    parser.add_argument("--asr-python", required=True,
                         help="Interpreter that owns the pinned Qwen3-ASR runtime packages")
     args = parser.parse_args()
     for flag, value in (("--tts-python", args.tts_python), ("--asr-python", args.asr_python)):
         if not Path(value).is_file():
             parser.error(f"{flag} must point at an existing interpreter on this machine")
+    for flag, value in (
+        ("--tts-packages", args.tts_packages), ("--tts-model", args.tts_model),
+        ("--qwen-asr-packages", args.qwen_asr_packages), ("--qwen-asr-model-root", args.qwen_asr_model_root),
+    ):
+        if not value.is_dir():
+            parser.error(f"{flag} must point at an existing directory on this machine")
 
     evidence = Path(args.evidence_dir).resolve()
     (evidence / "asr").mkdir(parents=True, exist_ok=True)

@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -169,9 +172,9 @@ def test_unclassifiable_pid_is_retained_for_reconciliation(tmp_path):
 def test_launcher_continues_instead_of_bricking_on_an_unreconcilable_record():
     """One double click is the only entry, so an unverifiable record must not
     block it forever. The launcher archives the record and never kills it."""
-    text = (Path(__file__).resolve().parents[2] / "scripts/start_dev.ps1").read_text(encoding="utf-8-sig")
+    text = (Path(__file__).resolve().parents[2] / "scripts/start_shine.ps1").read_text(encoding="utf-8-sig")
     assert "processes.unresolved-" in text, "the launcher must archive the record it cannot reconcile"
-    assert "不会盲杀" in text, "the launcher must state that it does not kill unverified processes"
+    assert "no unverified process was killed" in text
     assert "stop_shine.py" in text, "the launcher must reconcile through the verified stop path"
 
 
@@ -189,11 +192,54 @@ def test_launcher_recognises_a_half_dead_stack_and_the_package_can_move_ports():
     install = (root / "scripts/install_once.ps1").read_text(encoding="utf-8-sig")
     start_app = (root / "packaging/windows/START_APP.cmd").read_text(encoding="utf-8-sig")
 
-    assert "function Test-WebAlive" in dev
-    assert "function Test-RecordedApiAlive" in dev
-    assert "默认端口被占用" in dev
-    assert "Test-WebAlive" in shine
-    assert "AutoPorts" in shine
+    assert "'start_shine.ps1'" in dev and "-AutoPorts" in dev
+    assert "function Test-WebAlive" in shine and "function Test-WebAlive" not in dev
+    assert "function Test-RecordedApiAlive" in shine and "function Test-RecordedApiAlive" not in dev
     assert "-AutoPorts" in start_app
     assert "Get-NetTCPConnection" in install
     assert (root / "scripts/update_dev_shortcut.ps1").is_file()
+
+
+@pytest.mark.windows_only
+@pytest.mark.skipif(not shutil.which("powershell"), reason="Windows PowerShell is required")
+def test_windows_launcher_resolves_checkout_settings_from_another_directory(tmp_path):
+    checkout = tmp_path / "工作台 with spaces"
+    checkout.mkdir()
+    (checkout / ".env").write_text(
+        "SHINE_DATA_DIR='本机数据 data'\nSHINE_BACKEND_ENV='本机工具 python'\n"
+        "SHINE_DATABASE_URL=sqlite:///configured.db\n",
+        encoding="utf-8",
+    )
+    script = tmp_path / "paths.ps1"
+    script.write_text(
+        """
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+. $env:SHINE_TEST_SETTINGS_HELPER
+$configured = Get-ShineStackSettings $env:SHINE_TEST_CHECKOUT
+$env:SHINE_DATA_DIR = 'other data'
+$overridden = Get-ShineStackSettings $env:SHINE_TEST_CHECKOUT
+$explicit = Get-ShineStackSettings $env:SHINE_TEST_CHECKOUT 'explicit data'
+@($configured, $overridden, $explicit) | ConvertTo-Json -Depth 3
+""",
+        encoding="utf-8-sig",
+    )
+    env = {key: value for key, value in os.environ.items() if key.upper() not in {
+        "SHINE_DATA_DIR", "SHINE_DATABASE_URL", "SHINE_BACKEND_ENV", "SHINE_BOOTSTRAP_ROOT",
+    }}
+    env["SHINE_TEST_SETTINGS_HELPER"] = str(
+        Path(__file__).resolve().parents[2] / "scripts/shine_local_config.ps1"
+    )
+    env["SHINE_TEST_CHECKOUT"] = str(checkout)
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+        cwd=tmp_path, env=env, capture_output=True, encoding="utf-8", timeout=30, check=True,
+    )
+    configured, overridden, explicit = json.loads(result.stdout)
+    assert Path(configured["DataDir"]) == checkout / "本机数据 data"
+    assert configured["DatabaseUrl"] == "sqlite:///configured.db"
+    assert Path(configured["Python"]) == checkout / "本机工具 python" / "Scripts/python.exe"
+    assert Path(overridden["DataDir"]) == checkout / "other data"
+    assert overridden["DatabaseUrl"] == f"sqlite:///{(checkout / 'other data/shine.db').as_posix()}"
+    assert Path(explicit["DataDir"]) == tmp_path / "explicit data"
+    assert explicit["DatabaseUrl"] == f"sqlite:///{(tmp_path / 'explicit data/shine.db').as_posix()}"

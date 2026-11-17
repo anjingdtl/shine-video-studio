@@ -26,6 +26,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
 $requiredBytes = 180GB
 $recommendedBytes = 200GB
 $bootstrapScript = Join-Path $PSScriptRoot 'bootstrap.ps1'
@@ -83,21 +84,6 @@ function Write-Step([string]$text) { Write-Host "  -> $text" -ForegroundColor Gr
 function Write-Ok([string]$text) { Write-Host "  [OK] $text" -ForegroundColor Green }
 function Write-Warn([string]$text) { Write-Host "  [注意] $text" -ForegroundColor Yellow }
 function Write-Fail([string]$text) { Write-Host "  [失败] $text" -ForegroundColor Red }
-
-function Get-ShineEnvValue([string]$Path, [string]$Key) {
-    if (-not (Test-Path -LiteralPath $Path)) { return '' }
-    $content = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
-    $match = [regex]::Match($content, "(?m)^$Key=(.*)$")
-    if (-not $match.Success) { return '' }
-    $value = $match.Groups[1].Value.Trim()
-    if ($value.StartsWith("'") -or $value.StartsWith('"')) {
-        if ($value.Length -lt 2) { return '' }
-        $value = $value.Substring(1, $value.Length - 2).Replace("\'", "'").Replace('\\', '\')
-    } else {
-        $value = ($value -replace '[ \t]+#.*$', '').Trim()
-    }
-    return $value
-}
 
 function Get-ShineDiskInventory {
     $items = @()
@@ -186,9 +172,9 @@ Write-Host '  只有明确选择新建环境并确认后，才会下载缺少的
 Write-Host '  默认只写非系统盘、不装驱动、不写系统级设置；' -ForegroundColor Gray
 Write-Host '  只有在没有合格非系统盘且你显式确认后，才会装到系统盘。' -ForegroundColor Gray
 
-$envFile = Join-Path $repoRoot '.env'
-$recordedRoot = Get-ShineEnvValue $envFile 'SHINE_BOOTSTRAP_ROOT'
-$recordedData = Get-ShineEnvValue $envFile 'SHINE_DATA_DIR'
+$stackSettings = Get-ShineStackSettings $repoRoot
+$recordedRoot = $stackSettings.Environment.SHINE_BOOTSTRAP_ROOT
+$recordedData = if ($stackSettings.Environment.SHINE_DATA_DIR -or $recordedRoot) { $stackSettings.DataDir }
 
 if (-not $StorageRoot -and $recordedRoot) { $StorageRoot = $recordedRoot }
 
@@ -257,12 +243,7 @@ if ($recordedData) {
             # verdict. Reconciliation only ends processes whose OS identity
             # still matches the record; the install flow below re-checks everything.
             Write-Warn '发现上次运行的进程记录；正在安全收尾。'
-            $backendEnv = Get-ShineEnvValue $envFile 'SHINE_BACKEND_ENV'
-            if (-not $backendEnv) { $backendEnv = Join-Path $recordedData '..\app\backend-env' }
-            $reconcilePython = Join-Path ([IO.Path]::GetFullPath($backendEnv)) 'Scripts/python.exe'
-            if (-not (Test-Path -LiteralPath $reconcilePython)) {
-                $reconcilePython = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
-            }
+            $reconcilePython = $stackSettings.Python
             if (Test-Path -LiteralPath $reconcilePython) {
                 $previous = $ErrorActionPreference
                 $ErrorActionPreference = 'Continue'
@@ -394,7 +375,7 @@ if ($apiPort -ne $defaultApiPort -or $webPort -ne $defaultWebPort) {
 Write-Ok '本机工作台无需密码，素材和下载仍由你点击确认。'
 
 # ---- 4. Tools + dependencies + services ---------------------------------
-$backendPython = Join-Path $StorageRoot 'app/backend-env/Scripts/python.exe'
+$backendPython = $stackSettings.Python
 $frontendModules = Join-Path $repoRoot 'frontend/node_modules'
 # The pinned PowerShell may be installed while the current shell's PATH is stale
 # (a new window opened right after the first run), so check the bootstrap shim too.

@@ -102,7 +102,11 @@ def test_restart_refused_while_live_work(supervisor):
 
 
 def test_restart_idle_runs_state_machine(supervisor, monkeypatch):
-    server, _factory, _dir = supervisor
+    server, _factory, data_dir = supervisor
+    (data_dir / "run").mkdir()
+    (data_dir / "run" / "processes.json").write_text(
+        json.dumps({"api_port": 8125, "web_port": 5199}), encoding="utf-8",
+    )
     called = {}
 
     def fake_restart(data_dir, api_port, web_port):
@@ -123,7 +127,7 @@ def test_restart_idle_runs_state_machine(supervisor, monkeypatch):
             break
         threading.Event().wait(0.05)
     assert status["phase"] == "ready"
-    assert called["args"][1:] == (8000, 5173)
+    assert called["args"][1:] == (8125, 5199)
 
 
 def test_a_restart_that_is_still_running_is_refused(supervisor, monkeypatch):
