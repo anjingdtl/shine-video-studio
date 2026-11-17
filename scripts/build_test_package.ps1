@@ -372,12 +372,17 @@ $buildInfo = [ordered]@{
 # with BUILD_INFO.json, so the manifest never has to contain its own commit.
 Push-Location (Join-Path $staging 'backend')
 try {
-    $python = Get-Command python -ErrorAction SilentlyContinue
-    if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
-    if (-not $python) { throw 'Python is required to bind the copilot knowledge manifest.' }
-    & $python.Source -m scripts.generate_shine_copilot_contracts --commit $commit
+    # The generator imports the real FastAPI app, so it needs the project's own
+    # interpreter. A PATH `python` has none of the backend dependencies and would
+    # fail the build for the wrong reason; the build machine already has
+    # backend/.venv beside the checkout (see the prerequisites at the top).
+    $python = Join-Path $repoRoot 'backend/.venv/Scripts/python.exe'
+    if (-not (Test-Path -LiteralPath $python)) {
+        throw 'backend/.venv/Scripts/python.exe is required to bind the copilot knowledge manifest; run: uv sync --project backend'
+    }
+    & $python -m scripts.generate_shine_copilot_contracts --commit $commit
     if ($LASTEXITCODE -ne 0) { throw "copilot contract generation failed ($LASTEXITCODE)" }
-    & $python.Source -m scripts.generate_shine_copilot_contracts --check --commit $commit
+    & $python -m scripts.generate_shine_copilot_contracts --check --commit $commit
     if ($LASTEXITCODE -ne 0) { throw "copilot contract verification failed ($LASTEXITCODE)" }
 } finally {
     Pop-Location
