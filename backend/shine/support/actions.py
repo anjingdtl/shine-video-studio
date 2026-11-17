@@ -35,7 +35,7 @@ from shine.support.context import build_evidence_snapshot, snapshot_revision
 from shine.support.models import SupportAction
 from shine.support.occupancy import occupancy_facts, release_occupancy, resource_occupancy
 from shine.support.privacy import private_roots_for, redact_payload
-from shine.support.tools import ACTION_PARAMS, ACTION_SPECS, ToolDenied, action_spec
+from shine.support.tools import ACTION_SPECS, ToolDenied, action_spec
 
 SETUP_TERMINAL = {"COMPLETED", "FAILED", "NEEDS_REVIEW", "CANCELLED", "SUPERSEDED"}
 EXECUTOR_FAILED = {"FAILED", "CANCELLED", "SUPERSEDED"}
@@ -90,11 +90,14 @@ class ActionInvalid(ActionBlocked):
         super().__init__("INVALID_ACTION_PARAMS", message)
 
 
-#: Parameter whitelist and project/machine scoping are *derived* from the one
-#: capability declaration; they are not a second hand-kept contract.
-_ALLOWED_PARAMS: dict[str, frozenset[str]] = {
-    kind: frozenset(names) for kind, names in ACTION_PARAMS.items()
-}
+#: Parameter whitelist and scoping are *derived* from the one capability
+#: declaration and its original Pydantic request model.  There is no second
+#: hand-kept parameter table here.
+def _param_names(kind: str) -> frozenset[str]:
+    from shine.copilot import declarations as decl
+
+    row = decl.write_action(kind)
+    return frozenset(row.param_names()) if row is not None else frozenset()
 
 #: Actions that always need a concrete project; the target may never be guessed.
 _PROJECT_SCOPED_KINDS = PROJECT_SCOPED_KINDS
@@ -111,114 +114,13 @@ _NO_GPU_GATE: frozenset[str] = NO_GPU_GATE_KINDS
 
 
 def _validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Reject anything the executor does not accept; never forward free-form keys."""
-    if not isinstance(params, dict):
-        raise ActionInvalid("动作参数必须是对象。")
-    extra = set(params) - _ALLOWED_PARAMS[kind]
-    if extra:
-        raise ActionInvalid(f"动作不接受的参数：{', '.join(sorted(extra))}")
-    clean: dict[str, Any] = {}
-    for key, value in params.items():
-        if key in {"project_id", "variant_id", "capability", "source_profile_id", "name"}:
-            limit = 120
-            if not isinstance(value, str) or not value.strip() or len(value) > limit:
-                raise ActionInvalid(f"{key} 必须是长度不超过 {limit} 的字符串。")
-            clean[key] = value.strip() if key == "name" else value
-        elif key == "parameter_overrides":
-            if not isinstance(value, dict) or len(value) > 12 or not all(
-                isinstance(item_key, str)
-                and isinstance(item_value, str)
-                and len(item_key) <= 64
-                and len(item_value) <= 200
-                for item_key, item_value in value.items()
-            ):
-                raise ActionInvalid("parameter_overrides 必须是最多 12 项的字符串键值表。")
-            clean[key] = dict(value)
-        elif key == "installation_path":
-            if not isinstance(value, str) or len(value) > 1024 or "\x00" in value:
-                raise ActionInvalid("installation_path 非法。")
-            clean[key] = value
-        elif key == "port":
-            if value is not None and (not isinstance(value, int) or not 1 <= value <= 65535):
-                raise ActionInvalid("port 必须在 1-65535 之间。")
-            clean[key] = value
-        elif key in {"verify_runtime", "deep_scan", "adopt"}:
-            if not isinstance(value, bool):
-                raise ActionInvalid(f"{key} 必须是布尔值。")
-            clean[key] = value
-        elif key == "capabilities":
-            if not isinstance(value, list) or not 1 <= len(value) <= 5:
-                raise ActionInvalid("capabilities 必须是 1-5 项列表。")
-            from shine.comfyops.setup_summary import CAPABILITIES
+    """Use the one resolved contract: declaration + original Pydantic schema."""
+    from shine.copilot.params import ParamError, validate_params
 
-            unknown = [item for item in value if item not in CAPABILITIES]
-            if unknown or len(set(value)) != len(value):
-                raise ActionInvalid("capabilities 含未知或重复项。")
-            clean[key] = list(value)
-        elif key == "only":
-            if not isinstance(value, list) or len(value) > 10 or not all(
-                isinstance(item, str) and len(item) <= 80 for item in value
-            ):
-                raise ActionInvalid("only 必须是最多 10 个服务 id 的字符串列表。")
-            clean[key] = list(value)
-        elif key == "title":
-            if not isinstance(value, str) or not value.strip() or len(value) > 120:
-                raise ActionInvalid("title 必须是长度不超过 120 的非空字符串。")
-            clean[key] = value.strip()
-        elif key == "description":
-            if not isinstance(value, str) or len(value) > 2000:
-                raise ActionInvalid("description 必须是不超过 2000 字符的字符串。")
-            clean[key] = value
-        elif key == "language":
-            if not isinstance(value, str) or not value.strip() or len(value) > 32:
-                raise ActionInvalid("language 必须是长度不超过 32 的字符串。")
-            clean[key] = value.strip()
-        elif key == "filename":
-            if not isinstance(value, str) or not value.strip() or len(value) > 200:
-                raise ActionInvalid("filename 必须是长度不超过 200 的字符串。")
-            clean[key] = value.strip()
-        elif key == "text":
-            if not isinstance(value, str) or not value.strip() or len(value) > 200_000:
-                raise ActionInvalid("text 必须是 1-200000 字符的原文；更长的文档请在界面上传文件。")
-            clean[key] = value
-        elif key == "locked_facts":
-            if not isinstance(value, list) or len(value) > 20 or not all(
-                isinstance(item, str) and len(item) <= 200 for item in value
-            ):
-                raise ActionInvalid("locked_facts 必须是最多 20 项的短文本列表。")
-            clean[key] = list(value)
-        elif key == "pacing":
-            if value not in {"compact", "balanced", "relaxed"}:
-                raise ActionInvalid("pacing 是 compact / balanced / relaxed 之一。")
-            clean[key] = value
-        elif key == "plan_version":
-            if value is not None and (not isinstance(value, int) or value < 1):
-                raise ActionInvalid("plan_version 必须是正整数。")
-            clean[key] = value
-        elif key in {"document_id", "run_id", "volume_id"}:
-            if not isinstance(value, str) or not value.strip() or len(value) > 80:
-                raise ActionInvalid(f"{key} 必须是长度不超过 80 的字符串。")
-            clean[key] = value.strip()
-        elif key == "operation":
-            if value not in {"pause", "resume", "cancel"}:
-                raise ActionInvalid("operation 是 pause / resume / cancel 之一。")
-            clean[key] = value
-        elif key == "episode_ids":
-            if not isinstance(value, list) or not 1 <= len(value) <= 32 or not all(
-                isinstance(item, str) and len(item) <= 80 for item in value
-            ):
-                raise ActionInvalid("episode_ids 必须是 1-32 个集 id。")
-            clean[key] = list(dict.fromkeys(value))
-        elif key == "strategy":
-            if not isinstance(value, dict) or not value:
-                raise ActionInvalid("strategy 必须是策略合同对象。")
-            from shine.strategy import GenerationStrategy
-
-            try:
-                clean[key] = GenerationStrategy.model_validate(value).model_dump(mode="json")
-            except ValueError as exc:
-                raise ActionInvalid(f"strategy 不符合既有策略合同：{str(exc)[:200]}") from exc
-    return clean
+    try:
+        return validate_params(kind, params)
+    except ParamError as exc:
+        raise ActionInvalid(str(exc)) from exc
 
 
 def _canonical(value: Any) -> str:
@@ -664,6 +566,10 @@ def _target_fingerprint(
             facts.update(scoped)
         elif kind == "project_create":
             facts.update({"title": params.get("title"), "language": params.get("language") or "Chinese"})
+        elif kind == "support_web_search_update":
+            from shine.support.agent import web_search_enabled
+
+            facts.update({"current": bool(web_search_enabled(db))})
         elif kind == "document_import_text":
             scoped, reason = _document_target_facts(
                 db, str(params.get("project_id") or ""), str(params.get("text") or "")
@@ -1232,6 +1138,15 @@ def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any
             "paid": True,
             "authorization_summary": "确认后只排队缺失的分节剧本任务，由既有流水线执行者生成。",
         }
+    if kind == "support_web_search_update":
+        return {
+            **common,
+            "summary": "只修改 AI 管家自身的联网检索开关；不会触发下载、脚本或生产任务。",
+            "web_search": bool(params.get("web_search")),
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "确认后写入本机偏好；可随时改回。",
+        }
     raise ToolDenied(f"未知动作：{kind}")
 
 
@@ -1322,6 +1237,7 @@ def preview_action(
     actor: str = "local-user",
     session_id: str | None = None,
     project_id: str | None = None,
+    app=None,
 ) -> tuple[dict[str, Any], bool]:
     spec = action_spec(kind)
     params = _validate_params(kind, params)
@@ -1339,6 +1255,14 @@ def preview_action(
                 "reason": contract_state.get("reason"),
             },
         )
+    if app is not None:
+        api_state = contract_registry.api_contract_state(kind, app)
+        if api_state["state"] != "AVAILABLE":
+            raise ActionBlocked(
+                api_state["state"],
+                "请求参数合同发生不兼容变化，请重新确认这个操作。",
+                details={"changes": api_state.get("changes"), "reason": api_state.get("reason")},
+            )
     if session_id:
         from shine.support.models import SupportSession
 
@@ -1357,7 +1281,7 @@ def preview_action(
     canonical = resolve_target_project(
         db, kind=kind, params=params, project_id=project_id
     )
-    if canonical and "project_id" in _ALLOWED_PARAMS[kind]:
+    if canonical and "project_id" in _param_names(kind):
         params["project_id"] = canonical
     else:
         params.pop("project_id", None)
@@ -1634,6 +1558,7 @@ def approve_action(
     preview_hash: str,
     actor: str = "local-user",
     gateway=None,
+    app=None,
 ) -> tuple[dict[str, Any], bool]:
     row = db.get(SupportAction, action_id)
     if row is None:
@@ -1664,6 +1589,21 @@ def approve_action(
             contract_state["notice"],
             details={"action_id": row.id, "capability_contract": stored_contract},
         )
+    if app is not None:
+        api_state = contract_registry.api_contract_state(row.kind, app)
+        if api_state["state"] != "AVAILABLE":
+            row.status = "EXPIRED"
+            row.last_error = "CONTRACT_CHANGED"
+            db.commit()
+            raise ActionBlocked(
+                "CONTRACT_CHANGED",
+                "请求参数合同发生不兼容变化，请重新预览并确认。",
+                details={
+                    "action_id": row.id,
+                    "changes": api_state.get("changes"),
+                    "reason": api_state.get("reason"),
+                },
+            )
     if not stored_digest or stored_digest != contract_state.get("contract_digest"):
         row.status = "EXPIRED"
         row.last_error = "CONTRACT_CHANGED"
@@ -1756,6 +1696,12 @@ def approve_action(
     # A reviewed alias may reuse an already-bound dispatcher; the stored
     # preview decides which one, never a runtime input.
     dispatch = str(stored_contract.get("dispatch") or row.kind)
+    from shine.copilot import declarations as decl
+    from shine.copilot.params import ParamError, model_payload, routed_kwargs
+
+    declaration = decl.write_action(row.kind)
+    if declaration is None:
+        raise ActionBlocked("CONTRACT_NOT_DECLARED", "当前构建没有这个动作的参数合同。")
 
     # The second occupancy read closes the preview→approval race: a render can
     # start between the two requests.  Release uses the release-specific gate so
@@ -1786,15 +1732,9 @@ def approve_action(
 
             value = enqueue(
                 db,
-                project_id=params.get("project_id"),
-                capabilities=list(params.get("capabilities") or ["h3"]),
-                installation_path=params.get("installation_path"),
-                port=params.get("port"),
-                variant_id=params.get("variant_id"),
-                verify_runtime=bool(params.get("verify_runtime", True)),
                 actor=actor,
                 settings=settings,
-                deep_scan=bool(params.get("deep_scan", False)),
+                **routed_kwargs(declaration, params, enqueue),
             )
             row.status = "DELEGATED"
             # Bind the action to the executor's own durable task id.
@@ -1842,12 +1782,10 @@ def approve_action(
                 db,
                 settings,
                 path=str(Path(str(target))),
-                project_id=params.get("project_id"),
-                capability=capability,
-                adopt=bool(params.get("adopt")),
-                port=params.get("port"),
                 actor=actor,
-                variant_id=params.get("variant_id"),
+                **routed_kwargs(
+                    declaration, params, reconcile_installation, handled={"installation_path"}
+                ),
             )
             result_status = str(value.get("status") or "UNKNOWN")
             adoption = value.get("adoption") if isinstance(value.get("adoption"), dict) else None
@@ -1981,6 +1919,25 @@ def approve_action(
                     },
                     project_id=row.project_id,
                 )
+        elif dispatch == "support_web_search_update":
+            from shine.support.agent import set_web_search
+
+            value = set_web_search(
+                db,
+                actor=actor,
+                enabled=bool(params.get("web_search")),
+                **routed_kwargs(
+                    declaration, params, set_web_search, handled={"web_search"}
+                ),
+            )
+            row.status = "SUCCEEDED"
+            row.verification = {
+                "outcome": "VERIFIED",
+                "executor": spec.executor,
+                "authority": "GET /api/v1/support/preferences",
+                "web_search": bool(value.get("web_search")),
+                "checked_at": utcnow().isoformat(),
+            }
         elif dispatch == "workflow_user_copy":
             import copy
 
@@ -1999,15 +1956,17 @@ def approve_action(
                 )
             parameter_map = dict(source.parameter_map or {})
             parameter_map.update(dict(params.get("parameter_overrides") or {}))
-            body = WorkflowProfileCreate(
-                name=str(params.get("name")),
-                mode=GenerationMode(source.mode),
-                graph=copy.deepcopy(source.graph),
-                parameter_map=parameter_map,
-                media_transfers=copy.deepcopy(source.media_transfers),
-                required_nodes=list(source.required_nodes or []),
-                checkpoint_id=source.checkpoint_id,
-                project_id=target_project,
+            body = WorkflowProfileCreate.model_validate(
+                {
+                    **model_payload(declaration, params),
+                    "mode": GenerationMode(source.mode),
+                    "graph": copy.deepcopy(source.graph),
+                    "parameter_map": parameter_map,
+                    "media_transfers": copy.deepcopy(source.media_transfers),
+                    "required_nodes": list(source.required_nodes or []),
+                    "checkpoint_id": source.checkpoint_id,
+                    "project_id": target_project,
+                }
             )
             created = create_workflow_profile(body, settings=settings, db=db)
             row.status = "EXECUTED"
@@ -2065,10 +2024,8 @@ def approve_action(
             try:
                 project = create_project(
                     db,
-                    title=str(params.get("title") or ""),
-                    description=str(params.get("description") or ""),
-                    language=str(params.get("language") or "Chinese"),
                     actor=actor,
+                    **routed_kwargs(declaration, params, create_project),
                 )
             except HTTPException as exc:
                 raise _blocked_from_executor(exc) from exc
@@ -2132,7 +2089,7 @@ def approve_action(
                 update_project_settings(
                     db,
                     project,
-                    {"language": str(params.get("language") or "")},
+                    model_payload(declaration, params),
                     actor=actor,
                 )
             except HTTPException as exc:
@@ -2173,6 +2130,12 @@ def approve_action(
                     gateway,
                     list(params.get("locked_facts") or []),
                     params.get("pacing") or "balanced",
+                    **routed_kwargs(
+                        declaration,
+                        params,
+                        story.queue_outline,
+                        handled={"document_id", "locked_facts", "pacing"},
+                    ),
                 )
             except LLMError as exc:
                 raise ActionBlocked(
@@ -2210,7 +2173,7 @@ def approve_action(
                     db,
                     str(row.project_id or ""),
                     actor=actor,
-                    plan_version=params.get("plan_version"),
+                    **routed_kwargs(declaration, params, queue_director_storyboard),
                 )
             except HTTPException as exc:
                 raise _blocked_from_executor(exc) from exc
@@ -2269,10 +2232,8 @@ def approve_action(
                     db,
                     project,
                     settings=settings,
-                    episode_ids=list(params.get("episode_ids") or []),
-                    workflow_profile_id=params.get("workflow_profile_id"),
-                    strategy=params.get("strategy"),
                     actor=actor,
+                    **routed_kwargs(declaration, params, start_director_production),
                 )
             except HTTPException as exc:
                 raise _blocked_from_executor(exc) from exc
@@ -2384,7 +2345,12 @@ def approve_action(
             }
         else:  # pragma: no cover - the registry above is exhaustive
             raise ToolDenied(f"未知动作：{row.kind}")
-    except ActionBlocked as exc:
+    except (ActionBlocked, ParamError) as caught:
+        exc = (
+            caught
+            if isinstance(caught, ActionBlocked)
+            else ActionBlocked("PARAM_NOT_ROUTABLE", str(caught))
+        )
         # The authorization was already claimed.  A pre-execution refusal must
         # become a real terminal state, otherwise the APPROVED row would be
         # reused forever and the user could never preview again.
@@ -2409,7 +2375,7 @@ def approve_action(
             project_id=row.project_id,
         )
         db.commit()
-        raise
+        raise exc from caught
     except Exception as exc:  # noqa: BLE001 - a delegated executor error is reported, not hidden
         row.status = "FAILED"
         row.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"

@@ -137,7 +137,7 @@ class CapabilityDeclaration:
     dispatch: str | None = None
     executor_bound: bool = True
     introduced_version: str = APP_VERSION
-    contract_revision: int = 1
+    contract_revision: int = 2
     examples: tuple[str, ...] = ()
     note: str = ""
     page: str = "导演模式"

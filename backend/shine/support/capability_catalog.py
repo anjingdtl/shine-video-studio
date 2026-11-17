@@ -38,6 +38,7 @@ class Capability:
     tier: str
     executor: str | None
     params: tuple[str, ...] = ()
+    param_contract: tuple[dict[str, Any], ...] = field(default_factory=tuple)
     preconditions: tuple[str, ...] = ()
     readback: str | None = None
     reversible: str = "NO"
@@ -68,6 +69,7 @@ def _row(payload: dict[str, Any], *, status: str | None = None) -> Capability:
         tier=str(payload.get("tier") or "PREVIEW"),
         executor=payload.get("executor"),
         params=tuple(payload.get("params") or ()),
+        param_contract=tuple(payload.get("param_contract") or ()),
         preconditions=tuple(payload.get("preconditions") or ()),
         readback=payload.get("readback") or payload.get("authority"),
         reversible=str(payload.get("reversible") or "NO"),
@@ -99,6 +101,7 @@ def _fallback_write_payload(row) -> dict[str, Any]:
         "tier": row.permission_tier,
         "executor": row.executor,
         "params": list(row.param_names()),
+        "param_contract": [],
         "preconditions": list(row.preconditions),
         "gates": list(row.gates),
         "readback": row.authority,

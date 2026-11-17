@@ -313,11 +313,20 @@ def test_p1_named_episode_in_an_empty_project_is_reported_as_a_gate(api):
 # ---------------------------------------------------------------------------
 
 
-def _delegate(client, session_id: str, orders: list[int], budget: dict | None = None):
+def _delegate(
+    client,
+    session_id: str,
+    orders: list[int],
+    budget: dict | None = None,
+    *,
+    plan: dict | None = None,
+):
     return client.post(
         "/api/v1/support/plans/delegate",
         json={
             "session_id": session_id,
+            "plan_id": (plan or {}).get("plan_id"),
+            "plan_hash": (plan or {}).get("plan_hash"),
             "approved_orders": orders,
             "budget": budget or {"max_episodes": 1, "max_gpu_actions": 0, "max_paid_actions": 1},
             "confirm": True,
@@ -330,7 +339,7 @@ def test_p1_delegation_creates_the_project_then_stops(api):
     client, _, _ = api
     session = _session(client)
     plan = _plan(client, "建立一个名叫《雾港回声》的短剧项目。", session_id=session["id"])
-    response = _delegate(client, session["id"], [plan["steps"][0]["order"]])
+    response = _delegate(client, session["id"], [plan["steps"][0]["order"]], plan=plan)
     assert response.status_code == 200, response.text
     delegation = response.json()["delegation"]
     assert delegation["status"] == "DONE"
@@ -426,7 +435,7 @@ def test_p1_cancel_does_not_touch_submitted_steps(api):
     client, factory, _ = api
     session = _session(client)
     plan = _plan(client, "建立一个名叫《雾港回声》的短剧项目。", session_id=session["id"])
-    created = _delegate(client, session["id"], [plan["steps"][0]["order"]]).json()["delegation"]
+    created = _delegate(client, session["id"], [plan["steps"][0]["order"]], plan=plan).json()["delegation"]
     response = client.post(f"/api/v1/support/sessions/{session['id']}/delegation/cancel", headers=HEADERS)
     assert response.status_code == 200, response.text
     cancelled = response.json()["delegation"]

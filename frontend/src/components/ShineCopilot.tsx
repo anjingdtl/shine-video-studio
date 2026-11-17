@@ -19,6 +19,15 @@ export type RecommendedAction = {
 export type CapabilityInfo = {
   action_id: string;
   params?: string[];
+  param_contract?: Array<{
+    name: string;
+    type: string;
+    required: boolean;
+    binding: string;
+    max_length?: number | null;
+    enum?: unknown[];
+    default?: unknown;
+  }>;
   scope?: string;
 };
 
@@ -71,6 +80,8 @@ type PlanStep = {
 type CopilotPlan = {
   intent: string;
   summary: string;
+  plan_id?: string;
+  plan_hash?: string;
   steps: PlanStep[];
   requires_input: string[];
   notice: string;
@@ -646,6 +657,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: session.id,
+          plan_id: plan?.plan_id,
+          plan_hash: plan?.plan_hash,
           approved_orders: selected,
           budget: { max_episodes: 1, max_gpu_actions: allowGpu[message.id] ? 1 : 0 },
           confirm: true,

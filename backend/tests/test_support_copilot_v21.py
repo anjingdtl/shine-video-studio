@@ -10,16 +10,21 @@ No test here mocks the generator's output: every artefact is produced by
 """
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
+
+from pydantic import BaseModel, Field
 
 from shine.copilot import build as contract_build
 from shine.copilot import declarations as decl
+from shine.copilot.contracts import ParamSpec
 from shine.support import capability_catalog, contracts, project_knowledge
-from shine.support.models import SupportSession
+from shine.support.models import SupportDelegation, SupportSession
 from tests.conftest import create_project
 
 HEADERS = {"x-shine-local-action": "1"}
@@ -732,3 +737,467 @@ def test_plan_steps_carry_the_packaged_contract(api):
     for action in actions:
         assert action["contract"]["contract_digest"]
         assert action["contract"]["state"] == "AVAILABLE"
+
+
+# ---------------------------------------------------------------------------
+# Task 1: one parameter contract (declaration + original Pydantic schema)
+# ---------------------------------------------------------------------------
+
+
+class ProjectCreateWithSubtitle(BaseModel):
+    """A real request model with one new optional field (test capability)."""
+
+    title: str = Field(min_length=1, max_length=160)
+    description: str = Field(default="", max_length=4000)
+    language: str = Field(default="Chinese", min_length=2, max_length=32)
+    subtitle: str | None = Field(default=None, max_length=80)
+
+
+def test_resolved_parameter_contract_comes_from_the_request_schema():
+    artifact = _load(contracts.ARTIFACT_PATH)
+    row = next(
+        item for item in artifact["capabilities"] if item["action_id"] == "project_create"
+    )
+    contract = {item["name"]: item for item in row["param_contract"]}
+    # The original CreateProject schema allows 160 characters, not the older
+    # hand-kept 120; the schema is the authority for body parameters.
+    assert contract["title"]["max_length"] == 160
+    assert contract["title"]["required"] is True
+    assert contract["description"]["max_length"] == 4000
+    assert contract["language"]["default"] == "Chinese"
+    # CreateProject declares language as a plain string; the original business
+    # gate (canonical spoken language) owns the accepted range, not the copilot.
+    assert contract["language"]["enum"] == []
+    assert contract["title"]["source"] == "shine.schemas:CreateProject"
+
+
+def test_new_optional_schema_parameter_flows_to_the_executor(api, monkeypatch):
+    """Only schema + declaration change; no fixed field branch is edited."""
+    client, _, _ = api
+    base = decl.write_action("project_create")
+    assert base is not None
+    modified = replace(
+        base,
+        params=base.params + (ParamSpec("subtitle", required=False, max_length=160),),
+        request_schema=f"{__name__}:ProjectCreateWithSubtitle",
+    )
+    original = decl.write_action
+    monkeypatch.setattr(
+        decl,
+        "write_action",
+        lambda action_id: modified if action_id == "project_create" else original(action_id),
+    )
+    from shine.support import contracts as contract_registry
+
+    contract_registry.reset_cache()
+
+    calls: list[dict] = []
+    from shine.services import create_project as real_create_project
+
+    def fake_create_project(db, *, title, description="", language="Chinese", subtitle=None, actor="user"):
+        calls.append({"title": title, "subtitle": subtitle, "language": language})
+        return real_create_project(
+            db, title=title, description=description, language=language, actor=actor
+        )
+
+    monkeypatch.setattr("shine.services.create_project", fake_create_project)
+    preview = _preview(client, "project_create", {"title": "新参数项目", "subtitle": "副标题"})
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["action"]["status"] == "PREVIEWED"
+    approved = _approve(client, preview.json()["action"])
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["action"]["status"] == "SUCCEEDED"
+    assert calls and calls[0]["subtitle"] == "副标题"
+    assert "新参数项目" in [row["title"] for row in client.get("/api/v1/projects").json()]
+
+
+def test_unknown_parameter_is_rejected_not_silently_dropped(api):
+    client, _, _ = api
+    response = _preview(client, "project_create", {"title": "拒绝未知", "subtitle": "x"})
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "INVALID_ACTION_PARAMS"
+
+
+# ---------------------------------------------------------------------------
+# Task 2: full API request-contract fingerprint and compatibility classes
+# ---------------------------------------------------------------------------
+
+
+def _project_create_contract(app) -> list[dict]:
+    from shine.copilot.build import _operations_for, api_schema_contract
+
+    row = decl.write_action("project_create")
+    return api_schema_contract(app, operations=_operations_for(row))
+
+
+def _project_operation(rows: list[dict]) -> dict:
+    return next(row for row in rows if row["operation"] == "POST /api/v1/projects")
+
+
+def test_api_schema_digest_ignores_documentation_and_order():
+    from shine.copilot.build import api_schema_digest
+    from shine.main import app
+
+    spec = copy.deepcopy(app.openapi())
+    original = api_schema_digest(spec)
+    operation = spec["paths"]["/api/v1/projects"]["post"]
+    operation["summary"] = "changed documentation"
+    operation["description"] = "a different prose"
+    spec["paths"]["/api/v1/projects"]["post"]["tags"] = ["reordered"]
+    assert api_schema_digest(spec) == original
+
+
+def test_api_contract_diff_classifies_field_changes():
+    from shine.copilot.build import diff_api_contract
+    from shine.main import app
+
+    base = _project_create_contract(app)
+    operation = _project_operation(base)
+    field = operation["body"]["fields"]["title"]
+
+    def changed(**updates) -> list[dict]:
+        rows = copy.deepcopy(base)
+        row = _project_operation(rows)
+        row["body"]["fields"]["title"] = {**field, **updates}
+        row["body"]["schema_digest"] = "0" * 64 if updates else row["body"]["schema_digest"]
+        return rows
+
+    type_changed = diff_api_contract(base, changed(type="integer"))
+    assert any(change["reason"] == "type changed" and change["severity"] == "BREAKING"
+               for change in type_changed)
+
+    enum_changed = diff_api_contract(base, changed(enum=["a", "b"]))
+    assert any(change["reason"] == "enum changed" and change["severity"] == "BREAKING"
+               for change in enum_changed)
+
+    default_changed = diff_api_contract(base, changed(default="other"))
+    assert any(change["reason"] == "default changed" and change["severity"] == "BREAKING"
+               for change in default_changed)
+
+    narrow = diff_api_contract(base, changed(maxLength=10))
+    assert any(change["reason"] == "maxLength changed" and change["severity"] == "BREAKING"
+               for change in narrow)
+
+    optional_to_required = copy.deepcopy(base)
+    row = _project_operation(optional_to_required)
+    row["body"]["fields"]["description"]["required"] = True
+    row["body"]["required_fields"] = sorted(
+        set(row["body"]["required_fields"]) | {"description"}
+    )
+    row["body"]["schema_digest"] = "1" * 64
+    classified = diff_api_contract(base, optional_to_required)
+    assert any("optional body field became required" in change["reason"] for change in classified)
+
+    nested = copy.deepcopy(base)
+    _project_operation(nested)["body"]["schema_digest"] = "2" * 64
+    classified = diff_api_contract(base, nested)
+    assert any(change["reason"] == "nested request schema changed"
+               and change["severity"] == "BREAKING" for change in classified)
+
+    removed = copy.deepcopy(base)
+    _project_operation(removed)["body"]["fields"].pop("title")
+    classified = diff_api_contract(base, removed)
+    assert any(change["reason"] == "body field removed: title" for change in classified)
+
+    permission = copy.deepcopy(base)
+    perm_row = _project_operation(permission)
+    perm_row["permission"]["auth_headers"] = ["authorization"]
+    classified = diff_api_contract(base, permission)
+    assert any(change["reason"] == "permission changed" and change["severity"] == "BREAKING"
+               for change in classified)
+
+
+def test_api_contract_state_blocks_incompatible_and_allows_compatible(api):
+    from shine.main import app
+
+    client, _, _ = api
+    openapi = copy.deepcopy(app.openapi())
+    schema = openapi["components"]["schemas"]["CreateProject"]
+
+    compatible = copy.deepcopy(openapi)
+    compatible["components"]["schemas"]["CreateProject"]["properties"]["subtitle"] = {
+        "type": "string",
+        "maxLength": 80,
+        "title": "Subtitle",
+    }
+    state = contracts.api_contract_state("project_create", compatible)
+    assert state["state"] == "AVAILABLE"
+    assert any(change["reason"] == "body field added: subtitle" for change in state["changes"])
+
+    incompatible = copy.deepcopy(openapi)
+    incompatible["components"]["schemas"]["CreateProject"]["properties"]["title"]["type"] = "integer"
+    incompatible["components"]["schemas"]["CreateProject"]["required"] = ["title"]
+    state = contracts.api_contract_state("project_create", incompatible)
+    assert state["state"] == "CONTRACT_STALE"
+    assert any(change["reason"] == "type changed" for change in state["changes"])
+    assert schema["properties"]["title"]["type"] == "string"  # real app untouched
+
+
+# ---------------------------------------------------------------------------
+# Task 3: delegation persistence, plan identity, idempotency and recovery
+# ---------------------------------------------------------------------------
+
+
+def _plan(client, request: str, *, session_id: str | None = None) -> dict:
+    response = client.post(
+        "/api/v1/support/plans/preview",
+        json={"request": request, "session_id": session_id},
+        headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["plan"]
+
+
+def _delegate(client, session_id: str, plan: dict, orders: list[int]):
+    return client.post(
+        "/api/v1/support/plans/delegate",
+        json={
+            "session_id": session_id,
+            "plan_id": plan.get("plan_id"),
+            "plan_hash": plan.get("plan_hash"),
+            "approved_orders": orders,
+            "confirm": True,
+        },
+        headers=HEADERS,
+    )
+
+
+def test_plan_identity_is_immutable_and_old_plan_cannot_authorize_new(api):
+    client, _, _ = api
+    session = _session(client)
+    first = _plan(client, "建立一个名叫《甲》的项目。", session_id=session["id"])
+    second = _plan(client, "建立一个名叫《乙》的项目。", session_id=session["id"])
+    assert first["plan_id"] != second["plan_id"]
+    assert first["plan_hash"] != second["plan_hash"]
+    refused = _delegate(client, session["id"], first, [1])
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "PLAN_CHANGED"
+
+
+def test_repeated_authorization_never_duplicates_the_project(api):
+    client, _, _ = api
+    session = _session(client)
+    plan = _plan(client, "建立一个名叫《只建一次》的项目。", session_id=session["id"])
+    first = _delegate(client, session["id"], plan, [1]).json()["delegation"]
+    second = _delegate(client, session["id"], plan, [1]).json()["delegation"]
+    assert first["id"] == second["id"]
+    assert [row["title"] for row in client.get("/api/v1/projects").json()].count("只建一次") == 1
+
+
+def test_delegation_state_is_readable_from_a_new_database_session(api):
+    client, factory, _ = api
+    session = _session(client)
+    plan = _plan(client, "建立一个名叫《跨会话》的项目。", session_id=session["id"])
+    delegation = _delegate(client, session["id"], plan, [1]).json()["delegation"]
+    assert delegation["status"] == "DONE"
+    with factory() as db:
+        row = db.scalar(
+            SupportDelegation.__table__.select().where(
+                SupportDelegation.session_id == session["id"]
+            )
+        )
+        assert row is not None
+        stored = db.query(SupportDelegation).filter_by(session_id=session["id"]).one()
+        assert stored.status == "DONE"
+        assert stored.plan_id == plan["plan_id"]
+        assert stored.payload["steps"][0]["state"] == "SUCCEEDED"
+        session_row = db.get(SupportSession, session["id"])
+        from shine.support import delegation as delegation_service
+
+        assert delegation_service.get(db, session_row)["status"] == "DONE"
+
+
+def test_authorization_key_is_unique_at_the_database_level(api):
+    client, factory, _ = api
+    session = _session(client)
+    plan = _plan(client, "建立一个名叫《唯一键》的项目。", session_id=session["id"])
+    delegation = _delegate(client, session["id"], plan, [1]).json()["delegation"]
+    with factory() as db:
+        stored = db.query(SupportDelegation).filter_by(session_id=session["id"]).one()
+        duplicate = SupportDelegation(
+            id="duplicate-key",
+            session_id=session["id"],
+            plan_id=stored.plan_id,
+            plan_hash=stored.plan_hash,
+            authorization_key=stored.authorization_key,
+            status="RUNNING",
+            payload=delegation,
+        )
+        db.add(duplicate)
+        import pytest
+        from sqlalchemy.exc import IntegrityError
+
+        with pytest.raises(IntegrityError):
+            db.commit()
+        db.rollback()
+
+
+def test_completed_step_is_not_resubmitted_after_restart(api):
+    client, factory, _ = api
+    session = _session(client)
+    plan = _plan(client, "建立一个名叫《重启恢复》的项目。", session_id=session["id"])
+    delegation = _delegate(client, session["id"], plan, [1]).json()["delegation"]
+    with factory() as db:
+        stored = db.query(SupportDelegation).filter_by(session_id=session["id"]).one()
+        assert stored.status == "DONE"
+        stored.status = "RUNNING"
+        db.commit()
+    before = [row["title"] for row in client.get("/api/v1/projects").json()].count("重启恢复")
+    refreshed = client.post(
+        f"/api/v1/support/sessions/{session['id']}/delegation/refresh",
+        json={"session_id": session["id"]},
+        headers=HEADERS,
+    ).json()["delegation"]
+    assert refreshed["status"] == "DONE"
+    after = [row["title"] for row in client.get("/api/v1/projects").json()].count("重启恢复")
+    assert before == after == 1
+    assert delegation["steps"][0]["state"] == "SUCCEEDED"
+
+
+# ---------------------------------------------------------------------------
+# Task 4: one build identity, precise (local) degradation
+# ---------------------------------------------------------------------------
+
+
+def test_build_identity_detects_manifest_and_artifact_commit_mismatch(api, tmp_path, monkeypatch):
+    client, _, _ = api
+    artifact = _load(contracts.ARTIFACT_PATH)
+    manifest = _load(contracts.MANIFEST_PATH)
+    manifest["source_commit"] = "d" * 40
+    artifact["source_commit"] = "e" * 40
+    artifact_path = tmp_path / "artifact.json"
+    manifest_path = tmp_path / "manifest.json"
+    artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setattr(contracts, "ARTIFACT_PATH", artifact_path)
+    monkeypatch.setattr(contracts, "MANIFEST_PATH", manifest_path)
+    contracts.reset_cache()
+    identity = contracts.build_identity(build_commit="e" * 40)
+    assert identity["state"] == "STALE"
+    assert identity["artifact_source_commit"] == "e" * 40
+    assert any("不一致" in reason for reason in identity["reasons"])
+
+
+def test_single_action_contract_mismatch_degrades_only_that_action(api, monkeypatch):
+    client, _, _ = api
+    base = decl.write_action("project_create")
+    assert base is not None
+    broken = replace(base, params=tuple(p for p in base.params if p.name != "description"))
+    original = decl.write_action
+    monkeypatch.setattr(
+        decl,
+        "write_action",
+        lambda action_id: broken if action_id == "project_create" else original(action_id),
+    )
+    identity = contracts.build_identity(openapi=client.app.openapi())
+    assert identity["state"] in {"PARTIAL", "UNKNOWN"}
+    assert {row["action_id"] for row in identity["degraded_actions"]} == {"project_create"}
+    assert contracts.execution_state("project_create")["state"] == "CONTRACT_STALE"
+    assert contracts.execution_state("project_settings_update")["state"] == "AVAILABLE"
+
+
+def test_full_api_contract_mismatch_is_not_reported_fresh(api, tmp_path, monkeypatch):
+    client, _, _ = api
+    artifact = _load(contracts.ARTIFACT_PATH)
+    artifact["digests"]["api_schema"] = "0" * 64
+    path = tmp_path / "artifact.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    monkeypatch.setattr(contracts, "ARTIFACT_PATH", path)
+    contracts.reset_cache()
+    identity = contracts.build_identity(openapi=client.app.openapi())
+    assert identity["state"] == "STALE"
+    assert identity["api_matches"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 5: a new write capability is genuinely usable end to end
+# ---------------------------------------------------------------------------
+
+
+def test_new_write_capability_is_generated_planned_and_executed(api):
+    client, _, _ = api
+    artifact = _load(contracts.ARTIFACT_PATH)
+    capability = next(
+        row for row in artifact["capabilities"] if row["action_id"] == "support_web_search_update"
+    )
+    assert capability["request_schema"] == "shine.api_support:PreferenceUpdate"
+    assert capability["executor"] == "shine.support.agent.set_web_search"
+    assert capability["availability"] == "AVAILABLE"
+    assert capability["param_contract"][0]["name"] == "web_search"
+    assert capability["param_contract"][0]["type"] == "boolean"
+
+    catalog = client.get("/api/v1/support/capabilities/actions").json()
+    row = next(
+        item for item in catalog["capabilities"]
+        if item["action_id"] == "support_web_search_update"
+    )
+    assert row["param_contract"][0]["type"] == "boolean"
+
+    session = _session(client)
+    plan = _plan(client, "帮我开启管家联网检索", session_id=session["id"])
+    assert plan["intent"] == "WEB_SEARCH"
+    step = plan["steps"][0]
+    assert step["action"]["kind"] == "support_web_search_update"
+    assert step["action"]["params"]["web_search"] is True
+    assert step["action"]["contract"]["state"] == "AVAILABLE"
+
+    response = _delegate(client, session["id"], plan, [1])
+    assert response.status_code == 200, response.text
+    delegation = response.json()["delegation"]
+    assert delegation["status"] == "DONE"
+    assert delegation["steps"][0]["state"] == "SUCCEEDED"
+
+    # Real executor + real read-back, not a read-only probe.
+    assert client.get("/api/v1/support/preferences").json()["web_search"] is True
+
+
+def test_unreviewed_new_write_api_stays_discovered():
+    artifact = _load(contracts.ARTIFACT_PATH)
+    reviewed = {
+        row["action_id"]
+        for row in artifact["capabilities"]
+        if row["availability"] == "AVAILABLE"
+    }
+    assert "support_web_search_update" in reviewed
+    # Undeclared routes are only described; none of them is executable.
+    for row in artifact["discovered"]:
+        assert row["status"] == "DISCOVERED"
+        assert row["executable"] is False
+
+
+def test_all_delegation_states_are_readable_from_a_new_session(api):
+    client, factory, _ = api
+    from datetime import timedelta
+
+    from shine.models import new_id, utcnow
+
+    statuses = ("DONE", "WAITING", "PAUSED", "FAILED", "CANCELLED")
+    for index, status in enumerate(statuses):
+        session = _session(client)
+        with factory() as db:
+            db.add(
+                SupportDelegation(
+                    id=new_id(),
+                    session_id=session["id"],
+                    plan_id=f"plan-{index}",
+                    plan_hash=f"{index}" * 64,
+                    authorization_key=f"state-{index}-" + "0" * 80,
+                    status=status,
+                    stop_reason=None if status == "DONE" else status,
+                    payload={
+                        "id": new_id(),
+                        "status": status,
+                        "steps": [],
+                        "created_at": (utcnow() - timedelta(seconds=index)).isoformat(),
+                    },
+                    created_at=utcnow() - timedelta(seconds=index),
+                )
+            )
+            db.commit()
+        with factory() as db:
+            session_row = db.get(SupportSession, session["id"])
+            from shine.support import delegation as delegation_service
+
+            payload = delegation_service.get(db, session_row)
+            assert payload is not None
+            assert payload["status"] == status

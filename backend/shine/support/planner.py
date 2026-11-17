@@ -34,6 +34,7 @@ _INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("outline", ("故事大纲", "大纲")),
     ("control", ("暂停", "继续", "取消生产", "停止生产", "取消任务")),
     ("create_project", ("新建项目", "建立项目", "创建一个项目", "建个项目", "建立一个", "建一个", "创建项目")),
+    ("web_search", ("联网检索", "联网搜索", "网络搜索", "联网开关", "开启联网", "关闭联网")),
     ("import_document", ("导入", "上传小说", "导入小说", "导入文本", "导入原文")),
     ("diagnose", ("为什么", "失败", "报错", "诊断", "原因", "怎么回事")),
     ("knowledge", ("是什么", "怎么用", "有什么区别", "介绍", "支持吗", "能不能")),
@@ -531,6 +532,37 @@ def _create_plan(*, request: str, project_id: str | None) -> dict[str, Any]:
     }
 
 
+def _web_search_plan(*, request: str, project_id: str | None) -> dict[str, Any]:
+    lowered = request or ""
+    disabled = any(word in lowered for word in ("关闭", "禁用", "关掉", "停止联网"))
+    enabled = not disabled
+    return {
+        "intent": "WEB_SEARCH",
+        "summary": f"可以把管家的联网检索{'关闭' if disabled else '开启'}；只改检索开关。",
+        "project_id": project_id,
+        "steps": [
+            {
+                "order": 1,
+                "title": "关闭管家联网检索" if disabled else "开启管家联网检索",
+                "capability_id": "support_web_search_update",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "evidence": ["官方资料仍只作参考证据，不执行下载或脚本。"],
+                "action": {
+                    "kind": "support_web_search_update",
+                    "params": {"web_search": enabled},
+                },
+                "readback": "GET /api/v1/support/preferences",
+                "requires_confirmation": "PREVIEW",
+                "reason": "只写一个本机偏好；不会触发任何生产任务。",
+            }
+        ],
+        "requires_input": [],
+        "notice": "联网检索开关只影响 AI 管家自身的检索，不代表本机已支持官方能力。",
+        "bounded": True,
+    }
+
+
 def _import_plan(*, project_id: str | None) -> dict[str, Any]:
     return {
         "intent": "IMPORT_DOCUMENT",
@@ -878,6 +910,8 @@ def _build_plan_raw(
         return _control_plan(db, request=request, project_id=project_id)
     if intent == "create_project":
         return _create_plan(request=request, project_id=project_id)
+    if intent == "web_search":
+        return _web_search_plan(request=request, project_id=project_id)
     if intent == "import_document":
         return _import_plan(project_id=project_id)
     return None

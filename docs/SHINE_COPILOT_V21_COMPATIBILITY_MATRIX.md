@@ -6,23 +6,24 @@
 - 数据来源：`backend/shine/support/generated/copilot_contracts.json`（由 `backend/shine/copilot/declarations.py` 生成）
 - 后端路由审计：464 个方法级 `/api/v1` 路由；矩阵 44 项；`DISCOVERED` 425 条（未声明路由，恒 `executable=false`）
 
-## 1. 可执行能力（13）
+## 1. 可执行能力（14）
 
 | action_id | 原业务 API | 请求模型 | 回读接口 | 权限级别 | 合同版本 | AI 状态 | 知识来源 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `setup_repair` | `POST /api/v1/setup/prepare/execute` | `shine.api_setup:PrepareRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r1 | GUARDED | setup-verdict |
-| `setup_reconcile` | `POST /api/v1/setup/reconcile` | `shine.api_setup:ReconcileRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r1 | GUARDED | model-download-verify |
-| `managed_release` | `POST /api/v1/setup/managed-processes/release` | `shine.api_setup:ManagedReleaseRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r1 | GUARDED | comfy-scheduler |
-| `workflow_user_copy` | `POST /api/v1/workflow-profiles` | `shine.schemas:WorkflowProfileCreate` | `GET /api/v1/workflow-profiles` | PREVIEW | r1 | GUARDED | workflow-assembly |
-| `project_create` | `POST /api/v1/projects` | `shine.schemas:CreateProject` | `GET /api/v1/projects/{project_id}` | PREVIEW | r1 | GUARDED | web-workbench |
-| `document_import_text` | `POST /api/v1/projects/{project_id}/documents` | 多部分表单 | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r1 | GUARDED | novel-import |
-| `project_settings_update` | `PATCH /api/v1/projects/{project_id}/settings` | `shine.schemas:ProjectSettings` | `GET /api/v1/projects/{project_id}` | PREVIEW | r1 | GUARDED | web-workbench |
-| `story_outline_generate` | `POST /api/v1/projects/{project_id}/story-preparation/outlines` | `shine.api_story:OutlineRequest` | `GET /api/v1/projects/{project_id}/story-preparation` | EXECUTE_GUARDED | r1 | GUARDED | literary-four-stages |
-| `storyboard_generate` | `POST /api/v1/projects/{project_id}/director/storyboard/generate` | `shine.api_streamline:DirectorStoryboardBody` | `GET /api/v1/projects/{project_id}/director/storyboard/state` | EXECUTE_GUARDED | r1 | GUARDED | storyboard-agents |
-| `production_start` | `POST /api/v1/projects/{project_id}/director/production/start` | `shine.api_streamline:ShootBody` | `GET /api/v1/production-runs/{run_id}` | EXECUTE_GUARDED | r1 | GUARDED | production-qc-delivery |
-| `document_switch_basis` | `POST /api/v1/projects/{project_id}/script-basis` | `shine.api_story:ScriptBasisRequest` | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r1 | GUARDED | novel-import |
-| `production_control` | `POST /api/v1/production-runs/{run_id}/pause|resume|cancel` | 路径 + 原状态机 | `GET /api/v1/production-runs/{run_id}` | EXECUTE_GUARDED | r1 | GUARDED | production-qc-delivery |
-| `literary_scripts_generate` | `POST /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}/scripts` | 路径 | `GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}` | EXECUTE_GUARDED | r1 | GUARDED | literary-four-stages |
+| `setup_repair` | `POST /api/v1/setup/prepare/execute` | `shine.api_setup:PrepareRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r2 | GUARDED | setup-verdict |
+| `setup_reconcile` | `POST /api/v1/setup/reconcile` | `shine.api_setup:ReconcileRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r2 | GUARDED | model-download-verify |
+| `managed_release` | `POST /api/v1/setup/managed-processes/release` | `shine.api_setup:ManagedReleaseRequest` | `GET /api/v1/setup/verdict` | PREVIEW | r2 | GUARDED | comfy-scheduler |
+| `workflow_user_copy` | `POST /api/v1/workflow-profiles` | `shine.schemas:WorkflowProfileCreate` | `GET /api/v1/workflow-profiles` | PREVIEW | r2 | GUARDED | workflow-assembly |
+| `project_create` | `POST /api/v1/projects` | `shine.schemas:CreateProject` | `GET /api/v1/projects/{project_id}` | PREVIEW | r2 | GUARDED | web-workbench |
+| `document_import_text` | `POST /api/v1/projects/{project_id}/documents` | 多部分表单 | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r2 | GUARDED | novel-import |
+| `project_settings_update` | `PATCH /api/v1/projects/{project_id}/settings` | `shine.schemas:ProjectSettings` | `GET /api/v1/projects/{project_id}` | PREVIEW | r2 | GUARDED | web-workbench |
+| `story_outline_generate` | `POST /api/v1/projects/{project_id}/story-preparation/outlines` | `shine.api_story:OutlineRequest` | `GET /api/v1/projects/{project_id}/story-preparation` | EXECUTE_GUARDED | r2 | GUARDED | literary-four-stages |
+| `storyboard_generate` | `POST /api/v1/projects/{project_id}/director/storyboard/generate` | `shine.api_streamline:DirectorStoryboardBody` | `GET /api/v1/projects/{project_id}/director/storyboard/state` | EXECUTE_GUARDED | r2 | GUARDED | storyboard-agents |
+| `production_start` | `POST /api/v1/projects/{project_id}/director/production/start` | `shine.api_streamline:ShootBody` | `GET /api/v1/production-runs/{run_id}` | EXECUTE_GUARDED | r2 | GUARDED | production-qc-delivery |
+| `document_switch_basis` | `POST /api/v1/projects/{project_id}/script-basis` | `shine.api_story:ScriptBasisRequest` | `GET /api/v1/projects/{project_id}/script-basis` | PREVIEW | r2 | GUARDED | novel-import |
+| `production_control` | `POST /api/v1/production-runs/{run_id}/pause|resume|cancel` | 路径 + 原状态机 | `GET /api/v1/production-runs/{run_id}` | EXECUTE_GUARDED | r2 | GUARDED | production-qc-delivery |
+| `literary_scripts_generate` | `POST /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}/scripts` | 路径 | `GET /api/v1/projects/{project_id}/pipeline/volumes/{volume_id}` | EXECUTE_GUARDED | r2 | GUARDED | literary-four-stages |
+| `support_web_search_update` | `POST /api/v1/support/preferences` | `shine.api_support:PreferenceUpdate` | `GET /api/v1/support/preferences` | PREVIEW | r2 | GUARDED | support-agent |
 
 ## 2. 只读能力（8）
 
@@ -80,8 +81,14 @@
 | 同步面 | 结果 | 证据 |
 | --- | --- | --- |
 | 知识索引由声明生成 | 完成：21 条，字段齐全，`source_revision` 来自构建注入 | `test_knowledge_index_is_generated_with_the_required_fields` |
-| 能力目录由声明生成 | 完成：13 写 + 8 读，参数顺序与 V2 合同一致 | `test_knowledge_and_capabilities_are_derived_not_hand_maintained` |
-| 参数白名单不再重复维护 | 完成：`ACTION_PARAMS` → `_ALLOWED_PARAMS` 单链派生 | `test_contract_check_passes_on_the_committed_build` |
+| 能力目录由声明生成 | 完成：14 写 + 8 读，参数顺序与 V2 合同一致 | `test_knowledge_and_capabilities_are_derived_not_hand_maintained` |
+| 参数语义由原 Pydantic Schema 提供 | 完成：标题 160、描述 4000、默认值与枚举来自请求模型；执行器专属参数保留显式适配 | `test_resolved_parameter_contract_comes_from_the_request_schema` |
+| 新增可选参数无需固定分支 | 完成：只改 Schema + 声明，参数即可预览并传到原执行器 | `test_new_optional_schema_parameter_flows_to_the_executor` |
+| 未知参数明确拒绝 | 完成：`INVALID_ACTION_PARAMS` | `test_unknown_parameter_is_rejected_not_silently_dropped` |
+| 参数白名单不再重复维护 | 完成：声明 + `copilot/params.py` 单一解析；`actions.py` 不再有固定字段 if/elif | `test_contract_check_passes_on_the_committed_build` |
+| 完整 API 请求合同指纹 | 完成：路径/查询/头参数、请求体字段、类型、必填、默认、枚举、约束、嵌套结构、权限 | `test_api_contract_diff_classifies_field_changes` |
+| 兼容变更不失效旧授权 | 完成：新增可选字段 → `AVAILABLE` + compatible changes | `test_api_contract_state_blocks_incompatible_and_allows_compatible` |
+| 不兼容变更使旧授权过期 | 完成：类型/枚举/必填/默认/嵌套/权限/删除 → `CONTRACT_STALE` | 同上 + `test_contract_change_invalidates_a_stored_authorization` |
 | 新增功能自动进入索引 | 完成：临时真实声明 → 生成 → 加载 → 查询/执行 | `test_new_feature_declaration_reaches_the_runtime` |
 | 生成确定性 | 完成：两次生成字节一致 | `test_generation_is_deterministic` |
 | CI 合同门禁 | 完成：`--check` 进 L1，12 项校验 | `test_contract_check_passes_on_the_committed_build` |
@@ -90,9 +97,18 @@
 | 执行者/回读失配即 CI FAIL | 完成 | `test_executor_and_readback_drift_is_a_build_failure` |
 | 旧授权遇合同变化 | 完成：423 `CONTRACT_CHANGED` + `EXPIRED` | `test_contract_change_invalidates_a_stored_authorization` |
 | 旧委托遇合同变化 | 完成：`PAUSED` + `CONTRACT_CHANGED`，未执行 | `test_delegation_pauses_when_the_contract_changed` |
+| 委托状态统一持久化 | 完成：`support_delegations` 表；新数据库会话可读 DONE/WAITING/PAUSED/FAILED/CANCELLED | `test_delegation_state_is_readable_from_a_new_database_session` |
+| 计划不可变身份 | 完成：每次预览生成 `plan_id` + `plan_hash` | `test_plan_identity_is_immutable_and_old_plan_cannot_authorize_new` |
+| 旧计划按钮不能执行新计划 | 完成：`PLAN_CHANGED` | 同上 |
+| 重复授权整份委托幂等 | 完成：`authorization_key` 唯一；不重复建项目/开生产 | `test_repeated_authorization_never_duplicates_the_project` |
+| 并发授权数据库级幂等 | 完成：唯一约束拒绝第二个同键授权 | `test_authorization_key_is_unique_at_the_database_level` |
+| 进程重启不重复提交已完成步骤 | 完成：已完成步骤直接复用，不再提交 | `test_completed_step_is_not_resubmitted_after_restart` |
 | 旧委托无合同 | 完成：`PAUSED` + `CONTRACT_UNVERIFIED` | `test_legacy_delegation_without_a_contract_is_not_executed` |
 | 已完成委托不重提 | 完成 | `test_completed_delegation_is_never_resubmitted` |
 | 知识过期不锁死执行 | 完成：`STALE` 仅影响说明，动作仍 `AVAILABLE` | `test_knowledge_staleness_does_not_lock_execution` |
+| 单一动作合同失配局部降级 | 完成：构建身份 `PARTIAL`，仅该动作 `CONTRACT_STALE` | `test_single_action_contract_mismatch_degrades_only_that_action` |
+| 构建身份四指纹交叉核对 | 完成：artifact/manifest 提交、知识、合同、API Schema | `test_build_identity_detects_manifest_and_artifact_commit_mismatch` |
+| 全量 API 合同失配不再显示 FRESH | 完成：`STALE` + `api_matches=false` | `test_full_api_contract_mismatch_is_not_reported_fresh` |
 | 产物缺失/损坏精确降级 | 完成：知识 UNKNOWN，动作 `CONTRACT_UNAVAILABLE` | `test_damaged_index_degrades_to_unknown_not_crash` |
 | 运行时篡改不能自授权 | 完成：伪造动作 `CONTRACT_NOT_DECLARED` | `test_runtime_artifact_cannot_self_grant` |
 | Windows 安装包携带合同 | 完成：打包脚本生成 + `--check`；实机安装 NOT_RUN | `scripts/build_test_package.ps1` |

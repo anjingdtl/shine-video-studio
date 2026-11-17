@@ -73,6 +73,12 @@ def _import_module_or_object(spec: str) -> Any:
     return getattr(module, attr)
 
 
+def app_openapi() -> dict[str, Any]:
+    from shine.main import app
+
+    return app.openapi()
+
+
 def app_routes() -> list[tuple[str, str]]:
     from shine.main import app
 
@@ -295,6 +301,15 @@ def compare_with_previous(bundle: dict[str, Any], previous: dict[str, Any] | Non
         if action_id not in new:
             breaking.append(f"action {action_id}: removed from the registry")
 
+    from shine.copilot.build import diff_api_contract
+
+    api_changes = diff_api_contract(previous.get("api_contract"), bundle.get("api_contract"))
+    for change in api_changes:
+        if change.get("severity") == "BREAKING":
+            breaking.append(
+                f"API {change.get('operation')}: {change.get('reason')}"
+            )
+
     for message in breaking:
         issues.append(f"BREAKING {message} (pass --allow-breaking after review)")
     return issues
@@ -316,9 +331,15 @@ def build(args) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
         forbidden=base.FORBIDDEN,
         source_commit=_source_commit(getattr(args, "commit", None)) or "",
         routes=routes,
+        openapi=app_openapi(),
     )
     previous = None if getattr(args, "output_dir", None) else _read_json(ARTIFACT)
     issues.extend(compare_with_previous(bundle, previous))
+    if previous and bundle.get("api_contract_version") != previous.get("api_contract_version"):
+        issues.append(
+            "BREAKING API contract normalization version changed; regenerate and review "
+            "(pass --allow-breaking after review)"
+        )
     return bundle, manifest_payload(bundle, source_commit=bundle["source_commit"]), issues
 
 

@@ -1,12 +1,14 @@
 {
-  "api_schema_digest": "768c59b03c515b3fd8688508f3d1d9c9717b7d40ccf219c6cb9632239ed8331d",
+  "api_contract_digest": "abcc4ef5f4565028e19d2d28c81f6e7244e2f4b7643745d6de15f6f2848214a0",
+  "api_contract_version": "openapi-normalized-2026.11-v1",
+  "api_schema_digest": "bb2d7cd29d26e7c1c5065c75ccdc5ba587c415006387e9a2e7d3d13299c2d29e",
   "app_version": "2.1.0",
-  "capability_count": 13,
+  "capability_count": 14,
   "content_sha256": "fc8beceacbaca9d7eabf470b111e277029946c18de7711a9c7896495b98e2e0e",
-  "contracts_digest": "490e17e27efa679b99639845db3d36df7d1cae7221a124266027303320fafa45",
+  "contracts_digest": "d30bd45dc93d258992b63fc790293d5e5949226884d67fa3d4db5bbed7247818",
   "entry_count": 21,
   "generator": "backend/scripts/generate_shine_copilot_contracts.py",
   "knowledge_version": "shine-project-kb-2.1.0",
   "read_capability_count": 8,
-  "source_commit": ""
+  "source_commit": "2361979c01ba4eecff60f3b6a53bfb1cc848a9ec"
 }

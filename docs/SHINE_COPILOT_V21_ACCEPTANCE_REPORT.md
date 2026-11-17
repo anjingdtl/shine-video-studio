@@ -15,13 +15,13 @@
 | `tests/test_support_agent.py`（V1） | 55 项全部通过 |
 | `tests/test_support_copilot_v2.py`（V201—V240） | 24 项全部通过 |
 | `tests/test_support_copilot_v3.py`（V2 P0/P1） | 27 项全部通过 |
-| `tests/test_support_copilot_v21.py`（本轮专项） | **21 项全部通过** |
+| `tests/test_support_copilot_v21.py`（本轮专项） | **38 项全部通过** |
 | 后端八分片全量 | **3046 项 / 0 失败 / 178 跳过**，8/8 退出码 0 |
 | 前端 Vitest | **79 文件 / 414 项全部通过**（管家组件 18 项，含 2 项构建提示） |
 | TypeScript / Vite | `tsc -b`、`vite build` 通过（仅既有 chunk>500kB 提示） |
 | Ruff | `backend/shine`、`backend/scripts`、`backend/tests` 全部通过 |
-| 迁移 | V2/V2.1 无新迁移；空库升级成功，head `f180f0010004` |
-| 契约一致性 | `generate_shine_copilot_contracts --check` 通过（13 动作 / 21 知识 / 425 DISCOVERED） |
+| 迁移 | 新增 `support_delegations`（`f180f0010005`）；空库与旧库升级成功，head 一致 |
+| 契约一致性 | `generate_shine_copilot_contracts --check` 通过（14 动作 / 21 知识 / 425 DISCOVERED） |
 | 真实浏览器 | Chromium headless：构建身份 FRESH、知识引用、项目创建完成，见 §4 |
 
 ### 1.1 后端八分片
@@ -51,6 +51,12 @@
 | 场景 | 结果 | 证据 |
 | --- | --- | --- |
 | 新增已审核只读能力自动识别 | PASS | 同上（`read_v21_probe` 进入目录） |
+| 参数类型/必填/枚举/长度/默认来自原 Pydantic Schema | PASS | `test_resolved_parameter_contract_comes_from_the_request_schema` |
+| 新增真实可选参数只需改 Schema + 声明 | PASS | `test_new_optional_schema_parameter_flows_to_the_executor`（预览→执行器收到 `subtitle`） |
+| 不认识/未声明参数明确拒绝 | PASS | `test_unknown_parameter_is_rejected_not_silently_dropped` |
+| 完整 API 请求合同指纹 | PASS | `test_api_schema_digest_ignores_documentation_and_order`、`test_api_contract_diff_classifies_field_changes` |
+| 兼容 API 变更不失效旧授权 | PASS | `test_api_contract_state_blocks_incompatible_and_allows_compatible` |
+| 类型/枚举/必填/默认/嵌套/权限/删除变更分类 | PASS | 同上（7 类对抗用例） |
 | 未审核写 API 不自动开放执行 | PASS | `test_undeclared_or_unreviewed_api_never_executes`（`CONTRACT_REVIEW_REQUIRED`） |
 | API 增加兼容参数目录更新 | PASS | `param_contract` 由声明生成；`--check` 通过 |
 | API 删除参数旧动作不误执行 | PASS | `test_contract_check_fails_when_a_parameter_is_removed` + `CONTRACT_CHANGED` |
@@ -64,11 +70,14 @@
 
 | 场景 | 结果 | 证据 |
 | --- | --- | --- |
-| 升级前创建委托，升级后能读取 | PASS | 信封存 `SupportSession.context_json`，无新表 |
+| 升级前创建委托，升级后能读取 | PASS | 统一存 `support_delegations`；旧 `context_json` 信封自动迁移 |
 | 合同兼容可合法继续 | PASS | `test_delegation_continues_after_a_compatible_upgrade` |
 | 合同不兼容暂停未执行步骤 | PASS | `test_delegation_pauses_when_the_contract_changed`（`PAUSED` + 未创建项目） |
 | 升级不重复提交已完成任务 | PASS | `test_completed_delegation_is_never_resubmitted` |
-| 旧计划不能授权新计划 | PASS | 每步记录 `contract_digest`/`revision`；新计划不能复用旧信封 |
+| 旧计划不能授权新计划 | PASS | 每次预览生成不可变 `plan_id`/`plan_hash`；旧按钮 → `PLAN_CHANGED` |
+| 重复授权整份委托 | PASS | `authorization_key` 唯一；不重复建项目/开生产 |
+| 并发授权 | PASS | 数据库唯一约束拒绝第二个同键授权 |
+| 进程重启/新会话恢复 | PASS | DONE/WAITING/PAUSED/FAILED/CANCELLED 新会话可读；已完成步骤不重提 |
 | UNKNOWN 必须等待原任务核对 | PASS | V3 `test_p1_unknown_task_is_reported_but_never_resubmitted` |
 | 不跨项目复用授权 | PASS | V3 `test_p0_01_historical_authorization_cannot_be_replayed_elsewhere` |
 | 旧委托无合同不执行 | PASS | `test_legacy_delegation_without_a_contract_is_not_executed`（`CONTRACT_UNVERIFIED`） |
@@ -79,11 +88,14 @@
 | --- | --- | --- |
 | CI 识别关联业务合同修改 | PASS | L1 执行 `--check`；CI 在推送后运行（见 §6） |
 | 未更新静态说明可发现差异 | PASS | 知识指纹/清单比较 |
-| 高风险合同失配 CI FAIL | PASS | 参数删除/执行者/回读/权限/路由五类均失败 |
+| 高风险合同失配 CI FAIL | PASS | 声明参数、执行者、回读、权限、路由、API 请求体不兼容变化均失败 |
 | Windows 安装包包含正确版本知识与合同 | PARTIAL | `build_test_package.ps1` 已在 staging 生成并 `--check`；本环境无 Windows，实机 NOT_RUN |
-| 安装包知识版本与 BUILD_INFO 一致 | PARTIAL | 生成器写入 `--commit`；实机安装 NOT_RUN |
+| 安装包知识版本与 BUILD_INFO 一致 | PARTIAL | 生成器写入 `--commit`；构建身份同时核对 artifact/manifest/知识/合同/API Schema；实机安装 NOT_RUN |
 | 发布构建不受 Git 自引用影响 | PASS | 生成器不再回退 `git rev-parse HEAD`；产物 `source_commit` 由打包注入 |
 | 用户无须运行脚本 | PASS | 运行时只读打包产物；`/support/build` 与前端提示 |
+| 单一动作失配局部降级 | PASS | `test_single_action_contract_mismatch_degrades_only_that_action`（`PARTIAL` + 该动作 `CONTRACT_STALE`） |
+| 全量合同失配不再显示 FRESH | PASS | `test_full_api_contract_mismatch_is_not_reported_fresh` |
+| 构建身份四指纹交叉核对 | PASS | `test_build_identity_detects_manifest_and_artifact_commit_mismatch` |
 
 ### 2.5 安全对抗
 
@@ -95,6 +107,24 @@
 | 未登记 API 不可自然语言调用 | PASS | 同上 |
 | 新增高风险操作不得自动授权 | PASS | `availability=REVIEW_REQUIRED` 门禁 |
 | 运行时修改清单不能提权 | PASS | `test_runtime_artifact_cannot_self_grant`（`CONTRACT_NOT_DECLARED`） |
+
+### 2.6 新增受控写能力的真实端到端证据
+
+本轮新增一个受控写能力 `support_web_search_update`（原 `POST /api/v1/support/preferences` 正式 API + `PreferenceUpdate` 请求模型，此前矩阵中仅为 GUARDED 且无 action）：
+
+| 步骤 | 真实结果 |
+| --- | --- |
+| 1. 正式 API / Schema | `POST /api/v1/support/preferences` + `shine.api_support:PreferenceUpdate` |
+| 2. 正式能力声明 | `declarations.py` 一次声明；`AVAILABLE` + 唯一执行者 `shine.support.agent.set_web_search` |
+| 3. 构建期自动生成 | `copilot_contracts.json` 生成 `param_contract`（`web_search: boolean`）、知识、矩阵与 API 合同 |
+| 4. 前端获取参数 | `GET /api/v1/support/capabilities/actions` 返回 `support_web_search_update` 及其 `param_contract` |
+| 5. 自然语言计划 | 「帮我开启管家联网检索」→ `WEB_SEARCH` 计划，步骤 `READY`，参数 `web_search=true` |
+| 6. 预览并授权 | 计划 `plan_id` + `plan_hash` → 委托 → 每步仍走 `preview → approve` |
+| 7. 调用新能力执行者 | `shine.support.agent.set_web_search(db, enabled=True)` 真实写入 |
+| 8. 回读真实结果 | `GET /api/v1/support/preferences` 返回 `{"web_search": true}` |
+| 9. 旧计划保护 | 旧 `plan_id` 授权新计划 → `PLAN_CHANGED`，不执行 |
+
+证据：`test_new_write_capability_is_generated_planned_and_executed`。未审核的新写 API 仍只能 `DISCOVERED`/`REVIEW_REQUIRED`，由 `test_undeclared_or_unreviewed_api_never_executes` 与 `test_unreviewed_new_write_api_stays_discovered` 覆盖。
 
 ## 3. V1 / V2 回归
 
