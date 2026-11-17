@@ -27,7 +27,7 @@ from shine.comfy.workflow import graph_hash, validate_against_object_info
 from shine.comfyops.managed_recipe import (
     build_renderer_launch,
     build_review_launch,
-    load_managed_recipe,
+    recipe_path,
 )
 from shine.comfyops.mode_capabilities import auto_register_missing_baseline_profiles
 from shine.comfyops.models import ComfyInstance
@@ -36,8 +36,10 @@ from shine.comfyops.runtime_configuration import (
     ACTIVE_KEY,
     CANDIDATE_KEY,
     configuration_identity,
+    load_runtime_recipe,
     record_service_evidence,
     require_idle_configuration,
+    same_configuration,
     workflow_contract_sha256,
 )
 from shine.config import Settings
@@ -193,7 +195,8 @@ def validate_registered_workflow(db: Session, settings: Settings, profile_id: st
         instance = db.get(ComfyInstance, identity["instance_id"])
         if instance is None or instance.status != "STOPPED" or instance.payload.get("process"):
             raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_VALIDATION")
-        recipe = load_managed_recipe(identity["recipe"], expected_sha256=identity["recipe_sha256"])
+        recipe, _sha = load_runtime_recipe(settings,
+                                          expected_sha256=identity["recipe_sha256"])
         try:
             probe = _probe_renderer(recipe)  # returns only after the owned process has stopped
         except HTTPException as exc:
@@ -574,8 +577,8 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
         raise HTTPException(409, "GENERATE_RUNTIME_CONFIGURATION_FIRST")
     if candidate.value.get("identity", {}).get("recipe_sha256") != recipe_sha256:
         raise HTTPException(409, "RUNTIME_CONFIRMATION_HASH_CHANGED")
-    identity = configuration_identity(db, settings, candidate.value["identity"]["recipe"])
-    if graph_hash(identity) != graph_hash(candidate.value["identity"]):
+    identity = configuration_identity(db, settings, recipe_path(settings))
+    if not same_configuration(candidate.value["identity"], identity, settings=settings):
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
     require_project(db, project_id)
     require_idle_configuration(db)
@@ -588,7 +591,7 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     auto_registered = auto_register_missing_baseline_profiles(db, project_id, actor=actor)
     if auto_registered:
         _files, contracts, template_advisory = _workflow_contracts(db, project_id)
-    recipe = load_managed_recipe(identity["recipe"], expected_sha256=identity["recipe_sha256"])
+    recipe, _sha = load_runtime_recipe(settings, expected_sha256=identity["recipe_sha256"])
     missing_resources = _review_resource_blockers(recipe)
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
@@ -635,7 +638,10 @@ def validate_services(db: Session, settings: Settings, project_id: str, recipe_s
     current = db.get(AppSetting, CANDIDATE_KEY)
     if not current or current.value.get("identity", {}).get("recipe_sha256") != recipe_sha256:
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
-    if configuration_identity(db, settings, current.value["identity"]["recipe"]) != identity:
+    if not same_configuration(
+            current.value["identity"],
+            configuration_identity(db, settings, recipe_path(settings)),
+            settings=settings):
         raise HTTPException(409, "RUNTIME_CONFIGURATION_CHANGED_REGENERATE")
     # A reviewer that cannot import its executor must not stay routed into a
     # production handoff; its optional failure is recorded, not retried.

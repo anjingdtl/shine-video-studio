@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.managed_recipe import load_managed_recipe
+from shine.comfyops.managed_recipe import load_managed_recipe, recipe_path
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, ResourceLease
 from shine.models import AgentRoute, AppSetting, Job, ProductionSeries, ProviderProfile, WorkflowProfile
 from shine.services import add_audit, require_project
@@ -41,6 +41,150 @@ def _pinned_file_digest(target: Path) -> str:
     _PIN_HASH_CACHE[key] = digest
     return digest
 
+#: The fields that describe the machine, not the directory the bookkeeping
+#: lives in.  A relocation must leave all of them untouched.
+_CONFIGURATION_FACTS = ('instance_id', 'instance_sha256', 'catalog_sha256',
+                        'recipe_sha256', 'comfyui_base_url')
+
+
+def configuration_fingerprint(identity: dict) -> str:
+    """What a sealed service validation is about: the machine, not the notes.
+
+    The recorded identity lists the absolute path of every pinned file, which is
+    what got hashed - but a copied data directory or a new checkout changes
+    those paths without touching one byte of the environment.  The fingerprint
+    therefore covers only the facts that describe the machine.  ``instance_sha256``
+    already commits to the installation payload, ``catalog_sha256`` to the
+    resource catalog and ``recipe_sha256`` to the recipe's own bytes, so nothing
+    that decides what will render is dropped.
+    """
+    return graph_hash({field: identity.get(field) for field in _CONFIGURATION_FACTS})
+
+
+def _recorded_roots(recipe: dict, settings) -> list[tuple[Path, Path]]:
+    """Where the recipe's own paths were recorded, and where they live now.
+
+    A recipe is byte-identical after a data directory or worktree is copied, but
+    the absolute paths inside it still name the old place.  Two roots can move
+    this way: the data directory's ``comfyops`` tree and the repository that
+    ships the renderer bootstrap / review entrypoint.
+    """
+    from shine.comfyops.deployment import REPO_ROOT
+
+    roots: list[tuple[Path, Path]] = []
+    renderer = recipe.get('renderer') if isinstance(recipe, dict) else None
+    if not isinstance(renderer, dict):
+        return roots
+    runtime_root = Path(str(renderer.get('runtime_data_root') or renderer.get('root') or ''))
+    # <data>/comfyops/adopted-runtime/<id> → <data>/comfyops
+    if runtime_root.is_absolute() and len(runtime_root.parents) >= 2:
+        old_comfyops = runtime_root.parent.parent
+        if old_comfyops.name == 'comfyops':
+            try:
+                if old_comfyops.resolve() != settings.comfyops_dir.resolve():
+                    roots.append((old_comfyops, settings.comfyops_dir))
+            except OSError:
+                pass
+    bootstrap = Path(str(renderer.get('bootstrap') or ''))
+    if bootstrap.is_absolute() and bootstrap.parent.name == 'scripts':
+        old_repo = bootstrap.parent.parent
+        try:
+            if old_repo.resolve() != REPO_ROOT.resolve():
+                roots.append((old_repo, REPO_ROOT))
+        except OSError:
+            pass
+    return roots
+
+
+def _anchored(value: str, roots: list[tuple[Path, Path]]) -> str:
+    """The same file, found where it lives *now* (the recorded copy is gone)."""
+    path = Path(str(value))
+    if not path.is_absolute() or path.exists():
+        return str(value)
+    for old, new in roots:
+        try:
+            if path.is_relative_to(old):
+                moved = new / path.relative_to(old)
+                if moved.exists():
+                    return str(moved)
+        except OSError:
+            continue
+    return str(value)
+
+
+def load_runtime_recipe(settings, *, expected_sha256=None, path=None):
+    """Read the managed recipe where this data directory keeps it now.
+
+    Returns ``(recipe, sha256_of_the_bytes_on_disk)`` so a caller that records
+    an identity hashes exactly what it validated.  The bytes are never rewritten:
+    a moved directory is recognised through the digest the operator activated,
+    and only the paths the renderer is *handed* follow the move.
+    """
+    target = Path(path) if path is not None else recipe_path(settings)
+    try:
+        raw = json.loads(Path(target).read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise HTTPException(409, 'RUNTIME_CONFIGURATION_INVALID') from exc
+    roots = _recorded_roots(raw, settings)
+    recipe = load_managed_recipe(
+        target, expected_sha256=expected_sha256 or graph_hash(raw),
+        anchor=lambda value: _anchored(value, roots))
+    return recipe, graph_hash(raw)
+
+
+def _workbench_pin_names(settings) -> set[str]:
+    """Pinned files that ship with the workbench, not with the install.
+
+    Two pinned files are this repository's own code: the bootstrap that starts
+    the renderer and the review entrypoint.  They change whenever the product is
+    upgraded, and an upgrade must not invalidate an environment the operator
+    already confirmed - the new code is simply what runs next.  Everything else
+    the recipe pins (the interpreter, the ComfyUI tree, the adapter bytes, the
+    sampling node, the review manifests) is what the operator installed, and
+    those still have to hash exactly as recorded.
+    """
+    try:
+        recipe = json.loads(recipe_path(settings).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return set()
+    names: set[str] = set()
+    renderer = recipe.get('renderer')
+    if isinstance(renderer, dict) and renderer.get('bootstrap'):
+        names.add(Path(str(renderer['bootstrap'])).name)
+    for spec in (recipe.get('reviews') or {}).values():
+        argv = (spec or {}).get('argv') or []
+        if len(argv) > 1:
+            names.add(Path(str(argv[1])).name)
+    return {name for name in names if name}
+
+
+def _production_digests(identity: dict, workbench: set[str]) -> list[str]:
+    return sorted(digest for path, digest in (identity.get('files') or {}).items()
+                  if Path(str(path)).name not in workbench)
+
+
+def _same_configuration(stored: dict, current: dict, *, workbench: set[str]) -> bool:
+    """The same confirmed machine, recorded under other bookkeeping paths.
+
+    Compare what the machine will render with, not where the notes live:
+    every installed pinned file must still hash to the digest the identity
+    recorded, and the instance, catalog, recipe and renderer endpoint must be
+    unchanged.  A different data directory, a new worktree or an upgraded
+    bootstrap all describe the same machine and stay ready.
+    """
+    if any(stored.get(field) != current.get(field) for field in _CONFIGURATION_FACTS):
+        return False
+    stored_files = _production_digests(stored, workbench)
+    current_files = _production_digests(current, workbench)
+    return bool(stored_files) and stored_files == current_files
+
+
+def same_configuration(stored: dict, current: dict, *, settings) -> bool:
+    """Exact match, or the same production configuration recorded elsewhere."""
+    return stored == current or _same_configuration(
+        stored, current, workbench=_workbench_pin_names(settings))
+
+
 #: The series states that can still hold the GPU or be resumed by a Worker.
 #: NEEDS_REVIEW is deliberately absent: it is a blocked, unclaimable record.
 LIVE_SERIES_STATUSES = ('QUEUED', 'CLAIMED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED', 'RECONCILING')
@@ -58,20 +202,35 @@ def workflow_contract_sha256(profile: WorkflowProfile) -> str:
     })
 
 
+def _recorded_identity(db, settings, key: str, changed_code: str):
+    """The identity recorded under one key, re-read in this data directory.
+
+    The recorded identity is returned when it still describes this machine -
+    even if the data directory moved - so the service-validation seal (which is
+    keyed by that identity) keeps meaning what it says.  A genuine change is
+    refused with the caller's own code.
+    """
+    row = db.get(AppSetting, key)
+    if row is None:
+        return None
+    try:
+        stored = row.value['identity']
+        current = configuration_identity(db, settings, recipe_path(settings))
+    except (HTTPException, KeyError, TypeError) as exc:
+        raise HTTPException(409, changed_code) from exc
+    if not same_configuration(stored, current, settings=settings):
+        raise HTTPException(409, changed_code)
+    return stored
+
+
 def _current_identity(db, settings):
     """The identity the setup wizard is working on, active first then candidate."""
-    active = db.get(AppSetting, ACTIVE_KEY)
-    if active:
-        try:
-            return configuration_identity(db, settings, active.value['identity']['recipe'])
-        except (HTTPException, KeyError, TypeError) as exc:
-            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED') from exc
-    candidate = db.get(AppSetting, CANDIDATE_KEY)
-    if candidate:
-        try:
-            return configuration_identity(db, settings, candidate.value['identity']['recipe'])
-        except (HTTPException, KeyError, TypeError) as exc:
-            raise HTTPException(409, 'RUNTIME_CONFIGURATION_CHANGED_REGENERATE') from exc
+    active = _recorded_identity(db, settings, ACTIVE_KEY, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
+    if active is not None:
+        return active
+    candidate = _recorded_identity(db, settings, CANDIDATE_KEY, 'RUNTIME_CONFIGURATION_CHANGED_REGENERATE')
+    if candidate is not None:
+        return candidate
     raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
 
 
@@ -90,7 +249,7 @@ def record_service_evidence(db, identity, evidence: dict) -> dict:
     """
     payload = {
         'version': 2,
-        'configuration_sha256': graph_hash(identity),
+        'configuration_sha256': configuration_fingerprint(identity),
         'recipe_sha256': identity['recipe_sha256'],
         'instance_id': identity['instance_id'],
         'instance_sha256': identity['instance_sha256'],
@@ -146,7 +305,11 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
     blockers = []
     if evidence.get('sha256') != _evidence_seal(evidence):
         blockers.append('SERVICE_VALIDATION_TAMPERED')
-    if evidence.get('configuration_sha256') != graph_hash(identity):
+    # Seals written before the fingerprint existed committed to the identity as
+    # a whole, including the bookkeeping paths.  Both readings describe the same
+    # machine, so an old seal stays valid instead of demanding a new setup.
+    sealed_configurations = {configuration_fingerprint(identity), graph_hash(identity)}
+    if evidence.get('configuration_sha256') not in sealed_configurations:
         blockers.append('SERVICE_VALIDATION_STALE_CONFIGURATION')
     if evidence.get('recipe_sha256') != identity.get('recipe_sha256'):
         blockers.append('SERVICE_VALIDATION_STALE_RECIPE')
@@ -196,11 +359,12 @@ def configuration_identity(db, settings, path):
     from shine.comfyops.instances import instance_identity, instance_root
 
     path = Path(path).resolve()
-    if path != (settings.comfyops_dir / 'setup/managed_recipe.json').resolve():
+    if path != recipe_path(settings).resolve():
         raise HTTPException(409, 'GENERATED_RUNTIME_RECIPE_REQUIRED')
     try:
-        raw = json.loads(path.read_text(encoding='utf-8'))
-        recipe = load_managed_recipe(path, expected_sha256=graph_hash(raw))
+        # The recipe this data directory serves, with the paths inside it
+        # resolved to where they live now; the digest stays the recorded bytes.
+        recipe, recipe_sha256 = load_runtime_recipe(settings)
         renderer = recipe['renderer']
         instance = db.get(ComfyInstance, renderer['instance_id'])
         adopted = bool(instance and instance.payload.get('adopted'))
@@ -232,7 +396,7 @@ def configuration_identity(db, settings, path):
         for template in renderer['pinned_files']:
             paths.add(Path(template.format_map(values)))
         for review in recipe['reviews'].values():
-            paths.add(Path(review['manifest']))
+            paths.add(Path(str(review['manifest'])))
             # The controlled review entrypoint is part of the confirmed identity.
             paths.add(Path(review['argv'][1].format_map(review)))
         pins = {}
@@ -240,7 +404,7 @@ def configuration_identity(db, settings, path):
             if not target.is_absolute() or not target.is_file():
                 raise HTTPException(409, 'RUNTIME_PINNED_FILE_MISSING')
             pins[str(target.resolve())] = _pinned_file_digest(target)
-        return {'recipe': str(path), 'recipe_sha256': graph_hash(raw),
+        return {'recipe': str(path), 'recipe_sha256': recipe_sha256,
                 'instance_id': instance.id, 'instance_sha256': instance.sha256,
                 'catalog_sha256': graph_hash(load_default_catalog()), 'files': pins,
                 'comfyui_base_url': f"http://127.0.0.1:{renderer['port']}"}
@@ -248,8 +412,8 @@ def configuration_identity(db, settings, path):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_INVALID') from exc
 
 
-def record_candidate(db, settings, project_id, recipe_path):
-    identity = configuration_identity(db, settings, recipe_path)
+def record_candidate(db, settings, project_id, path):
+    identity = configuration_identity(db, settings, path)
     value = {'version': 1, 'project_id': project_id, 'identity': identity}
     row = db.get(AppSetting, CANDIDATE_KEY)
     if row is None:
@@ -267,16 +431,21 @@ def resolve_runtime(db, settings):
     try:
         value = row.value
         identity = value['identity']
-        if (value['version'] != 1 or graph_hash(identity) != value['sha256']
-                or configuration_identity(db, settings, identity['recipe']) != identity):
+        if value['version'] != 1 or graph_hash(identity) != value['sha256']:
+            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
+        path = recipe_path(settings)
+        current = configuration_identity(db, settings, path)
+        if not same_configuration(identity, current, settings=settings):
             raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
     except HTTPException as exc:
         raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED') from exc
     except (KeyError, TypeError) as exc:
         raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_INVALID') from exc
+    # The bytes are the ones the operator activated; only the directory that
+    # holds the recipe moved.  Hand the renderer the recipe that exists *now*.
     return replace(settings, render_provider='comfyui', allow_remote_comfyui=False,
                    comfyui_base_url=identity['comfyui_base_url'],
-                   managed_recipe_path=identity['recipe'], managed_recipe_sha256=identity['recipe_sha256'])
+                   managed_recipe_path=str(path), managed_recipe_sha256=identity['recipe_sha256'])
 
 
 def _live_installation_attempts(db) -> list[str]:
@@ -350,7 +519,9 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
     identity = candidate.value['identity']
     if recipe_sha256 != identity['recipe_sha256']:
         raise HTTPException(409, 'RUNTIME_CONFIRMATION_HASH_CHANGED')
-    if configuration_identity(db, settings, identity['recipe']) != identity:
+    if not same_configuration(
+            identity, configuration_identity(db, settings, recipe_path(settings)),
+            settings=settings):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_CHANGED_REGENERATE')
     if settings.offline_simulation:
         raise HTTPException(409, 'OFFLINE_SIMULATION_CANNOT_ACTIVATE_REAL_RUNTIME')

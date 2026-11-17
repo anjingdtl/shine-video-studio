@@ -33,7 +33,10 @@ from sqlalchemy import text
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.handoff_memory import evaluate_readiness, probe_memory
 from shine.comfyops.installer import process_identity
-from shine.comfyops.managed_recipe import build_renderer_launch, load_managed_recipe
+from shine.comfyops.managed_recipe import (
+    build_renderer_launch,
+    recipe_path,
+)
 from shine.comfyops.models import ComfyInstance
 from shine.comfyops.owned_process import OwnedProcessGroup, terminate_named_group
 from shine.comfyops.renderer_release import live_process_facts, managed_process_state
@@ -43,9 +46,6 @@ from shine.runtime_orchestrator.contracts import IMAGE_STARTUP_PREFIX
 from shine.services import add_audit
 
 __all__ = ["IMAGE_STARTUP_PREFIX"]
-
-RECIPE_RELATIVE_PATH = ("setup", "managed_recipe.json")
-"""The recipe ``generate_configuration`` wrote for this installation."""
 
 #: The named reason a renderer that is no longer running is reported with.
 RENDERER_GONE_CODE = "IMAGE_RENDERER_GONE"
@@ -65,10 +65,6 @@ def image_startup_key(instance_id: str) -> str:
     return IMAGE_STARTUP_PREFIX + instance_id
 
 
-def recipe_path(settings) -> Path:
-    return Path(settings.comfyops_dir).joinpath(*RECIPE_RELATIVE_PATH)
-
-
 def load_image_recipe(settings) -> dict[str, Any]:
     """The pinned recipe of the managed renderer, or a named blocker."""
     path = recipe_path(settings)
@@ -79,7 +75,11 @@ def load_image_recipe(settings) -> dict[str, Any]:
                       "在「设置 → 制作环境」里会自动补齐。",
             "auto_recovery": "PREPARE_ENVIRONMENT",
         })
-    return load_managed_recipe(str(path))
+    # Same read as the H3 renderer: the recorded paths are resolved to where the
+    # files live now, so a copied data directory still launches.
+    from shine.comfyops.runtime_configuration import load_runtime_recipe
+
+    return load_runtime_recipe(settings)[0]
 
 
 def image_recipe_state(settings) -> dict[str, Any]:
@@ -95,8 +95,10 @@ def image_recipe_state(settings) -> dict[str, Any]:
                              "code": "IMAGE_RENDERER_RECIPE_MISSING"}
     if not path.is_file():
         return state
+    from shine.comfyops.runtime_configuration import load_runtime_recipe
+
     try:
-        recipe = load_managed_recipe(str(path))
+        recipe, _sha = load_runtime_recipe(settings)
     except HTTPException as exc:
         detail = exc.detail
         code = detail.get("code") if isinstance(detail, dict) else detail

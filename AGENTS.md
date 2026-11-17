@@ -92,7 +92,7 @@ Never bundle official full-text guides without redistribution permission. Run
 的全量回归一律按测试文件均分成 **8 个分片并行**执行，单次约 10 分钟。
 
 ```bash
-cd <worktree>
+cd <repo>
 ls backend/tests/test_*.py > /tmp/all-tests.txt
 split -n r/8 /tmp/all-tests.txt /tmp/chunk-          # 按文件均分，不按用例切
 for f in /tmp/chunk-*; do
@@ -1887,3 +1887,38 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   `test_episode_subtitle_cut`（3）、`test_setup_chain_convergence`（4）、
   `test_worker_batch_priority`（6）、前端 `setupSingleExecutor`（2）。验收记录见
   `docs/ACCEPTANCE_20261117_R3_MATERIAL_SETUP_UNIQUENESS.md`。
+
+## 2026-11-17 环境整备状态随机器走 + 钉死路径专项排查（本轮新增）
+
+- **配置身份只比机器事实**。`runtime_configuration._CONFIGURATION_FACTS`
+  （`instance_id` / `instance_sha256` / `catalog_sha256` / `recipe_sha256` /
+  `comfyui_base_url`）+ 安装态钉住文件摘要集合，构成唯一裁决 `same_configuration`。
+  数据目录被复制、改名、换 worktree，只要这五项与安装字节不变，就仍是同一套配置；
+  徽标保持「真实制作已就绪」，不再每次启动都要求重走基础配置。
+- **仓库自带脚本不算安装事实**。`_workbench_pin_names` 把
+  `scripts/managed_comfy_bootstrap.py` 与 `scripts/local_review_isolated_server.py`
+  排除在比对之外：它们随产品版本升级，改代码不该让整台机器「环境失效」。
+  审片 `manifest`（`asr.json`/`vlm.json`）仍计入，它变了要重验。
+- **配方里的绝对路径是书签**。`load_managed_recipe(..., anchor=...)` 先按磁盘字节
+  校验 `expected_sha256`，再递归把文档里的绝对路径锚定到现位置；
+  `_recorded_roots`/`_anchored` 只处理「旧 `<data>/comfyops`」与「旧仓库根」两处会搬的根。
+  于是配方字节不变时，渲染器拿到的是**现位置**的 bootstrap、runtime 目录与审片清单。
+- **一条读取链**。`recipe_path` / `RECIPE_RELATIVE_PATH` 只在 `managed_recipe` 定义一份；
+  `load_runtime_recipe(settings, expected_sha256=, path=)` 是唯一入口，返回
+  `(recipe, sha256)`。`service_validation`、`worker._managed_recipe`、`image_renderer`
+  全部改走它，`identity["recipe"]` 这种「记录路径当可访问路径」的读法已删净。
+- **证据封条只封机器**。`configuration_fingerprint(identity)` 只含上面五项事实；
+  读取时同时接受旧口径 `graph_hash(identity)`，旧证据继续有效，不逼操作员重验。
+- **钉死路径排查结论**：主仓代码/脚本/入库配置里**没有**指向其他 worktree、副本或
+  非主分支的路径；`git worktree list` 只有主仓一条，分支为 `main`。残留只在两处本机配置：
+  `.env` 的 `SHINE_DATA_DIR` 仍在 `.local-acceptance` 的验收副本里（未擅自改，待操作员裁定），
+  以及 shell 的 `PYTEST_DEBUG_TEMPROOT=F:/ClaudeWorkSpace/.pytest-tmp` 指向已占满的 F: 盘
+  （会让全量回归变成整片 `OSError: could not create numbered dir` 假失败，改到 C: 即恢复）。
+  `.env.example` 的写死绝对路径示例与本机 `.env` 里无消费者的 `SHINE_SETUP_RECIPE` 已删。
+- **固定规则（不再犯）**：修复与验证一律在**主仓原地、当前分支**上做，不新建 worktree、
+  不新建副本、不把运行配置指向 `.local-acceptance`；记录进台账的绝对路径一律视为书签，
+  下次启动按现状解析，不要拿它直接当可访问路径。
+- 回归：`test_runtime_identity_relocation`（8 例，含「配方内部路径全指向已删除 worktree」
+  「仓库启动器升级不算环境变化」「重新封印后搬家仍 READY」）。行为级基线红→绿用
+  `.local-acceptance/_repro_relocation.py`（只用 `resolve_runtime`/`runtime_report`）。
+  验收记录见 `docs/ACCEPTANCE_20261117_R4_RUNTIME_IDENTITY_RELOCATION.md`。

@@ -26,6 +26,37 @@ RENDERER_KEYS = ("instance_id", "python", "root", "base_directory", "bootstrap",
                  "adapter_sha256", "gpu_uuid", "argv", "pinned_files")
 REVIEW_KEYS = ("service_id", "python", "manifest", "runtime_packages", "port", "argv")
 
+#: Where the managed recipe lives inside one data directory.  A recipe records
+#: absolute paths because that is what gets hashed; the *data directory* holding
+#: those paths is bookkeeping and may move (a copied profile, a new checkout).
+#: One definition, so every reader means the same file.
+RECIPE_RELATIVE_PATH = ("setup", "managed_recipe.json")
+
+
+def recipe_path(settings) -> Path:
+    """The managed recipe *this* data directory serves."""
+    return Path(settings.comfyops_dir).joinpath(*RECIPE_RELATIVE_PATH)
+
+
+def _relocated(document, anchor):
+    """Rewrite every absolute path the document records to where it lives now.
+
+    A recipe stays byte-identical when its data directory or repository is
+    copied, so the absolute paths inside still name the old place.  ``anchor``
+    maps one recorded path to the file that exists now; ``None`` (no relocation
+    known) leaves the document untouched.  Only strings are candidates - a flag
+    such as ``--fast`` or a version digit is not a path and is never rewritten.
+    """
+    if anchor is None:
+        return document
+    if isinstance(document, str):
+        return anchor(document)
+    if isinstance(document, list):
+        return [_relocated(item, anchor) for item in document]
+    if isinstance(document, dict):
+        return {key: _relocated(value, anchor) for key, value in document.items()}
+    return document
+
 
 def adapter_identity(adapter_dir) -> str:
     """The adapter's own identity, as the ComfyUI plugin computes it."""
@@ -158,8 +189,14 @@ def _review(raw, kind):
     return recipe
 
 
-def load_managed_recipe(path, *, expected_sha256=None):
-    """Read and validate the managed renderer and review recipes."""
+def load_managed_recipe(path, *, expected_sha256=None, anchor=None):
+    """Read and validate the managed renderer and review recipes.
+
+    ``expected_sha256`` always compares the bytes **as recorded on disk**, so a
+    relocated recipe still proves it is the one that was activated.  ``anchor``
+    then resolves the recorded absolute paths to where they live now, which is
+    what the renderer is going to be handed; it never changes the hash.
+    """
     target = Path(path)
     if not target.is_absolute() or not target.is_file():
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
@@ -176,6 +213,8 @@ def load_managed_recipe(path, *, expected_sha256=None):
     reviews = raw.get("reviews") or {}
     if not isinstance(reviews, dict) or any(kind not in {"VLM", "ASR"} for kind in reviews):
         raise HTTPException(409, "COMFY_RECIPE_INVALID")
+    raw = _relocated(raw, anchor)
+    reviews = raw.get("reviews") or {}
     return {
         "renderer": _renderer(raw["renderer"]),
         "reviews": {kind: _review(spec, kind) for kind, spec in reviews.items()},

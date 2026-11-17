@@ -2127,9 +2127,11 @@ def _managed_recipe(settings):
     path = settings.managed_recipe_path or os.getenv("SHINE_MANAGED_RECIPE", "").strip()
     if not path:
         return None
-    from shine.comfyops.managed_recipe import load_managed_recipe
+    from shine.comfyops.runtime_configuration import load_runtime_recipe
 
-    return load_managed_recipe(path, expected_sha256=settings.managed_recipe_sha256 or None)
+    recipe, _sha = load_runtime_recipe(
+        settings, expected_sha256=settings.managed_recipe_sha256 or None, path=path)
+    return recipe
 
 
 def _managed_review_specs(recipe, semantic_reviewer, asr_reviewer):

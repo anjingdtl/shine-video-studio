@@ -80,7 +80,8 @@ def test_registered_workflow_managed_probe_records_only_node_validation(prep, mo
     registered = post(client, '/setup/profiles', {'project_id': project_id})
     profile_id = registered['profiles'][0]['profile_id']
     monkeypatch.setattr('shine.comfyops.runtime_configuration._current_identity', lambda db, settings: identity)
-    monkeypatch.setattr(service_validation, 'load_managed_recipe', lambda *a, **kw: {'renderer': {}})
+    monkeypatch.setattr(service_validation, 'load_runtime_recipe',
+                        lambda *a, **kw: ({'renderer': {}}, identity['recipe_sha256']))
     monkeypatch.setattr(service_validation, '_probe_renderer', lambda recipe: {'object_info': _fake_object_info()})
 
     response = client.post(f'/api/v1/workflow-profiles/{profile_id}/validate-managed')
