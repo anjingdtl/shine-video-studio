@@ -21,8 +21,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-APP_VERSION = "2.1.0"
-CONTRACT_VERSION = "shine-copilot-contracts-2026.11.17-v21"
+APP_VERSION = "2.2.0"
+CONTRACT_VERSION = "shine-copilot-contracts-2026.11.17-v22"
 
 PERMISSION_TIERS = {
     "READ": "只读，无需确认",

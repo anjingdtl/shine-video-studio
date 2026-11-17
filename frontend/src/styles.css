@@ -2532,3 +2532,66 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 @media (prefers-reduced-motion:reduce){
   .copilot-panel,.copilot-spin{animation:none}
 }
+
+/* V2.2 AI 管家配置：个性、启动预读与本地长期记忆。
+   复用现有浅色/深色主题变量与卡片、按钮规范，不引入第二套主题。 */
+.copilot-settings{gap:16px}
+.copilot-settings-card{padding:20px 21px}
+.copilot-settings-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+.copilot-field{display:flex;flex-direction:column;gap:6px;min-width:0}
+.copilot-field>span{font-size:var(--fs-caption);font-weight:600;color:var(--ink-soft)}
+.copilot-field>small{font-size:var(--fs-caption);color:var(--muted);line-height:1.5}
+.copilot-field input,.copilot-field textarea{width:100%;border:1px solid var(--line);border-radius:7px;background:var(--field);padding:9px 10px;color:var(--ink-mid);font-size:var(--fs-body);line-height:1.6}
+.copilot-field textarea{resize:vertical;min-height:88px}
+.copilot-field input:focus,.copilot-field textarea:focus{outline:none;border-color:var(--olive-faint);box-shadow:0 0 0 2px var(--input-ring)}
+.copilot-settings-notice,.copilot-settings-error{display:flex;align-items:center;gap:7px;margin:0;padding:9px 11px;border-radius:7px;font-size:var(--fs-caption);line-height:1.5}
+.copilot-settings-notice{background:var(--ok-bg-2);color:var(--ok-ink-2)}
+.copilot-settings-error{background:var(--danger-bg);color:var(--danger-ink)}
+.copilot-settings-hint{margin:0;padding:8px 10px;border-radius:7px;background:var(--surface-3);color:var(--muted);font-size:var(--fs-caption);line-height:1.6}
+.copilot-toggle-rows{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:2px 0 12px}
+.copilot-toggle{display:flex;align-items:flex-start;gap:9px;padding:10px 11px;border:1px solid var(--line);border-radius:8px;background:var(--surface-3);cursor:pointer}
+.copilot-toggle input{width:16px;height:16px;margin-top:2px;accent-color:var(--olive-mid);flex:none}
+.copilot-toggle span{display:flex;flex-direction:column;gap:3px;min-width:0}
+.copilot-toggle b{font-size:var(--fs-caption);color:var(--ink-soft)}
+.copilot-toggle small{font-size:var(--fs-caption);color:var(--muted);line-height:1.5}
+.copilot-status-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:4px 0 10px}
+.copilot-status-grid>div{display:flex;flex-direction:column;gap:3px;padding:9px 10px;border:1px solid var(--line-soft);border-radius:7px;background:var(--surface-2);min-width:0}
+.copilot-status-grid span{font-size:var(--fs-caption);color:var(--muted)}
+.copilot-status-grid b{font-size:var(--fs-caption);font-weight:600;color:var(--ink-soft);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.copilot-state.state-ok{color:var(--ok-ink)}
+.copilot-state.state-degraded,.copilot-state.state-rebuild_required{color:var(--warn-ink)}
+.copilot-state.state-corrupt{color:var(--danger-ink)}
+.copilot-memory-toolbar{display:flex;align-items:flex-end;gap:7px;flex-wrap:wrap;margin:12px 0;padding:10px;border:1px solid var(--line-soft);border-radius:8px;background:var(--surface-3)}
+.copilot-inline-field{display:flex;flex-direction:column;gap:4px;min-width:110px}
+.copilot-inline-field>span{font-size:var(--fs-caption);color:var(--muted)}
+.copilot-inline-field select{height:32px;border:1px solid var(--line);border-radius:6px;background:var(--field);padding:0 8px;color:var(--ink-mid);font-size:var(--fs-caption)}
+.copilot-inline-field.compact{min-width:150px}
+.copilot-search{display:flex;align-items:center;gap:6px;height:32px;padding:0 9px;border:1px solid var(--line);border-radius:6px;background:var(--field);min-width:210px;flex:1}
+.copilot-search input{border:0;background:transparent;padding:0;height:30px;font-size:var(--fs-caption);color:var(--ink);min-width:0;flex:1}
+.copilot-search input:focus{outline:none;box-shadow:none}
+.copilot-memory-create{padding:11px;border:1px dashed var(--line-2);border-radius:8px;background:var(--surface-3);margin-bottom:11px}
+.copilot-memory-create-row{display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap;margin-top:8px}
+.copilot-memory-list{display:flex;flex-direction:column;gap:8px;margin-top:4px}
+.copilot-memory-row{padding:11px 12px;border:1px solid var(--line);border-radius:8px;background:var(--paper)}
+.copilot-memory-meta{display:flex;align-items:center;gap:5px;flex-wrap:wrap;margin-bottom:6px}
+.copilot-chip{padding:2px 7px;border-radius:20px;background:var(--line-soft);color:var(--ink-2);font-size:10px;letter-spacing:.3px}
+.copilot-chip.auto{background:var(--info-bg);color:var(--info-ink)}
+.copilot-chip.manual{background:var(--ok-bg-2);color:var(--ok-ink-2)}
+.copilot-chip.scope{background:var(--sand-bg);color:var(--sand-ink)}
+.copilot-memory-time{margin-left:auto;color:var(--faint);font-size:10px}
+.copilot-memory-content{margin:0;color:var(--ink-soft);font-size:var(--fs-body);line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.copilot-memory-edit{display:flex;flex-direction:column;gap:7px}
+.copilot-memory-edit textarea{width:100%;min-height:70px;border:1px solid var(--line);border-radius:6px;background:var(--field);padding:8px 9px;font-size:var(--fs-body);resize:vertical}
+.copilot-memory-edit>div{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.copilot-memory-edit select{height:30px;border:1px solid var(--line);border-radius:6px;background:var(--field);padding:0 8px;font-size:var(--fs-caption)}
+.copilot-memory-actions{display:flex;align-items:center;gap:9px;margin-top:7px}
+.copilot-memory-actions .btn-text{padding:0;font-size:var(--fs-caption)}
+.copilot-memory-actions .btn-text.danger{color:var(--danger-ink)}
+.copilot-memory-sources{margin-top:8px;padding:8px 10px;border-radius:6px;background:var(--surface-3);color:var(--muted);font-size:var(--fs-caption);line-height:1.6}
+.copilot-memory-sources p{margin:4px 0 0;color:var(--ink-2)}
+.copilot-privacy-list{display:flex;flex-direction:column;gap:7px;margin:10px 0 0;padding:0;list-style:none}
+.copilot-privacy-list li{display:flex;align-items:flex-start;gap:7px;padding:7px 9px;border-radius:6px;background:var(--surface-3);color:var(--muted);font-size:var(--fs-caption);line-height:1.6}
+.copilot-privacy-list svg{flex:none;margin-top:2px;color:var(--olive-soft)}
+@media (max-width:900px){
+  .copilot-settings-grid,.copilot-toggle-rows,.copilot-status-grid{grid-template-columns:1fr}
+}

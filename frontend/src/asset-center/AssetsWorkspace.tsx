@@ -165,7 +165,7 @@ export function AssetsWorkspace({
   page, onNavigate, onWorkspace, projects, projectId, projectAssets, onOpenImageSetup,
 }: {
   page: AssetCenterPage; onNavigate: (page: AssetCenterPage) => void;
-  onWorkspace: (space: 'director' | 'expert') => void; projects: Project[]; projectId: string;
+  onWorkspace: (space: 'director' | 'expert' | 'copilot') => void; projects: Project[]; projectId: string;
   projectAssets: Asset[];
   onOpenImageSetup?: () => void;
 }) {
@@ -204,6 +204,7 @@ export function AssetsWorkspace({
         <div className="asset-center-workspace-links">
           <button onClick={() => onWorkspace('director')}><ArrowLeft size={14} />导演工作台</button>
           <button onClick={() => onWorkspace('expert')}><ChevronDown size={14} />高级设置</button>
+          <button onClick={() => onWorkspace('copilot')}><Sparkles size={14} />AI 管家配置</button>
         </div>
       </aside>
       <main className="asset-center-main">

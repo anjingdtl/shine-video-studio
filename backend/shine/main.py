@@ -510,6 +510,9 @@ def create_app(
     from shine.api_support import router as support_router
 
     app.include_router(support_router)
+    from shine.api_support_memory import router as support_memory_router
+
+    app.include_router(support_memory_router)
     from shine.api_director_styles import router as director_styles_router
 
     app.include_router(director_styles_router)

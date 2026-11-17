@@ -10,7 +10,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shine.db import Base
@@ -110,6 +120,67 @@ class SupportDelegation(Base):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+
+
+class CopilotMemory(Base):
+    """One long-lived, user-owned fact distilled from a conversation.
+
+    This is *derived* data: the original exchange stays in ``SupportSession`` /
+    ``SupportMessage``.  A memory never becomes a second production ledger and
+    never decides a business verdict.  Deleted rows stay as tombstones (status
+    ``DELETED``) with only the content hash, so a later automatic extraction
+    cannot silently recreate exactly what the person removed.
+    """
+
+    __tablename__ = "copilot_memories"
+    __table_args__ = (
+        Index("ix_copilot_memories_scope_project", "scope", "project_id", "status"),
+        Index("ix_copilot_memories_status_updated", "status", "updated_at"),
+        Index("ix_copilot_memories_content_hash", "content_hash"),
+        Index("ix_copilot_memories_source", "source", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    content: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    memory_type: Mapped[str] = mapped_column(String(32), default="SUMMARY", nullable=False)
+    source: Mapped[str] = mapped_column(String(16), default="MANUAL", nullable=False)
+    source_session_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_message_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    embedding_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), default="ACTIVE", nullable=False)
+    confirmed: Mapped[bool] = mapped_column(default=True, nullable=False)
+    supersedes_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    deleted_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
+
+
+class CopilotMemoryVector(Base):
+    """Rebuildable local vector index for one memory revision.
+
+    The row is not an authority: it carries the hash/revision it was built
+    from, so a stale vector can never be returned for edited or deleted text.
+    """
+
+    __tablename__ = "copilot_memory_vectors"
+
+    memory_id: Mapped[str] = mapped_column(
+        ForeignKey("copilot_memories.id", ondelete="CASCADE"), primary_key=True
+    )
+    content_revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    vector: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
 
 
 class SupportReport(Base):
