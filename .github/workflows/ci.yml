@@ -60,8 +60,8 @@ jobs:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
       - run: uv sync --project backend --locked
-      - name: Verify copilot knowledge manifest
-        run: PYTHONPATH=backend uv run --project backend python backend/scripts/generate_copilot_knowledge.py --check
+      - name: Verify copilot knowledge and capability contracts
+        run: PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --check
       - run: uv run --project backend python scripts/run_tests.py quick
 
   backend-l2:

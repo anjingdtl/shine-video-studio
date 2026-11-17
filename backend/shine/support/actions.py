@@ -24,12 +24,18 @@ from fastapi import HTTPException
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
+from shine.copilot.declarations import (
+    MACHINE_SCOPED_KINDS,
+    NO_GPU_GATE_KINDS,
+    PROJECT_OPTIONAL_KINDS,
+    PROJECT_SCOPED_KINDS,
+)
 from shine.models import AppSetting, AuditEvent, new_id, utcnow
 from shine.support.context import build_evidence_snapshot, snapshot_revision
 from shine.support.models import SupportAction
 from shine.support.occupancy import occupancy_facts, release_occupancy, resource_occupancy
 from shine.support.privacy import private_roots_for, redact_payload
-from shine.support.tools import ACTION_SPECS, ToolDenied, action_spec
+from shine.support.tools import ACTION_PARAMS, ACTION_SPECS, ToolDenied, action_spec
 
 SETUP_TERMINAL = {"COMPLETED", "FAILED", "NEEDS_REVIEW", "CANCELLED", "SUPERSEDED"}
 EXECUTOR_FAILED = {"FAILED", "CANCELLED", "SUPERSEDED"}
@@ -84,75 +90,24 @@ class ActionInvalid(ActionBlocked):
         super().__init__("INVALID_ACTION_PARAMS", message)
 
 
+#: Parameter whitelist and project/machine scoping are *derived* from the one
+#: capability declaration; they are not a second hand-kept contract.
 _ALLOWED_PARAMS: dict[str, frozenset[str]] = {
-    "setup_repair": frozenset(
-        {
-            "project_id",
-            "capabilities",
-            "installation_path",
-            "port",
-            "variant_id",
-            "verify_runtime",
-            "deep_scan",
-        }
-    ),
-    "setup_reconcile": frozenset(
-        {"project_id", "installation_path", "capability", "adopt", "port", "variant_id"}
-    ),
-    "managed_release": frozenset({"only"}),
-    "workflow_user_copy": frozenset(
-        {"source_profile_id", "name", "parameter_overrides", "project_id"}
-    ),
-    "project_create": frozenset({"title", "description", "language"}),
-    "document_import_text": frozenset({"project_id", "filename", "text"}),
-    "project_settings_update": frozenset({"project_id", "language"}),
-    "story_outline_generate": frozenset(
-        {"project_id", "document_id", "locked_facts", "pacing"}
-    ),
-    "storyboard_generate": frozenset({"project_id", "plan_version"}),
-    "production_start": frozenset(
-        {"project_id", "episode_ids", "workflow_profile_id", "strategy"}
-    ),
-    "document_switch_basis": frozenset({"project_id", "document_id"}),
-    "production_control": frozenset({"run_id", "operation"}),
-    "literary_scripts_generate": frozenset({"project_id", "volume_id"}),
+    kind: frozenset(names) for kind, names in ACTION_PARAMS.items()
 }
 
 #: Actions that always need a concrete project; the target may never be guessed.
-_PROJECT_SCOPED_KINDS = frozenset(
-    {
-        "document_import_text",
-        "project_settings_update",
-        "story_outline_generate",
-        "storyboard_generate",
-        "production_start",
-        "document_switch_basis",
-        "literary_scripts_generate",
-    }
-)
+_PROJECT_SCOPED_KINDS = PROJECT_SCOPED_KINDS
 #: Actions whose project is optional (the executor derives it from another
 #: identifier); a declared project must still be validated.
-_PROJECT_OPTIONAL_KINDS = frozenset(
-    {"setup_repair", "setup_reconcile", "workflow_user_copy", "production_control"}
-)
+_PROJECT_OPTIONAL_KINDS = PROJECT_OPTIONAL_KINDS
 #: Machine-level actions never inherit the current project.
-_MACHINE_SCOPED_KINDS = frozenset({"project_create", "managed_release"})
+_MACHINE_SCOPED_KINDS = MACHINE_SCOPED_KINDS
 
 #: Actions that do not compete for the GPU.  They must not be refused by the
 #: production/lease gate: a project import, a story outline or a setting edit
 #: does not touch the renderer.  Their own executors still enforce every gate.
-_NO_GPU_GATE: frozenset[str] = frozenset(
-    {
-        "project_create",
-        "document_import_text",
-        "project_settings_update",
-        "story_outline_generate",
-        "storyboard_generate",
-        "document_switch_basis",
-        "production_control",
-        "literary_scripts_generate",
-    }
-)
+_NO_GPU_GATE: frozenset[str] = NO_GPU_GATE_KINDS
 
 
 def _validate_params(kind: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -1370,6 +1325,20 @@ def preview_action(
 ) -> tuple[dict[str, Any], bool]:
     spec = action_spec(kind)
     params = _validate_params(kind, params)
+    from shine.support import contracts as contract_registry
+
+    # V2.1: a packaged contract must exist, match this build and be reviewed.
+    # A missing or stale contract blocks *this* action only.
+    contract_state = contract_registry.execution_state(kind)
+    if not contract_state["executable"]:
+        raise ActionBlocked(
+            contract_state["state"],
+            contract_state["notice"],
+            details={
+                "availability": contract_state.get("availability"),
+                "reason": contract_state.get("reason"),
+            },
+        )
     if session_id:
         from shine.support.models import SupportSession
 
@@ -1441,6 +1410,9 @@ def preview_action(
         "available": fingerprint is not None,
         "reason": fingerprint_reason,
     }
+    # V2.1: the authorization is bound to this exact capability contract, so an
+    # upgrade can never replay old parameters against a changed API.
+    preview["capability_contract"] = contract_registry.contract_binding(kind)
     preview["requires_authorization"] = True
     preview["expires_at"] = (utcnow() + timedelta(minutes=15)).replace(microsecond=0).isoformat()
     digest = hashlib.sha256(
@@ -1675,6 +1647,37 @@ def approve_action(
         db.commit()
         raise ActionStale("预览已过期，请重新预览并授权。")
 
+    # V2.1: never apply a stored authorization to a changed contract.  A
+    # preview made before an upgrade must be re-confirmed, and a capability
+    # that lost its reviewed contract is refused instead of half-executed.
+    from shine.support import contracts as contract_registry
+
+    contract_state = contract_registry.execution_state(row.kind)
+    stored_contract = (row.preview or {}).get("capability_contract") or {}
+    stored_digest = stored_contract.get("contract_digest")
+    if not contract_state["executable"]:
+        row.status = "EXPIRED"
+        row.last_error = contract_state["state"]
+        db.commit()
+        raise ActionBlocked(
+            contract_state["state"],
+            contract_state["notice"],
+            details={"action_id": row.id, "capability_contract": stored_contract},
+        )
+    if not stored_digest or stored_digest != contract_state.get("contract_digest"):
+        row.status = "EXPIRED"
+        row.last_error = "CONTRACT_CHANGED"
+        db.commit()
+        raise ActionBlocked(
+            "CONTRACT_CHANGED",
+            "这个操作在当前版本已经调整，请重新预览并确认。",
+            details={
+                "action_id": row.id,
+                "previewed_contract": stored_contract,
+                "current_contract": contract_registry.contract_binding(row.kind),
+            },
+        )
+
     # The target project is recomputed from the stored envelope *and* the
     # session's current project.  A database edit or a session switch after the
     # preview must never redirect an already-authorized action to another
@@ -1750,6 +1753,9 @@ def approve_action(
     db.refresh(row)
     params = dict(row.params or {})
     spec = action_spec(row.kind)
+    # A reviewed alias may reuse an already-bound dispatcher; the stored
+    # preview decides which one, never a runtime input.
+    dispatch = str(stored_contract.get("dispatch") or row.kind)
 
     # The second occupancy read closes the preview→approval race: a render can
     # start between the two requests.  Release uses the release-specific gate so
@@ -1775,7 +1781,7 @@ def approve_action(
     from shine.services import add_audit
 
     try:
-        if row.kind == "setup_repair":
+        if dispatch == "setup_repair":
             from shine.comfyops.setup_preparation import TASK_KEY, enqueue
 
             value = enqueue(
@@ -1815,7 +1821,7 @@ def approve_action(
                      "setup_task_key": TASK_KEY},
                     project_id=row.project_id,
                 )
-        elif row.kind == "setup_reconcile":
+        elif dispatch == "setup_reconcile":
             from pathlib import Path
 
             from shine.comfyops.setup_reconcile import reconcile_installation
@@ -1975,7 +1981,7 @@ def approve_action(
                     },
                     project_id=row.project_id,
                 )
-        elif row.kind == "workflow_user_copy":
+        elif dispatch == "workflow_user_copy":
             import copy
 
             from shine.api_comfy import create_workflow_profile
@@ -2015,7 +2021,7 @@ def approve_action(
                 "source_unchanged": True,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "managed_release":
+        elif dispatch == "managed_release":
             from shine.comfyops.renderer_release import release_managed_processes_guarded
 
             only = set(params.get("only") or []) or None
@@ -2053,7 +2059,7 @@ def approve_action(
                 },
                 project_id=row.project_id,
             )
-        elif row.kind == "project_create":
+        elif dispatch == "project_create":
             from shine.services import create_project
 
             try:
@@ -2080,7 +2086,7 @@ def approve_action(
                 "language": project.language,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "document_import_text":
+        elif dispatch == "document_import_text":
             from shine.agents.script import ScriptParseError
             from shine.models import Project
             from shine.services import import_project_document
@@ -2114,7 +2120,7 @@ def approve_action(
                 "current_basis": project.current_document_id,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "project_settings_update":
+        elif dispatch == "project_settings_update":
             from shine.models import Project
             from shine.services import update_project_settings
 
@@ -2140,7 +2146,7 @@ def approve_action(
                 "language": project.language,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "story_outline_generate":
+        elif dispatch == "story_outline_generate":
             from shine.llm.base import LLMError
             from shine.materialprep import story
             from shine.models import Project, ProjectDocument
@@ -2196,7 +2202,7 @@ def approve_action(
                 {"kind": row.kind, "task_id": task.id, "role": story.OUTLINE_RUN},
                 project_id=row.project_id,
             )
-        elif row.kind == "storyboard_generate":
+        elif dispatch == "storyboard_generate":
             from shine.director.streamline import queue_director_storyboard
 
             try:
@@ -2230,7 +2236,7 @@ def approve_action(
                     {"kind": row.kind, "task_id": task_id},
                     project_id=row.project_id,
                 )
-        elif row.kind == "production_start":
+        elif dispatch == "production_start":
             from shine.director.overview import build_overview
             from shine.director.streamline import start_director_production
             from shine.models import Project
@@ -2297,7 +2303,7 @@ def approve_action(
                     {"kind": row.kind, "task_id": run_id, "run_status": value.get("run_status")},
                     project_id=row.project_id,
                 )
-        elif row.kind == "document_switch_basis":
+        elif dispatch == "document_switch_basis":
             from shine.models import Project, ProjectDocument
             from shine.services import switch_script_basis
 
@@ -2317,7 +2323,7 @@ def approve_action(
                 "current_basis_id": document.id,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "production_control":
+        elif dispatch == "production_control":
             from shine.director import run_engine
             from shine.production.models import ProductionRun
 
@@ -2350,7 +2356,7 @@ def approve_action(
                 "state_version": fresh.state_version if fresh else None,
                 "checked_at": utcnow().isoformat(),
             }
-        elif row.kind == "literary_scripts_generate":
+        elif dispatch == "literary_scripts_generate":
             from shine.director import pipeline
 
             if gateway is None:

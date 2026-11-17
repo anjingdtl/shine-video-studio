@@ -372,8 +372,10 @@ try {
     $python = Get-Command python -ErrorAction SilentlyContinue
     if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
     if (-not $python) { throw 'Python is required to bind the copilot knowledge manifest.' }
-    & $python.Source -m scripts.generate_copilot_knowledge --commit $commit
-    if ($LASTEXITCODE -ne 0) { throw "knowledge manifest generation failed ($LASTEXITCODE)" }
+    & $python.Source -m scripts.generate_shine_copilot_contracts --commit $commit
+    if ($LASTEXITCODE -ne 0) { throw "copilot contract generation failed ($LASTEXITCODE)" }
+    & $python.Source -m scripts.generate_shine_copilot_contracts --check --commit $commit
+    if ($LASTEXITCODE -ne 0) { throw "copilot contract verification failed ($LASTEXITCODE)" }
 } finally {
     Pop-Location
 }

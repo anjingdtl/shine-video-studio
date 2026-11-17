@@ -14,7 +14,7 @@ from pathlib import Path
 from sqlalchemy import func, select
 
 from shine.models import Project, WorkflowProfile, utcnow
-from shine.support import capability_catalog, project_knowledge
+from shine.support import capability_catalog, contracts, project_knowledge
 from shine.support.models import SupportAction, SupportSession
 from tests.conftest import create_project
 
@@ -477,6 +477,8 @@ def test_p1_delegation_resumes_from_the_stored_envelope(api):
                 "state": "WAITING",
                 "action_id": seeded["id"],
                 "message": "",
+                "contract_digest": contracts.live_contract_digest("project_create"),
+                "contract_revision": 1,
             },
             {
                 "order": 2,
@@ -487,6 +489,8 @@ def test_p1_delegation_resumes_from_the_stored_envelope(api):
                 "state": "PENDING",
                 "action_id": None,
                 "message": "",
+                "contract_digest": contracts.live_contract_digest("project_create"),
+                "contract_revision": 1,
             },
         ],
     )

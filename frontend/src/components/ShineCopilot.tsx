@@ -22,6 +22,13 @@ export type CapabilityInfo = {
   scope?: string;
 };
 
+/** The installed build's knowledge/contract binding, in plain language. */
+type BuildInfo = {
+  state: string;
+  notice?: string;
+  user_notice?: string;
+};
+
 /** Build the preview payload from the capability registry, never from habit.
  *
  *  Every action has its own parameter contract: `managed_release` takes `only`,
@@ -240,6 +247,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [togglingWeb, setTogglingWeb] = useState(false);
   const [showEvidence, setShowEvidence] = useState<Record<string, boolean>>({});
   const [capabilities, setCapabilities] = useState<Record<string, CapabilityInfo>>({});
+  const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
   const [planInputs, setPlanInputs] = useState<Record<string, Record<string, string>>>({});
   const [approvedSteps, setApprovedSteps] = useState<Record<string, number[]>>({});
   const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
@@ -277,11 +285,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     let cancelled = false;
     void (async () => {
       try {
-        const payload = await api<{ capabilities?: CapabilityInfo[] }>('/support/capabilities/actions');
+        const payload = await api<{
+          capabilities?: CapabilityInfo[];
+          build?: BuildInfo;
+        }>('/support/capabilities/actions');
         if (cancelled) return;
         const map: Record<string, CapabilityInfo> = {};
         for (const row of payload.capabilities || []) map[row.action_id] = row;
         setCapabilities(map);
+        setBuildInfo(payload.build ?? null);
       } catch {
         // The registry is a contract aid; a failure must not block diagnosis.
       }
@@ -912,6 +924,12 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
           </div>
 
           <div className="copilot-scroll" ref={scrollRef}>
+            {buildInfo && (
+              <p className="copilot-build" role="status">
+                <ShieldCheck size={13} aria-hidden="true" />
+                {buildInfo.user_notice || buildInfo.notice || '无法确认 AI 管家的知识版本。'}
+              </p>
+            )}
             {!session && !busy && (
               <div className="copilot-intro">
                 <p>我能读懂这台电脑上的真实环境与任务记录，帮你判断下一步。</p>

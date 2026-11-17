@@ -838,7 +838,7 @@ def _switch_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
     }
 
 
-def build_plan(
+def _build_plan_raw(
     db,
     settings,
     *,
@@ -881,3 +881,52 @@ def build_plan(
     if intent == "import_document":
         return _import_plan(project_id=project_id)
     return None
+
+
+def _bind_contracts(plan: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Attach the packaged contract to every planned action (V2.1).
+
+    Planning never invents a capability, and a capability whose contract does
+    not belong to this build is shown as BLOCKED with the plain-language notice
+    instead of pretending it can be previewed.
+    """
+    if not plan:
+        return plan
+    from shine.support import contracts as contract_registry
+
+    for step in plan.get("steps") or []:
+        action = step.get("action") or {}
+        kind = action.get("kind")
+        if not kind:
+            continue
+        state = contract_registry.execution_state(str(kind))
+        action["contract"] = {
+            "action_id": kind,
+            "state": state["state"],
+            "contract_digest": state.get("contract_digest"),
+            "contract_revision": state.get("contract_revision"),
+        }
+        if not state["executable"] and step.get("state") in {"READY", "COVERED"}:
+            step["state"] = "BLOCKED"
+            step["notice"] = state["notice"]
+    return plan
+
+
+def build_plan(
+    db,
+    settings,
+    *,
+    request: str,
+    project_id: str | None = None,
+    episode_ids: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """The bounded plan for this request, or ``None`` when no operation applies."""
+    return _bind_contracts(
+        _build_plan_raw(
+            db,
+            settings,
+            request=request,
+            project_id=project_id,
+            episode_ids=episode_ids,
+        )
+    )

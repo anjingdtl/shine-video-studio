@@ -22,6 +22,7 @@ from shine.models import utcnow
 from shine.support import actions as action_service
 from shine.support import agent as agent_service
 from shine.support import capability_catalog, official_docs, project_knowledge
+from shine.support import contracts as contract_registry
 from shine.support import delegation as delegation_service
 from shine.support import parameters as parameter_service
 from shine.support import planner as planner_service
@@ -56,21 +57,9 @@ class MessageCreate(BaseModel):
 
 class ActionPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    kind: Literal[
-        "setup_repair",
-        "setup_reconcile",
-        "managed_release",
-        "workflow_user_copy",
-        "project_create",
-        "document_import_text",
-        "project_settings_update",
-        "story_outline_generate",
-        "storyboard_generate",
-        "production_start",
-        "document_switch_basis",
-        "production_control",
-        "literary_scripts_generate",
-    ]
+    #: Validated against the packaged capability contracts, never a second
+    #: hand-kept literal list (V2.1).
+    kind: str = Field(min_length=1, max_length=48)
     params: dict = Field(default_factory=dict)
     session_id: str | None = Field(default=None, max_length=36)
     project_id: str | None = Field(default=None, max_length=36)
@@ -196,6 +185,42 @@ def support_knowledge_sources():
 @router.get("/capabilities/actions")
 def support_capability_actions():
     return capability_catalog.catalog_payload()
+
+
+@router.get("/build")
+def support_build(request: Request):
+    """One build identity: knowledge index, capability contracts and routes.
+
+    This is the endpoint a person/UI checks to know whether the copilot's
+    knowledge and contracts belong to this installed version.  It never
+    executes anything and never scans the worktree.
+    """
+    routes = [
+        (method, getattr(route, "path", ""))
+        for route in request.app.routes
+        for method in (getattr(route, "methods", None) or set())
+        if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}
+    ]
+    identity = contract_registry.build_identity()
+    live = contract_registry.live_api_digest(routes)
+    api_matches = bool(identity.get("api_schema_digest")) and identity["api_schema_digest"] == live
+    state = identity["state"]
+    if state == "FRESH" and not api_matches:
+        state = "STALE"
+        identity["reasons"].append("运行中的 API 路由与打包合同不一致，已按过期合同处理。")
+    identity["state"] = state
+    identity["api_matches"] = api_matches
+    identity["live_api_digest"] = live
+    identity["action_states"] = {
+        row.action_id: contract_registry.execution_state(row.action_id)["state"]
+        for row in capability_catalog.CAPABILITIES
+    }
+    identity["notice"] = (
+        "AI 管家知识与能力合同已匹配当前版本。"
+        if state == "FRESH"
+        else "；".join(identity["reasons"]) or "无法证明知识与能力合同属于当前版本。"
+    )
+    return identity
 
 
 @router.post("/plans/preview")

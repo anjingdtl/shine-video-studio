@@ -14,26 +14,22 @@ from __future__ import annotations
 
 from typing import Any
 
+from shine.copilot.declarations import WRITE_ACTIONS
 from shine.models import new_id, utcnow
 from shine.support import actions as action_service
+from shine.support import contracts as contract_registry
 from shine.support.models import SupportSession
 
-#: Steps the person may authorize as one low-risk batch.
+#: Auto-advanced steps are exactly the non-GPU, no-occupancy-gate capabilities
+#: declared by the product.  These sets are derived, never hand-kept.
 AUTO_KINDS = frozenset(
-    {
-        "project_create",
-        "document_import_text",
-        "document_switch_basis",
-        "project_settings_update",
-        "story_outline_generate",
-        "storyboard_generate",
-        "literary_scripts_generate",
-        "production_control",
-    }
+    row.action_id
+    for row in WRITE_ACTIONS
+    if row.occupancy_gate == "NONE" and not row.gpu
 )
 #: Steps that consume GPU; they must fit the explicitly granted budget.
-GPU_KINDS = frozenset({"production_start"})
-PAID_KINDS = frozenset({"story_outline_generate", "storyboard_generate", "literary_scripts_generate"})
+GPU_KINDS = frozenset(row.action_id for row in WRITE_ACTIONS if row.gpu)
+PAID_KINDS = frozenset(row.action_id for row in WRITE_ACTIONS if row.paid)
 
 DEFAULT_BUDGET = {"max_episodes": 1, "max_gpu_actions": 0, "max_paid_actions": 2}
 
@@ -139,15 +135,24 @@ def create(
     }
     for step in steps:
         order = int(step.get("order") or 0)
+        kind = (step.get("action") or {}).get("kind")
         entry = {
             "order": order,
             "title": step.get("title"),
-            "kind": (step.get("action") or {}).get("kind"),
+            "kind": kind,
             "params": (step.get("action") or {}).get("params") or {},
             "plan_state": step.get("state"),
             "state": "PENDING" if order in orders and step.get("state") == "READY" else "SKIPPED",
             "action_id": None,
             "message": "",
+            # V2.1: the step is authorized against the contract that existed
+            # when the person approved it, not against a future build.
+            "contract_digest": contract_registry.live_contract_digest(str(kind)) if kind else None,
+            "contract_revision": (contract_registry.live_contract(str(kind)) or {}).get(
+                "contract_revision"
+            )
+            if kind
+            else None,
         }
         if order in orders and step.get("state") != "READY":
             entry["state"] = "PAUSED"
@@ -194,6 +199,19 @@ def _advance(
             return _finish(payload, "PAUSED", "HUMAN_REQUIRED")
         if not _scope_matches(payload, step):
             return _finish(payload, "FAILED", "SCOPE_EXCEEDED")
+        # V2.1: an upgrade may have changed this capability's contract.  The
+        # step keeps its original identity/task reference, but an unexecuted
+        # step must be re-confirmed instead of being sent to a new API.
+        current_digest = contract_registry.live_contract_digest(kind)
+        stored_digest = step.get("contract_digest")
+        if not stored_digest:
+            step["state"] = "PAUSED"
+            step["message"] = "这一步是在旧版本授权的，能力合同未核对；请重新确认后再执行。"
+            return _finish(payload, "PAUSED", "CONTRACT_UNVERIFIED")
+        if current_digest != stored_digest:
+            step["state"] = "PAUSED"
+            step["message"] = "这个操作在当前版本已经调整，请重新确认这一步。"
+            return _finish(payload, "PAUSED", "CONTRACT_CHANGED")
         if kind in GPU_KINDS:
             if payload.get("gpu_actions_used", 0) >= budget["max_gpu_actions"]:
                 step["state"] = "PAUSED"
