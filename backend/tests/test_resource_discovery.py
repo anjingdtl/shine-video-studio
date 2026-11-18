@@ -23,6 +23,7 @@ import pytest
 from shine.comfyops import deployment, resource_discovery
 from shine.comfyops.models import InstallationPlan
 from shine.models import AppSetting
+from tests.conftest import make_sparse_file
 
 LOCAL = {"x-shine-local-action": "1"}
 
@@ -40,12 +41,6 @@ def _first_model_spec() -> dict:
             spec = component["files"][0]
             return {"component_id": component["component_id"], **spec}
     raise AssertionError("default catalog has no model file")
-
-
-def _sparse_file(path: Path, size: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("wb") as stream:
-        stream.truncate(size)
 
 
 def _fake_comfy(root: Path) -> None:
@@ -87,11 +82,11 @@ def test_scan_finds_renamed_weights_nodes_and_workflows_across_roots(env):
     # Root A: a ComfyUI checkout whose models tree holds the pinned byte size.
     root_a = tmp_path / "盘A" / "ComfyUI"
     _fake_comfy(root_a)
-    _sparse_file(root_a / "models" / "diffusion_models" / "官方名.safetensors", spec["size"])
+    make_sparse_file(root_a / "models" / "diffusion_models" / "官方名.safetensors", spec["size"])
 
     # Root B: no ComfyUI at all — a renamed weight, a node pack, a workflow.
     root_b = tmp_path / "盘B" / "模型散放"
-    _sparse_file(root_b / "改过的名字.bin", spec["size"])
+    make_sparse_file(root_b / "改过的名字.bin", spec["size"])
     (root_b / "ComfyUI-KJNodes").mkdir(parents=True)
     (root_b / "我的 workflow.json").write_text(
         '{"31": {"class_type": "MiniMaxH3ReferenceToVideo", "inputs": {}}}',
@@ -170,7 +165,7 @@ def test_report_keeps_found_and_missing_apart(env):
     client, factory, tmp_path, _ = env
     spec = _first_model_spec()
     root = tmp_path / "只有一半"
-    _sparse_file(root / "one.bin", spec["size"])
+    make_sparse_file(root / "one.bin", spec["size"])
     client.post("/api/v1/setup/search-directories", json={"path": str(root)}, headers=LOCAL)
     with factory() as db:
         resource_discovery.start_scan(db, drives=False)

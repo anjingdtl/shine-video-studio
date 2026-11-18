@@ -102,6 +102,20 @@ Never bundle official full-text guides without redistribution permission. Run
 Windows 从当前仓库调用 `.\run_backend_shards.ps1 -WorkRoot <非系统盘上的隔离测试目录>`。
 脚本沿用当前仓库配置的 Python，每轮使用独立的临时目录，并记录 8 个分片的退出码与日志。
 
+**跑完必须落地清理。** 脚本判定完成后删除各分片的 `bt-*` basetemp（有分片失败时保留，
+便于定位失败用例的 `tmp_path`；`-KeepBasetemp` 强制保留），并删掉本脚本产出的旧
+`shards-*` 日志目录（`-KeepRuns N` 保留最近 N 次，默认 1）。`WorkRoot` 要**固定复用同一个
+测试根**：换一个中文名的手工目录跑一次，就多一份没人认领的残留（历史事故：`F:\ShineTest`
+累计 327 GB、`F:\ClaudeWorkSpace\.pytest-tmp` 累计 132 GB，两者合计吃掉 F 盘 459 GB）。
+
+**假权重必须写成真稀疏文件。** 按字节数匹配目录清单的用例只能用
+`tests.conftest.make_sparse_file`。NTFS 上先 `FSCTL_SET_SPARSE` 再 `truncate` **仍然真实分配**
+（实测 20 GiB 全部落盘），必须标记稀疏后 seek 到末尾写最后一个字节（实测 0.1 MiB）。
+改回 `truncate` 会让单次全量回归写约 70 GB，这是上一轮把测试盘吃满的直接原因。
+
+**分片数是时间/并发参数，不是空间参数。** 峰值占用由"哪几个用例造大文件"决定，与分片数无关；
+收缩分片只会让单次从约 10 分钟拉长到 20 分钟量级，不减少任何字节。要治空间就治造假文件和清理。
+
 ```bash
 cd <repo>
 ls backend/tests/test_*.py > /tmp/all-tests.txt

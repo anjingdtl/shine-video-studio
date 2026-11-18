@@ -21,6 +21,7 @@ import pytest
 
 from shine.comfyops import deployment, setup_preparation, setup_summary
 from shine.comfyops.verification_receipts import save_receipt
+from tests.conftest import make_sparse_file
 
 pytestmark = pytest.mark.integration
 
@@ -173,10 +174,7 @@ def test_review_capability_reads_the_same_root_as_its_readiness(tmp_path, api):
 
     # 稀疏文件只满足尺寸过滤（presence 的语义），不声称核验。
     for row in files:
-        target = store / str(row["relative_path"])
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("wb") as handle:
-            handle.truncate(int(row["size"]))
+        make_sparse_file(store / str(row["relative_path"]), int(row["size"]))
     readiness = deployment.advisory_review_readiness(settings)["VLM"]
     assert readiness["model_files_present"] == len(files)
 

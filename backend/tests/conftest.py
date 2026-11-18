@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+import os
 import shutil
 import subprocess
 import tempfile
@@ -16,6 +18,62 @@ from shine.db import Base, make_engine, make_session_factory
 from shine.main import create_app
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
+
+_FSCTL_SET_SPARSE = 0x000900C4
+_GENERIC_WRITE = 0x40000000
+_CREATE_ALWAYS = 2
+_FILE_ATTRIBUTE_NORMAL = 0x80
+
+
+def _mark_sparse_windows(path: Path) -> None:
+    """Flag *path* as an NTFS sparse file (no administrator rights needed)."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [
+        ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+        ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p,
+    ]
+    kernel32.DeviceIoControl.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint32,
+        ctypes.c_void_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint32), ctypes.c_void_p,
+    ]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = kernel32.CreateFileW(
+        str(path), _GENERIC_WRITE, 0, None, _CREATE_ALWAYS, _FILE_ATTRIBUTE_NORMAL, None)
+    if handle in (None, ctypes.c_void_p(-1).value):
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        returned = ctypes.c_uint32(0)
+        if not kernel32.DeviceIoControl(
+                ctypes.c_void_p(handle), _FSCTL_SET_SPARSE, None, 0,
+                None, 0, ctypes.byref(returned), None):
+            raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+
+
+def make_sparse_file(path: Path, size: int) -> None:
+    """Create a file of *size* logical bytes without allocating the disk blocks.
+
+    The resource scanner matches candidates on ``st_size``, so the logical size
+    must be exact.  On NTFS, marking the file sparse and then ``truncate``-ing to
+    the target size still allocates every cluster — a single regression run wrote
+    ~70 GB of fake weights that way and filled the test drive.  Seeking past the
+    end and writing the final byte is what actually keeps the interior
+    unallocated; measured 20 GiB logical / 0.1 MiB on disk.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if size <= 0:
+        path.write_bytes(b"")
+        return
+    if os.name == "nt":
+        _mark_sparse_windows(path)
+        with path.open("r+b") as handle:
+            handle.seek(size - 1)
+            handle.write(b"\x00")
+        return
+    with path.open("wb") as handle:
+        handle.truncate(size)
 
 
 _TEST_TIERS = ("unit", "integration", "full")
