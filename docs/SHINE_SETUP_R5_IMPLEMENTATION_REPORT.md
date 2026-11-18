@@ -13,7 +13,10 @@
 | `3903977` | R5-0 基线审计文档 |
 | `3f75f0f` | R5-1 后端：稳定收编身份、端点可变、回执复用、同源选择、扫描 UNKNOWN、确定性选择（B1–B5/B8） |
 | `62804b6` | R5-2 前端：未知≠缺件、第二执行链删除、测试收敛（B6/B7）+ INV-07/10 反例 |
-| （本轮后续） | INV-03/04 反例补强、Ruff 修正、验收文档 |
+| `40f9781` | INV-03/04 反例补强（历史端口行继承、封条精准失效、多候选只问一次）、Ruff 修正、实施报告 |
+| `00ff396` | 同端点多声明按最近显式确认优先（双安装同端口配置死路修复，INV-04） |
+| `1fa8f55` | 新审计码登记前端清单（首轮 8 分片唯一真实回归） |
+| （本轮后续） | 验收文档与最终全量证据 |
 
 ## 2. 修复的真实根因与代码位置
 
@@ -27,6 +30,7 @@
   - `installation_identity_matches(instance, port)`：六个强制点共用的唯一谓词（端口 uuid 行 OR adopted 且端点一致）。
 - 收编（`adoption.py`）：同 root 历史行被继承；端口迁移只更新同一行的 `port` 与 `adoption.service_identity`，写审计 `ADOPTED_INSTALLATION_ENDPOINT_CHANGED`，**字节证据/节点指纹/行 ID 不动**；探测行接管逻辑保留；另一安装的 adopted 行占用同端口身份时，新安装使用稳定 root 身份（不再 409 死路）；受管/假行占用端点仍拒绝。
 - 强制点收敛：`runtime_configuration.configuration_identity`、`handoff_startup._installation_evidence`、`resource_resolver.managed_installation_pin`、`deployment.generate_configuration` 全部改用同一谓词/查找；受管实例阶梯（`next_instance_plan`）身份不变。
+- 同端点多声明（`00ff396`）：两套安装先后收编在同一端口时，`find_instance_by_endpoint` 与收编候选排序共用同一规则——稳定 root 身份先于历史端口行，同级按最近确认 attempt 时间（`confirmation_sort_key`）排序，完全同序才具名拒绝；用户显式选择仍高于一切自动排序。反例锁定「A(h3)+B(image) 同端口 → 配置指向 B」。
 - 兼容与回滚：历史行 ID 一律保留，无 schema 迁移（Alembic check 无漂移）；回滚 = 恢复旧查找函数。旧封条按既有 `comfyui_base_url` 事实精准失效（见 B2/INV-03 反例）。
 
 ### B2 RECIPE 幂等跳过不看端点/变体（INV-09）
