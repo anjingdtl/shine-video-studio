@@ -242,6 +242,97 @@ def test_relayvsr_places_verified_bytes_into_the_served_models_root(tmp_path, ap
     assert third["served_root_placed"] == []
 
 
+def test_manual_reconcile_reuses_the_cached_digest_without_a_full_reread(tmp_path, api, monkeypatch):
+    """R5 B3/INV-02/05：已缓存字节判同走回执复用，不得每轮全量重读几十 GiB。
+
+    复现方向：manual_files_reconcile 对每个已缓存文件裸哈希判同，整备每轮
+    RECONCILE 都全量重读缓存。威胁模型不变：stat+头尾见证仍区分同 tick 改写。
+    """
+    client, factory, settings = api
+    catalog = _catalog()
+    from shine.comfyops import setup_reconcile, verification_receipts
+
+    monkeypatch.setattr(setup_reconcile, "_capability_catalog", lambda capability: catalog)
+    staging = Path(settings.comfyops_dir) / "manual-downloads"
+    staging.mkdir(parents=True, exist_ok=True)
+    (staging / "w.safetensors").write_bytes(PAYLOAD)
+    with factory() as db:
+        first = setup_reconcile.manual_files_reconcile(db, settings, capability="h3", catalog=catalog)
+    assert first["imported_bytes"] == len(PAYLOAD)
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+
+    seen: list[tuple[str, bool]] = []
+    real_digest = verification_receipts.file_digest
+
+    def spy(path, expected_sha256, expected_size, cache_dir=None):
+        result = real_digest(path, expected_sha256, expected_size, cache_dir=cache_dir)
+        seen.append((str(path), bool(result.get("reused"))))
+        return result
+
+    monkeypatch.setattr(verification_receipts, "file_digest", spy)
+    original_hash = setup_reconcile._hash_file
+
+    def guarded(path):
+        if Path(path).parent == cache:
+            raise AssertionError("FULL_REHASH_OF_CACHED_BYTES")
+        return original_hash(path)
+
+    monkeypatch.setattr(setup_reconcile, "_hash_file", guarded)
+    # 第二轮建立缓存回执（首次允许读一遍）；第三轮必须复用，不再全量读。
+    with factory() as db:
+        setup_reconcile.manual_files_reconcile(db, settings, capability="h3", catalog=catalog)
+    seen.clear()
+    with factory() as db:
+        third = setup_reconcile.manual_files_reconcile(db, settings, capability="h3", catalog=catalog)
+    assert third["imported"] == []
+    assert (str(cache / SHA), True) in seen, "已缓存字节必须命中回执复用"
+
+
+def test_relayvsr_served_check_reuses_the_receipt_instead_of_rehashing(tmp_path, api, monkeypatch):
+    """R5 B3：已落位文件的判同也走同一回执执行者，不每轮全量重读。"""
+    client, factory, settings = api
+    catalog = _catalog()
+    from shine.comfyops import setup_reconcile, verification_receipts
+
+    monkeypatch.setattr(setup_reconcile, "_capability_catalog", lambda capability: catalog)
+    installation = _installation(tmp_path / "ComfyUI")
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / SHA).write_bytes(PAYLOAD)
+    with factory() as db:
+        setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    target = Path(installation["root"]) / "models" / "w.safetensors"
+    assert target.is_file()
+
+    seen: list[tuple[str, bool]] = []
+    real_digest = verification_receipts.file_digest
+
+    def spy(path, expected_sha256, expected_size, cache_dir=None):
+        result = real_digest(path, expected_sha256, expected_size, cache_dir=cache_dir)
+        seen.append((str(path), bool(result.get("reused"))))
+        return result
+
+    monkeypatch.setattr(verification_receipts, "file_digest", spy)
+    original_hash = setup_reconcile._hash_file
+
+    def guarded(path):
+        if Path(path) == target:
+            raise AssertionError("FULL_REHASH_OF_SERVED_BYTES")
+        return original_hash(path)
+
+    monkeypatch.setattr(setup_reconcile, "_hash_file", guarded)
+    with factory() as db:
+        setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    seen.clear()
+    with factory() as db:
+        setup_reconcile.reconcile_installation(
+            db, settings, path=installation["root"], capability="relayvsr")
+    assert (str(target), True) in seen, "已落位文件判同必须命中回执复用"
+    assert target.read_bytes() == PAYLOAD
+
+
 def test_presence_accepts_family_prefixed_relative_paths(tmp_path, api):
     """RelayVSR 清单的 relative_path 带 family 前缀；presence 不得叠双层目录。
 

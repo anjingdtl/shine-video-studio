@@ -212,6 +212,183 @@ def test_explicit_probe_roots_use_the_settings_value(installed, monkeypatch):
     assert queue[0]["root"] == str(root)
 
 
+# --- R5 B1/B2/B8：物理安装身份稳定、端点可变、选择确定性 ---------------------
+
+
+def _second_installation(temporary, catalogs):
+    """A second physical ComfyUI with the same pinned bytes, on another root."""
+    root = temporary / "另一套安装" / "ComfyUI"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("# synthetic entry\n", encoding="utf-8")
+    (root / "comfyui_version.py").write_text('__version__ = "0.39.0"\n', encoding="utf-8")
+    python = root.parent / "python_embeded" / "python.exe"
+    python.parent.mkdir()
+    python.write_bytes(b"synthetic interpreter, never executed")
+    for capability, family in (("h3", "diffusion_models"), ("image", "text_encoders")):
+        data = ("synthetic weight for " + capability).encode()
+        target = root / "models" / family / (capability + ".safetensors")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return root
+
+
+def test_port_change_keeps_one_installation_and_its_byte_evidence(installed):
+    """INV-03/05：端口是端点，不是物理安装身份；换端口不产生第二条行、不丢证据。"""
+    factory, settings, root, _ = installed
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    assert first["adoption"]["status"] == "ADOPTED"
+    with factory() as db:
+        second = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8189)
+    assert second["adoption"]["status"] in {"ADOPTED", "ALREADY_ADOPTED"}
+    assert second["adoption"]["instance_id"] == first["adoption"]["instance_id"]
+    with factory() as db:
+        rows = db.scalars(select(ComfyInstance)).all()
+        assert len(rows) == 1
+        assert rows[0].payload["port"] == 8189
+        adoption = rows[0].payload["adoption"]
+        assert adoption["verified_files"], "换端口不得清空已核验字节证据"
+        assert adoption["service_identity"]["port"] == 8189
+
+
+def test_legacy_port_row_keeps_its_id_when_the_endpoint_moves(installed):
+    """历史端口主键行不重算 ID：同一 root 在新端口被继承，证据保留。"""
+    from shine.comfyops.instances import instance_identity
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    legacy_id = first["adoption"]["instance_id"]
+    with factory() as db:
+        row = db.get(ComfyInstance, legacy_id)
+        # 模拟历史行：旧版本以端口 uuid 为主键（当前实现即如此）。
+        assert row is not None
+    with factory() as db:
+        again = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8200)
+    assert again["adoption"]["instance_id"] == legacy_id
+    with factory() as db:
+        assert db.get(ComfyInstance, legacy_id).payload["port"] == 8200
+        assert len(db.scalars(select(ComfyInstance)).all()) == 1
+
+
+def test_same_port_different_root_is_not_a_dead_end(installed):
+    """INV-04：两套真实安装先后用同一端口，第二套必须可收编，第一套历史不动。"""
+    factory, settings, root, _ = installed
+    other = _second_installation(Path(settings.data_dir), None)
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    with factory() as db:
+        second = setup_reconcile.reconcile_installation(
+            db, settings, path=str(other), capability="h3", adopt=True, port=8188)
+    assert second["adoption"]["status"] == "ADOPTED", second
+    assert second["adoption"]["instance_id"] != first["adoption"]["instance_id"]
+    with factory() as db:
+        prior = db.get(ComfyInstance, first["adoption"]["instance_id"])
+        assert prior.payload["root"] == str(root)
+        assert prior.payload["port"] == 8188
+        rows = db.scalars(select(ComfyInstance)).all()
+        assert len(rows) == 2
+
+
+def test_duplicate_legacy_rows_resolve_deterministically_to_the_chosen_port(installed):
+    """INV-04/B8：历史同 root 多行时，选择跟随用户确认的端口，不随遍历顺序漂移。"""
+    from shine.comfyops.instances import instance_identity
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        first = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    # 人为制造历史重复行（旧版本端口漂移的遗留）：同 root、不同端口。
+    with factory.begin() as db:
+        payload = dict(db.get(ComfyInstance, first["adoption"]["instance_id"]).payload)
+        payload["port"] = 8189
+        payload["adoption"] = {**payload["adoption"],
+                               "service_identity": {**payload["adoption"]["service_identity"], "port": 8189}}
+        from shine.comfy.workflow import graph_hash
+        db.add(ComfyInstance(id=instance_identity("local", 8189), payload=payload,
+                             sha256=graph_hash(payload), status="STOPPED"))
+    with factory() as db:
+        # 用户确认的是 8188；后插入的遗留行是 8189。last-wins 会选错。
+        record_installation_choice(db, root=str(root), port=8188, actor="local-user")
+        db.commit()
+    for _ in range(3):
+        with factory() as db:
+            selected = resolve_installation(db, settings)["selected"]
+        assert selected["port"] == 8188
+
+
+def test_recipe_step_regenerates_when_the_endpoint_moved(installed, monkeypatch):
+    """INV-09/B2：同一实例、端口已变 → 不得「沿用现有配置」跳过重生成。"""
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adoption = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    instance_id = adoption["adoption"]["instance_id"]
+    monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report", lambda *a: {
+        "status": "ACTIVE", "services_verified": True})
+    from shine.models import AppSetting
+    with factory.begin() as db:
+        db.add(AppSetting(key="deployment-runtime-active", value={
+            "version": 1, "identity": {"instance_id": instance_id,
+                                       "comfyui_base_url": "http://127.0.0.1:8188"},
+            "sha256": "x" * 64}))
+    calls = []
+    monkeypatch.setattr(deployment, "generate_configuration",
+                        lambda *a, **kw: calls.append(kw) or {"recipe_sha256": "b" * 64})
+    task = {"project_id": None,
+            "target": {"instance_id": instance_id, "port": 8189, "name": "shine-h3"},
+            "request": {"capabilities": ["h3"], "variant_id": "h3-ref2va-int8-convrot"}}
+    result = setup_preparation._step_recipe(factory, settings, task)
+    assert result["status"] == "DONE"
+    assert len(calls) == 1, "端口变化必须重新生成运行配方"
+    assert calls[0]["port"] == 8189
+
+
+def test_recipe_step_regenerates_when_the_active_variant_is_not_the_requested_one(installed, monkeypatch):
+    """INV-09/B2：激活的是候选变体而本次请求默认基线 → 不得静默沿用候选配方。"""
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adoption = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    instance_id = adoption["adoption"]["instance_id"]
+    monkeypatch.setattr("shine.comfyops.runtime_configuration.runtime_report", lambda *a: {
+        "status": "ACTIVE", "services_verified": True})
+    from shine.models import AppSetting
+    with factory.begin() as db:
+        db.add(AppSetting(key="deployment-runtime-active", value={
+            "version": 1, "variant_id": "ref2va-lowend-candidate",
+            "identity": {"instance_id": instance_id,
+                         "comfyui_base_url": "http://127.0.0.1:8188"},
+            "sha256": "x" * 64}))
+    calls = []
+    monkeypatch.setattr(deployment, "generate_configuration",
+                        lambda *a, **kw: calls.append(kw) or {"recipe_sha256": "c" * 64})
+    task = {"project_id": None,
+            "target": {"instance_id": instance_id, "port": 8188, "name": "shine-h3"},
+            "request": {"capabilities": ["h3"], "variant_id": "h3-ref2va-int8-convrot"}}
+    result = setup_preparation._step_recipe(factory, settings, task)
+    assert result["status"] == "DONE"
+    assert len(calls) == 1, "变体变化必须重新生成运行配方"
+
+
+def test_root_identity_ignores_windows_case_and_spaces(installed):
+    """INV-13：同一物理 root 的大小写/空格变体只对应一个稳定身份。"""
+    import os
+
+    from shine.comfyops.instances import adopted_instance_identity
+
+    factory, settings, root, _ = installed
+    base = adopted_instance_identity(root)
+    variant = str(root).upper() if os.name == "nt" else str(root)
+    assert adopted_instance_identity(variant) == base
+    assert adopted_instance_identity(str(root) + os.sep) == base
+
+
 @pytest.mark.parametrize("explicit_variant", [False, True])
 def test_machine_card_inherits_the_same_bound_and_validated_contract(installed, monkeypatch, explicit_variant):
     from shine.comfyops import setup_summary

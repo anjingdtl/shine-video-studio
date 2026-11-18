@@ -563,10 +563,10 @@ def _installation_evidence(db, settings, binding, *, port, cwd=None):
     and a run may only use it while it is real, stopped and complete.
     """
     from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
-    from shine.comfyops.instances import instance_identity
+    from shine.comfyops.instances import installation_identity_matches
 
     installed = db.get(ComfyInstance, binding['id'])
-    if (not installed or installed.id != instance_identity('local', port)
+    if (not installed or not installation_identity_matches(installed, port)
             or installed.sha256 != binding['sha256'] or installed.payload.get('is_mock', True)
             or installed.payload.get('process') or installed.status != 'STOPPED'
             or (cwd is not None

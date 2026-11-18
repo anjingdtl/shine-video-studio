@@ -183,6 +183,51 @@ def test_report_keeps_found_and_missing_apart(env):
     assert all(row["sources"] == [] for row in h3["missing"])
 
 
+def test_incomplete_coverage_reports_unknown_not_missing(env, monkeypatch):
+    """R5 B5/INV-14：扫描被截断时，未找到的文件只能是 UNKNOWN，不得断言本机没有。"""
+    client, factory, tmp_path, _ = env
+    monkeypatch.setattr(resource_discovery, "SCAN_BATCH_DIRECTORY_BUDGET", 3)
+    deep = tmp_path / "未扫完"
+    for index in range(8):
+        (deep / f"层{index}" / "子目录").mkdir(parents=True)
+    client.post("/api/v1/setup/search-directories", json={"path": str(deep)}, headers=LOCAL)
+    with factory() as db:
+        resource_discovery.start_scan(db, drives=False)
+    with factory() as db:
+        first = resource_discovery.advance_scan(db, budget_s=5.0)
+    assert first["coverage"]["status"] == "TRUNCATED"
+    report = client.get("/api/v1/setup/resource-scan").json()
+    assert report["coverage_complete"] is False
+    h3 = report["capabilities"]["h3"]
+    assert h3["missing"] == [], "覆盖不完整不得断言 MISSING"
+    assert h3["unknown"], "未覆盖区域里的文件只能报未知"
+
+
+def test_unreadable_area_also_downgrades_missing_to_unknown(env, monkeypatch):
+    """R5 B5/INV-14：存在读不到的区域时，即使批次完成也不得断言本机没有。"""
+    client, factory, tmp_path, _ = env
+    root = tmp_path / "含坏区二"
+    (root / "可读").mkdir(parents=True)
+    blocked = root / "不可读"
+    blocked.mkdir()
+    real_scandir = os.scandir
+
+    def guarded_scandir(path):
+        if str(path) == str(blocked):
+            raise PermissionError("denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(resource_discovery.os, "scandir", guarded_scandir)
+    client.post("/api/v1/setup/search-directories", json={"path": str(root)}, headers=LOCAL)
+    with factory() as db:
+        resource_discovery.start_scan(db, drives=False)
+    _drain_scan(factory)
+    report = client.get("/api/v1/setup/resource-scan").json()
+    h3 = report["capabilities"]["h3"]
+    assert h3["missing"] == []
+    assert h3["unknown"]
+
+
 def test_machine_level_installation_plan_needs_no_project(env):
     _, factory, _, _ = env
     with factory.begin() as db:

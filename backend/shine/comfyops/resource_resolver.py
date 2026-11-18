@@ -129,14 +129,14 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
 
 def managed_installation_pin(db, instance_id: str) -> dict:
     """Pin a physical installation without requiring the default INT8 launch recipe."""
-    from shine.comfyops.instances import instance_identity
+    from shine.comfyops.instances import installation_identity_matches
     from shine.comfyops.models import ComfyInstance
 
     instance = db.get(ComfyInstance, instance_id)
     value = instance.payload if instance and isinstance(instance.payload, dict) else {}
     port = value.get("port")
     if (not instance or value.get("managed") is not True or value.get("is_mock") is not False
-            or not isinstance(port, int) or instance_identity("local", port) != instance.id
+            or not isinstance(port, int) or not installation_identity_matches(instance, port)
             or instance.sha256 != graph_hash(value)):
         raise ValueError("RESOURCE_INSTANCE_UNVERIFIED")
     return {"id": instance.id, "sha256": instance.sha256}

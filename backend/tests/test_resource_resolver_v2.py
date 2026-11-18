@@ -396,6 +396,34 @@ def test_variant_availability_decouples_preparation_from_production(studio, monk
     assert candidate["production_ready"] is False
 
 
+def test_variant_availability_reads_the_same_installation_selection(studio, tmp_path):
+    """R5 B4/INV-07：availability 的安装事实必须与 summary 同一选择，不取第一条行。"""
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.instances import instance_identity
+    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.setup_summary import record_installation_choice
+
+    client, factory, _settings = studio
+    project = create_project(client, title="同源选择")
+    roots = []
+    for name in ("第一套", "第二套"):
+        root = tmp_path / name / "ComfyUI"
+        (root / "comfy").mkdir(parents=True)
+        (root / "main.py").write_text("# synthetic\n", encoding="utf-8")
+        roots.append(root)
+    with factory.begin() as db:
+        for port, root in zip((8188, 8189), roots):
+            payload = {"managed": True, "adopted": True, "external_installation": True,
+                       "root": str(root), "port": port, "name": "shine-h3", "is_mock": False}
+            db.add(ComfyInstance(id=instance_identity("local", port), payload=payload,
+                                 sha256=graph_hash(payload), status="STOPPED"))
+    with factory() as db:
+        record_installation_choice(db, root=str(roots[1]), port=8189, actor="local-user")
+        db.commit()
+    body = client.get(f"/api/v1/setup/variant-availability?project_id={project}").json()
+    assert body["adopted_root"] == str(roots[1]), "必须读用户选定的安装，而不是台账第一条收编行"
+
+
 def test_live_node_check_never_queries_unowned_service(studio, monkeypatch):
     from shine.comfyops.resource_diagnostics import check_owned_node_inputs
     from shine.strategy import GenerationStrategy

@@ -33,7 +33,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from shine.comfyops import deployment
+from shine.comfyops import deployment, verification_receipts
 
 logger = logging.getLogger(__name__)
 
@@ -89,20 +89,17 @@ def _known_port(db, root: str) -> int | None:
     """The port this installation is already registered under, if any.
 
     Reading it back keeps an adoption on a non-default port (8189) on *that*
-    port instead of silently re-registering the installation as 8188.
+    port instead of silently re-registering the installation as 8188.  The
+    row is found by the same single resolver adoption uses (R5 B1), so a
+    legacy duplicate can never answer with an arbitrary iteration order.
     """
-    from sqlalchemy import select
-
-    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.instances import find_adopted_instance
 
     try:
-        resolved = str(Path(root).resolve())
-        for row in db.scalars(select(ComfyInstance)):
-            payload = row.payload if isinstance(row.payload, dict) else {}
-            if payload.get("root") and str(Path(payload["root"]).resolve()) == resolved:
-                port = payload.get("port")
-                if isinstance(port, int) and not isinstance(port, bool):
-                    return port
+        row = find_adopted_instance(db, root)
+        port = (row.payload if row is not None else {}).get("port")
+        if isinstance(port, int) and not isinstance(port, bool):
+            return port
     except Exception:  # noqa: BLE001 - an unreadable row is not a port
         return None
     return None
@@ -365,16 +362,17 @@ def manual_files_reconcile(db, settings, *, capability: str = "h3",
             expected_sha = str(item.get("sha256") or "").lower()
             size = int(item.get("size") or 0)
             target = cache / expected_sha if expected_sha else None
-            if target is not None and target.is_file() and _hash_file(target) == expected_sha:
+            # R5 B3：判同走同一回执执行者（stat+头尾见证复用）。已缓存字节
+            # 不得每轮全量重读；字节真变了仍会被见证/哈希揪出，威胁模型不变。
+            if target is not None and target.is_file() and verification_receipts.file_digest(
+                    target, expected_sha, size, cache_dir=cache)["verified"]:
                 continue  # already cached and verified - never copy twice
             match = None
             for candidate in by_size.get(size, []):
-                try:
-                    if _hash_file(candidate) == expected_sha:
-                        match = candidate
-                        break
-                except OSError:
-                    continue
+                if verification_receipts.file_digest(
+                        candidate, expected_sha, size, cache_dir=cache)["verified"]:
+                    match = candidate
+                    break
             if match is None:
                 absent.append({"component_id": component["component_id"],
                                "relative_path": item["relative_path"], "size": size})
@@ -435,10 +433,9 @@ def _place_relayvsr_served(db, settings, catalog: dict, served_root: Path, *, ac
             if not source.is_file():
                 continue
             if target.is_file():
-                try:
-                    same = target.stat().st_size == int(item["size"]) and _hash_file(target) == sha
-                except OSError:
-                    same = False
+                # R5 B3：已落位文件判同同样走回执复用，不每轮全量重读。
+                same = verification_receipts.file_digest(
+                    target, sha, int(item["size"]), cache_dir=cache)["verified"]
                 if not same:
                     refused.append({"path": str(target), "code": "SERVED_TARGET_BYTES_DIFFER"})
                 continue

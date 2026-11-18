@@ -371,16 +371,59 @@ def adopt_existing_installation(
     except (OSError, ValueError) as exc:
         raise HTTPException(409, str(exc)) from exc
 
-    identity = instance_identity("local", port)
-    prior = db.get(ComfyInstance, identity)
+    # R5 B1：物理安装身份稳定。同一 root 的历史行（无论当年按哪个端口收编）
+    # 被继承并保留原 ID；端口只是这一行上的可变端点。只有从未收编过的 root
+    # 才使用新的稳定身份；探测证据行仍按原端口身份接管。
+    from shine.comfyops.instances import adopted_instance_identity, find_adopted_instance
+
+    prior = find_adopted_instance(db, root, port)
     replaced_probe_row = False
+    if prior is not None:
+        identity = prior.id
+    else:
+        probe = db.get(ComfyInstance, instance_identity("local", port))
+        if probe is not None and not probe.payload.get("adopted"):
+            if probe.payload.get("managed") or probe.payload.get("is_mock"):
+                # A managed (or fake) row is a real claim on this endpoint by
+                # this workbench's own instance; it is never overwritten.
+                raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
+            # The local-mode inventory probe writes an evidence row for the
+            # deterministic port identity before any adoption exists. The
+            # first adoption takes that row over instead of blocking on a row
+            # no one ever claimed.
+            prior = probe
+            identity = probe.id
+            replaced_probe_row = True
+        elif probe is not None and probe.payload.get("adopted"):
+            # Another installation's adopted row owns this port identity.
+            # History is never rewritten: the new installation gets its own
+            # stable root identity instead of a dead-end 409.
+            identity = adopted_instance_identity(root)
+        else:
+            identity = adopted_instance_identity(root)
     prior_adoption: dict = {}
     if prior is not None:
         prior_adoption = prior.payload.get("adoption") or {}
         if prior.payload.get("adopted"):
-            same_root = Path(prior.payload.get("root", "")).resolve() == root.resolve()
-            if not same_root:
-                raise HTTPException(409, "INSTANCE_IDENTITY_CHANGED")
+            if prior.payload.get("port") != port:
+                # R5 B1/INV-03：端点迁移只改这一行的端口与服务探测事实；
+                # 行 ID、已核验字节证据、节点指纹全部保留，历史不重写。
+                moved = dict(prior.payload)
+                moved["port"] = port
+                moved_adoption = dict(prior_adoption)
+                moved_adoption["service_identity"] = {
+                    "port": port,
+                    "is_comfyui": service["is_comfyui"],
+                    "version": service.get("version"),
+                    "version_source": service.get("version_source"),
+                }
+                moved["adoption"] = moved_adoption
+                prior.payload = moved
+                prior.sha256 = graph_hash(moved)
+                prior_adoption = moved_adoption
+                add_audit(db, actor, "ADOPTED_INSTALLATION_ENDPOINT_CHANGED",
+                          "comfy_instance", prior.id, {"port": port}, project_id=project_id)
+                db.commit()
             covered = set(prior_adoption.get("capabilities") or ["h3"])
             old_files = prior_adoption.get("verified_files") or [
                 {**item, "capability": "h3"} for item in prior_adoption.get("verified_h3_files") or []

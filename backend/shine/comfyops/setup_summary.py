@@ -281,9 +281,34 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
     from shine.comfyops.resource_discovery import read_state
 
     rows = [row for row in _instance_rows(db) if row.get("root") and Path(row["root"]).is_dir()]
-    by_root = {str(Path(row["root"]).resolve()): row for row in rows if row.get("root")}
     chosen = _choice(db)
     active = _runtime_instance_id(db)
+    # R5 B8：同一物理 root 的历史多行（旧端口漂移遗留）按确定性偏好收敛为一条：
+    # 正在服务的行 > 用户确认端口的行 > 稳定 root 身份行 > 较小 id。绝不依赖
+    # 表的遍历顺序，选择不得随重启/切页漂移（INV-04）。
+    from shine.comfyops.instances import adopted_instance_identity
+
+    def root_priority(row: dict[str, Any]) -> tuple[int, str]:
+        score = 0
+        if active and row.get("instance_id") == active:
+            score += 8
+        if chosen.get("port") and row.get("port") == chosen.get("port"):
+            score += 4
+        if row.get("instance_id") == adopted_instance_identity(row["root"]):
+            score += 2
+        return (score, str(row.get("instance_id") or ""))
+
+    by_root: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(Path(row["root"]).resolve())
+        current = by_root.get(key)
+        if current is None:
+            by_root[key] = row
+            continue
+        left, right = root_priority(row), root_priority(current)
+        # 分数高者优先；同分取较小 id，保证与插入顺序无关。
+        if left[0] > right[0] or (left[0] == right[0] and left[1] < right[1]):
+            by_root[key] = row
     candidates: list[dict[str, Any]] = []
 
     def add(root: str, *, instance: dict | None, source: str, reason: str) -> None:
@@ -312,11 +337,13 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
         if Path(root).is_dir():
             add(root, instance=by_root.get(root) or {"port": chosen.get("port")},
                 source="user_choice", reason="你上次确认使用的这套安装")
-    for row in rows:
+    for key in sorted(by_root):
+        row = by_root[key]
         if row["adopted"]:
             add(str(row["root"]), instance=row, source="adopted",
                 reason="已经确认复用的本机 ComfyUI")
-    for row in rows:
+    for key in sorted(by_root):
+        row = by_root[key]
         if row["managed"]:
             add(str(row["root"]), instance=row, source="managed",
                 reason="本工作台自己的受管环境")

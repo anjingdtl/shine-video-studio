@@ -689,7 +689,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     from sqlalchemy import select as _select
 
     from shine.comfyops import variant_readiness as _vr_module
-    from shine.comfyops.models import ComfyInstance
     from shine.comfyops.variant_binding import load_binding
     from shine.comfyops.variant_readiness import readiness as variant_readiness
     from shine.comfyops.variants import list_variant_manifests
@@ -705,12 +704,12 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         hit = _VA_CACHE.get(cache_key)
         if hit and now - hit[0] < _VA_CACHE_TTL:
             return hit[1]
-    adopted_root = None
-    for row in db.scalars(_select(ComfyInstance)):
-        payload = row.payload if isinstance(row.payload, dict) else {}
-        if payload.get("adopted") and payload.get("root"):
-            adopted_root = str(payload["root"])
-            break
+    # R5 B4/INV-07：扫描回退读的安装必须与 summary 同一份选择事实，
+    # 而不是台账里第一条收编行（多安装时会拿错 root，假报「本机没有」）。
+    from shine.comfyops.setup_summary import resolve_installation
+
+    _selected = resolve_installation(db, settings).get("selected") or {}
+    adopted_root = str(_selected["root"]) if _selected.get("adopted") and _selected.get("root") else None
     project_profiles = {
         row.name: row
         for row in db.scalars(_select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))

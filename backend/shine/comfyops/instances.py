@@ -19,7 +19,7 @@ from uuid import NAMESPACE_URL, uuid4, uuid5
 import httpx
 from fastapi import HTTPException
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.installer import (
@@ -77,6 +77,93 @@ def instance_root(settings, name, mode):
 
 def instance_identity(mode, port):
     return str(uuid5(NAMESPACE_URL, f"shine-comfy-instance:{mode}:http://127.0.0.1:{port}"))
+
+
+def adopted_instance_identity(root) -> str:
+    """The stable identity of one *physical* external installation (R5 B1).
+
+    A confirmed external ComfyUI is identified by its root directory, not by
+    the port it happens to serve on: the port is a migratable endpoint, the
+    installation is the machine fact.  Windows case semantics are applied so
+    ``F:\\Comfy`` and ``f:\\comfy`` are one identity (INV-13).  Historical
+    port-keyed rows keep their own ids; this identity is only used for rows
+    that never had a ledger identity before, and as a lookup alias.
+    """
+    normalized = os.path.normcase(str(Path(root).resolve()))
+    return str(uuid5(NAMESPACE_URL, f"shine-comfy-adopted:{normalized}"))
+
+
+def installation_identity_matches(instance, port) -> bool:
+    """One predicate for every enforcement point (R5 B1).
+
+    A row proves it owns this endpoint either the legacy way (its id is the
+    port identity) or the stable way (it is an adopted installation whose
+    recorded endpoint is this port).  The physical root is checked separately
+    by each caller against the recipe/binding it is about to use.
+    """
+    if instance is None:
+        return False
+    if instance.id == instance_identity("local", port):
+        return True
+    payload = instance.payload if isinstance(instance.payload, dict) else {}
+    return bool(payload.get("adopted")) and payload.get("port") == port
+
+
+def find_adopted_instance(db, root, port=None):
+    """The one ledger row of a physical installation, whatever port it was confirmed on.
+
+    Lookup order: the stable root identity, then any historical adopted row
+    whose root resolves to the same directory (a port-keyed legacy row keeps
+    its id).  When several legacy rows share the root, the one matching the
+    requested endpoint wins, then a deterministic id order — never the
+    arbitrary iteration order of the table.
+    """
+    resolved = Path(root).resolve()
+    row = db.get(ComfyInstance, adopted_instance_identity(resolved))
+    if row is not None and isinstance(row.payload, dict) and row.payload.get("adopted"):
+        return row
+    matches = []
+    for candidate in db.scalars(select(ComfyInstance)):
+        payload = candidate.payload if isinstance(candidate.payload, dict) else {}
+        if not payload.get("adopted") or not payload.get("root"):
+            continue
+        try:
+            if Path(payload["root"]).resolve() == resolved:
+                matches.append(candidate)
+        except OSError:
+            continue
+    if not matches:
+        return None
+    if port is not None:
+        for candidate in matches:
+            if candidate.payload.get("port") == port:
+                return candidate
+    return sorted(matches, key=lambda candidate: candidate.id)[0]
+
+
+def find_instance_by_endpoint(db, port, *, instance_name=None):
+    """The installation row a configuration request is really about (R5 B1).
+
+    The legacy port identity is tried first; adopted rows recorded under the
+    stable root identity are found by their endpoint.  A name preference
+    disambiguates when several rows claim the same port; an ambiguous answer
+    is None so the caller refuses by name instead of guessing.
+    """
+    matches = []
+    legacy = db.get(ComfyInstance, instance_identity("local", port))
+    if legacy is not None:
+        matches.append(legacy)
+    for candidate in db.scalars(select(ComfyInstance)):
+        payload = candidate.payload if isinstance(candidate.payload, dict) else {}
+        if payload.get("adopted") and payload.get("port") == port:
+            if legacy is None or candidate.id != legacy.id:
+                matches.append(candidate)
+    if instance_name:
+        named = [row for row in matches
+                 if isinstance(row.payload, dict) and row.payload.get("name") == instance_name]
+        if named:
+            matches = named
+    return matches[0] if len(matches) == 1 else None
 
 
 def tree_manifest(root):

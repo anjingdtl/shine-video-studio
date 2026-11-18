@@ -364,7 +364,7 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
 
 def configuration_identity(db, settings, path):
     from shine.comfyops.deployment import load_default_catalog
-    from shine.comfyops.instances import instance_identity, instance_root
+    from shine.comfyops.instances import installation_identity_matches, instance_root
 
     path = Path(path).resolve()
     if path != recipe_path(settings).resolve():
@@ -381,7 +381,7 @@ def configuration_identity(db, settings, path):
                          if instance else None)
         if (not instance or not instance.payload.get('managed') or instance.payload.get('is_mock', True)
                 or instance.sha256 != graph_hash(instance.payload)
-                or instance.id != instance_identity('local', renderer['port'])
+                or not installation_identity_matches(instance, renderer['port'])
                 or Path(renderer['root']).resolve() != expected_root
                 or Path(instance.payload['root']).resolve() != Path(renderer['root']).resolve()
                 or instance.payload['port'] != renderer['port']):
@@ -420,9 +420,11 @@ def configuration_identity(db, settings, path):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_INVALID') from exc
 
 
-def record_candidate(db, settings, project_id, path):
+def record_candidate(db, settings, project_id, path, *, variant_id=None):
     identity = configuration_identity(db, settings, path)
-    value = {'version': 1, 'project_id': project_id, 'identity': identity}
+    # R5 B2：变体身份记在 value 顶层（不进 identity、不改配方字节），旧记录
+    # 缺省按默认基线读。整备链据此判断「沿用现有配置」是否真的同一套方案。
+    value = {'version': 1, 'project_id': project_id, 'identity': identity, 'variant_id': variant_id}
     row = db.get(AppSetting, CANDIDATE_KEY)
     if row is None:
         db.add(AppSetting(key=CANDIDATE_KEY, value=value))
@@ -546,7 +548,8 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor):
         raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_ACTIVATION')
     require_idle_configuration(db)
     value = {'version': 1, 'identity': identity, 'sha256': graph_hash(identity),
-             'project_id': project_id, 'actor': actor}
+             'project_id': project_id, 'actor': actor,
+             'variant_id': candidate.value.get('variant_id')}
     if active is None:
         db.add(AppSetting(key=ACTIVE_KEY, value=value))
     else:

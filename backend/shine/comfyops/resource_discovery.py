@@ -410,11 +410,18 @@ def report(db) -> dict:
     state = read_state(db)
     resources = state["resources"]
     scan = state["scan"]
+    coverage = scan.get("coverage") or {}
+    coverage_complete = bool(coverage) and all(
+        row.get("status") == "DONE" for row in coverage.values()) and not (scan.get("queue") or [])
+    # R5 B5/INV-14：只有覆盖完整且没有读不到的区域，「没找到」才是 MISSING；
+    # 截断/不可访问时未找到的文件只能是 UNKNOWN—— absence of evidence 不是证据。
+    can_assert_missing = coverage_complete and not any(
+        row.get("unreadable") for row in coverage.values())
     per_capability: dict[str, dict] = {}
     for catalog in _catalogues():
         capability = "image" if catalog["catalog_id"] == IMAGE_CATALOG_ID else "h3"
         bucket = per_capability.setdefault(capability, {
-            "catalog_id": catalog["catalog_id"], "found": [], "missing": [],
+            "catalog_id": catalog["catalog_id"], "found": [], "missing": [], "unknown": [],
         })
         for component in catalog.get("components", []):
             if component.get("kind") not in {"model", "review-model"}:
@@ -429,18 +436,17 @@ def report(db) -> dict:
                          "sources": [row["path"] for row in sources]}
                 if sources:
                     bucket["found"].append(entry)
-                else:
+                elif can_assert_missing:
                     bucket["missing"].append(entry)
-    coverage = scan.get("coverage") or {}
+                else:
+                    bucket["unknown"].append(entry)
     return {
         "status": scan.get("status") or "IDLE",
         "message": scan.get("message"),
         "directories": state.get("directories") or [],
         "queue_remaining": len(scan.get("queue") or []),
         "coverage": coverage,
-        "coverage_complete": bool(coverage) and all(
-            row.get("status") == "DONE" for row in coverage.values())
-        and not (scan.get("queue") or []),
+        "coverage_complete": coverage_complete,
         "resources": {
             "comfy_roots": resources["comfy_roots"],
             "node_dirs": resources["node_dirs"],

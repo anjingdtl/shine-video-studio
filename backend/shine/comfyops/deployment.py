@@ -815,7 +815,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     forever.  Ownership requirements (adapter, python, revision, nodes) are
     identical in both cases.
     """
-    from shine.comfyops.instances import instance_identity, instance_root
+    from shine.comfyops.instances import find_instance_by_endpoint, instance_root
 
     if capability not in {'h3', 'image'}:
         raise HTTPException(409, 'RUNTIME_CAPABILITY_UNKNOWN')
@@ -843,7 +843,8 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     # timeout does not prove that a renderer has stopped.
     db.execute(text('BEGIN IMMEDIATE'))
     _require_project(db, project_id)
-    instance = db.get(ComfyInstance, instance_identity('local', port))
+    # R5 B1：按端点找行，兼容历史端口主键行与稳定 root 身份行；歧义具名拒绝。
+    instance = find_instance_by_endpoint(db, port, instance_name=instance_name)
     adopted = bool(instance and instance.payload.get('adopted'))
     if (instance is None or not instance.payload.get('managed') or instance.payload.get('is_mock')
             or instance.payload.get('name') != instance_name
@@ -1044,7 +1045,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         # Only an H3 recipe is a *video runtime* candidate; an image recipe must
         # not replace the project's activation record or claim the renderer.
         from shine.comfyops.runtime_configuration import record_candidate
-        record_candidate(db, settings, project_id, recipe_path)
+        record_candidate(db, settings, project_id, recipe_path, variant_id=variant_id)
         env_updates = {
             "SHINE_DATA_DIR": str(settings.data_dir),
             "SHINE_SETUP_RECIPE": str(recipe_path),

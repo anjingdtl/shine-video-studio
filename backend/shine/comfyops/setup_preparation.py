@@ -867,12 +867,31 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
     # recipe. Regenerating would be refused while the owned renderer is running
     # (STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION), turning a ready machine into a
     # false failure. Keep the valid recipe and move on.
+    # R5 B2：「沿用」必须真的是同一套合同——同一实例、同一端点、同一变体。
+    # 端口迁移或变体切换后静默沿用旧配方，会让整备链永远修不好端点/方案。
     with factory() as db:
         report = runtime_report(db, settings)
         active_instance = _runtime_instance_id(db)
+        active_row = db.get(AppSetting, "deployment-runtime-active")
+        active_value = active_row.value if active_row is not None and isinstance(active_row.value, dict) else {}
+    active_port = None
+    try:
+        active_port = int(str((active_value.get("identity") or {}).get("comfyui_base_url") or "").rsplit(":", 1)[-1])
+    except ValueError:
+        active_port = None
+    active_variant = active_value.get("variant_id")  # 旧记录无此字段 = 默认基线
+    requested_variant = request.get("variant_id")
+    variant_matches = (
+        "h3" not in capabilities
+        or requested_variant == active_variant
+        or (requested_variant in {None, default_variant_id()}
+            and active_variant in {None, default_variant_id()})
+    )
     if (report.get("status") == "ACTIVE" and report.get("services_verified")
             and active_instance == target["instance_id"]
-            and ("h3" not in capabilities or request.get("variant_id") in {None, default_variant_id()})):
+            and active_port is not None and target.get("port")
+            and active_port == int(target["port"])
+            and variant_matches):
         return {"status": "DONE", "detail": "运行合同已激活并核验，沿用现有配置，无需重新生成。"}
     # Both capabilities share one physical recipe. H3 owns it when requested,
     # and the image binding consumes that exact recipe instead of rewriting it.
