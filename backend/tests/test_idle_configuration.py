@@ -52,7 +52,7 @@ def test_pending_install_record_without_a_lease_does_not_block_h3_checks(studio)
         require_idle_configuration(db)
 
 
-@pytest.mark.parametrize("status", ["QUEUED", "RUNNING", "PAUSED", "RECONCILING"])
+@pytest.mark.parametrize("status", ["RUNNING", "PAUSE_REQUESTED", "RECONCILING"])
 def test_a_live_series_still_blocks_a_runtime_revalidation(studio, status):
     client, factory, _root, _settings = studio
     project_id = create_project(client, "在跑的项目")
@@ -73,6 +73,17 @@ def test_a_finished_series_does_not_block_a_runtime_revalidation(studio):
 
     with factory() as db:
         require_idle_configuration(db)  # must not raise
+
+
+@pytest.mark.parametrize("status", ["QUEUED", "PAUSED"])
+def test_a_series_without_a_claim_or_work_in_flight_can_keep_its_place_during_revalidation(studio, status):
+    client, factory, _root, _settings = studio
+    project_id = create_project(client, "等待制作")
+    series = _series(factory, project_id, status)
+
+    with factory() as db:
+        require_idle_configuration(db)
+        assert db.get(ProductionSeries, series.id).status == status
 
 
 def _attempt(factory, project_id: str, *, status: str, packages: list[str],
@@ -107,16 +118,16 @@ def test_a_failed_advisory_review_download_does_not_block_the_whole_workbench(st
         require_idle_configuration(db)  # must not raise
 
 
-def test_a_failed_production_download_still_blocks_until_it_is_reconciled(studio):
-    """A failed production component is a real half-finished installation."""
+def test_a_stopped_production_download_remains_history_during_runtime_revalidation(studio):
+    """The installed bytes still need verification; the old failure owns no writer."""
     client, factory, _root, _settings = studio
     project_id = create_project(client, "生产组件下载失败")
-    _attempt(factory, project_id, status="FAILED_RECONCILE_REQUIRED",
-             packages=["minimax-h3-diffusion"])
+    attempt_id = _attempt(factory, project_id, status="FAILED_RECONCILE_REQUIRED",
+                          packages=["minimax-h3-diffusion"])
 
-    with factory() as db, pytest.raises(HTTPException) as excinfo:
+    with factory() as db:
         require_idle_configuration(db)
-    assert excinfo.value.detail == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK"
+        assert db.get(InstallationAttempt, attempt_id).status == "FAILED_RECONCILE_REQUIRED"
 
 
 def test_a_failed_download_that_still_owns_a_lease_blocks(studio):

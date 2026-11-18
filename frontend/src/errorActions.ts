@@ -95,9 +95,9 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
     action: { label: '去基础配置核对', target: 'setup-env' },
   },
   RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: {
-    reason: '本机仍有在途任务、GPU 租约或待整理的安装记录，暂不能重写运行配置',
-    why: '请先在「视频生产」结束或取消排队/暂停中的拍摄任务，或在左侧「工作栈」释放空闲后台服务，再点一次「核对运行合同」从当前步骤继续。',
-    action: { label: '去视频生产查看', target: 'run-stage' },
+    reason: '本机资源仍在使用或等待核对',
+    why: '提交「核对运行合同」后，后台会等候资源可用再继续。可在「工作栈」查看等待项。',
+    action: { label: '去基础配置核对', target: 'setup-env' },
     serverMessage: true,
   },
   ASSET_RIGHTS_NOT_APPROVED: { reason: '素材权利还没确认', action: { label: '去确认素材', target: 'assets-stage' } },

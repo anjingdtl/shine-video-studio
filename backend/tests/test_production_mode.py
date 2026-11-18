@@ -170,6 +170,24 @@ def test_changed_active_files_report_blocked_with_chinese_detail(prep, candidate
     assert client.get('/api/v1/system/status').json()['render_mode'] == 'unavailable'
 
 
+def test_rejected_active_identity_cannot_reuse_its_old_service_seal(prep, candidate):  # noqa: F811
+    from shine.comfyops.runtime_configuration import ACTIVE_KEY
+    from shine.models import AppSetting
+
+    client, factory, _settings = prep
+    assert activate(prep, candidate).status_code == 200
+    _seed_service_evidence(factory)
+    with factory.begin() as db:
+        row = db.get(AppSetting, ACTIVE_KEY)
+        row.value = {**row.value, 'sha256': '0' * 64}
+
+    runtime = client.get('/api/v1/setup/runtime').json()
+    assert runtime['status'] == 'INVALID_REQUIRES_REVIEW'
+    assert runtime['services_verified'] is False
+    assert runtime['service_validation']['blockers'] == ['ACTIVE_RUNTIME_CONFIGURATION_CHANGED']
+    assert _mode(client)['code'] == 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED'
+
+
 def test_reconcile_lease_outranks_everything(prep, candidate):  # noqa: F811
     client, factory, _settings = prep
     assert activate(prep, candidate).status_code == 200

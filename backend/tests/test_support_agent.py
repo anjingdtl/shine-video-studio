@@ -179,8 +179,8 @@ def test_setup_repair_delegates_to_the_existing_installer_exactly_once(api, monk
     assert len(calls) == 1
 
 
-def test_repair_is_refused_while_real_production_is_running(api, monkeypatch):
-    client, _, _ = api
+def test_repair_is_queued_while_real_production_is_running(api, monkeypatch):
+    client, factory, _ = api
 
     def busy(db):
         return {
@@ -197,15 +197,26 @@ def test_repair_is_refused_while_real_production_is_running(api, monkeypatch):
         json={"kind": "setup_repair", "params": {"capabilities": ["h3"]}},
         headers=HEADERS,
     ).json()["action"]
-    assert preview["preview"]["blocked"] is True
-    assert preview["preview"]["blocked_code"] == "PRODUCTION_ACTIVE"
-    refused = client.post(
+    assert preview["preview"]["blocked"] is False
+    assert preview["preview"]["occupancy"]["advisory_code"] == "PRODUCTION_ACTIVE"
+    approved = client.post(
         f"/api/v1/support/actions/{preview['id']}/approve",
         json={"preview_hash": preview["preview_hash"], "confirm": True},
         headers=HEADERS,
     )
-    assert refused.status_code == 423
-    assert refused.json()["detail"]["code"] == "PRODUCTION_ACTIVE"
+    assert approved.status_code == 200, approved.text
+    action = approved.json()["action"]
+    assert action["status"] == "DELEGATED", approved.text
+    from shine.comfyops.setup_preparation import read_task
+
+    with factory() as db:
+        task = read_task(db)
+        assert task["status"] == "QUEUED"
+        assert task["task_id"] == action["original_task_id"]
+    via_page = client.post("/api/v1/setup/prepare/execute", headers=HEADERS,
+                           json={"capabilities": ["h3"]})
+    assert via_page.status_code == 200, via_page.text
+    assert via_page.json()["task_id"] == task["task_id"]
 
 
 def test_reconcile_without_a_known_installation_is_refused(api):
@@ -684,10 +695,11 @@ def test_preview_is_stale_when_the_machine_changes_before_approval(api):
     assert approved.json()["detail"]["code"] == "PREVIEW_STALE"
 
 
-def test_active_lease_blocks_a_conflicting_recovery(api):
+def test_active_lease_is_visible_at_enqueue_and_blocks_the_actual_reconfiguration(api):
     from datetime import timedelta
 
     from shine.comfyops.models import ResourceLease
+    from shine.comfyops.runtime_configuration import RuntimeConfigurationBusy, require_idle_configuration
     from shine.models import utcnow
 
     client, factory, _ = api
@@ -703,9 +715,11 @@ def test_active_lease_blocks_a_conflicting_recovery(api):
         json={"kind": "setup_repair", "params": {"capabilities": ["h3"]}},
         headers=HEADERS,
     ).json()["action"]
-    assert preview["preview"]["blocked"] is True
-    assert preview["preview"]["blocked_code"] == "GPU_LEASE_ACTIVE"
+    assert preview["preview"]["blocked"] is False
+    assert preview["preview"]["occupancy"]["advisory_code"] == "GPU_LEASE_ACTIVE"
     assert preview["preview"]["occupancy"]["leases"]
+    with factory() as db, pytest.raises(RuntimeConfigurationBusy, match="RUNTIME_CONFIGURATION_REQUIRES_IDLE"):
+        require_idle_configuration(db)
 
 
 def test_terminal_attempt_allows_a_new_preview(api, monkeypatch):
@@ -1478,10 +1492,18 @@ def test_setup_preview_is_stale_when_a_verification_receipt_changes(api, tmp_pat
     assert stale.json()["detail"]["code"] == "PREVIEW_STALE"
 
 
-def test_a_refused_repair_can_be_previewed_again_with_the_same_request(api, monkeypatch):
+def test_a_refused_workflow_copy_can_be_previewed_again_with_the_same_request(api, monkeypatch):
+    from types import SimpleNamespace
+
+    from shine.models import WorkflowProfile
     from shine.support.occupancy import resource_occupancy
 
-    client, factory, settings = api
+    client, factory, _settings = api
+    with factory.begin() as db:
+        db.add(WorkflowProfile(
+            id="retry-source", name="内置工作流", mode="Ref2VA", graph={"1": {}},
+            parameter_map={"positive_prompt": "1.inputs.text"}, graph_sha256="a" * 64,
+        ))
 
     def busy(db):
         return {
@@ -1489,7 +1511,7 @@ def test_a_refused_repair_can_be_previewed_again_with_the_same_request(api, monk
             "signals": [], "leases": [],
         }
 
-    payload = {"kind": "setup_repair", "params": {"capabilities": ["h3"]}}
+    payload = {"kind": "workflow_user_copy", "params": {"source_profile_id": "retry-source", "name": "恢复测试副本"}}
     monkeypatch.setattr(action_service, "_occupancy", busy)
     first = client.post(
         "/api/v1/support/actions/preview", json=payload, headers=HEADERS
@@ -1502,10 +1524,10 @@ def test_a_refused_repair_can_be_previewed_again_with_the_same_request(api, monk
     assert refused.status_code == 423
     monkeypatch.setattr(action_service, "_occupancy", resource_occupancy)
 
-    def fake_enqueue(db, **kwargs):
-        return {"status": "QUEUED", "task_id": "setup-after-refusal"}
+    def fake_copy(body, **kwargs):
+        return SimpleNamespace(id="copy-after-refusal", name=body.name, validated_against=None)
 
-    monkeypatch.setattr("shine.comfyops.setup_preparation.enqueue", fake_enqueue)
+    monkeypatch.setattr("shine.api_comfy.create_workflow_profile", fake_copy)
     second = client.post(
         "/api/v1/support/actions/preview", json=payload, headers=HEADERS
     ).json()
@@ -1518,7 +1540,7 @@ def test_a_refused_repair_can_be_previewed_again_with_the_same_request(api, monk
         headers=HEADERS,
     )
     assert approved.status_code == 200, approved.text
-    assert approved.json()["action"]["original_task_id"] == "setup-after-refusal"
+    assert approved.json()["action"]["verification"]["created_profile_id"] == "copy-after-refusal"
 
 
 def test_action_fingerprint_covers_selected_installation_and_receipt_variant(api, monkeypatch):

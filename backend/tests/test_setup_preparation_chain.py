@@ -397,3 +397,54 @@ def test_an_identical_request_after_failure_resumes_from_the_first_unfinished_st
         assert statuses["RECIPE"] == "PENDING", statuses
         assert task.get("claim_token") is None
         assert task.get("lease_owner") is None
+
+
+def test_recipe_waits_for_a_live_lease_and_continues_without_another_click(env, monkeypatch):
+    from datetime import timedelta
+
+    from shine.comfyops import deployment, runtime_configuration
+    from shine.comfyops.models import ResourceLease
+    from shine.comfyops.scheduler import ResourceScheduler
+    from shine.models import utcnow
+
+    client, factory, _, settings = env
+    first = client.post("/api/v1/setup/prepare/execute", headers=LOCAL,
+                        json={"capabilities": ["h3"]}).json()
+    with factory.begin() as db:
+        row = db.get(AppSetting, setup_preparation.TASK_KEY)
+        task = dict(row.value)
+        task["target"] = {"instance_id": "configured", "port": 8189}
+        for step in task["steps"]:
+            if step["id"] == "RECIPE":
+                break
+            step["status"] = "DONE"
+        row.value = task
+        lease = ResourceLease(owner="h3:in-flight", status="ACTIVE", exclusive=True,
+                              priority=10, budget_mb=1, expires_at=utcnow() + timedelta(minutes=1))
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+
+    configured = []
+
+    def generate(db, *_args, **_kwargs):
+        runtime_configuration.require_idle_configuration(db)
+        configured.append(True)
+        return {"recipe_sha256": "configured"}
+
+    monkeypatch.setattr(deployment, "generate_configuration", generate)
+    assert setup_preparation.advance(factory, settings, "test-worker") == "setup:RECIPE:waiting"
+    with factory.begin() as db:
+        task = setup_preparation.read_task(db)
+        assert task["status"] == "RUNNING"
+        assert task["task_id"] == first["task_id"]
+        assert "h3:in-flight" in task["message"]
+        assert configured == []
+        ResourceScheduler().release(db, lease_id, "h3:in-flight")
+
+    assert setup_preparation.advance(factory, settings, "test-worker") == "setup:RECIPE"
+    with factory() as db:
+        task = setup_preparation.read_task(db)
+        assert task["task_id"] == first["task_id"]
+        assert task["result"]["recipe_sha256"] == "configured"
+    assert configured == [True]

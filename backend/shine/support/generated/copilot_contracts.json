@@ -1696,8 +1696,8 @@
       "authority": "GET /api/v1/setup/verdict",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示要补的文件与安装位置，确认后由原安装器执行。",
-      "contract_digest": "5a90b6fd074a36eea6e3e6ebb59891e8ee5956474e065c04d66124d2a1d4d797",
-      "contract_revision": 2,
+      "contract_digest": "bac0f87184cfa9b6bf1e74410d2af81f47a7001bada9a21e5b32d43d3e187c06",
+      "contract_revision": 3,
       "description": "复用统一安装器的持久准备任务，不会启动第二套安装器。",
       "dispatch": "setup_repair",
       "examples": [
@@ -1713,7 +1713,7 @@
       "label": "补齐真实制作环境",
       "module": "comfyops",
       "note": "只补齐缺失文件；不改别人的 ComfyUI 配置。",
-      "occupancy_gate": "FULL",
+      "occupancy_gate": "NONE",
       "page": "基础配置",
       "paid": false,
       "param_contract": [
@@ -1849,8 +1849,8 @@
       "authority": "GET /api/v1/setup/verdict",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示要登记的文件，确认后写入回执。",
-      "contract_digest": "b9507923fd3c96e109dc624427a006f97459248e09392fb164d4df7e114044b9",
-      "contract_revision": 3,
+      "contract_digest": "afd15f51bd47739213172df684a33ce5f391a95f0046f2801376d42a5a40fe80",
+      "contract_revision": 4,
       "description": "复用现有回执、只对变化文件计算哈希，并交给持久整备任务执行，不修改别人的 ComfyUI。",
       "dispatch": "setup_reconcile",
       "examples": [],
@@ -1864,7 +1864,7 @@
       "label": "重新核验并登记已存在的本机文件",
       "module": "comfyops",
       "note": "adopt 是显式确认；检测本身不会接管外部 ComfyUI。",
-      "occupancy_gate": "FULL",
+      "occupancy_gate": "NONE",
       "page": "基础配置",
       "paid": false,
       "param_contract": [
@@ -2993,7 +2993,7 @@
   "digests": {
     "api_contract": "638282d3906acb57a2c671f0c376ac4dc114fa8be8636404ab1bf605cbedd6f1",
     "api_schema": "29bd6d06b2629896db32c79a5273c9e8162363695c30c5d44304bcd7a1cce2c9",
-    "contracts": "c461a90dcb8dbb2ed58cdb07a932cdf9aee9c6f5116f9b4a9fede70be3cc28cf"
+    "contracts": "d5271a360b2f51d20b6539e954dadad9f6561bfd0054237c0fdde093aecf1665"
   },
   "discovered": [
     {

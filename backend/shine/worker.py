@@ -4355,7 +4355,13 @@ def _reconcile_pre_runtime_control_and_leases(session_factory, settings, worker_
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     global _text_preparation_ticks
     from shine.comfyops.runtime_configuration import resolve_runtime
+    from shine.comfyops.setup_preparation import read_task, validation_delegated
 
+    # The supervisor may stop us at any point after accepting this handoff.
+    # Keep the acknowledged VALIDATE window free of new work until it returns.
+    with session_factory() as db:
+        if validation_delegated(read_task(db)):
+            return "setup:VALIDATE:delegated"
     _reconcile_pre_runtime_control_and_leases(session_factory, settings, worker_id)
 
     # A setup-type installation is durable work that does not need the video
@@ -4444,7 +4450,6 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
             # Only this task's own sample batch runs here: the runtime gate is
             # down for video, and an unscoped claim would execute whatever
             # unrelated production item happened to be oldest.
-            from shine.comfyops.setup_preparation import read_task
             from shine.materialprep.execution import run_pending_image_items
 
             with session_factory() as setup_db:

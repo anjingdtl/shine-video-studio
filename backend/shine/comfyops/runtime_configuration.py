@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe, recipe_path
@@ -191,9 +191,10 @@ def same_configuration(stored: dict, current: dict, *, settings) -> bool:
         stored, current, workbench=_workbench_pin_names(settings))
 
 
-#: The series states that can still hold the GPU or be resumed by a Worker.
-#: NEEDS_REVIEW is deliberately absent: it is a blocked, unclaimable record.
-LIVE_SERIES_STATUSES = ('QUEUED', 'CLAIMED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED', 'RECONCILING')
+#: Candidates for the shared in-flight decision. A queued or paused series
+#: without active work keeps its place while the runtime is being checked.
+LIVE_SERIES_STATUSES = ('QUEUED', 'CLAIMED', 'RUNNING', 'PAUSED', 'PAUSE_REQUESTED',
+                       'CANCEL_REQUESTED', 'RECONCILING')
 
 
 def workflow_contract_sha256(profile: WorkflowProfile) -> str:
@@ -219,8 +220,18 @@ def _recorded_identity(db, settings, key: str, changed_code: str):
     row = db.get(AppSetting, key)
     if row is None:
         return None
+    if key == ACTIVE_KEY and settings.offline_simulation:
+        raise HTTPException(409, 'ACTIVE_RUNTIME_OFFLINE_SIMULATION_FORBIDDEN')
     try:
         stored = row.value['identity']
+        if not isinstance(stored, dict):
+            raise TypeError('runtime identity must be a mapping')
+        if key == ACTIVE_KEY and (row.value['version'] != 1 or graph_hash(stored) != row.value['sha256']):
+            raise HTTPException(409, changed_code)
+    except (KeyError, TypeError) as exc:
+        code = 'ACTIVE_RUNTIME_CONFIGURATION_INVALID' if key == ACTIVE_KEY else changed_code
+        raise HTTPException(409, code) from exc
+    try:
         current = configuration_identity(db, settings, recipe_path(settings))
     except (HTTPException, KeyError, TypeError) as exc:
         raise HTTPException(409, changed_code) from exc
@@ -447,66 +458,14 @@ def record_candidate(db, settings, project_id, path, *, variant_id=None):
 
 
 def resolve_runtime(db, settings):
-    row = db.get(AppSetting, ACTIVE_KEY)
-    if row is None:
+    identity = _recorded_identity(db, settings, ACTIVE_KEY, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
+    if identity is None:
         return settings
-    if settings.offline_simulation:
-        raise HTTPException(409, 'ACTIVE_RUNTIME_OFFLINE_SIMULATION_FORBIDDEN')
-    try:
-        value = row.value
-        identity = value['identity']
-        if value['version'] != 1 or graph_hash(identity) != value['sha256']:
-            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
-        path = recipe_path(settings)
-        current = configuration_identity(db, settings, path)
-        if not same_configuration(identity, current, settings=settings):
-            raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED')
-    except HTTPException as exc:
-        raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_CHANGED') from exc
-    except (KeyError, TypeError) as exc:
-        raise HTTPException(409, 'ACTIVE_RUNTIME_CONFIGURATION_INVALID') from exc
     # The bytes are the ones the operator activated; only the directory that
     # holds the recipe moved.  Hand the renderer the recipe that exists *now*.
     return replace(settings, render_provider='comfyui', allow_remote_comfyui=False,
                    comfyui_base_url=identity['comfyui_base_url'],
-                   managed_recipe_path=str(path), managed_recipe_sha256=identity['recipe_sha256'])
-
-
-def _live_installation_attempts(db) -> list[str]:
-    """Installation attempts that can still hold the machine.
-
-    An attempt that already failed (``FAILED_RECONCILE_REQUIRED``) is waiting
-    for a person to reconcile it.  It holds no lease and installs nothing, so
-    it cannot touch the GPU - but counting it anyway froze the whole
-    workbench: one failed download of optional enhancement models (画面审片 /
-    语音核对 / RelayVSR 2X 精修) made service validation, runtime activation
-    and the production badge refuse forever, with nothing in the UI able to
-    clear it.
-
-    Two rules, both about not letting an unrelated download freeze everything:
-
-    * a failed attempt only counts while it still owns a lease;
-    * a plan that contains nothing but optional components (VLM / ASR /
-      RelayVSR) never counts once stopped - optional enhancements never gate
-      H3 production.
-    """
-    from shine.comfyops.deployment import OPTIONAL_INSTALL_COMPONENTS
-    from shine.comfyops.models import InstallationPlan
-
-    live: list[str] = []
-    rows = db.scalars(select(InstallationAttempt).where(
-        InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING',
-                                        'FAILED_RECONCILE_REQUIRED']))).all()
-    for attempt in rows:
-        if attempt.status == 'FAILED_RECONCILE_REQUIRED' and attempt.lease_owner is None:
-            # The failure is recorded, nothing is running any more.
-            plan = db.get(InstallationPlan, attempt.plan_id)
-            payload = (plan.payload or {}) if plan is not None else {}
-            packages = [str(row.get('id') or '') for row in (payload.get('packages') or [])]
-            if not packages or set(packages).issubset(OPTIONAL_INSTALL_COMPONENTS):
-                continue
-        live.append(attempt.id)
-    return live
+                   managed_recipe_path=str(recipe_path(settings)), managed_recipe_sha256=identity['recipe_sha256'])
 
 
 def idle_configuration_blockers(db) -> list[dict]:
@@ -518,7 +477,8 @@ def idle_configuration_blockers(db) -> list[dict]:
     """
     from shine.comfyops.models import InstallationPlan
     from shine.models import Project, Shot
-    from shine.services import ACTIVE_JOB_STATUSES
+    from shine.production.runner import _series_has_inflight_work
+    from shine.runtime_orchestrator.identity import IN_FLIGHT_JOB_STATUSES
 
     def _project_title(project_id: str | None) -> str | None:
         if not project_id:
@@ -556,8 +516,10 @@ def idle_configuration_blockers(db) -> list[dict]:
         run_by_series = {}
 
     for series in db.scalars(
-        select(ProductionSeries).where(ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(8)
+        select(ProductionSeries).where(ProductionSeries.status.in_(LIVE_SERIES_STATUSES))
     ).all():
+        if series.status != 'CLAIMED' and not _series_has_inflight_work(db, series):
+            continue
         title = _project_title(series.project_id)
         prefix = f"作品《{title}》" if title else f"作品 {str(series.project_id)[:8]}"
         run_id = run_by_series.get(str(series.id))
@@ -572,7 +534,7 @@ def idle_configuration_blockers(db) -> list[dict]:
         })
 
     for job in db.scalars(
-        select(Job).where(Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(8)
+        select(Job).where(Job.status.in_(IN_FLIGHT_JOB_STATUSES), Job.stale.is_(False)).limit(8)
     ).all():
         title = _project_title(job.project_id)
         shot = db.get(Shot, job.shot_id) if job.shot_id else None
@@ -590,21 +552,18 @@ def idle_configuration_blockers(db) -> list[dict]:
             'label': f"{prefix} 镜头「{shot_label}」处于 {job.status}",
         })
 
-    leased_review = db.scalars(
+    # Stopped installation history stays available for per-package recovery.
+    # The instance and byte checks still decide what can actually be used.
+    installing = db.scalars(
         select(InstallationAttempt).where(
-            (InstallationAttempt.status == 'NEEDS_REVIEW')
-            & (InstallationAttempt.lease_owner.is_not(None))
+            or_(
+                InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING']),
+                InstallationAttempt.status.in_(['NEEDS_REVIEW', 'FAILED_RECONCILE_REQUIRED'])
+                & InstallationAttempt.lease_owner.is_not(None),
+            )
         ).limit(8)
     ).all()
-    live_attempt_ids = set(_live_installation_attempts(db))
-    seen_attempts: set[str] = set()
-    for attempt in [
-        *leased_review,
-        *(db.get(InstallationAttempt, aid) for aid in sorted(live_attempt_ids)),
-    ]:
-        if attempt is None or attempt.id in seen_attempts:
-            continue
-        seen_attempts.add(attempt.id)
+    for attempt in installing:
         plan = db.get(InstallationPlan, attempt.plan_id) if attempt.plan_id else None
         payload = (plan.payload or {}) if plan is not None and isinstance(plan.payload, dict) else {}
         packages = [str(row.get('id') or '') for row in (payload.get('packages') or []) if isinstance(row, dict)]
@@ -624,18 +583,17 @@ def idle_configuration_blockers(db) -> list[dict]:
     return blockers
 
 
+class RuntimeConfigurationBusy(HTTPException):
+    def __init__(self, blockers: list[dict]):
+        super().__init__(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
+        labels = '；'.join(row['label'] for row in blockers[:4])
+        self.wait_message = f'等待本机资源可用后自动继续。{labels}'
+
+
 def require_idle_configuration(db):
-    # Only work that can still touch the GPU blocks a re-validation. A
-    # NEEDS_REVIEW record with no active lease is an audit trail, not live work.
-    #
-    # The series check therefore asks which series are *live*, not which ones
-    # are not finished: a Worker only claims QUEUED/RUNNING series, and
-    # PAUSED/PAUSE_REQUESTED/RECONCILING are the in-flight states around them.
-    # A NEEDS_REVIEW series is blocked and unclaimable - it holds no lease and
-    # cannot render - so an unrelated project's blocked series must not freeze
-    # the whole workbench.
-    if idle_configuration_blockers(db):
-        raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
+    blockers = idle_configuration_blockers(db)
+    if blockers:
+        raise RuntimeConfigurationBusy(blockers)
 
 
 def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_guard=None):

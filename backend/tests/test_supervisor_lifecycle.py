@@ -310,10 +310,13 @@ def test_late_supervisor_validation_cannot_affect_newer_task_or_lease(tmp_path, 
 
 def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, monkeypatch):
     """R5 closeout: Worker releasing lease after HTTP 202 VALIDATING keeps same delegation valid for Supervisor."""
+    from sqlalchemy import select
+
+    from shine import worker
     from shine.comfyops import runtime_configuration, service_validation, setup_preparation
     from shine.config import Settings
     from shine.db import Base, make_engine, make_session_factory
-    from shine.models import AppSetting
+    from shine.models import AppSetting, ProductionSeries, Project
 
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -344,6 +347,10 @@ def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, mo
             "project_id": None,
             "identity": {"recipe_sha256": recipe_sha},
         }))
+        project = Project(title="等待续拍的项目")
+        db.add(project)
+        db.flush()
+        db.add(ProductionSeries(project_id=project.id, status="PAUSED"))
 
     monkeypatch.setattr(
         runtime_configuration,
@@ -361,17 +368,21 @@ def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, mo
         return {"status": "VALIDATING"}
 
     monkeypatch.setattr(setup_preparation, "_delegate_supervisor_validation", accept_http)
-    assert setup_preparation.advance(factory, settings, "setup-worker") == "setup:VALIDATE:waiting"
+    assert setup_preparation.advance(factory, settings, "setup-worker") == "setup:VALIDATE:delegated"
     assert len(delegations) == 1
     delegation = delegations[0]
     assert delegation["task_id"] == "setup-del-1"
     assert delegation["claim_token"]
     # Another worker tick while delegation is active must not steal/clobber the pending delegation.
     assert setup_preparation.advance(factory, settings, "setup-worker") is None
+    monkeypatch.setattr(worker, "_reconcile_pre_runtime_control_and_leases",
+                        lambda *_a: pytest.fail("new work during the validation handoff"))
+    assert worker.run_configured_once(factory, None, "setup-worker", settings=settings) == "setup:VALIDATE:delegated"
 
     called = []
     monkeypatch.setattr(supervisor, "_settings", lambda _d: settings)
-    monkeypatch.setattr(supervisor, "_stack_blockers", lambda _d: [])
+    monkeypatch.setattr(supervisor, "_stack_blockers",
+                        lambda _d: pytest.fail("delegated validation is not a whole-stack stop"))
     monkeypatch.setattr(supervisor, "_stop_worker", lambda _d: (200, {}))
     monkeypatch.setattr(supervisor, "_start_worker", lambda _d: (200, {}))
     monkeypatch.setattr(
@@ -387,6 +398,7 @@ def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, mo
     result = supervisor._validate_services_background(data_dir, delegation)
     with factory() as db:
         current = setup_preparation.read_task(db)
+        assert db.scalar(select(ProductionSeries)).status == "PAUSED"
     engine.dispose()
     assert result["status"] == "READY"
     assert called == ["validated", "activated"]

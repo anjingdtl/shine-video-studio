@@ -461,19 +461,28 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
     """
     from sqlalchemy import text
 
-    from shine.comfyops.runtime_configuration import CANDIDATE_KEY, activate_runtime, runtime_report
+    from shine.comfyops.runtime_configuration import (
+        CANDIDATE_KEY,
+        RuntimeConfigurationBusy,
+        activate_runtime,
+        require_idle_configuration,
+        runtime_report,
+    )
     from shine.comfyops.service_validation import validate_services
     from shine.comfyops.setup_preparation import TASK_KEY
     from shine.db import make_engine, make_session_factory
     from shine.models import AppSetting, utcnow
 
-    blockers = _stack_blockers(data_dir)
-    if blockers:
-        return {"status": "FAILED", "code": "STACK_BUSY", "blockers": blockers}
+    # The Worker is at its VALIDATE checkpoint for a fenced delegation. A
+    # standalone request can arrive mid-tick and keeps the worker-stop guard.
+    delegated_info = dict(delegation) if isinstance(delegation, dict) else {}
+    if not all(delegated_info.get(key) for key in ("task_id", "claim_token", "recipe_sha256")):
+        blockers = _stack_blockers(data_dir)
+        if blockers:
+            return {"status": "FAILED", "code": "STACK_BUSY", "blockers": blockers}
     settings = _settings(data_dir)
     engine = make_engine(settings.database_url)
     factory = make_session_factory(engine)
-    delegated_info = dict(delegation) if isinstance(delegation, dict) else {}
 
     with factory() as db:
         task_row = db.get(AppSetting, TASK_KEY)
@@ -517,6 +526,8 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
             return False
         if current.get("status") in {"CANCELLED", "SUPERSEDED", "DONE", "FAILED"}:
             return False
+        if has_delegated_claim and current.get("current") != "VALIDATE":
+            return False
         if not _delegation_matches(current):
             return False
         return True
@@ -542,6 +553,7 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
             task["lease_expires_at"] = None
             task["claim_token"] = None
             task.pop("validation_delegation", None)
+            task["message"] = detail
             for step in task.get("steps", []):
                 if step.get("id") == "VALIDATE":
                     step["status"] = step_status
@@ -550,21 +562,29 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
             if step_status == "FAILED":
                 task["status"] = "FAILED"
                 task["error"] = code
-                task["message"] = detail
             elif step_status == "DONE" and all(
                 step.get("status") in {"DONE", "SKIPPED"} for step in task.get("steps", [])
             ):
                 task["status"] = "DONE"
                 task["current"] = None
-                task["message"] = detail
             task["updated_at"] = utcnow().isoformat()
             row.value = task
 
     try:
+        try:
+            with factory() as db:
+                if not _task_and_candidate_valid(db):
+                    return {"status": "STALE", "code": "TASK_SUPERSEDED"}
+                require_idle_configuration(db)
+        except RuntimeConfigurationBusy as exc:
+            mark_task("PENDING", exc.detail, exc.wait_message)
+            return {"status": "WAITING", "code": exc.detail}
         code, payload = _stop_worker(data_dir)
         if code != 200:
-            return {"status": "FAILED", "code": payload.get("code", "WORKER_STOP_FAILED"),
-                    "detail": payload.get("detail", "Worker 未能停止，未进行核验。")}
+            code = payload.get("code", "WORKER_STOP_FAILED")
+            detail = payload.get("detail", "Worker 未能停止，未进行核验。")
+            mark_task("FAILED", code, detail)
+            return {"status": "FAILED", "code": code, "detail": detail}
         with factory() as db:
             if not _task_and_candidate_valid(db):
                 _start_worker(data_dir)
@@ -599,6 +619,9 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
             mark_task("DONE", None,
                       f"服务核验通过，本机配置已激活；已核对 {checked} 个生成方案节点（Worker 已自动恢复）。")
             return {"status": "READY"}
+        except RuntimeConfigurationBusy as exc:
+            mark_task("PENDING", exc.detail, exc.wait_message)
+            return {"status": "WAITING", "code": exc.detail}
         except Exception as exc:  # noqa: BLE001 - the named refusal is the answer
             if str(exc) == "SUPERVISOR_TASK_OR_CANDIDATE_SUPERSEDED":
                 return {"status": "STALE", "code": "TASK_SUPERSEDED"}

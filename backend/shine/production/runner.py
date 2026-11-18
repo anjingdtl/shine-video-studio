@@ -430,10 +430,15 @@ def _job_submission_settled(db: Session, job: Job) -> bool:
     ).order_by(ExternalJobReconciliation.created_at.desc(),
                ExternalJobReconciliation.id.desc()).limit(1))
     if reconciliation is not None:
-        # The newest reconciliation decision is the current state of the
-        # uncertainty: "requires_reconciliation" is the one result that says
-        # the question is still open.
-        return reconciliation.result != "requires_reconciliation"
+        # A lookup miss or an unavailable provider leaves the submission open.
+        # The matching external ID stays on both records as historical evidence.
+        return (
+            reconciliation.provider_job_id == job.provider_job_id
+            and reconciliation.result in {
+                "abandoned", "NOT_SENT_PROVEN", "artifact_persisted",
+                "completed", "completed_without_output", "failed",
+            }
+        )
     if job.provider_job_id:
         return False
     if db.scalar(select(JobAttempt.id).where(
@@ -464,15 +469,16 @@ def _series_has_unreconciled_submission(db: Session, series: ProductionSeries) -
         job = db.get(Job, item.job_id) if item.job_id else None
         if job is None:
             continue
-        if (job.status in INFLIGHT_JOB_STATUSES or job.lease_owner or job.lease_expires_at
-                or job.provider_job_id):
+        if job.status in INFLIGHT_JOB_STATUSES or job.lease_owner or job.lease_expires_at:
             return True
         # A settled failure is history: cancelling or resuming the remaining
         # work of this series neither replays nor rewrites it (2026-11-18 P3:
         # "any attempt at all" made a paused series permanently uncancelable).
-        if _job_submission_settled(db, job):
-            continue
-        if db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1)):
+        if job.status in {"FAILED", "CANCELLED"}:
+            if _job_submission_settled(db, job):
+                continue
+            return True
+        if job.provider_job_id or db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1)):
             return True
         if db.scalar(select(AuditEvent.id).where(
             AuditEvent.project_id == series.project_id,

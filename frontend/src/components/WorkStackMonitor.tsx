@@ -121,6 +121,7 @@ export function WorkStackMonitor() {
   const visible = showHistory ? [...live, ...history] : live;
   const working = stacks.filter((row) => row.working).length;
   const counts = snapshot?.counts;
+  const idleBlockers = snapshot?.idle_blockers ?? [];
 
   return <section className={`stack-monitor${open ? ' open' : ''}`} aria-label="工作栈监控">
     <button type="button" className="stack-monitor-head" onClick={() => setOpen((value) => !value)}
@@ -145,7 +146,7 @@ export function WorkStackMonitor() {
       </div>
       <div className="stack-monitor-meta">
         <button type="button" className="ghost-mini" disabled={workerBusy}
-          title="服务复核验需要「API 活着 + Worker 停止」；验证完成后记得启动恢复"
+          title="手动维护 Worker。基础配置会自动完成运行核对和恢复。"
           onClick={() => void (async () => {
             setWorkerBusy(true);
             setMessage('');
@@ -153,7 +154,7 @@ export function WorkStackMonitor() {
               const result = lifecycle?.worker === 'running' ? await stopWorker() : await startWorker();
               setMessage(result.code
                 ? `Worker 操作被拒绝：${result.detail || result.code}`
-                : (lifecycle?.worker === 'running' ? 'Worker 已停止；心跳约 30 秒后过期，可继续服务核验。' : 'Worker 已启动。'));
+                : (lifecycle?.worker === 'running' ? 'Worker 已停止。' : 'Worker 已启动。'));
               await load();
             } catch (error) {
               setMessage(error instanceof Error ? error.message : String(error));
@@ -186,13 +187,13 @@ export function WorkStackMonitor() {
         {confirmExit && <button type="button" className="ghost-mini" onClick={() => { setConfirmExit(false); setMessage(''); }}>取消</button>}
       </div>
       <div className="stack-monitor-list" role="log" aria-live="polite">
-        {visible.length === 0 && !snapshot?.idle_blockers?.length && !snapshot?.idle_blockers_unreadable && <p className="stack-monitor-empty">当前没有后台进程在跑。</p>}
-        {visible.length === 0 && snapshot?.idle_blockers_unreadable && (
-          <p className="stack-monitor-empty">无活动渲染进程；配置等待项暂时读取失败，不能据此判断为空。</p>
+        {visible.length === 0 && !idleBlockers.length && !snapshot?.idle_blockers_unreadable && <p className="stack-monitor-empty">当前没有后台进程在跑。</p>}
+        {snapshot?.idle_blockers_unreadable && (
+          <p className="stack-monitor-empty">配置等待项暂时读取失败，不能据此判断为空。</p>
         )}
-        {visible.length === 0 && Boolean(snapshot?.idle_blockers?.length) && (
+        {idleBlockers.length > 0 && (
           <p className="stack-monitor-empty">
-            无活动渲染进程；配置等待项：{snapshot!.idle_blockers!.slice(0, 2).map((row) => row.label).join('；')}
+            配置等待项：{idleBlockers.slice(0, 2).map((row) => row.label).join('；')}
           </p>
         )}
         {visible.map((stack) => <div className={`stack-row ${STATE_TONE[stack.state] ?? 'unknown'}`} key={stack.id}>

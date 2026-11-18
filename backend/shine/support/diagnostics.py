@@ -52,8 +52,8 @@ _CODE_RULES: dict[str, dict[str, str]] = {
     },
     "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK": {
         "category": "EXTERNAL",
-        "symptom": "本机仍有在途/暂停的生产任务、GPU 租约或待核对安装项未释放，暂时不能切换运行配置。",
-        "next_step": "先在左下角「工作栈」或原页面结束/取消挂起任务、释放空闲渲染服务后，再继续「核对运行合同」。",
+        "symptom": "本机还有正在执行的工作或待核对的资源占用。",
+        "next_step": "提交「核对运行合同」后，后台会等待资源可用再继续。可在「工作栈」查看等待项。",
     },
     "STOP_OWNED_INSTANCE_BEFORE_VALIDATION": {
         "category": "CONFIG",
@@ -282,20 +282,7 @@ def _facts(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return facts
 
 
-def _blocked_production(db) -> bool:
-    if db is None:
-        return False
-    try:
-        from shine.support.occupancy import resource_occupancy
-
-        return bool(resource_occupancy(db)["busy"])
-    except Exception:  # noqa: BLE001 - an unreadable occupancy must not authorise a repair
-        return True
-
-
-def _repair_action(snapshot: dict[str, Any], *, db=None) -> dict[str, Any] | None:
-    if _blocked_production(db):
-        return None
+def _repair_action(snapshot: dict[str, Any]) -> dict[str, Any]:
     capabilities = ((snapshot.get("setup") or {}).get("summary") or {}).get("capabilities") or {}
     has_missing = False
     wanted = [
@@ -338,88 +325,18 @@ def _repair_action(snapshot: dict[str, Any], *, db=None) -> dict[str, Any] | Non
     }
 
 
-def _unblock_actions(snapshot: dict[str, Any], *, db=None) -> list[dict[str, Any]]:
-    """Guarded existing executors that clear configuration-gate occupancy when safe."""
-    if db is None:
-        return []
-    actions: list[dict[str, Any]] = []
-    try:
-        from shine.support.occupancy import release_occupancy, resource_occupancy
-
-        occ = resource_occupancy(db)
-        rel = release_occupancy(db)
-        if occ.get("code") == "GPU_LEASE_ACTIVE" and not rel.get("busy"):
-            spec = ACTION_SPECS["managed_release"]
-            actions.append(
-                {
-                    "kind": spec.kind,
-                    "label": spec.label,
-                    "reason": (
-                        "当前没有在途生成任务，但存在未释放的 GPU 租约/空闲受管服务；"
-                        "释放后即可继续核对运行合同。"
-                    ),
-                    "requires_authorization": True,
-                    "mutates": True,
-                    "params": {},
-                }
-            )
-    except Exception:  # noqa: BLE001 - unreadable occupancy never fabricates an action
-        return []
-
-    page_project_id = ((snapshot.get("page_context") or {}).get("project_id") or "").strip() or None
-    # A cancel recommendation names the run that actually holds the gate:
-    # "exactly one unfinished run on the page" alone is not a verdict that
-    # cancelling it clears anything (2026-11-18 handoff).
-    blocking_series = [
-        row for row in ((snapshot.get("setup") or {}).get("idle_blockers") or [])
-        if isinstance(row, dict) and row.get("kind") == "production_series"
-    ]
-    blocking_run_ids = {str(row.get("run_id")) for row in blocking_series if row.get("run_id")}
-    if blocking_run_ids:
-        try:
-            from sqlalchemy import select
-
-            from shine.production.models import ProductionRun
-
-            active_runs = [
-                row
-                for row in db.scalars(select(ProductionRun).order_by(ProductionRun.created_at.desc())).all()
-                if str(row.id) in blocking_run_ids
-                and str(row.status) not in {"COMPLETED", "FAILED", "CANCELLED", "SUPERSEDED"}
-                and (page_project_id is None or str(row.project_id) == page_project_id)
-            ]
-            for run in active_runs[:1]:
-                spec = ACTION_SPECS["production_control"]
-                actions.append(
-                    {
-                        "kind": spec.kind,
-                        "label": f"取消阻塞配置切换的生产运行（{run.status}）",
-                        "reason": (
-                            f"生产运行 {run.id[:8]} 的拍摄序列仍在占用配置门禁（状态 {run.status}）；"
-                            "取消未提交镜头后可继续核对合同（已出片保留）。"
-                        ),
-                        "requires_authorization": True,
-                        "mutates": True,
-                        "params": {"run_id": run.id, "operation": "cancel"},
-                    }
-                )
-        except Exception:  # noqa: BLE001
-            pass
-    return actions
-
-
 def _apply_setup_diagnosis_detail(
     base: dict[str, Any],
     snapshot: dict[str, Any],
     *,
     code: str | None,
-    db=None,
 ) -> None:
     preparation = ((snapshot.get("setup") or {}).get("summary") or {}).get("preparation") or {}
     raw_blockers = ((snapshot.get("setup") or {}).get("idle_blockers"))
     blockers_unreadable = raw_blockers is None
     idle_blockers = [row for row in (raw_blockers or []) if isinstance(row, dict)]
-    prep_failed = isinstance(preparation, dict) and preparation.get("status") == "FAILED"
+    prep_status = preparation.get("status") if isinstance(preparation, dict) else None
+    prep_failed = prep_status == "FAILED"
     prep_error = str(preparation.get("error") or "") if prep_failed else ""
     # Confirmed facts come from authoritative reads only; the blocker ledger is
     # an observation, not a code-level root cause, and an unreadable ledger is
@@ -450,7 +367,7 @@ def _apply_setup_diagnosis_detail(
                     str(row.get("label") or row.get("id")) for row in idle_blockers[:3]
                 )
                 base["symptom"] = f"{base['symptom']} 最近一次重配在「生成受管运行配置」被阻塞：{labels}。"
-                base["next_step"] = f"先解除阻塞项（{labels}），再继续「核对运行合同」。"
+                base["next_step"] = "继续「核对运行合同」后，后台会等待上述工作收尾。"
             else:
                 base["symptom"] = (
                     f"{base['symptom']} 最近一次重配曾因在途任务或未核对记录停在"
@@ -471,11 +388,11 @@ def _apply_setup_diagnosis_detail(
         base["root_cause"] = "\n".join(lines)
         base["root_cause_confirmed"] = bool(confirmed_lines) and not blockers_unreadable
 
-    action = _repair_action(snapshot, db=db)
-    if action:
-        base["recommended_actions"] = [action]
-    else:
-        base["recommended_actions"] = _unblock_actions(snapshot, db=db)
+    if prep_status in {"QUEUED", "RUNNING"}:
+        base["outcome"] = "WAIT"
+        base["next_step"] = str(preparation.get("message") or "整备已交给后台，打开基础配置即可查看进度。")
+        return
+    base["recommended_actions"] = [_repair_action(snapshot)]
 
 
 def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) -> dict[str, Any]:
@@ -572,7 +489,7 @@ def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) 
                 "confidence": "HIGH",
             }
         )
-        _apply_setup_diagnosis_detail(base, snapshot, code=code, db=db)
+        _apply_setup_diagnosis_detail(base, snapshot, code=code)
         return base
 
     if mode in {"SETUP_REQUIRED", "VALIDATION_REQUIRED"}:
@@ -588,7 +505,7 @@ def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) 
                 "confidence": "HIGH",
             }
         )
-        _apply_setup_diagnosis_detail(base, snapshot, code=code, db=db)
+        _apply_setup_diagnosis_detail(base, snapshot, code=code)
         return base
 
     task_status = str(task.get("status") or "").upper()

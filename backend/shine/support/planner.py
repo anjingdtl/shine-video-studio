@@ -875,12 +875,10 @@ def _switch_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
 
 def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[str, Any]:
     from shine.comfyops.setup_summary import summary as build_setup_summary
-    from shine.support.occupancy import resource_occupancy
 
     summary = build_setup_summary(db, settings, project_id=project_id, variant_id=None, discovered=[])
     verdict = summary.get("verdict") or {}
     capabilities = summary.get("capabilities") or {}
-    occupancy = resource_occupancy(db)
     lowered = (request or "").casefold()
     evidence = [
         f"生产裁决：{verdict.get('label') or verdict.get('mode') or '未知'}"
@@ -903,14 +901,13 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
     ]
     if any(word in lowered for word in ("核验", "登记已有")):
         cap = "image" if "出图" in lowered else "h3"
-        step_state = "BLOCKED" if occupancy["busy"] else "READY"
         steps.append(
             {
                 "order": 2,
                 "title": "核验并登记已有本地文件",
                 "capability_id": "setup_reconcile",
-                "state": step_state,
-                "state_label": _STEP_LABELS[step_state],
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
                 "action": {
                     "kind": "setup_reconcile",
                     "params": {"capability": cap, "adopt": False},
@@ -972,21 +969,20 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
     repair_params: dict[str, Any] = {"capabilities": wanted, "verify_runtime": True}
     if project_id:
         repair_params["project_id"] = project_id
-    step_state = "BLOCKED" if occupancy["busy"] else "READY"
     steps.append(
         {
             "order": 2,
             "title": "准备并核验指定制作环境能力",
             "capability_id": "setup_repair",
-            "state": step_state,
-            "state_label": _STEP_LABELS[step_state],
+            "state": "READY",
+            "state_label": _STEP_LABELS["READY"],
             "action": {
                 "kind": "setup_repair",
                 "params": repair_params,
             },
             "readback": "GET /api/v1/setup/prepare/{task_id}",
             "requires_confirmation": "EXECUTE_GUARDED",
-            "reason": "复用统一整备任务队列与下载计划裁决；仍需先预览下载清单并确认。",
+            "reason": "确认后交给原整备任务。需要释放资源时，后台会等待后继续。",
         }
     )
     return {

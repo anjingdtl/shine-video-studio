@@ -340,6 +340,18 @@ def _assert_claim(factory, task: dict[str, Any] | None) -> None:
         _assert_claim_in_tx(db, task)
 
 
+def validation_delegated(task: dict[str, Any]) -> bool:
+    """The Worker has handed this pending VALIDATE step to its supervisor."""
+    if task.get("status") != "RUNNING" or task.get("current") != "VALIDATE":
+        return False
+    delegated = task.get("validation_delegation")
+    delegated_until = delegated.get("expires_at") if isinstance(delegated, dict) else None
+    try:
+        return isinstance(delegated_until, str) and datetime.fromisoformat(delegated_until) > utcnow()
+    except ValueError:
+        return False
+
+
 def _claim(factory, worker_id: str) -> dict[str, Any] | None:
     try:
         with factory.begin() as db:
@@ -359,15 +371,8 @@ def _claim(factory, worker_id: str) -> dict[str, Any] | None:
                 except ValueError:
                     pass
             pending = next((step for step in value.get("steps") or [] if step.get("status") == "PENDING"), None)
-            if pending is not None and pending.get("id") == "VALIDATE":
-                delegated = value.get("validation_delegation")
-                delegated_until = delegated.get("expires_at") if isinstance(delegated, dict) else None
-                if isinstance(delegated_until, str):
-                    try:
-                        if datetime.fromisoformat(delegated_until) > utcnow():
-                            return None
-                    except ValueError:
-                        pass
+            if validation_delegated(value):
+                return None
             value.pop("validation_delegation", None)
             value["status"] = "RUNNING"
             if pending is not None:
@@ -456,6 +461,8 @@ def advance(factory, settings, worker_id: str) -> str | None:
                 task["error"] = failures[0].get("code")
             task["current"] = None
         _save(factory, task)
+        if validation_delegated(task):
+            return f"setup:{step_id}:delegated"
         # A step that is merely waiting on bytes has not consumed the tick:
         # the caller keeps serving the queues that can still advance.
         return f"setup:{step_id}:waiting" if detail.get("status") == "PENDING" \
@@ -640,11 +647,13 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
                 if adoption and not adoption.get("instance_id"):
                     code = adoption.get("code") or adoption.get("status")
                     notes.append(f"{capability}:{code}")
+                    if code == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK":
+                        return {"status": "PENDING", "code": code,
+                                "detail": "等待本机资源可用后，自动继续登记这套安装。"}
                     if code in {
                         "STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION",
                         "PORT_OCCUPIED",
                         "INSTANCE_LIFECYCLE_LEASE_ACTIVE",
-                        "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK",
                     }:
                         failures += 1
             except ClaimLostError:
@@ -1184,7 +1193,7 @@ def _step_target(factory, settings, task) -> dict[str, Any]:
 def _step_recipe(factory, settings, task) -> dict[str, Any]:
     """Write the recipe for exactly the capabilities that were authorized."""
     from shine.comfyops import deployment
-    from shine.comfyops.runtime_configuration import runtime_report
+    from shine.comfyops.runtime_configuration import RuntimeConfigurationBusy, runtime_report
     from shine.comfyops.setup_summary import _runtime_instance_id
     from shine.comfyops.variants import default_variant_id
 
@@ -1244,22 +1253,8 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
                 port=int(target.get("port") or 8188), capability=capability,
                 variant_id=request.get("variant_id") if capability == "h3" else None,
                 instance_id=target["instance_id"], **gen_extra)
-    except ClaimLostError:
-        raise
-    except Exception as exc:  # noqa: BLE001 - enrich idle-gate refusal with exact ledger blockers
-        code = _code_of(exc)
-        if code == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK":
-            from shine.comfyops.runtime_configuration import idle_configuration_blockers
-
-            with factory() as db:
-                items = [row.get("label") for row in idle_configuration_blockers(db) if row.get("label")]
-            summary_note = ("；".join(items[:4])) if items else "存在尚未释放的任务或租约"
-            return {
-                "status": "FAILED",
-                "code": code,
-                "detail": f"暂不能重写运行配置（{summary_note}）。请先在「视频生产」或左侧「工作栈」处理后再继续。",
-            }
-        raise
+    except RuntimeConfigurationBusy as exc:
+        return {"status": "PENDING", "code": exc.detail, "detail": exc.wait_message}
     task.setdefault("result", {})["recipe_sha256"] = result.get("recipe_sha256")
     _align_existing_image_binding(factory, settings, task)
     return {"status": "DONE", "detail": "共用渲染器运行配置已生成。"}
@@ -1338,7 +1333,11 @@ def _step_profiles(factory, settings, task) -> dict[str, Any]:
 def _step_validate(factory, settings, task) -> dict[str, Any]:
     from sqlalchemy import select
 
-    from shine.comfyops.runtime_configuration import runtime_report
+    from shine.comfyops.runtime_configuration import (
+        RuntimeConfigurationBusy,
+        require_idle_configuration,
+        runtime_report,
+    )
     from shine.models import WorkflowProfile
 
     with factory() as db:
@@ -1346,9 +1345,15 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
         report = runtime_report(db, settings)
         profiles = db.scalars(select(WorkflowProfile).where(
             WorkflowProfile.project_id == task.get("project_id"))).all() if task.get("project_id") else []
-    profiles_validated = not task.get("project_id") or bool(profiles) and all(row.validated_against for row in profiles)
-    if report.get("status") == "ACTIVE" and report.get("services_verified") and profiles_validated:
-        return {"status": "DONE", "detail": "本机运行合同与生成方案节点均已核验，无需重复启动。"}
+        profiles_validated = not task.get("project_id") or bool(profiles) and all(
+            row.validated_against for row in profiles
+        )
+        if report.get("status") == "ACTIVE" and report.get("services_verified") and profiles_validated:
+            return {"status": "DONE", "detail": "本机运行合同与生成方案节点均已核验，无需重复启动。"}
+        try:
+            require_idle_configuration(db)
+        except RuntimeConfigurationBusy as exc:
+            return {"status": "PENDING", "code": exc.detail, "detail": exc.wait_message}
     candidate = report.get("candidate") or {}
     if not candidate.get("recipe_sha256"):
         return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST",

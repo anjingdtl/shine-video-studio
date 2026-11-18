@@ -116,9 +116,8 @@ _PROJECT_OPTIONAL_KINDS = PROJECT_OPTIONAL_KINDS
 #: Machine-level actions never inherit the current project.
 _MACHINE_SCOPED_KINDS = MACHINE_SCOPED_KINDS
 
-#: Actions that do not compete for the GPU.  They must not be refused by the
-#: production/lease gate: a project import, a story outline or a setting edit
-#: does not touch the renderer.  Their own executors still enforce every gate.
+#: Actions whose submission does not claim the GPU. Setup uses this for the
+#: existing task enqueue; the Worker checks resources at the relevant step.
 _NO_GPU_GATE: frozenset[str] = NO_GPU_GATE_KINDS
 
 
@@ -146,10 +145,8 @@ def _action_occupancy(db, kind: str, params: dict[str, Any]) -> dict[str, Any]:
 
     Releasing idle managed services is the one action whose *purpose* is to
     clear a GPU lease, so it must not be refused by the generic lease gate.
-    Configuration changes keep the full fail-closed protection.  User-level
-    edits that never touch the renderer report occupancy as *context* only: they
-    are still refused if the product's own executor says so, but a running
-    render must not make "import the novel" or "change the language" impossible.
+    Operations that only enqueue work use occupancy as context. Their own
+    executors enforce the resource checks when they perform the work.
 
     ``production_start`` deliberately keeps the full gate: a second real shoot
     must not be slipped past an active run.
@@ -163,7 +160,7 @@ def _action_occupancy(db, kind: str, params: dict[str, Any]) -> dict[str, Any]:
             "busy": False,
             "advisory_busy": bool(occupancy.get("busy")),
             "advisory_code": occupancy.get("code"),
-            "label": "不占用 GPU 的用户级操作；生产占用仅作提示。",
+            "label": "由原入口执行，资源占用仅作提示。",
         }
     return _occupancy(db)
 
@@ -1806,12 +1803,9 @@ def approve_action(
                     call_kwargs["reconcile_only"] = True
                 value = enqueue(db, actor=actor, settings=settings, **call_kwargs)
             else:
-                value = enqueue(
-                    db,
-                    actor=actor,
-                    settings=settings,
-                    **routed_kwargs(declaration, params, enqueue),
-                )
+                from shine.api_setup import PrepareRequest, setup_prepare_execute
+
+                value = setup_prepare_execute(PrepareRequest.model_validate(params), actor, settings, db)
             row.status = "DELEGATED"
             # Bind the action to the executor's own durable task id.
             row.original_task_id = str(value.get("task_id") or "") or None

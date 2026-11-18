@@ -892,10 +892,10 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
                 and not relocated_managed_root(instance, ladder_root))):
         raise HTTPException(409, "MANAGED_INSTANCE_REQUIRED")
     payload = instance.payload
-    if payload.get('process') or instance.status != 'STOPPED':
-        raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
     from shine.comfyops.runtime_configuration import require_idle_configuration
     require_idle_configuration(db)
+    if payload.get('process') or instance.status != 'STOPPED':
+        raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
     # A relocated managed row keeps its historical root as a record; the files
     # and the generated recipe follow the ladder's *current* anchor.
     root = Path(payload["root"]).resolve() if adopted else ladder_root

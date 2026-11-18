@@ -149,13 +149,19 @@ def test_changed_identity_blocks_activation_and_active_worker_without_mock_fallb
     assert client.get('/api/v1/system/status').json()['render_mode'] == 'unavailable'
 
 
-@pytest.mark.parametrize('blocker', ['ACTIVE', 'RECONCILE_REQUIRED', 'queued_job', 'fake_receipt', 'missing_receipt'])
+@pytest.mark.parametrize('blocker', ['ACTIVE', 'RECONCILE_REQUIRED', 'running_job', 'fake_receipt', 'missing_receipt'])
 def test_activation_requires_idle_reconciled_real_installation(prep, candidate, blocker):
     client, factory, settings = prep
-    if blocker == 'queued_job':
+    if blocker == 'running_job':
+        from shine.models import Job
+
         style = freeze_style(client, candidate[0])
         shot = create_shot(client, candidate[0], style['id'])
-        create_job(client, candidate[0], shot['id'])
+        job = create_job(client, candidate[0], shot['id'])
+        with factory.begin() as db:
+            row = db.get(Job, job['id'])
+            row.status = 'RUNNING'
+            row.provider = 'comfyui'
     else:
         with factory.begin() as db:
             if blocker in {'ACTIVE', 'RECONCILE_REQUIRED'}:
@@ -173,6 +179,19 @@ def test_activation_requires_idle_reconciled_real_installation(prep, candidate, 
     with factory() as db:
         assert db.get(AppSetting, ACTIVE_KEY) is None
         assert resolve_runtime(db, settings).render_provider == 'mock'
+
+
+def test_activation_leaves_unclaimed_jobs_queued(prep, candidate):
+    from shine.models import Job
+
+    client, factory, _settings = prep
+    style = freeze_style(client, candidate[0])
+    shot = create_shot(client, candidate[0], style['id'])
+    job = create_job(client, candidate[0], shot['id'])
+
+    assert activate(prep, candidate).status_code == 200
+    with factory() as db:
+        assert db.get(Job, job['id']).status == 'QUEUED'
 
 
 def test_real_activation_is_incompatible_with_offline_simulation(prep, candidate):

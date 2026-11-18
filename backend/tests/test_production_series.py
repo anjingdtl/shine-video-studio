@@ -1290,7 +1290,7 @@ def test_a_failing_shot_callback_still_releases_the_renderer(api, monkeypatch):
     assert released == [series.id]
 
 
-def _settled_failed_item(factory, series, *, uncertain=False):
+def _settled_failed_item(factory, series, *, uncertain=False, prompt_id=None):
     """把序列的第一镜写成一条已结清的失败历史（或真正不确定的尝试）。"""
     with factory.begin() as db:
         item = db.scalar(select(ProductionSeriesItem).where(
@@ -1302,7 +1302,7 @@ def _settled_failed_item(factory, series, *, uncertain=False):
         job.failure_code = "USER_ABANDONED_UNRECONCILED"
         job.lease_owner = None
         job.lease_expires_at = None
-        job.provider_job_id = None
+        job.provider_job_id = prompt_id
         attempt = db.scalar(select(JobAttempt).where(JobAttempt.job_id == job.id))
         if attempt is not None:
             attempt.status = "FAILED"
@@ -1310,7 +1310,7 @@ def _settled_failed_item(factory, series, *, uncertain=False):
             if uncertain:
                 attempt.submit_ack_at = utcnow()
         db.add(ExternalJobReconciliation(
-            job_id=job.id, provider_job_id=None, action="user_abandon", result="abandoned",
+            job_id=job.id, provider_job_id=prompt_id, action="user_abandon", result="abandoned",
             evidence={"artifact_kept": None, "resubmitted": False, "note": "测试收尾"},
         ))
         item.status = "FAILED"
@@ -1321,8 +1321,7 @@ def _settled_failed_item(factory, series, *, uncertain=False):
 
 
 def test_a_settled_failed_job_does_not_block_cancelling_the_series(api):
-    """已结清的失败历史（终态 FAILED、无租约、无外部 ID、user_abandon/abandoned 核对在案）
-    允许取消尚未执行的镜头；只有 attempt 存在就永久拒绝是 2026-11-18 现场复现的 P3。"""
+    """An abandoned attempt keeps its prompt ID and permits cancelling the rest."""
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
     profile = _register_ref2va_profile(client)
@@ -1337,7 +1336,7 @@ def test_a_settled_failed_job_does_not_block_cancelling_the_series(api):
                           status="FAILED", lease_owner="worker-dead",
                           lease_expires_at=utcnow()))
         db.commit()
-    _settled_failed_item(factory, series)
+    _settled_failed_item(factory, series, prompt_id="retained-prompt-id")
 
     response = client.post(
         f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel",
@@ -1345,9 +1344,12 @@ def test_a_settled_failed_job_does_not_block_cancelling_the_series(api):
     )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "CANCELLED"
+    with factory() as db:
+        assert db.get(Job, item.job_id).provider_job_id == "retained-prompt-id"
 
 
-def test_a_genuinely_uncertain_attempt_still_refuses_cancellation(api):
+@pytest.mark.parametrize("lookup_result", [None, "not_found"])
+def test_a_genuinely_uncertain_attempt_still_refuses_cancellation(api, lookup_result):
     """真正不确定的尝试（有 ack、无核对结论）仍然拒绝取消——保护不因上一条放宽。"""
     client, factory, settings = api
     project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
@@ -1368,6 +1370,11 @@ def test_a_genuinely_uncertain_attempt_still_refuses_cancellation(api):
         # 不确定尝试没有核对结论：抹掉 user_abandon 行，只剩 ack。
         db.query(ExternalJobReconciliation).filter(
             ExternalJobReconciliation.job_id == item.job_id).delete()
+        if lookup_result is not None:
+            db.add(ExternalJobReconciliation(
+                job_id=item.job_id, action="recover_not_found", result=lookup_result,
+                evidence={"resubmitted": False},
+            ))
 
     response = client.post(
         f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel",

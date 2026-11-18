@@ -62,3 +62,26 @@
 - b30ebb92 的 `h3:INSTANCE_IDENTITY_CHANGED` 行是主因还是同次告警未在旧库反例中核定；搬迁容忍已统一到唯一判定（§3），真机 `J:\svs\...` 场景的复验留待用户机。
 - 「取消后单独 Job 不可被普通队列重新认领」「保留已通过版本/产物/外部 ID」等既有保护未放宽，均有反例锁定。
 - 本轮未提交、未推送：commit/push/发布按交接等待另行授权。
+
+## 8. 独立复验与整备交互简化
+
+复验从本地主仓的 `6773587` 开始。该提交已有隔离启动和回归证据，本节补齐从整备停步到真实服务核验的用户路径。
+
+- 排队且未领用资源的镜头、已暂停且无在途工作的序列、已停止的历史安装失败仍保留在台账。运行配置的唯一空闲裁决会等待实际在途工作、仍有持有者的安装和未核对的资源占用。安装目标与在盘字节继续使用原证据校验。
+- 基础配置与 AI 管家通过同一整备入口登记请求。等候资源时在同一个任务里保留停点，释放后 Worker 自动继续。Supervisor 仅在现有任务、认领和配方凭证相符时执行委托，短时接管期间 Worker 停在核验交接点。整栈退出的占用规则留给整栈退出。
+- 浏览器复验发现顶部判配置失效时，H3 卡片仍能借旧封条显示已核验，原核对按钮因此不可用。激活身份与服务证据改由同一个读取函数判断，失效时页面可继续发起核对。
+- 序列收尾使用外部核对记录判定。已明确放弃的历史保留 `provider_job_id`，允许从原入口取消剩余工作。`not_found` 表示外部结果尚未确定，保留原保护。
+
+从既有真机验收库复制了隔离台账和少量配置，使用 `F:\ShineTest\整备复验 20261118 hlrl5484` 通过正式启动器打开 `#d/setup`。在副本里植入失效激活摘要、`RECIPE` 停步、暂停序列和无租约历史安装失败。实际在页面点一次「核对运行合同」，任务 `setup-a7a5ec9ce447` 保持同一 ID、记录一次续跑并完成 9/9 步。复用原 ComfyUI 安装，真实 `/object_info` 返回 1281 个节点，四个 Ref2VA 工作流核验通过。页面显示 100%，`/setup/runtime` 为 `ACTIVE`，服务核验和 `/setup/verdict` 均为 `READY`，Worker 自动恢复。暂停序列和历史失败仍可查，隔离库新建视频 Job 为 0。正式停止入口完成后，隔离 API、Web、Supervisor 和渲染端口均已释放。
+
+验证交接的占用反例使用隔离 SQLite 和有持有者的 GPU 租约。Supervisor 将同一任务送回 `VALIDATE: PENDING`，保留具体等待项，未调用停止 Worker。
+
+最终工作树的验证结果如下。
+
+| 验证 | 结果 |
+| --- | --- |
+| `$env:CODEBUDDY_SAFE_DELETE_ENABLED = '0'` 后执行 `.\run_backend_shards.ps1 -WorkRoot F:\ShineTest -KeepRuns 3` | 274 个文件按文件分成 8 片，8 个退出码均为 0，零 `FAILED` / `ERROR`。日志在 `F:\ShineTest\shards-20261118-231644-790`，本轮 `bt-*` 已由脚本清理。 |
+| `vitest run --no-file-parallelism`、`npm.cmd --prefix frontend run build` | 83 个文件、433 例通过，TypeScript 和 Vite 构建通过。 |
+| `ruff check --no-cache backend scripts/shine_supervisor.py`、Copilot 合同 `--check`、隔离库 `alembic -c backend/alembic.ini check`、`git diff --check` | 全部退出码 0，隔离库没有新增迁移差异。 |
+
+这次现场复验覆盖本机 RTX 5080 的真实服务合同和旧停点续跑。报障用户原库、12GB 规格表现、真实 H3 出片与 guided VLM 校准属于待验项。修订保留在本地 `main` 工作区。
