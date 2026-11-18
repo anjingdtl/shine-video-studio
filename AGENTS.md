@@ -2088,3 +2088,27 @@ hand-maintained lists. When you add or change a product capability:
    compares it with the packaged declarations and refuses mismatches.
 7. Never give the runtime copilot shell/git/pip/arbitrary HTTP/source-write tools,
    and never let an unreviewed API become executable. Discovery is not permission.
+
+## 2026-11-19 「文件找到却用不了」收敛轮（用户报障：素材出图又被阻滞）
+
+- **完成的检索轮次是终态**：`_step_scan` 不得重启已完成的检索（旧逻辑与 Worker
+  常规 `advance_scan` 交替形成活锁，整备永远停在 SCAN，出图永远「已找到/跑不通」）。
+  整备发起的深搜用 `start_scan(reuse_completed=True)` 复用已完成覆盖（检索复用）；
+  每轮检索带 `round_id`，任务记录自己发起的轮次身份；显式重检索入口保留全量重走。
+- **图层证据持久化且同源读**：`runtime.record_graph_verification` 是唯一写入点
+  （受管启动 / IMAGE_VERIFY / image-readiness 活体探测三个调用方），按运行时指纹
+  键控存 `image-graph-verification`；`readiness` 无活体时读同一份证据，换绑/改模型/
+  改模板使指纹变化即如实失效。渲染器停止后卡片不得回退「未核验/跑不通」。
+- **adopted 活体只读复用**：`image_renderer.adopted_live_renderer` 是唯一裁决——
+  adopted 且非 mock、登记端口被环回活体 ComfyUI 服务、且无本工作台 RUNNING 受管
+  记录 → 该监听就是这套安装的渲染器，只读复用（不启动、不停止、不做内存准入）；
+  `start_image_renderer` 在外部端口拒绝前先过它。非 adopted 绝不复用外部监听。
+  GPU 忙 / H3 占用 / 另有启动者在途 → 具名 PENDING 等待，不是失败。
+- **整备进行中卡片不投影死胡同**：整备任务活跃且覆盖该能力时，`_two_step_projection`
+  把②投影为 PREPARING「后台整备中，完成后自动可用」，前端隐藏只会重排同一任务的
+  按钮；事实读同一份整备台账，不新增权威状态。
+- 回归：`backend/tests/test_image_found_runnable_convergence.py`（9 例）、前端
+  `setupPreparingProjection.test.tsx`（2 例）；真机同一台账重启续跑全链 DONE
+  （三类真实小样 + 五模式出图，指纹 `ede62ef0…`）。证据
+  `docs/ACCEPTANCE_20261119_IMAGE_FOUND_RUNNABLE_CONVERGENCE.md`。
+  本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。

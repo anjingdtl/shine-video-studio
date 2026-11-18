@@ -566,13 +566,36 @@ def _step_tool_repair(factory, settings, task) -> dict[str, Any]:
 
 
 def _step_scan(factory, settings, task) -> dict[str, Any]:
-    """Advance the bounded deep scan; the page closing never stops it."""
+    """Advance the bounded deep scan; the page closing never stops it.
+
+    The completion verdict is single: the round this task started is DONE once
+    the durable scan says DONE.  The previous shape restarted a full deep scan
+    whenever it observed a finished round, while the Worker's own background
+    advancer kept finishing rounds between ticks - the step livelocked at
+    "scanning" and every later step (verify, bind, trial) never ran.  A finished
+    round is therefore terminal for this step, and a new preparation reuses
+    completed coverage instead of re-walking every drive.
+    """
     from shine.comfyops import resource_discovery
 
     with factory() as db:
-        status = resource_discovery.read_state(db)["scan"].get("status")
-        if status not in {"QUEUED", "RUNNING"}:
-            resource_discovery.start_scan(db, actor="worker:setup", probe_roots=settings.comfy_probe_roots)
+        scan = resource_discovery.read_state(db)["scan"]
+        if scan.get("status") in {"QUEUED", "RUNNING"}:
+            task.setdefault("result", {}).setdefault("scan_round_id", scan.get("round_id"))
+            result = resource_discovery.advance_scan(db, budget_s=2.0)
+            if result.get("status") in {"QUEUED", "RUNNING"}:
+                return {"status": "PENDING",
+                        "detail": f"正在深搜本机资源（剩余 {result.get('remaining', 0)} 批，关闭页面也会继续）。"}
+            return {"status": "DONE", "detail": "本机资源深搜完成，已有文件进入候选台账。"}
+        round_id = (task.get("result") or {}).get("scan_round_id")
+        if round_id and round_id == scan.get("round_id"):
+            return {"status": "DONE", "detail": "本轮检索已完成，进入核验。"}
+        started = resource_discovery.start_scan(
+            db, actor="worker:setup", probe_roots=settings.comfy_probe_roots,
+            reuse_completed=True)
+        task.setdefault("result", {})["scan_round_id"] = started.get("round_id")
+        if started.get("status") == "IDLE":
+            return {"status": "DONE", "detail": "已有检索覆盖完整，复用本轮结果，无需重搜。"}
     with factory() as db:
         result = resource_discovery.advance_scan(db, budget_s=2.0)
     if result.get("status") in {"QUEUED", "RUNNING"}:
@@ -1422,17 +1445,24 @@ def _delegate_supervisor_validation(settings, delegation: dict[str, Any] | None 
 
 
 def _step_image_verify(factory, settings, task) -> dict[str, Any]:
-    """Start the managed image renderer once, prove the graph, release the GPU.
+    """Prove the image graph against a live renderer, through the same start door.
 
-    A machine without a usable GPU cannot prove this step; the failure is named
-    and kept, never converted into "ready".  A renderer that cannot be stopped
-    keeps its lease for reconciliation - this step never claims it stopped.
+    Three physical facts, one verdict: the user's own live ComfyUI on an
+    adopted installation is reused read-only (never started, never stopped);
+    a managed renderer already running is probed in place; otherwise the
+    managed renderer is started once, probed and released.  The verification
+    is persisted as durable graph evidence, so the setup card keeps reading
+    "verified" after the renderer stops.  A busy GPU is a named wait, not a
+    failure; a renderer that cannot be stopped keeps its lease for
+    reconciliation - this step never claims it stopped.
     """
+    from shine.comfy.client import ComfyUIClient
     from shine.comfyops.image_renderer import (
         image_renderer_state,
         start_image_renderer,
         stop_image_renderer,
     )
+    from shine.materialprep import runtime as image_runtime
 
     target = task.get("target") or {}
     instance_id = str(target.get("instance_id") or "")
@@ -1440,25 +1470,46 @@ def _step_image_verify(factory, settings, task) -> dict[str, Any]:
         return {"status": "SKIPPED", "detail": "没有可用的实例。"}
     with factory() as db:
         state = image_renderer_state(db, settings, instance_id)
-    if state.get("state") == "RUNNING":
-        return {"status": "DONE", "detail": "出图渲染器已在运行（受管且身份可证明）。"}
+    already_running = state.get("state") == "RUNNING"
+    if already_running:
+        started = {"base_url": f"http://127.0.0.1:{state.get('port')}",
+                   "port": state.get("port"), "reused": True}
+    else:
+        try:
+            started = start_image_renderer(factory, settings, instance_id=instance_id, actor="worker:setup")
+        except Exception as exc:  # noqa: BLE001 - the named code is the answer
+            code = _code_of(exc)
+            if code in {"IMAGE_RENDERER_GPU_LEASE_ACTIVE", "IMAGE_RENDERER_INSTALLATION_BUSY_H3",
+                        "IMAGE_RENDERER_INSTALLATION_UNCERTAIN", "IMAGE_RENDERER_START_IN_PROGRESS"}:
+                return {"status": "PENDING", "code": code,
+                        "detail": "等待本机 GPU 空闲后自动继续核对出图节点。"}
+            return {"status": "FAILED", "code": code,
+                    "detail": "出图渲染器没能启动：" + _message_of(exc)}
     try:
-        started = start_image_renderer(factory, settings, instance_id=instance_id, actor="worker:setup")
-    except Exception as exc:  # noqa: BLE001 - the named code is the answer
+        object_info = ComfyUIClient(started["base_url"], max_retries=0, trust_env=False).object_info()
+        graph_report = image_runtime.verify_graph_against_object_info(object_info)
+    except Exception as exc:  # noqa: BLE001 - an unreadable renderer is named
         return {"status": "FAILED", "code": _code_of(exc),
-                "detail": "出图渲染器没能启动：" + _message_of(exc)}
-    from shine.runtime_orchestrator.contracts import IMAGE_STARTUP_PREFIX
-
+                "detail": "读不到渲染器的节点声明：" + _message_of(exc)}
     with factory() as db:
-        record = db.get(AppSetting, IMAGE_STARTUP_PREFIX + instance_id)
-        graph_verified = bool((record.value or {}).get("graph_verified")) if record is not None else None
+        config = image_runtime.load_config(settings)
+        if config.instance_id == instance_id:
+            image_runtime.record_graph_verification(
+                db, settings, config, graph_report,
+                source="adopted_live" if started.get("adopted_live") else "managed_startup")
+    if not graph_report["complete"]:
+        return {"status": "FAILED", "code": "IMAGE_GRAPH_NOT_VERIFIED",
+                "detail": "本机缺少出图工作流需要的节点或输入。"}
+    if started.get("adopted_live"):
+        return {"status": "DONE",
+                "detail": f"出图节点已在你自己的 ComfyUI 上核对（端口 {started.get('port')}，"
+                          "只读复用，不启动不停止）。"}
+    if already_running:
+        return {"status": "DONE", "detail": "出图渲染器已在运行，节点已核对。"}
     try:
         stop_image_renderer(factory, settings, instance_id=instance_id, actor="worker:setup")
     except Exception:  # noqa: BLE001 - an unstopped renderer keeps its lease for reconciliation
         return {"status": "FAILED", "code": "IMAGE_RENDERER_STOP_UNCONFIRMED",
                 "detail": "出图节点已核验，但渲染器没有确认停止；GPU 会在下次释放时处理。"}
-    if graph_verified is False:
-        return {"status": "FAILED", "code": "IMAGE_GRAPH_NOT_VERIFIED",
-                "detail": "本机缺少出图工作流需要的节点或输入。"}
     return {"status": "DONE",
             "detail": f"出图节点已核对（端口 {started.get('port')}），渲染器已释放显存。"}

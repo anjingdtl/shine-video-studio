@@ -200,39 +200,46 @@ def _queue_scan(state: dict) -> int:
 
 
 def start_scan(db, *, drives: bool = True, probe_roots: tuple[str, ...] = (),
-               actor: str = "local-user") -> dict:
+               actor: str = "local-user", reuse_completed: bool = False) -> dict:
     """Queue one bounded deep scan over fixed drives and declared directories.
 
     An explicit re-scan re-walks the directories a previous round already
     finished, so a file that arrived afterwards is found instead of being
     skipped because its root had a ``DONE`` coverage record.
+
+    ``reuse_completed`` is the preparation chain's semantics (检索复用): a root
+    whose coverage is already DONE is not re-walked, because re-walking every
+    drive on every preparation is exactly the stall that kept the chain at
+    "scanning" forever.  The explicit re-scan entry keeps the full re-walk.
     """
     from shine.services import add_audit
 
     state = read_state(db)
+    rescan = not reuse_completed
     for row in state.get("directories") or []:
         _enqueue_seed(state, row["path"], CONFIGURED_ROOT_DEPTH, source="rescan",
-                      rescan=True)
+                      rescan=rescan)
     for root in probe_roots:
         try:
             _enqueue_seed(state, str(local_path(root)), CONFIGURED_ROOT_DEPTH,
-                          source="probe_root", rescan=True)
+                          source="probe_root", rescan=rescan)
         except Exception:  # noqa: BLE001 - an invalid env root is named, not fatal
             state["scan"].setdefault("unreadable", []).append(root)
     if drives:
         for drive in fixed_drives():
             # 一次显式重检索要能发现之后才出现的文件，所以固定盘也重走一遍；
             # 分批推进，UI 上如实显示还剩几批。
-            _enqueue_seed(state, str(drive), DRIVE_SCAN_DEPTH, source="drive", rescan=True)
+            _enqueue_seed(state, str(drive), DRIVE_SCAN_DEPTH, source="drive", rescan=rescan)
     queued = _queue_scan(state)
     if not queued:
         _save(db, state)
-        return {"status": "IDLE", "queued": 0}
+        return {"status": "IDLE", "queued": 0, "round_id": state["scan"].get("round_id")}
+    state["scan"]["round_id"] = uuid4().hex[:12]
     _save(db, state)
     add_audit(db, actor, "RESOURCE_SCAN_STARTED", "resource_discovery", STATE_KEY,
-              {"queued": queued})
+              {"queued": queued, "reuse_completed": reuse_completed})
     db.commit()
-    return {"status": "QUEUED", "queued": queued}
+    return {"status": "QUEUED", "queued": queued, "round_id": state["scan"]["round_id"]}
 
 
 def _priority(entry) -> tuple[int, str]:

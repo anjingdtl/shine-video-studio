@@ -193,6 +193,47 @@ def image_renderer_state(db, settings, instance_id: str) -> dict[str, Any]:
     }
 
 
+def adopted_live_renderer(db, settings, instance_id: str) -> dict[str, Any] | None:
+    """The user's own live ComfyUI on an adopted installation, for read-only reuse.
+
+    An adopted installation is registered and hash-verified but read-only: the
+    workbench never launches or terminates it.  When its port is served by a
+    live loopback ComfyUI and no managed renderer of ours is running there,
+    that listener IS this installation's renderer - the same read-only reuse
+    the setup page promises ("你自己的安装（只读复用）").  A RUNNING managed
+    record means the listener is ours, not the user's, and this door stays
+    closed; a non-adopted instance never reuses an external listener.
+    """
+    import httpx
+
+    from shine.comfyops.models import ComfyInstance
+
+    instance = db.get(ComfyInstance, instance_id)
+    payload = instance.payload if instance is not None and isinstance(instance.payload, dict) else {}
+    if not payload.get("adopted") or payload.get("is_mock"):
+        return None
+    port = payload.get("port")
+    if not isinstance(port, int) or port <= 0:
+        return None
+    row = db.get(AppSetting, image_startup_key(instance_id))
+    record = row.value if row is not None and isinstance(row.value, dict) else {}
+    if record and managed_process_state(record) == "RUNNING":
+        return None
+    try:
+        listeners = windows_port_listeners(port)
+    except (OSError, ValueError):
+        return None
+    if not listeners or any(host != "127.0.0.1" for host, _pid in listeners):
+        return None
+    base_url = f"http://127.0.0.1:{port}"
+    try:
+        response = httpx.get(f"{base_url}/system_stats", timeout=3.0, trust_env=False)
+        response.raise_for_status()
+    except Exception:  # noqa: BLE001 - an unanswered port is not a reusable renderer
+        return None
+    return {"instance_id": instance_id, "base_url": base_url, "port": port, "adopted_live": True}
+
+
 def renderer_log_path(settings, instance_id: str) -> str:
     """Where the managed renderer writes its own stdout/stderr."""
     return str(Path(settings.comfyops_dir) / "logs" / f"renderer-{instance_id}.log")
@@ -470,6 +511,14 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         _normalize_provably_dead_record(factory, instance_id, actor="controller:recorded-gone")
         with factory() as db:
             released_h3 = _refuse_installation_conflicts(db, instance_id, held_lease_id=held_lease_id)
+            live = adopted_live_renderer(db, settings, instance_id)
+        if live is not None:
+            # Read-only reuse: the user's own renderer already serves this
+            # installation.  Nothing is launched, nothing is ever stopped, and
+            # no memory admission applies to a process the user chose to run.
+            return {"status": "RUNNING", "reused": True, "adopted_live": True,
+                    "instance_id": instance_id, "base_url": live["base_url"],
+                    "port": live["port"], "process": None, "listener": None}
         try:
             listeners = windows_port_listeners(port)
         except (OSError, ValueError) as exc:
@@ -547,9 +596,19 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
 
         try:
             object_info = ComfyUIClient(base_url, max_retries=0, trust_env=False).object_info()
-            graph_verified = verify_graph_against_object_info(object_info)["complete"]
+            graph_report = verify_graph_against_object_info(object_info)
+            graph_verified = graph_report["complete"]
         except (ComfyError, ValueError):
+            graph_report = None
             graph_verified = False
+        if graph_verified and graph_report is not None:
+            from shine.materialprep import runtime as image_runtime
+
+            with factory() as db:
+                config = image_runtime.load_config(settings)
+                if config.instance_id == instance_id:
+                    image_runtime.record_graph_verification(
+                        db, settings, config, graph_report, source="managed_startup")
         # The queue opens only after the adapter proved that it is the pinned
         # one; the image submission is a real prompt, not a rehearsal.
         supervisor.resume()

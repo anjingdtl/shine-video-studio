@@ -36,6 +36,7 @@ from shine.materialprep.image_prompts import template_evidence
 from shine.models import utcnow
 
 CONFIG_FILENAME = "image-runtime.json"
+GRAPH_EVIDENCE_KEY = "image-graph-verification"
 
 LAYER_NOT_CONFIGURED = "NOT_CONFIGURED"
 LAYER_FILES_VERIFIED = "FILES_VERIFIED"
@@ -225,6 +226,58 @@ def verify_graph_against_object_info(object_info: dict[str, Any]) -> dict[str, A
     return report
 
 
+def record_graph_verification(db, settings, config: ImageRuntimeConfig,
+                              graph_report: dict[str, Any], *, source: str) -> None:
+    """Persist one live graph verification as durable evidence.
+
+    The graph layer used to live only in the moment of a live probe: once the
+    renderer stopped, every reader fell back to "not verified" and the setup
+    card regressed to "cannot run" on a machine that had just proven itself.
+    This is the single write point for that fact; it is bound to the runtime
+    fingerprint, so a rebind, a model change or a template change invalidates
+    it honestly.  Only a complete verification is evidence.
+    """
+    from shine.models import AppSetting
+
+    if not graph_report or not graph_report.get("complete"):
+        return
+    fingerprint = current_fingerprint(config)
+    row = db.get(AppSetting, GRAPH_EVIDENCE_KEY)
+    existing = row.value if row is not None and isinstance(row.value, dict) else {}
+    if existing.get("fingerprint") == fingerprint and existing.get("complete"):
+        return
+    value = {
+        "fingerprint": fingerprint,
+        "instance_id": config.instance_id,
+        "recipe_sha256": config.recipe_sha256,
+        "graph_sha256": config.graph_sha256 or qwen_workflow.BASE_GRAPH_SHA256,
+        "complete": True,
+        "missing_nodes": [],
+        "missing_inputs": [],
+        "output_node_class_present": True,
+        "source": source,
+        "verified_at": utcnow().isoformat(),
+    }
+    if row is None:
+        db.add(AppSetting(key=GRAPH_EVIDENCE_KEY, value=value))
+    else:
+        row.value = value
+    db.commit()
+
+
+def persisted_graph_verification(db, settings, config: ImageRuntimeConfig) -> dict[str, Any] | None:
+    """The durable graph fact for this exact fingerprint, or None."""
+    from shine.models import AppSetting
+
+    row = db.get(AppSetting, GRAPH_EVIDENCE_KEY)
+    value = row.value if row is not None and isinstance(row.value, dict) else {}
+    if not value.get("complete"):
+        return None
+    if value.get("fingerprint") != current_fingerprint(config):
+        return None
+    return value
+
+
 def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, Any] | None = None) -> str:
     """The identity readiness evidence is bound to.
 
@@ -366,6 +419,14 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         # Store what was just hashed, so the next read does not hash 16 GiB again.
         persist_verification(settings, config, files)
     graph_report = verify_graph_against_object_info(object_info) if object_info else None
+    if graph_report is not None and graph_report.get("complete"):
+        record_graph_verification(db, settings, config, graph_report, source="live_probe")
+    elif graph_report is None:
+        # No live probe right now: the durable fact from the last live
+        # verification under this exact fingerprint is the same answer.
+        persisted = persisted_graph_verification(db, settings, config)
+        if persisted is not None:
+            graph_report = {**persisted, "persisted": True}
     fingerprint = current_fingerprint(config, graph_report=graph_report)
     renderer = _renderer_state(db, settings, config.instance_id)
     renderer_blocker = _renderer_blocker(db, settings, config.instance_id, state=renderer.get("state"))

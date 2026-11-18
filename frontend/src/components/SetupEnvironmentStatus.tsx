@@ -302,7 +302,9 @@ export function SetupEnvironmentStatus({
               </div>
               <div className={`setup-step-row run-${cap.two_step.run.state.toLowerCase()}`}>
                 <span className="setup-step-key">② 运行</span>
-                {cap.two_step.run.state === 'READY' ? <Check size={11} /> : <X size={11} />}
+                {cap.two_step.run.state === 'READY' ? <Check size={11} />
+                  : cap.two_step.run.state === 'PREPARING' ? <span className="setup-phase-dot" />
+                    : <X size={11} />}
                 <span>{cap.two_step.run.label}{cap.two_step.run.reason ? ` · ${cap.two_step.run.reason}` : ''}</span>
               </div>
             </div> : <div className="setup-cap-facts">
@@ -313,6 +315,9 @@ export function SetupEnvironmentStatus({
             {cap.two_step && !readOnly && (() => {
               const run = cap.two_step.run.state;
               if (run === 'READY') return null;
+              // 整备任务正在推进这项能力：进度面板是唯一事实视图，
+              // 不再挂一个只会重排同一任务的「跑不通」按钮。
+              if (run === 'PREPARING') return null;
               const action = cap.next_step;
               if (action?.action === 'TRIAL' && key === 'h3') {
                 return <p className="run-hint">运行合同已核对，可在作品的「⑥ 视频生产」开始真实试镜。</p>;

@@ -497,7 +497,7 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,
                       project_id: str | None, variant_id: str | None = None,
-                      runtime_verified: bool = False) -> dict[str, Any]:
+                      runtime_verified: bool = False, preparing: bool = False) -> dict[str, Any]:
     """One capability, as a ladder of facts that never impersonate each other.
 
     ``variant_id`` names the H3 stack the person actually chose.  Without it
@@ -727,14 +727,14 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
                                          missing_files=missing, advisories=advisories,
                                          unknown_files=unknown_files,
-                                         unknown_bytes=unknown_bytes),
+                                         unknown_bytes=unknown_bytes, preparing=preparing),
     }
 
 
 def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
                          missing_files: list, advisories: list,
                          unknown_files: list | None = None,
-                         unknown_bytes: int = 0) -> dict[str, Any]:
+                         unknown_bytes: int = 0, preparing: bool = False) -> dict[str, Any]:
     """The user-facing model: two questions, not a dozen engineering steps.
 
     ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
@@ -774,6 +774,12 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
             reason = "文件未就绪，先补齐文件"
         run = {"state": "BLOCKED", "label": "跑不通",
                "reason": reason or "资源尚未绑定到本机渲染器或运行合同未核对"}
+    if preparing and run["state"] != "READY":
+        # The single preparation task is actively working on this capability:
+        # the honest projection is "in progress", not a dead-end "cannot run"
+        # with a button that only re-queues the same task.  The fact read is
+        # the same preparation ledger the progress panel renders.
+        run = {"state": "PREPARING", "label": "后台整备中，完成后自动可用"}
     return {"files": files, "run": run}
 
 
@@ -896,10 +902,14 @@ def summary(db, settings, *, project_id: str | None = None,
         report = {}
     runtime_verified = bool(report.get("services_verified") and selected
                             and selected.get("instance_id") == _runtime_instance_id(db, settings))
+    preparation = preparation_state(db)
+    preparing_caps = (set(preparation.get("capabilities") or [])
+                      if preparation.get("status") in {"QUEUED", "RUNNING"} else set())
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
                                variant_id=variant_id if key == "h3" else None,
-                               runtime_verified=runtime_verified if key == "h3" else False)
+                               runtime_verified=runtime_verified if key == "h3" else False,
+                               preparing=key in preparing_caps)
         for key in CAPABILITIES
     }
     progress = _progress(capabilities)
@@ -922,7 +932,7 @@ def summary(db, settings, *, project_id: str | None = None,
         "primary_capability": primary["key"],
         "action_required": action_required,
         "blockers": blockers,
-        "preparation": preparation_state(db),
+        "preparation": preparation,
         "verdict": verdict,
         "machine_progress": machine_progress(db, progress=progress, verdict=verdict),
         "manual_download_root": str(Path(settings.comfyops_dir) / "manual-downloads"),
@@ -1067,7 +1077,8 @@ def preparation_state(db) -> dict[str, Any]:
 
     row = db.get(AppSetting, "setup-preparation-task")
     if row is None or not isinstance(row.value, dict):
-        return {"status": "IDLE", "task_id": None, "current": None, "steps": [], "message": None}
+        return {"status": "IDLE", "task_id": None, "current": None, "steps": [], "message": None,
+                "capabilities": []}
     value = dict(row.value)
     steps = value.get("steps") or []
     done = len([row for row in steps if row.get("status") in {"DONE", "SKIPPED"}])
@@ -1081,6 +1092,7 @@ def preparation_state(db) -> dict[str, Any]:
         "message": value.get("message"),
         "error": value.get("error"),
         "updated_at": value.get("updated_at"),
+        "capabilities": sorted((value.get("request") or {}).get("capabilities") or []),
     }
 
 
