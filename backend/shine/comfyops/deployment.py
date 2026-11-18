@@ -798,7 +798,9 @@ def advisory_review_readiness(settings: Settings) -> dict:
 def generate_configuration(db, settings: Settings, project_id: str | None, *,
                            instance_name: str = 'shine-h3', port: int = 8188,
                            variant_id: str | None = None,
-                           capability: str = 'h3') -> dict:
+                           capability: str = 'h3',
+                           instance_id: str | None = None,
+                           claim_guard=None) -> dict:
     """Generate the instance-bound managed recipe, review manifests and .env entries.
 
     Everything is derived from the deployed isolated instance and the repo, so a
@@ -815,7 +817,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     forever.  Ownership requirements (adapter, python, revision, nodes) are
     identical in both cases.
     """
-    from shine.comfyops.instances import find_instance_by_endpoint, instance_root
+    from shine.comfyops.instances import find_instance_by_endpoint, instance_root, runtime_binding_sha256
 
     if capability not in {'h3', 'image'}:
         raise HTTPException(409, 'RUNTIME_CAPABILITY_UNKNOWN')
@@ -843,8 +845,24 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     # timeout does not prove that a renderer has stopped.
     db.execute(text('BEGIN IMMEDIATE'))
     _require_project(db, project_id)
-    # R5 B1：按端点找行，兼容历史端口主键行与稳定 root 身份行；歧义具名拒绝。
-    instance = find_instance_by_endpoint(db, port, instance_name=instance_name)
+    if claim_guard is not None:
+        claim_guard(db)
+    # R5 B1：显式传递的稳定 instance_id 优先；未传时先看唯一解析入口的当前
+    # 选中项（同端点多实例时尊重显式确认），再退回按端点查找。
+    if instance_id is not None:
+        instance = db.get(ComfyInstance, instance_id)
+    else:
+        from shine.comfyops.setup_summary import resolve_installation
+
+        selected = resolve_installation(db, settings, discovered=[]).get("selected") or {}
+        selected_id = selected.get("instance_id")
+        candidate = db.get(ComfyInstance, selected_id) if selected_id else None
+        if (candidate is not None and isinstance(candidate.payload, dict)
+                and candidate.payload.get("port") == port
+                and candidate.payload.get("name") == instance_name):
+            instance = candidate
+        else:
+            instance = find_instance_by_endpoint(db, port, instance_name=instance_name)
     adopted = bool(instance and instance.payload.get('adopted'))
     if (instance is None or not instance.payload.get('managed') or instance.payload.get('is_mock')
             or instance.payload.get('name') != instance_name
@@ -970,7 +988,7 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         "node_pack_dirs": pack_dirs,
         "node_pack_notes": node_pack_notes,
         "log_file": renderer_log,
-        "installation": {"id": instance.id, "sha256": instance.sha256},
+        "installation": {"id": instance.id, "sha256": runtime_binding_sha256(instance)},
         "python": venv_python,
         "root": str(root),
         "base_directory": str(root),
@@ -1036,6 +1054,8 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
 
 
     # 3) Write the recipe and update .env (no secrets ever go through here).
+    if claim_guard is not None:
+        claim_guard(db)
     recipe = {"renderer": renderer, "reviews": reviews}
     from shine.comfyops.installer import durable_json
     durable_json(recipe_path, recipe)

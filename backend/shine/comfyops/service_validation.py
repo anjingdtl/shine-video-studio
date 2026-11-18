@@ -484,18 +484,74 @@ def renderer_log_evidence(log_file) -> dict:
     return evidence
 
 
+def _is_audio_only_template_gap(name: str, profile, validation: dict) -> bool:
+    missing_nodes = set(validation.get("missing_nodes") or [])
+    missing_inputs = validation.get("missing_inputs") or []
+    graph_nodes = {str(node.get("class_type") or "")
+                   for node in (getattr(profile, "graph", None) or {}).values()
+                   if isinstance(node, dict)}
+    return bool(
+        missing_nodes == {"VHS_LoadAudioUpload"}
+        and not missing_inputs
+        and ("1aud" in name or "VHS_LoadAudioUpload" in graph_nodes)
+    )
+
+
 def _validate_workflows_against_object_info(contracts: dict, object_info: dict,
-                                            log_evidence: dict | None = None) -> None:
-    for name, profile in contracts.items():
-        validation = validate_against_object_info(profile.graph, profile.parameter_map, object_info)
-        if validation["missing_nodes"] or validation["missing_inputs"]:
+                                            log_evidence: dict | None = None,
+                                            *, compiled_graph: dict | None = None,
+                                            compiled_parameter_map: dict | None = None) -> list[dict]:
+    """Validate selected/dynamic Ref2VA graph and baseline contracts against object_info.
+
+    Missing nodes in an unused optional template (e.g. audio template
+    ``VHS_LoadAudioUpload`` when image-only Ref2VA compiles and validates cleanly)
+    become per-template diagnostics instead of blocking image-only Ref2VA.
+    """
+    from shine.comfy.graph_compiler import compile_ref2va_workflow
+
+    advisories: list[dict] = []
+    if compiled_graph is not None:
+        selected_check = validate_against_object_info(
+            compiled_graph, compiled_parameter_map or {}, object_info)
+        if selected_check["missing_nodes"] or selected_check["missing_inputs"]:
             raise HTTPException(409, {
                 "code": "LIVE_WORKFLOW_CONTRACT_FAILED",
-                "profile": name,
-                "missing_nodes": validation["missing_nodes"],
-                "missing_inputs": validation["missing_inputs"],
+                "profile": "selected-dynamic-ref2va",
+                "missing_nodes": selected_check["missing_nodes"],
+                "missing_inputs": selected_check["missing_inputs"],
                 **(log_evidence or {}),
             })
+        return advisories
+
+    compiled_image_only = compile_ref2va_workflow(image_count=2, audio_count=0, object_info=object_info)
+    compiled_ok = not (compiled_image_only.validated_against.get("missing_nodes")
+                       or compiled_image_only.validated_against.get("missing_inputs"))
+    validations = {
+        name: validate_against_object_info(profile.graph, profile.parameter_map, object_info)
+        for name, profile in contracts.items()
+    }
+    passing_names = [name for name, val in validations.items()
+                     if not val["missing_nodes"] and not val["missing_inputs"]]
+    for name, profile in contracts.items():
+        validation = validations[name]
+        if not validation["missing_nodes"] and not validation["missing_inputs"]:
+            continue
+        if compiled_ok and passing_names and _is_audio_only_template_gap(name, profile, validation):
+            advisories.append({
+                "code": "OPTIONAL_AUDIO_TEMPLATE_NODES_MISSING",
+                "profile": name,
+                "missing_nodes": validation["missing_nodes"],
+                "advisory": True,
+            })
+            continue
+        raise HTTPException(409, {
+            "code": "LIVE_WORKFLOW_CONTRACT_FAILED",
+            "profile": name,
+            "missing_nodes": validation["missing_nodes"],
+            "missing_inputs": validation["missing_inputs"],
+            **(log_evidence or {}),
+        })
+    return advisories
 
 
 def _worker_online(db: Session, settings: Settings) -> bool:
@@ -621,8 +677,10 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
     object_info = renderer["object_info"]
-    _validate_workflows_against_object_info(
+    template_contract_advisories = _validate_workflows_against_object_info(
         contracts, object_info, log_evidence=renderer_log_evidence(recipe.get("log_file")))
+    if template_contract_advisories:
+        template_advisory = {**template_advisory, "optional_templates": template_contract_advisories}
     _validate_core_mode_nodes(object_info)
     if renderer["port"] != recipe["renderer"].get("port"):
         raise HTTPException(409, "SERVICE_VALIDATION_RENDERER_PORT_CHANGED")

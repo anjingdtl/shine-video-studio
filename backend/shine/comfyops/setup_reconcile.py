@@ -141,7 +141,8 @@ def _with_scan_candidates(report: dict, candidates: list[dict]) -> dict:
 
 def reconcile_installation(db, settings, *, path: str | None, project_id: str | None = None,
                            capability: str = "h3", adopt: bool = False, port: int | None = None,
-                           actor: str = "local-user", variant_id: str | None = None) -> dict[str, Any]:
+                           actor: str = "local-user", variant_id: str | None = None,
+                           claim_guard=None) -> dict[str, Any]:
     """Prove what is there, register it, and optionally confirm the instance.
 
     ``adopt`` is the single authorization this function can consume.  Without
@@ -224,6 +225,8 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         # RelayVSR 精修跑在既有 ComfyUI 核心上（2026-11-17 用户裁定）：已核验字节
         # 必须加性落位到该安装的 models 目录，readiness 与执行读同一个根。
         # 只加钉住文件：同名不同字节拒绝覆盖，已存在则跳过。
+        if claim_guard is not None:
+            claim_guard(db)
         served_placed: list[str] = []
         if capability == "relayvsr" and path:
             served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
@@ -242,6 +245,7 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
                         db, settings, project_id=project_id, path=report["root"],
                         snapshot=report["snapshot"], port=int(port or _known_port(db, report["root"]) or 8188),
                         actor=actor, capability=capability, catalog=catalog, inspected=report, verified=verified,
+                        claim_guard=claim_guard,
                     )
                 except HTTPException as exc:
                     detail = exc.detail
@@ -250,6 +254,8 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
             else:
                 adoption = {"status": "FILES_INCOMPLETE",
                             "missing_components": sorted({row[0] for row in required - verified_keys})}
+        if claim_guard is not None:
+            claim_guard(db)
         db.commit()
         # Stage verified bytes for the existing installer when they are outside
         # the installation or the installation cannot be adopted.

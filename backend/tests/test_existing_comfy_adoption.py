@@ -290,3 +290,27 @@ def test_adopted_node_tree_change_invalidates_installation_evidence(prep, tmp_pa
         instance = db.get(ComfyInstance, response.json()["instance_id"])
         blockers = deployment.installed_instance_blockers(db, settings, instance, catalog)
         assert "ADOPTED_COMFY_NODES_CHANGED" in blockers
+
+
+def test_initial_adoption_refuses_when_target_port_has_foreign_listener(prep, tmp_path, monkeypatch):
+    client, factory, _settings = prep
+    project = create_project(client, "foreign port refusal")
+    catalog = deployment.load_default_catalog()
+    root, report, verified_files = _install_fixture(tmp_path, catalog)
+    _seed_verification(factory, catalog, report, verified_files)
+    monkeypatch.setattr(adoption, "inspect", lambda _path, _catalog: report)
+    monkeypatch.setattr("shine.comfyops.existing_installation.inspect", lambda _path, _catalog: report)
+    from shine.comfyops import host_env
+
+    monkeypatch.setattr(
+        "shine.comfyops.host_env.probe_port",
+        lambda port: {"port": port, "identity": host_env.PORT_FOREIGN_PROCESS},
+    )
+
+    response = client.post("/api/v1/setup/existing-installations/adopt", headers=HEADERS, json={
+        "project_id": project, "path": str(root), "snapshot": report["snapshot"], "port": 8199,
+    })
+    assert response.status_code == 409
+    assert "PORT_OCCUPIED" in response.text
+    with factory() as db:
+        assert list(db.scalars(select(ComfyInstance))) == []

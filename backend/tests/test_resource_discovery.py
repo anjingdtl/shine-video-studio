@@ -257,3 +257,50 @@ def test_existing_installations_merges_the_durable_index(env):
     listing = client.get("/api/v1/setup/existing-installations").json()
     assert str(root.resolve()) in listing["installations"]
     assert listing["deep_scan"]["indexed_comfy_roots"] == 1
+
+
+def test_depth_limited_and_unreadable_and_capped_scans_never_assert_missing(env, monkeypatch):
+    """R5 CE-5: Depth truncation, unreadable dirs, or candidate limits make coverage incomplete."""
+    _client, factory, tmp_path, _ = env
+    deep = tmp_path / "l1" / "l2" / "l3" / "l4"
+    deep.mkdir(parents=True)
+    (deep / "hidden.safetensors").write_bytes(b"weight")
+
+    monkeypatch.setattr(resource_discovery, "CONFIGURED_ROOT_DEPTH", 2)
+    with factory() as db:
+        resource_discovery.add_directory(db, str(tmp_path))
+        resource_discovery.advance_scan(db, budget_s=5.0)
+        rep = resource_discovery.report(db)
+        assert rep["coverage_complete"] is False
+        assert resource_discovery.coverage_gaps_present(rep) is True
+        assert rep["capabilities"]["h3"]["missing"] == []
+        assert len(rep["capabilities"]["h3"]["unknown"]) > 0
+
+    # Unreadable root must also keep coverage_complete False
+    with factory() as db:
+        state = resource_discovery.read_state(db)
+        state["scan"]["status"] = "DONE"
+        state["scan"]["queue"] = []
+        for entry in state["scan"]["coverage"].values():
+            entry["status"] = "DONE"
+            entry["depth_truncated"] = False
+            entry["unreadable"] = [{"path": str(tmp_path / "locked"), "error": "PermissionError"}]
+        db.get(AppSetting, resource_discovery.STATE_KEY).value = state
+        db.commit()
+        rep_unreadable = resource_discovery.report(db)
+        assert resource_discovery.coverage_gaps_present(rep_unreadable) is True
+        assert rep_unreadable["capabilities"]["h3"]["missing"] == []
+        assert len(rep_unreadable["capabilities"]["h3"]["unknown"]) > 0
+
+    # Candidate cap hit keeps coverage_complete False
+    with factory() as db:
+        state = resource_discovery.read_state(db)
+        for entry in state["scan"]["coverage"].values():
+            entry["unreadable"] = []
+            entry["candidate_limit_hit"] = True
+        db.get(AppSetting, resource_discovery.STATE_KEY).value = state
+        db.commit()
+        rep_capped = resource_discovery.report(db)
+        assert rep_capped["coverage_complete"] is False
+        assert resource_discovery.coverage_gaps_present(rep_capped) is True
+        assert rep_capped["capabilities"]["h3"]["missing"] == []

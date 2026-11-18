@@ -242,7 +242,11 @@ export default function DirectorSetupPanel({
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">
-      <LLMSetupPanel onChanged={onRefresh} />
+      <LLMSetupPanel onChanged={async () => {
+        await load();
+        window.dispatchEvent(new CustomEvent('shine:copilot-llm-updated'));
+        await onRefresh();
+      }} />
     </div>}
 
     {tab === 'extra' && <div className="setup-tab-body">

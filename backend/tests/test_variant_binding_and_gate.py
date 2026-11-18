@@ -109,7 +109,8 @@ def _mark_weights_verified(factory, settings, monkeypatch) -> list[str]:
         db.add(ComfyInstance(id="local:http://127.0.0.1:8188", sha256="0" * 64, status="STOPPED",
                              payload={"root": str(root), "managed": True, "port": 8188}))
 
-    def verified_receipt(db, *, component, variant_id, catalog_id, catalog_version, cache_dir=None):
+    def verified_receipt(db, *, component, variant_id, catalog_id, catalog_version,
+                         cache_dir=None, read_only=False):
         return {
             "verified": True, "present": True, "reason": None,
             "identity": receipts.component_identity(component),

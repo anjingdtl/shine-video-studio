@@ -60,6 +60,7 @@ def test_tool_registry_has_no_shell_or_source_write_capability():
         action_spec("write_source")
     assert forbidden_intent("请执行 powershell 删除模型并修改源码")
     assert action_spec("setup_repair").executor == "shine.comfyops.setup_preparation.enqueue"
+    assert action_spec("setup_reconcile").executor == "shine.comfyops.setup_preparation.enqueue"
 
 
 def test_capabilities_endpoint_lists_read_and_confirmed_tiers_but_no_forbidden_tool(api):
@@ -1194,11 +1195,11 @@ def test_a_blocked_executor_turns_the_authorization_terminal_and_allows_a_new_pr
         assert "INSTALLATION_UNKNOWN" in (row.last_error or "")
     calls: list[dict] = []
 
-    def fake_reconcile(db, settings, **kwargs):
+    def fake_enqueue(db, **kwargs):
         calls.append(kwargs)
-        return _successful_reconcile(kwargs["path"])
+        return {"status": "QUEUED", "task_id": "setup-reconcile-next"}
 
-    monkeypatch.setattr("shine.comfyops.setup_reconcile.reconcile_installation", fake_reconcile)
+    monkeypatch.setattr("shine.comfyops.setup_preparation.enqueue", fake_enqueue)
     second = client.post(
         "/api/v1/support/actions/preview",
         json={"kind": "setup_reconcile", "params": {
@@ -1214,8 +1215,10 @@ def test_a_blocked_executor_turns_the_authorization_terminal_and_allows_a_new_pr
         headers=HEADERS,
     )
     assert approved.status_code == 200, approved.text
-    assert calls and calls[0]["path"] == str(tmp_path)
-    assert approved.json()["action"]["status"] in {"SUCCEEDED", "NEEDS_REVIEW"}
+    action = approved.json()["action"]
+    assert action["status"] == "DELEGATED"
+    assert action["original_task_id"] == "setup-reconcile-next"
+    assert calls and calls[0]["installation_path"] == str(tmp_path)
 
 
 def test_abandoned_approval_is_recovered_by_a_new_preview(api):
@@ -1244,7 +1247,12 @@ def test_abandoned_approval_is_recovered_by_a_new_preview(api):
 def test_reconcile_in_progress_is_never_attributed_to_this_authorization(
     api, monkeypatch, tmp_path
 ):
-    client, factory, _ = api
+    from shine.comfyops import setup_preparation
+
+    client, factory, settings = api
+    root = tmp_path / "comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("# test\n", encoding="utf-8")
 
     def fake_reconcile(db, settings, **kwargs):
         return {
@@ -1256,7 +1264,7 @@ def test_reconcile_in_progress_is_never_attributed_to_this_authorization(
     preview = client.post(
         "/api/v1/support/actions/preview",
         json={"kind": "setup_reconcile", "params": {
-            "capability": "h3", "installation_path": str(tmp_path),
+            "capability": "h3", "installation_path": str(root),
         }},
         headers=HEADERS,
     ).json()["action"]
@@ -1267,36 +1275,47 @@ def test_reconcile_in_progress_is_never_attributed_to_this_authorization(
     )
     assert approved.status_code == 200, approved.text
     action = approved.json()["action"]
-    assert action["status"] == "NEEDS_REVIEW"
-    assert action["verification"]["outcome"] == "IN_PROGRESS"
-    assert action["verification"]["attributed"] is False
-    assert action["verification"]["result_identity"] is None
+    assert action["status"] == "DELEGATED"
+    assert action["verification"]["outcome"] == "PENDING"
+
+    with factory() as db:
+        task = setup_preparation.read_task(db)
+    outcome = setup_preparation.advance(factory, settings, "worker:test")
+    assert outcome == "setup:RECONCILE:waiting"
     refreshed = client.get(f"/api/v1/support/actions/{preview['id']}").json()["action"]
-    assert refreshed["status"] == "NEEDS_REVIEW"
-    assert refreshed["verification"]["outcome"] == "IN_PROGRESS"
+    assert refreshed["status"] == "DELEGATED"
+    assert refreshed["verification"]["outcome"] == "PENDING"
+    assert refreshed["original_task_id"] == task["task_id"]
+
+    # Legacy un-tasked delegated row without durable task id still refuses to attribute.
+    with factory.begin() as db:
+        row = db.get(SupportAction, preview["id"])
+        row.original_task_id = None
+    legacy = client.get(f"/api/v1/support/actions/{preview['id']}").json()["action"]
+    assert legacy["status"] == "NEEDS_REVIEW"
+    assert legacy["verification"]["outcome"] == "IN_PROGRESS"
+    assert legacy["verification"]["attributed"] is False
+    assert legacy["verification"].get("result_identity") is None
 
 
 def test_reconcile_reports_rejected_bytes_and_adoption_layers_separately(
     api, monkeypatch, tmp_path
 ):
+    from shine.comfyops import setup_preparation
+
     client, factory, _ = api
     scenarios = [
-        ({"complete": False, "rejected": 1,
-          "adoption": {"status": "ADOPTED"}}, "哈希"),
-        ({"complete": True, "rejected": 0,
-          "adoption": {"status": "FILES_INCOMPLETE"}}, "接管"),
+        ({"FILES_VERIFIED": False, "INSTANCE_BOUND": True, "PRODUCTION_READY": False, "state": "MISSING"}),
+        ({"FILES_VERIFIED": True, "INSTANCE_BOUND": False, "PRODUCTION_READY": False, "state": "VERIFIED"}),
     ]
-    for overrides, expected in scenarios:
-        def fake_reconcile(db, settings, _overrides=overrides, **kwargs):
-            return _successful_reconcile(kwargs["path"], **_overrides)
-
-        monkeypatch.setattr(
-            "shine.comfyops.setup_reconcile.reconcile_installation", fake_reconcile
-        )
+    for idx, cap_facts in enumerate(scenarios):
+        target_dir = tmp_path / f"comfy-{idx}"
+        (target_dir / "comfy").mkdir(parents=True)
+        (target_dir / "main.py").write_text("# test\n", encoding="utf-8")
         preview = client.post(
             "/api/v1/support/actions/preview",
             json={"kind": "setup_reconcile", "params": {
-                "capability": "h3", "installation_path": str(tmp_path), "adopt": True,
+                "capability": "h3", "installation_path": str(target_dir), "adopt": True,
             }},
             headers=HEADERS,
         ).json()["action"]
@@ -1306,15 +1325,37 @@ def test_reconcile_reports_rejected_bytes_and_adoption_layers_separately(
             headers=HEADERS,
         )
         assert approved.status_code == 200, approved.text
-        action = approved.json()["action"]
+        task_id = approved.json()["action"]["original_task_id"]
+        with factory.begin() as db:
+            row = db.get(AppSetting, setup_preparation.TASK_KEY)
+            task_val = dict(row.value)
+            task_val["task_id"] = task_id
+            task_val["status"] = "DONE"
+            row.value = task_val
+        monkeypatch.setattr(
+            action_service,
+            "_capability_evidence",
+            lambda *_a, _f=cap_facts, **_k: {
+                "h3": {
+                    "state": _f["state"],
+                    "label": "H3",
+                    "files_verified": _f["FILES_VERIFIED"],
+                    "instance_bound": _f["INSTANCE_BOUND"],
+                    "workflow_validated": False,
+                    "production_ready": _f["PRODUCTION_READY"],
+                    "next_step": "RECONCILE",
+                }
+            },
+        )
+        action = client.get(f"/api/v1/support/actions/{preview['id']}").json()["action"]
         assert action["status"] == "NEEDS_REVIEW"
         assert action["verification"]["outcome"] == "NOT_VERIFIED"
-        assert action["verification"]["result_identity"]
-        assert action["verification"]["attributed"] is True
         assert set(action["verification"]["layers"]) == {
             "files_verified", "instance_bound", "production_ready",
         }
-        assert expected in (action["last_error"] or "")
+        assert action["verification"]["layers"]["files_verified"] is cap_facts["FILES_VERIFIED"]
+        assert action["verification"]["layers"]["instance_bound"] is cap_facts["INSTANCE_BOUND"]
+        assert action["last_error"]
 
 
 def test_workflow_copy_preview_is_stale_when_the_source_graph_changes(api, monkeypatch):
@@ -1581,3 +1622,140 @@ def test_an_executor_exception_is_persisted_as_failed_and_recoverable(api, monke
     ).json()
     assert again["reused"] is False
     assert again["action"]["id"] != preview["id"]
+
+
+def test_setup_reconcile_dispatches_to_persistent_preparation_task(api, tmp_path):
+    """R5 CE-14: setup_reconcile enqueues a persistent Worker task and never runs synchronously."""
+    from shine.comfyops import setup_preparation
+    from shine.comfyops.models import ComfyInstance
+
+    client, factory, _ = api
+    root = tmp_path / "ext-comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("# test\n", encoding="utf-8")
+
+    preview = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {
+            "capability": "h3", "installation_path": str(root), "adopt": True,
+        }},
+        headers=HEADERS,
+    )
+    assert preview.status_code == 200, preview.text
+    action = preview.json()["action"]
+    approved = client.post(
+        f"/api/v1/support/actions/{action['id']}/approve",
+        json={"preview_hash": action["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved.status_code == 200, approved.text
+    delegated = approved.json()["action"]
+    with factory() as db:
+        task = setup_preparation.read_task(db)
+        instances = db.query(ComfyInstance).count()
+    assert delegated["status"] == "DELEGATED"
+    assert task.get("status") == "QUEUED"
+    assert delegated["original_task_id"] == task.get("task_id")
+    assert [step["id"] for step in task["steps"]] == ["RECONCILE"]
+    assert instances == 0
+
+    # Without adopt=True, only the non-mutating RECONCILE step is queued.
+    readonly = client.post(
+        "/api/v1/support/actions/preview",
+        json={"kind": "setup_reconcile", "params": {
+            "capability": "h3", "installation_path": str(root), "adopt": False,
+        }},
+        headers=HEADERS,
+    ).json()["action"]
+    approved_ro = client.post(
+        f"/api/v1/support/actions/{readonly['id']}/approve",
+        json={"preview_hash": readonly["preview_hash"], "confirm": True},
+        headers=HEADERS,
+    )
+    assert approved_ro.status_code == 200, approved_ro.text
+    with factory() as db:
+        task_ro = setup_preparation.read_task(db)
+    assert [step["id"] for step in task_ro["steps"]] == ["RECONCILE"]
+
+
+def test_legacy_reconcile_route_uses_the_same_preparation_task(api, tmp_path):
+    """R5 closeout: Legacy POST /api/v1/setup/reconcile queues onto setup_preparation instead of mutating inline."""
+    from shine.comfyops import setup_preparation
+    from shine.comfyops.models import ComfyInstance
+
+    client, factory, _ = api
+    root = tmp_path / "legacy-reconcile-comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("# test\n", encoding="utf-8")
+
+    response = client.post(
+        "/api/v1/setup/reconcile",
+        headers=HEADERS,
+        json={"capability": "h3", "path": str(root), "adopt": True},
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["status"] == "QUEUED"
+    assert body["steps"] == ["RECONCILE"]
+    with factory() as db:
+        task = setup_preparation.read_task(db)
+        rows = db.query(ComfyInstance).count()
+    assert task.get("status") == "QUEUED"
+    assert task.get("task_id") == body["task_id"]
+    assert [step["id"] for step in task["steps"]] == ["RECONCILE"]
+    assert rows == 0
+
+
+def test_copilot_answers_workflow_image_limit_with_llm_and_offline_without_irrelevant_boilerplate(
+    api, monkeypatch
+):
+    """User Q&A on healthy machine invokes configured support_agent LLM and answers directly."""
+    import json as _json
+    from types import SimpleNamespace
+
+    from shine.support import agent as agent_service
+
+    client, factory, settings = api
+    monkeypatch.setattr(
+        "shine.support.context._setup_verdict",
+        lambda *_a, **_k: {"mode": "READY", "label": "真实制作已就绪", "code": None},
+    )
+    monkeypatch.setattr(
+        "shine.support.context._runtime_report",
+        lambda *_a, **_k: {"status": "ACTIVE", "services_verified": True, "render_provider": "comfyui"},
+    )
+    seen_prompts: list[dict] = []
+
+    class AnsweringGateway:
+        def profile_for_role(self, db, role):
+            assert role == "support_agent"
+            return SimpleNamespace(kind="openai_compatible", base_url="http://127.0.0.1:11434/v1")
+
+        def complete_for_role(self, db, role, *, system, user, budget=None):
+            assert role == "support_agent"
+            payload = _json.loads(user)
+            seen_prompts.append(payload)
+            max_img = payload["workflow_capabilities"]["max_image_references"]
+            return SimpleNamespace(
+                text=f"当前 H3 Ref2VA 动态工作流单镜头支持 1～{max_img} 张参考图（内置基线含 2 图与 6 图模板）。",
+                model="qwen-local",
+                latency_ms=42,
+            )
+
+    with factory() as db:
+        session = agent_service.create_session(db, settings, page_id="setup")
+        res_llm = agent_service.handle_message(
+            db, settings, session, "目前项目内的工作流支持最大几张图片？", gateway=AnsweringGateway()
+        )
+        res_offline = agent_service.handle_message(
+            db, settings, session, "目前项目内的工作流支持最大几张图片？", gateway=None
+        )
+
+    assert len(seen_prompts) == 1
+    assert seen_prompts[0]["workflow_capabilities"]["max_image_references"] == 9
+    assert res_llm["diagnosis"]["llm"]["used"] is True
+    assert "1～9 张参考图" in res_llm["message"]["content"]
+    assert "本机状态正常" not in res_llm["message"]["content"]
+
+    assert "1～9 张参考图" in res_offline["message"]["content"]
+    assert "本机状态正常" not in res_offline["message"]["content"]

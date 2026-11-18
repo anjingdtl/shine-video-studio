@@ -61,7 +61,10 @@ STEP_LABELS = {
 
 
 def _steps_for(capabilities: list[str], *, verify_runtime: bool,
-               deep_scan: bool = False) -> list[str]:
+               deep_scan: bool = False, adopt: bool = True,
+               reconcile_only: bool = False) -> list[str]:
+    if reconcile_only or not adopt:
+        return ["SCAN", "RECONCILE"] if deep_scan else ["RECONCILE"]
     steps = []
     if deep_scan:
         steps.append("SCAN")
@@ -91,7 +94,8 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
 def enqueue(db, *, project_id: str | None, capabilities: list[str], installation_path: str | None = None,
             port: int | None = None, variant_id: str | None = None,
             verify_runtime: bool = True, actor: str = "local-user",
-            settings=None, deep_scan: bool = False) -> dict[str, Any]:
+            settings=None, deep_scan: bool = False, adopt: bool = True,
+            reconcile_only: bool = False) -> dict[str, Any]:
     """Freeze one authorization into a resumable task.
 
     Enqueuing the same request twice returns the running task instead of
@@ -101,6 +105,7 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
     """
     from shine.services import add_audit
 
+    reconcile_mode = bool(reconcile_only or not adopt)
     capabilities = sorted({row for row in capabilities if row in {"h3", "image", "vlm", "asr", "relayvsr"}})
     if "h3" in capabilities:
         from shine.comfyops.variants import default_variant_id
@@ -111,20 +116,30 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
     existing = db.get(AppSetting, TASK_KEY)
     current = dict(existing.value) if existing is not None and isinstance(existing.value, dict) else {}
     if current.get("status") in {"QUEUED", "RUNNING"}:
+        cur_req = current.get("request") or {}
+        cur_reconcile_mode = bool(cur_req.get("reconcile_only", not cur_req.get("adopt", True)))
         if (current.get("project_id") == project_id
-                and sorted(current.get("request", {}).get("capabilities") or []) == capabilities
-                and current.get("request", {}).get("variant_id") == variant_id
-                and current.get("request", {}).get("port") == port
-                and current.get("request", {}).get("installation_path") == installation_path
-                and current.get("request", {}).get("verify_runtime", True) == verify_runtime
-                and current.get("request", {}).get("deep_scan", False) == deep_scan):
+                and sorted(cur_req.get("capabilities") or []) == capabilities
+                and cur_req.get("variant_id") == variant_id
+                and cur_req.get("port") == port
+                and cur_req.get("installation_path") == installation_path
+                and cur_req.get("verify_runtime", True) == verify_runtime
+                and cur_req.get("deep_scan", False) == deep_scan
+                and cur_req.get("adopt", True) == adopt
+                and cur_reconcile_mode == reconcile_mode):
             return current
         # A different request supersedes the old one: the previous task is
         # cancelled by name so nothing later claims to be "in progress".
         current["status"] = "SUPERSEDED"
         current["message"] = "已被新的准备请求取代"
-    steps = _steps_for(capabilities, verify_runtime=verify_runtime, deep_scan=deep_scan)
-    if settings is not None:
+    steps = _steps_for(
+        capabilities,
+        verify_runtime=verify_runtime,
+        deep_scan=deep_scan,
+        adopt=adopt,
+        reconcile_only=reconcile_mode,
+    )
+    if settings is not None and "INSTANCE" in steps:
         # Adopted installations are read-only. Managed installations still ask
         # the existing ladder whether an interrupted install needs finishing.
         from shine.comfyops.setup_summary import resolve_installation
@@ -150,6 +165,8 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
             "variant_id": variant_id,
             "verify_runtime": verify_runtime,
             "deep_scan": deep_scan,
+            "adopt": adopt,
+            "reconcile_only": reconcile_mode,
         },
         "target": {},
         "downloads": {},
@@ -182,6 +199,7 @@ def cancel(db, *, actor: str = "local-user") -> dict[str, Any]:
         value["updated_at"] = utcnow().isoformat()
         value["lease_owner"] = None
         value["lease_expires_at"] = None
+        value["claim_token"] = None
         row.value = value
         add_audit(db, actor, "SETUP_PREPARATION_CANCELLED", "setup_task", value.get("task_id"), {})
         db.commit()
@@ -232,6 +250,48 @@ def _live_installation_work(db, project_id: str) -> list[str]:
     return live
 
 
+class ClaimLostError(RuntimeError):
+    """Raised when a setup worker's claim was superseded, cancelled, or expired."""
+
+
+def _claim_matches(current: dict[str, Any], value: dict[str, Any]) -> bool:
+    current_token = current.get("claim_token")
+    value_token = value.get("claim_token")
+    if current_token is not None or value_token is not None:
+        if current_token != value_token:
+            return False
+    current_owner = current.get("lease_owner")
+    value_owner = value.get("lease_owner")
+    if current_owner is not None and value_owner is not None and current_owner != value_owner:
+        return False
+    return True
+
+
+def _assert_claim_in_tx(db, task: dict[str, Any] | None) -> None:
+    if not task or not task.get("task_id"):
+        return
+    row = db.get(AppSetting, TASK_KEY)
+    if row is None or not isinstance(row.value, dict):
+        if task.get("claim_token") is not None:
+            raise ClaimLostError("SETUP_TASK_SUPERSEDED")
+        return
+    current = dict(row.value)
+    if current.get("task_id") != task.get("task_id"):
+        raise ClaimLostError("SETUP_TASK_SUPERSEDED")
+    if current.get("status") in {"CANCELLED", "SUPERSEDED", "DONE", "FAILED"}:
+        raise ClaimLostError("SETUP_TASK_CANCELLED")
+    if task.get("claim_token") is not None:
+        if current.get("status") != "RUNNING" or not _claim_matches(current, task):
+            raise ClaimLostError("SETUP_CLAIM_LOST")
+
+
+def _assert_claim(factory, task: dict[str, Any] | None) -> None:
+    if not task or not task.get("task_id"):
+        return
+    with factory() as db:
+        _assert_claim_in_tx(db, task)
+
+
 def _claim(factory, worker_id: str) -> dict[str, Any] | None:
     try:
         with factory.begin() as db:
@@ -250,13 +310,24 @@ def _claim(factory, worker_id: str) -> dict[str, Any] | None:
                         return None
                 except ValueError:
                     pass
-            value["status"] = "RUNNING"
             pending = next((step for step in value.get("steps") or [] if step.get("status") == "PENDING"), None)
+            if pending is not None and pending.get("id") == "VALIDATE":
+                delegated = value.get("validation_delegation")
+                delegated_until = delegated.get("expires_at") if isinstance(delegated, dict) else None
+                if isinstance(delegated_until, str):
+                    try:
+                        if datetime.fromisoformat(delegated_until) > utcnow():
+                            return None
+                    except ValueError:
+                        pass
+            value.pop("validation_delegation", None)
+            value["status"] = "RUNNING"
             if pending is not None:
                 value["current"] = pending["id"]
                 value["message"] = "正在" + STEP_LABELS[pending["id"]]
             value["lease_owner"] = worker_id
             value["lease_expires_at"] = (utcnow() + timedelta(seconds=LEASE_SECONDS)).isoformat()
+            value["claim_token"] = uuid4().hex
             value["updated_at"] = utcnow().isoformat()
             row.value = value
             return value
@@ -275,8 +346,11 @@ def _save(factory, value: dict[str, Any]) -> None:
             return  # a newer task superseded this one; never resurrect it
         if current.get("status") in {"CANCELLED", "SUPERSEDED"}:
             return
+        if not _claim_matches(current, value):
+            return
         value["lease_owner"] = None
         value["lease_expires_at"] = None
+        value["claim_token"] = None
         value["updated_at"] = utcnow().isoformat()
         row.value = value
     # 整备每一步都可能改变权重核验/方案登记台账：让变体可用性投影立即重算，
@@ -338,6 +412,9 @@ def advance(factory, settings, worker_id: str) -> str | None:
         # the caller keeps serving the queues that can still advance.
         return f"setup:{step_id}:waiting" if detail.get("status") == "PENDING" \
             else f"setup:{step_id}"
+    except ClaimLostError:
+        logger.info("setup_step_claim_lost step=%s task_id=%s", step_id, task.get("task_id"))
+        return f"setup:{step_id}:claim_lost"
     except Exception as exc:  # noqa: BLE001 - a failed step is evidence, not a crash
         detail_code = _code_of(exc)
         for row in steps:
@@ -378,6 +455,7 @@ def _message_of(exc: Exception) -> str:
 
 
 def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str, Any]:
+    _assert_claim(factory, task)
     handler = {
         "SCAN": _step_scan,
         "TOOL_REPAIR": _step_tool_repair,
@@ -448,6 +526,19 @@ def _step_scan(factory, settings, task) -> dict[str, Any]:
     return {"status": "DONE", "detail": "本机资源深搜完成，已有文件进入候选台账。"}
 
 
+def _accepts_kwarg(fn, name: str) -> bool:
+    import inspect
+
+    sig = inspect.signature(fn)
+    return name in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
+
+
+def _claim_guard_for(task: dict[str, Any]):
+    return lambda db: _assert_claim_in_tx(db, task)
+
+
 def _step_reconcile(factory, settings, task) -> dict[str, Any]:
     """Hash-verify and register the bytes this machine already has.
 
@@ -471,21 +562,36 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
                 "detail": "检索发现多套 ComfyUI，请选择本次使用的安装。"}
     notes: list[str] = []
     failures = 0
+    guard = _claim_guard_for(task)
     for capability in capabilities:
         with factory() as db:
             db.rollback()  # hashing and adoption own their transaction boundaries
             try:
+                _assert_claim_in_tx(db, task)
+                extra = {"claim_guard": guard} if _accepts_kwarg(reconcile_installation, "claim_guard") else {}
                 result = reconcile_installation(
                     db, settings, path=root, project_id=task.get("project_id"),
-                    capability=capability, adopt=True, port=request.get("port"),
+                    capability=capability, adopt=bool(request.get("adopt", True)),
+                    port=request.get("port"),
                     actor="worker:setup",
-                    variant_id=request.get("variant_id") if capability == "h3" else None)
+                    variant_id=request.get("variant_id") if capability == "h3" else None,
+                    **extra)
                 notes.append(f"{capability}:{result.get('status')}")
                 if result.get("status") == "IN_PROGRESS":
                     return {"status": "PENDING", "detail": "已有核验正在进行，等待同一份结果。"}
                 adoption = result.get("adoption") or {}
                 if adoption and not adoption.get("instance_id"):
-                    notes.append(f"{capability}:{adoption.get('code') or adoption.get('status')}")
+                    code = adoption.get("code") or adoption.get("status")
+                    notes.append(f"{capability}:{code}")
+                    if code in {
+                        "STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION",
+                        "PORT_OCCUPIED",
+                        "INSTANCE_LIFECYCLE_LEASE_ACTIVE",
+                        "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK",
+                    }:
+                        failures += 1
+            except ClaimLostError:
+                raise
             except Exception as exc:  # noqa: BLE001 - the named refusal is evidence
                 failures += 1
                 notes.append(f"{capability}:{_code_of(exc)}")
@@ -518,6 +624,121 @@ def _catalog_file_for(capability: str, variant_id: str | None, report: dict) -> 
             or "h3-ref2va-windows-x64")
 
 
+def plan_prepare_downloads(
+    db,
+    settings,
+    *,
+    capabilities: list[str],
+    installation_path: str | None = None,
+    project_id: str | None = None,
+    variant_id: str | None = None,
+    verify_runtime: bool = True,
+    discovered: list[str] | None = None,
+) -> dict[str, Any]:
+    """Single authoritative download & closure plan shared by preview and execution."""
+    from shine.comfyops import deployment
+    from shine.comfyops.setup_summary import (
+        capability_report,
+        resolve_installation,
+        runtime_closure_gap,
+    )
+
+    resolved_kw = (
+        {"discovered": discovered}
+        if discovered is not None and _accepts_kwarg(resolve_installation, "discovered")
+        else {}
+    )
+    resolved = resolve_installation(db, settings, path=installation_path, **resolved_kw)
+    selected = resolved.get("selected") or {}
+    gap_kw = {"capabilities": capabilities} if _accepts_kwarg(runtime_closure_gap, "capabilities") else {}
+    gap = runtime_closure_gap(db, settings, selected, **gap_kw)
+    reports = {
+        capability: capability_report(
+            db,
+            settings,
+            capability,
+            installation=selected,
+            project_id=project_id,
+            variant_id=variant_id if capability == "h3" else None,
+        )
+        for capability in capabilities
+    }
+    default_catalog = deployment.load_default_catalog()
+    default_cmap = deployment._component_map(default_catalog)
+    plans = []
+    for capability, report in reports.items():
+        raw_missing = report.get("missing_files") or []
+        raw_unknown = report.get("unknown_files") or []
+        unknown_cids = {row["component_id"] for row in raw_unknown}
+        unknown_keys = {
+            (row["component_id"], Path(str(row["relative_path"])).as_posix())
+            for row in raw_unknown
+        }
+        # Any component containing an UNKNOWN file (including mixed components)
+        # stays out of download/placement until discovery finishes, so preview
+        # and execution never diverge.
+        missing = [row for row in raw_missing if row["component_id"] not in unknown_cids]
+        deferred_mixed = [row for row in raw_missing if row["component_id"] in unknown_cids]
+        unknown = list(raw_unknown) + deferred_mixed
+        unplaced = [
+            item for item in (report.get("unplaced_files") or [])
+            if item["component_id"] not in unknown_cids
+            and (item["component_id"], Path(str(item["relative_path"])).as_posix()) not in unknown_keys
+        ]
+        capability_components = sorted(
+            {row["component_id"] for row in missing}
+            | {row["component_id"] for row in unplaced}
+        )
+        closure: list[str] = []
+        if not unknown:
+            if capability == "h3":
+                closure = sorted(set(gap.get("missing_components") or []))
+            elif capability == "image" and "h3" not in capabilities:
+                closure = sorted(set(gap.get("missing_components") or []))
+        components = sorted(set(capability_components) | set(closure))
+        catalog_file = _catalog_file_for(capability, variant_id, report)
+        catalog = deployment.load_deployment_catalog(catalog_file)
+        cmap = {**default_cmap, **deployment._component_map(catalog)}
+        missing_bytes = sum(int(row.get("size") or 0) for row in missing)
+        unknown_bytes = sum(int(row.get("size") or 0) for row in unknown)
+        plans.append({
+            "capability": capability,
+            "label": report.get("label") or capability,
+            "catalog": report.get("catalog"),
+            "_catalog_file": catalog_file,
+            "_capability_components": capability_components,
+            "_closure_components": closure,
+            "download_bytes": missing_bytes + sum(
+                int(f.get("size") or 0)
+                for cid in closure for f in cmap.get(cid, {}).get("files", [])
+            ),
+            "unknown_bytes": unknown_bytes,
+            "unknown_files": len(unknown),
+            "scan_incomplete": bool(unknown),
+            "components": components,
+            "files": len(missing) + sum(len(cmap.get(cid, {}).get("files", [])) for cid in closure),
+            "needs_download": bool(missing or closure),
+            "needs_recipe": capability in {"h3", "image"},
+            "starts_services": bool(verify_runtime) and capability == "h3",
+            "changes_external_installation": False,
+        })
+    return {
+        "project_id": project_id,
+        "installation": resolved,
+        "runtime_gap": gap,
+        "capabilities": reports,
+        "plans": plans,
+        "download_bytes": sum(row["download_bytes"] for row in plans),
+        "will_start_gpu": any(row["starts_services"] for row in plans),
+        "will_modify_user_comfyui": False,
+        "authorization": {
+            "summary": "本次只下载缺失的固定文件、登记已核验的本机文件并生成运行配置；"
+                       "不会删除你的模型，也不会终止别人的 ComfyUI。",
+            "verify_runtime": verify_runtime,
+        },
+    }
+
+
 def _step_download(factory, settings, task) -> dict[str, Any]:
     """Fetch exactly the missing pinned files, through the existing installer.
 
@@ -528,7 +749,6 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     """
     from shine.comfyops.deployment import REVIEW_COMPONENTS
     from shine.comfyops.models import InstallationAttempt
-    from shine.comfyops.setup_summary import capability_report, resolve_installation
 
     request = task.get("request") or {}
     capabilities = request.get("capabilities") or []
@@ -577,35 +797,45 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 "detail": f"正在下载并安装：{'、'.join(pending)}（关闭页面也会继续）。"}
 
     with factory() as db:
-        resolved = resolve_installation(db, settings, path=request.get("installation_path"))
-        selected = resolved.get("selected") or {}
+        plan_bundle = plan_prepare_downloads(
+            db,
+            settings,
+            capabilities=capabilities,
+            installation_path=request.get("installation_path"),
+            project_id=task.get("project_id"),
+            variant_id=request.get("variant_id"),
+            verify_runtime=bool(request.get("verify_runtime", True)),
+        )
     plans_needed: list[tuple[str, list[str], str]] = []
-    for capability in capabilities:
+    for plan_row in plan_bundle["plans"]:
+        capability = plan_row["capability"]
         if downloads.get(capability, {}).get("done"):
             continue  # this authorization already fetched and verified the bytes
         if capability in review_caps and downloads.get(capability, {}).get("attempt_id"):
-            # 审片已排队（运行中或失败）：沿用自己的安装记录，不重复排队，
-            # 也不把它的状态当成生产链的缺件。
             continue
-        with factory() as db:
-            report = capability_report(db, settings, capability, installation=selected,
-                                       project_id=task.get("project_id"),
-                                       variant_id=request.get("variant_id") if capability == "h3" else None)
-        missing = report.get("missing_files") or []
-        # 已核验但尚未落位的字节也要进计划：计划对缓存命中下载 0 字节，
-        # 执行的是本地放置。显示层的「缺件」只指需要外取的字节，两者同源于
-        # capability_report 的一次分类，不是两套缺件判定。
-        unplaced = report.get("unplaced_files") or []
-        components = sorted({row["component_id"] for row in missing}
-                            | {row["component_id"] for row in unplaced})
+        catalog_file = plan_row["_catalog_file"]
         if capability == "h3":
-            from shine.comfyops.setup_summary import runtime_closure_gap
-            with factory() as db:
-                gap = runtime_closure_gap(db, settings, selected)
-            components = sorted(set(components) | set(gap["missing_components"]))
-        if components:
-            catalog_file = _catalog_file_for(capability, request.get("variant_id"), report)
-            plans_needed.append((capability, components, catalog_file))
+            if plan_row["components"]:
+                plans_needed.append(("h3", plan_row["components"], catalog_file))
+        elif capability == "image":
+            if plan_row["_capability_components"]:
+                plans_needed.append(("image", plan_row["_capability_components"], catalog_file))
+            closure_cids = plan_row["_closure_components"]
+            if closure_cids and not downloads.get("runtime", {}).get("done"):
+                from shine.comfyops import deployment as _dep
+                from shine.comfyops.setup_summary import _verified_components
+
+                with factory() as db:
+                    default_cat = _dep.load_default_catalog()
+                    verified_rt = _verified_components(
+                        db, settings, default_cat, closure_cids
+                    )["verified"]
+                missing_rt = sorted(cid for cid in closure_cids if cid not in verified_rt)
+                if missing_rt:
+                    plans_needed.append(("runtime", missing_rt, "h3-ref2va-windows-x64"))
+        else:
+            if plan_row["_capability_components"]:
+                plans_needed.append((capability, plan_row["_capability_components"], catalog_file))
     if not plans_needed:
         return {"status": "DONE", "detail": "固定清单的文件都已在本机，无需下载。"}
 
@@ -616,10 +846,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.comfyops.storage import disk_info
     from shine.services import add_audit
 
+    guard = _claim_guard_for(task)
     for capability, components, catalog_file in plans_needed:
         # create_install_plan 自己提交建计划；批准与审计必须显式提交，
         # 否则会话关闭即回滚，queue_install_attempt 读到的仍是 AWAITING_APPROVAL。
         with factory() as db:
+            _assert_claim_in_tx(db, task)
             free = disk_info(settings.data_dir).get("free_bytes", 0)
             body = InstallPlanRequest(
                 catalog=catalog_file,
@@ -630,6 +862,8 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
             )
             try:
                 plan_view = install_plan(body=body, settings=settings, db=db)
+            except ClaimLostError:
+                raise
             except Exception as exc:  # noqa: BLE001 - admission refusal is the answer
                 db.rollback()
                 if capability in review_caps:
@@ -640,6 +874,8 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 return {"status": "FAILED", "code": _code_of(exc),
                         "detail": f"{capability} 的安装计划被拒绝：{_message_of(exc)}"}
             plan_id = plan_view["plan_id"]
+            db.execute(text("BEGIN IMMEDIATE"))
+            _assert_claim_in_tx(db, task)
             row = db.get(InstallationPlan, plan_id)
             approve_lifecycle_plan(db, row, actor="worker:setup",
                                    evidence=f"setup-preparation:{task.get('task_id')}")
@@ -649,8 +885,9 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                       project_id=task.get("project_id"))
             db.commit()
             digest = row.sha256
+        q_extra = {"claim_guard": guard} if _accepts_kwarg(queue_install_attempt, "claim_guard") else {}
         attempt_id, _reused = queue_install_attempt(
-            factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED")
+            factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED", **q_extra)
         downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id}
     production_queued = [row[0] for row in plans_needed if row[0] not in review_caps]
     if production_queued:
@@ -679,6 +916,8 @@ def _step_image_samples(factory, settings, task) -> dict[str, Any]:
     run_id = result.get("image_sample_run_id")
     if not run_id:
         with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
+            _assert_claim_in_tx(db, task)
             batch = service.create_validation_batch(
                 db, str(project_id), families=["character", "scene", "prop"],
                 idempotency_key=f"setup-samples-{task.get('task_id')}", rights_id=None)
@@ -709,8 +948,11 @@ def _step_image_edit_samples(factory, settings, task) -> dict[str, Any]:
     result = task.get("result") or {}
     edit_tasks = result.get("image_edit_validation")
     if not edit_tasks:
+        _assert_claim(factory, task)
         try:
             edit_tasks = queue_image_edit_validation(factory, settings, actor="worker:setup")
+        except ClaimLostError:
+            raise
         except Exception as exc:  # noqa: BLE001 - a named refusal is the answer
             return {"status": "FAILED", "code": _code_of(exc),
                     "detail": "图生图/局部改图验证未能排队：" + _message_of(exc)}
@@ -768,30 +1010,55 @@ def _step_instance(factory, settings, task) -> dict[str, Any]:
     if resolved.get("choice_required"):
         return {"status": "FAILED", "code": "INSTALLATION_SELECTION_REQUIRED",
                 "detail": "检索发现多套 ComfyUI，请选择本次使用的安装。"}
+    guard = _claim_guard_for(task)
     if selected.get("root") and not selected.get("instance_id"):
         from shine.comfyops.setup_reconcile import reconcile_installation
 
+        extra = {"claim_guard": guard} if _accepts_kwarg(reconcile_installation, "claim_guard") else {}
         for capability in request.get("capabilities") or []:
             if capability not in {"h3", "image"}:
                 continue
             with factory() as db:
+                _assert_claim_in_tx(db, task)
                 result = reconcile_installation(
                     db, settings, path=selected["root"], project_id=project_id,
                     capability=capability, adopt=True, port=request.get("port"), actor="worker:setup",
-                    variant_id=request.get("variant_id") if capability == "h3" else None)
+                    variant_id=request.get("variant_id") if capability == "h3" else None,
+                    **extra)
             adoption = result.get("adoption") or {}
             if not adoption.get("instance_id"):
                 return {"status": "FAILED", "code": adoption.get("code") or "EXISTING_MODEL_FILES_INCOMPLETE",
                         "detail": f"{capability} 安装复用未完成：{adoption.get('code') or adoption.get('status')}"}
         return {"status": "DONE", "detail": "本机已有安装已核验并绑定。"}
     port = int(selected.get("port") or request.get("port") or 8188)
+    capabilities = request.get("capabilities") or []
     with factory() as db:
+        _assert_claim_in_tx(db, task)
+        instance_catalog = deployment.load_default_catalog()
+        if "image" in capabilities and "h3" not in capabilities:
+            default_cat = deployment.load_default_catalog()
+            img_cat = deployment.load_deployment_catalog(deployment.IMAGE_CAPABILITY_CATALOG)
+            runtime_only = [
+                row for row in (default_cat.get("components") or [])
+                if row.get("kind") in {"source", "wheel"}
+            ]
+            img_models = [
+                row for row in (img_cat.get("components") or [])
+                if row.get("kind") == "model"
+            ]
+            instance_catalog = {
+                "catalog_id": img_cat["catalog_id"],
+                "catalog_version": img_cat["catalog_version"],
+                "components": [*runtime_only, *img_models],
+            }
         plan, action = deployment.next_instance_plan(
-            db, settings, deployment.load_default_catalog(), project_id,
+            db, settings, instance_catalog, project_id,
             instance_name=instance_name, port=port, mode="local")
     if plan is None:
         return {"status": "DONE", "detail": "实例阶梯已完成。"}
     with factory.begin() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        _assert_claim_in_tx(db, task)
         row = db.get(InstallationPlan, plan.id)
         if row.status in {"INSTALLING", "NEEDS_REVIEW"}:
             return {"status": "FAILED", "code": "INSTANCE_REQUIRES_RECONCILIATION",
@@ -817,7 +1084,8 @@ def _step_instance(factory, settings, task) -> dict[str, Any]:
                       {"task_id": task.get("task_id"), "action": action},
                       project_id=project_id)
         digest = row.sha256
-    instances.execute_operation(factory, settings, plan.id, digest, "worker:setup")
+    ex_extra = {"claim_guard": guard} if _accepts_kwarg(instances.execute_operation, "claim_guard") else {}
+    instances.execute_operation(factory, settings, plan.id, digest, "worker:setup", **ex_extra)
     return {"status": "PENDING", "detail": f"实例操作 {action} 已执行，继续下一步阶梯。"}
 
 
@@ -839,7 +1107,12 @@ def _step_target(factory, settings, task) -> dict[str, Any]:
             return {"status": "FAILED", "code": "COMFY_INSTANCE_NOT_FOUND",
                     "detail": "登记里的这套安装已经不在了，请重新检测。"}
         payload = instance.payload if isinstance(instance.payload, dict) else {}
-        port = request.get("port") or payload.get("port")
+        recorded_port = payload.get("port")
+        requested_port = request.get("port")
+        if requested_port and recorded_port and int(requested_port) != int(recorded_port):
+            return {"status": "FAILED", "code": "INSTANCE_ENDPOINT_MISMATCH",
+                    "detail": f"所选安装登记端口为 {recorded_port}，与请求端口 {requested_port} 不一致。"}
+        port = requested_port or recorded_port
         task["target"] = {
             "instance_id": instance_id,
             "name": payload.get("name") or "shine-h3",
@@ -892,19 +1165,37 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
             and active_port is not None and target.get("port")
             and active_port == int(target["port"])
             and variant_matches):
+        _align_existing_image_binding(factory, settings, task)
         return {"status": "DONE", "detail": "运行合同已激活并核验，沿用现有配置，无需重新生成。"}
     # Both capabilities share one physical recipe. H3 owns it when requested,
     # and the image binding consumes that exact recipe instead of rewriting it.
     capability = "h3" if "h3" in capabilities else "image"
     if capability not in capabilities:
         return {"status": "SKIPPED", "detail": "这次没有需要生成运行配置的能力。"}
+    guard = _claim_guard_for(task)
+    gen_extra = {"claim_guard": guard} if _accepts_kwarg(deployment.generate_configuration, "claim_guard") else {}
     with factory() as db:
+        _assert_claim_in_tx(db, task)
         result = deployment.generate_configuration(
             db, settings, task.get("project_id"), instance_name=target.get("name") or "shine-h3",
             port=int(target.get("port") or 8188), capability=capability,
-            variant_id=request.get("variant_id") if capability == "h3" else None)
+            variant_id=request.get("variant_id") if capability == "h3" else None,
+            instance_id=target["instance_id"], **gen_extra)
     task.setdefault("result", {})["recipe_sha256"] = result.get("recipe_sha256")
+    _align_existing_image_binding(factory, settings, task)
     return {"status": "DONE", "detail": "共用渲染器运行配置已生成。"}
+
+
+def _align_existing_image_binding(factory, settings, task) -> None:
+    """Keep an already-bound image runtime on this installation aligned with its shared recipe."""
+    from shine.materialprep import runtime as image_runtime
+
+    target_id = str((task.get("target") or {}).get("instance_id") or "")
+    if not target_id:
+        return
+    current = image_runtime.load_config(settings)
+    if current.instance_id and current.instance_id == target_id:
+        _step_image_bind(factory, settings, task)
 
 
 def _step_image_bind(factory, settings, task) -> dict[str, Any]:
@@ -944,6 +1235,7 @@ def _step_image_bind(factory, settings, task) -> dict[str, Any]:
         verified_files=current.verified_files,
         bound_at=utcnow().isoformat(),
     )
+    _assert_claim(factory, task)
     runtime.save_config(settings, config)
     return {"status": "DONE", "detail": f"出图运行时已对齐到端口 {port}"}
 
@@ -956,6 +1248,8 @@ def _step_profiles(factory, settings, task) -> dict[str, Any]:
                 "detail": "机器级整备：创建作品后会幂等绑定标准生成方案。"}
     request = task.get("request") or {}
     with factory() as db:
+        db.execute(text("BEGIN IMMEDIATE"))
+        _assert_claim_in_tx(db, task)
         registered = _register_project_profiles(db, str(task.get("project_id")),
                                                 variant_id=request.get("variant_id"))
     names = [row["name"] for row in registered]
@@ -969,6 +1263,7 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
     from shine.models import WorkflowProfile
 
     with factory() as db:
+        _assert_claim_in_tx(db, task)
         report = runtime_report(db, settings)
         profiles = db.scalars(select(WorkflowProfile).where(
             WorkflowProfile.project_id == task.get("project_id"))).all() if task.get("project_id") else []
@@ -983,8 +1278,22 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
     # the Worker. Delegate to the supervisor: it stops the Worker, validates and
     # activates, checks this project's profile nodes, records this step, then
     # restarts the Worker, which resumes here.
-    delegated = _delegate_supervisor_validation(settings)
+    delegation = {
+        "task_id": task.get("task_id"),
+        "claim_token": task.get("claim_token"),
+        "recipe_sha256": (task.get("result") or {}).get("recipe_sha256") or candidate.get("recipe_sha256"),
+        "project_id": task.get("project_id"),
+    }
+    import inspect as _inspect
+    sig = _inspect.signature(_delegate_supervisor_validation)
+    delegated = (_delegate_supervisor_validation(settings, delegation)
+                 if len(sig.parameters) >= 2 else _delegate_supervisor_validation(settings))
     if delegated.get("status") == "VALIDATING":
+        task["validation_delegation"] = {
+            "claim_token": delegation["claim_token"],
+            "recipe_sha256": delegation["recipe_sha256"],
+            "expires_at": (utcnow() + timedelta(seconds=600)).isoformat(),
+        }
         return {"status": "PENDING",
                 "detail": "已委托后台核验：会短暂停止 Worker、核对真实节点并激活，然后自动恢复 Worker。"}
     if delegated.get("status") == "IN_PROGRESS":
@@ -993,7 +1302,7 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
             "detail": delegated.get("detail") or "无法联系监督进程执行服务核验。"}
 
 
-def _delegate_supervisor_validation(settings) -> dict[str, Any]:
+def _delegate_supervisor_validation(settings, delegation: dict[str, Any] | None = None) -> dict[str, Any]:
     """Ask the resident supervisor to validate while the Worker is stopped."""
     import json as _json
 
@@ -1011,7 +1320,8 @@ def _delegate_supervisor_validation(settings) -> dict[str, Any]:
         with httpx.Client(trust_env=False, timeout=10) as client:
             response = client.post(
                 f"http://127.0.0.1:{port}/validate-services",
-                headers={"x-shine-local-action": "1"})
+                headers={"x-shine-local-action": "1"},
+                **({"json": delegation} if delegation else {}))
         if response.status_code == 202:
             return {"status": "VALIDATING"}
         if response.status_code == 409:

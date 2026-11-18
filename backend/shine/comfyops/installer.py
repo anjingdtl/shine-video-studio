@@ -792,6 +792,9 @@ class LocalInstaller:
                         self.root / ".cache",
                         progress=lambda confirmed, pinned=file: self._emit(pinned, confirmed),
                     )
+                    from shine.comfyops.verification_receipts import write_cache_sidecar
+
+                    write_cache_sidecar(source, file.sha256, file.size, cache_dir=self.root / ".cache")
                     target = safe_target(stage, file.relative_path)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(source, target)

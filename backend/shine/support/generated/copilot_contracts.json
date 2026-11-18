@@ -1117,122 +1117,6 @@
       "security": []
     },
     {
-      "body": {
-        "fields": {
-          "adopt": {
-            "default": false,
-            "type": "boolean"
-          },
-          "capability": {
-            "default": "h3",
-            "enum": [
-              "h3",
-              "image"
-            ],
-            "type": "string"
-          },
-          "path": {
-            "type": "string"
-          },
-          "port": {
-            "type": "integer"
-          },
-          "project_id": {
-            "type": "string"
-          },
-          "variant_id": {
-            "type": "string"
-          }
-        },
-        "required": true,
-        "required_fields": [],
-        "schema": {
-          "additionalProperties": false,
-          "properties": {
-            "adopt": {
-              "default": false,
-              "type": "boolean"
-            },
-            "capability": {
-              "default": "h3",
-              "enum": [
-                "h3",
-                "image"
-              ],
-              "type": "string"
-            },
-            "path": {
-              "anyOf": [
-                {
-                  "maxLength": 1024,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "port": {
-              "anyOf": [
-                {
-                  "maximum": 65535.0,
-                  "minimum": 1024.0,
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "project_id": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            },
-            "variant_id": {
-              "anyOf": [
-                {
-                  "maxLength": 120,
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          },
-          "type": "object"
-        },
-        "schema_digest": "54c17ab2858ce460b53932ed18e22c9ce269fceeeb15cef09db946df7dec2976"
-      },
-      "operation": "POST /api/v1/setup/reconcile",
-      "parameters": [
-        {
-          "in": "header",
-          "name": "authorization",
-          "required": false,
-          "schema": {
-            "default": "",
-            "type": "string"
-          },
-          "summary": {
-            "default": "",
-            "type": "string"
-          }
-        }
-      ],
-      "permission": {
-        "auth_headers": [],
-        "security": []
-      },
-      "security": []
-    },
-    {
       "body": null,
       "operation": "GET /api/v1/setup/verdict",
       "parameters": [],
@@ -1956,21 +1840,21 @@
     },
     {
       "action_id": "setup_reconcile",
-      "api_contract_digest": "56b8dd203fca86227a3f2aad66edcb5cce087b25ed8435900a7a2ecd00c03184",
+      "api_contract_digest": "f730cb5d9906a421239630758bd0a22d3f4b73bb883ddec580fcaba4b4358486",
       "api_operations": [
-        "POST /api/v1/setup/reconcile",
+        "POST /api/v1/setup/prepare/execute",
         "GET /api/v1/setup/verdict"
       ],
-      "api_route": "POST /api/v1/setup/reconcile",
+      "api_route": "POST /api/v1/setup/prepare/execute",
       "authority": "GET /api/v1/setup/verdict",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示要登记的文件，确认后写入回执。",
-      "contract_digest": "56f4b2e74f99410a20145dc73a7e7617f47b44d5c739cc3ff358157beff83416",
-      "contract_revision": 2,
-      "description": "复用现有回执、只对变化文件计算哈希，不修改别人的 ComfyUI。",
+      "contract_digest": "b9507923fd3c96e109dc624427a006f97459248e09392fb164d4df7e114044b9",
+      "contract_revision": 3,
+      "description": "复用现有回执、只对变化文件计算哈希，并交给持久整备任务执行，不修改别人的 ComfyUI。",
       "dispatch": "setup_reconcile",
       "examples": [],
-      "executor": "shine.comfyops.setup_reconcile.reconcile_installation",
+      "executor": "shine.comfyops.setup_preparation.enqueue",
       "executor_bound": true,
       "feature_id": "model-download-verify",
       "gates": [],
@@ -3107,9 +2991,9 @@
     }
   ],
   "digests": {
-    "api_contract": "e15f83855fc8717a59b1bce50f1a1cce0be9169235de86ec39462035a3e01560",
+    "api_contract": "638282d3906acb57a2c671f0c376ac4dc114fa8be8636404ab1bf605cbedd6f1",
     "api_schema": "29bd6d06b2629896db32c79a5273c9e8162363695c30c5d44304bcd7a1cce2c9",
-    "contracts": "132effb00d87e2684c0ea109966647ce9060e5d95d15b49e7a75f61da6789dbf"
+    "contracts": "c461a90dcb8dbb2ed58cdb07a932cdf9aee9c6f5116f9b4a9fede70be3cc28cf"
   },
   "discovered": [
     {
@@ -5383,6 +5267,12 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/setup/reconcile",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/setup/resource-scan/advance",
       "status": "DISCOVERED"
     },
@@ -5781,7 +5671,7 @@
     }
   ],
   "knowledge": {
-    "content_sha256": "8163621193bb276da3f931e77fc3d5c86150012e0d17075d1538bd8a9a921e0b",
+    "content_sha256": "ac1e40c37ba72be84f6e86fd6e14dd4315a4afce1fb2daaa57ad7f0d0e83b74a",
     "entries": [
       {
         "api_contract": {
@@ -6351,8 +6241,8 @@
           "POST /api/v1/workflow-capabilities/{identity}/validate"
         ],
         "app_version": "2.2.0",
-        "content_hash": "89453b5bc0b63b427ad6cc7e7dc5065e27f4ef16da7d39793bb9622e4d5a0c01",
-        "description": "工作流按策略 + 每条镜头的参考清单在提交前编译，缺参数映射/媒体转运会具名阻断；内置模板受 Git 管理，用户级调整只能创建副本。",
+        "content_hash": "db5edfa3f6b9254b9623fa8443528b2e3a36c47a3fa7035349811986d7d819bd",
+        "description": "仅启用 Ref2VA 参考驱动模式：动态编译器按策略与每条镜头参考清单在提交前编译，单镜头支持 1～9 张参考图（内置基线模板含 2 图与 6 图规格）、最多 3 段音频、最多 3 段视频、总参考上限 12 个；缺参数映射/媒体转运会具名阻断，内置模板受 Git 管理，用户级调整只能创建副本。",
         "docs": [],
         "evidence": [
           "backend/tests/test_graph_compiler.py",
@@ -6363,7 +6253,7 @@
         "id": "workflow-assembly",
         "implementation_status": "IMPLEMENTED",
         "knowledge_id": "kb-workflow-assembly",
-        "knowledge_revision": "2.2.0-89453b5b",
+        "knowledge_revision": "2.2.0-db5edfa3",
         "knowledge_version": "shine-project-kb-2.2.0",
         "module": "workflow",
         "not_supported": null,
@@ -6381,13 +6271,18 @@
         ],
         "status": "IMPLEMENTED",
         "status_label": "已实现",
-        "summary": "工作流按策略 + 每条镜头的参考清单在提交前编译，缺参数映射/媒体转运会具名阻断；内置模板受 Git 管理，用户级调整只能创建副本。",
+        "summary": "仅启用 Ref2VA 参考驱动模式：动态编译器按策略与每条镜头参考清单在提交前编译，单镜头支持 1～9 张参考图（内置基线模板含 2 图与 6 图规格）、最多 3 段音频、最多 3 段视频、总参考上限 12 个；缺参数映射/媒体转运会具名阻断，内置模板受 Git 管理，用户级调整只能创建副本。",
         "tags": [
           "工作流",
           "合同",
           "节点",
           "模板",
-          "副本"
+          "副本",
+          "参考图",
+          "图片",
+          "几张",
+          "上限",
+          "Ref2VA"
         ],
         "title": "动态工作流装配与合同",
         "verification": "AUTOMATED",
@@ -7279,9 +7174,9 @@
     {
       "ai_action": "setup_reconcile",
       "ai_status": "GUARDED",
-      "api": "POST /api/v1/setup/reconcile",
+      "api": "POST /api/v1/setup/prepare/execute",
       "area": "设置",
-      "executor": "comfyops.setup_reconcile.reconcile_installation",
+      "executor": "comfyops.setup_preparation.enqueue",
       "operation": "核验/登记已有文件"
     },
     {

@@ -124,6 +124,30 @@ export function AgentModelRouting({
     await onApply(preview);
   }
 
+  async function saveDirect() {
+    if (updates.length === 0) return;
+    setPreviewBusy(true);
+    setPreviewError('');
+    try {
+      const result = await onPreview(updates);
+      setPreview(result);
+      if (!result) {
+        setPreviewError('预览失败，请刷新模型和角色状态后重试。');
+        return;
+      }
+      if (!result.can_apply) return;
+      const ok = await onApply(result);
+      if (ok) {
+        setPreview(null);
+        window.dispatchEvent(new CustomEvent('shine:copilot-llm-updated'));
+      }
+    } catch (error) {
+      setPreviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
+
   return <section className="agent-routing" aria-label="Agent 模型分配">
     <div className="agent-routing-heading">
       <div>
@@ -185,6 +209,9 @@ export function AgentModelRouting({
     </section>)}
 
     <div className="agent-route-actions">
+      <button className="btn-primary" type="button" disabled={busy || previewBusy || updates.length === 0} onClick={() => void saveDirect()}>
+        <Save size={14} /> 保存改派（{updates.length}）
+      </button>
       <button className="btn-secondary" type="button" disabled={busy || previewBusy || updates.length === 0} onClick={() => void previewChanges()}>
         <Eye size={14} /> 预览改派影响（{updates.length}）
       </button>

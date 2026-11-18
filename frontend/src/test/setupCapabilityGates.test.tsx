@@ -123,9 +123,9 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     render(<SetupCenter projectId="proj-1" />);
     await detect();
 
-    // 只勾素材出图：先取消默认勾选的 H3 视频生成。
-    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    // 默认全空：由用户自行勾选素材出图。
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
 
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
@@ -152,7 +152,7 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
-    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
@@ -164,7 +164,7 @@ describe('CASE-01：4070 只下载素材出图权重', () => {
 
 describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法能力', () => {
   it('H3 与素材出图同时勾选时,同一个任务带上两项能力', async () => {
-    stub = new StudioStub([...routes4070(), ...installQueueRoutes()]);
+    stub = new StudioStub([...routes4070({ h3FilesPresent: false }), ...installQueueRoutes()]);
     stub.add({
       method: 'POST', pattern: /setup\/prepare\/execute$/,
       respond: () => jsonResponse({ status: 'QUEUED', task_id: 'setup-2',
@@ -175,6 +175,8 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     render(<SetupCenter projectId="proj-1" />);
     await detect();
 
+    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
@@ -209,6 +211,7 @@ describe('CASE-07：一项能力被自己的条件挡住，不影响其它合法
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
@@ -226,7 +229,7 @@ describe('按钮按实际选择命名', () => {
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
-    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     expect(screen.getByRole('button', { name: /确认下载素材出图权重/ })).toBeEnabled();
     const breakdown = screen.getByRole('list', { name: '分项下载量' });
     expect(breakdown).toHaveTextContent('素材出图权重');
@@ -234,10 +237,13 @@ describe('按钮按实际选择命名', () => {
   });
 
   it('多个能力同时选择时，显示分项下载量', async () => {
-    // H3 权重不在本机时，H3 与素材出图是两项待准备的能力。
+    // H3 权重不在本机时，用户勾选 H3 与素材出图后展示两项分项下载量。
     stub = new StudioStub(routes4070({ h3FilesPresent: false }));
+    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
+    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     expect(screen.getByRole('button', { name: '确认整备所选能力' })).toBeEnabled();
     const breakdown = screen.getByRole('list', { name: '分项下载量' });
     expect(breakdown).toHaveTextContent('H3 视频权重');

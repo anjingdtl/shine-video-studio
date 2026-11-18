@@ -86,9 +86,10 @@ describe('空数据库与两层界面入口', () => {
     await user.click(screen.getByRole('button', { name: '打开基础配置' }));
     expect(await screen.findByRole('heading', { name: /先把机器调好/ })).toBeInTheDocument();
     expect(await screen.findByRole('heading', { name: '制作环境' })).toBeInTheDocument();
-    // 空库也能整备机器：作品是可选的,不再挡住确认按钮。
+    // 空库也能整备机器：能力默认不预勾，用户勾选后作品仍是可选的、不挡确认按钮。
     expect(screen.getByText('没有作品也可以先整备机器')).toBeInTheDocument();
     expect(await screen.findByTestId('setup-environment')).toBeInTheDocument();
+    await user.click(await screen.findByRole('checkbox', { name: /H3 视频生成/ }));
     const confirms = screen.getAllByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
     expect(confirms.length).toBeGreaterThan(0);
     for (const button of confirms) expect(button).toBeEnabled();

@@ -265,6 +265,7 @@ def adopt_existing_installation(
     catalog: dict | None = None,
     inspected: dict | None = None,
     verified: list[dict] | None = None,
+    claim_guard=None,
 ) -> dict:
     """Record a locally confirmed installation after exact weight hashing.
 
@@ -294,6 +295,20 @@ def adopt_existing_installation(
     if report["snapshot"] != snapshot:
         raise HTTPException(409, "已有目录或模型清单变化，请重新检测后确认；本次没有下载任何文件。")
     service = probe_comfy_service(port)
+    from shine.comfyops.host_env import (
+        PORT_FOREIGN_PROCESS,
+        PORT_FREE,
+        PORT_UNKNOWN_IDENTITY,
+        probe_port,
+    )
+    from shine.comfyops.instances import find_instance_by_endpoint
+    from shine.comfyops.renderer_supervisor import windows_port_listeners
+
+    probe_state = probe_port(port)
+    if not service["is_comfyui"] and probe_state.get("identity") in {
+        PORT_FOREIGN_PROCESS, PORT_UNKNOWN_IDENTITY,
+    }:
+        raise HTTPException(409, "PORT_OCCUPIED")
     software = report["software"]
     version_status = software.get("version_status")
     version_source = software.get("version_source")
@@ -405,7 +420,30 @@ def adopt_existing_installation(
     if prior is not None:
         prior_adoption = prior.payload.get("adoption") or {}
         if prior.payload.get("adopted"):
-            if prior.payload.get("port") != port:
+            moving_endpoint = prior.payload.get("port") != port
+            if moving_endpoint:
+                if prior.status != "STOPPED" or prior.payload.get("process"):
+                    raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION")
+                from shine.comfyops.runtime_configuration import require_idle_configuration
+                from shine.runtime_orchestrator.guard import renderer_lifecycle_guard
+                from shine.runtime_orchestrator.identity import installation_activity
+
+                with renderer_lifecycle_guard(prior.id):
+                    activity = installation_activity(db, prior.id)
+                    if (activity["renderer_state"] != "NONE" or activity["in_flight_h3_jobs"]
+                            or activity["in_flight_image_work"]):
+                        raise HTTPException(409, "STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION")
+                    if activity["gpu_leases"]:
+                        raise HTTPException(409, "INSTANCE_LIFECYCLE_LEASE_ACTIVE")
+                    require_idle_configuration(db)
+                other = find_instance_by_endpoint(db, port)
+                if other is not None and other.id != prior.id:
+                    other_payload = other.payload if isinstance(other.payload, dict) else {}
+                    if (not other_payload.get("adopted") or other.status != "STOPPED"
+                            or other_payload.get("process")):
+                        raise HTTPException(409, "PORT_OCCUPIED")
+                if windows_port_listeners(port) or probe_state.get("identity") != PORT_FREE:
+                    raise HTTPException(409, "PORT_OCCUPIED")
                 # R5 B1/INV-03：端点迁移只改这一行的端口与服务探测事实；
                 # 行 ID、已核验字节证据、节点指纹全部保留，历史不重写。
                 moved = dict(prior.payload)
@@ -423,6 +461,8 @@ def adopt_existing_installation(
                 prior_adoption = moved_adoption
                 add_audit(db, actor, "ADOPTED_INSTALLATION_ENDPOINT_CHANGED",
                           "comfy_instance", prior.id, {"port": port}, project_id=project_id)
+                if claim_guard is not None:
+                    claim_guard(db)
                 db.commit()
             covered = set(prior_adoption.get("capabilities") or ["h3"])
             old_files = prior_adoption.get("verified_files") or [
@@ -454,6 +494,8 @@ def adopt_existing_installation(
             # row no one ever claimed.
             replaced_probe_row = True
 
+    from shine.media.integrity import content_sample
+
     capability_files = [item for item in verified_files if _verified_key(item) in required]
     h3_verified_files = [item for item in verified_files
                          if _verified_key(item) in _required_h3_files(catalog)]
@@ -461,12 +503,26 @@ def adopt_existing_installation(
     previous_files = prior_adoption.get("verified_files") or [
         {**item, "capability": "h3"} for item in prior_adoption.get("verified_h3_files") or []
     ]
+
+    def _confirmed_entry(item: dict) -> dict:
+        entry = {key: item[key] for key in ("component_id", "relative_path", "sha256", "size")}
+        entry["capability"] = capability
+        source_value = item.get("source")
+        if source_value:
+            entry["source"] = source_value
+            source_path = Path(source_value)
+            try:
+                if source_path.is_file():
+                    st = source_path.stat()
+                    if st.st_size == int(item.get("size") or -1):
+                        entry["mtime_ns"] = st.st_mtime_ns
+                        entry.update(content_sample(source_path, st.st_size) or {})
+            except OSError:
+                pass
+        return entry
+
     confirmed_files = [item for item in previous_files if (item.get("capability") or "h3") != capability]
-    confirmed_files.extend(
-        {**{key: item[key] for key in ("component_id", "relative_path", "sha256", "size")},
-         **({"source": item["source"]} if item.get("source") else {}),
-         "capability": capability} for item in capability_files
-    )
+    confirmed_files.extend(_confirmed_entry(item) for item in capability_files)
     receipt_count = (_save_adoption_receipts(db, report, catalog, verified_files)
                      if verified is None else len({row["component_id"] for row in verified_files}))
     review_components = {
@@ -579,6 +635,8 @@ def adopt_existing_installation(
         "user_install_modified": False,
         "replaced_probe_row": replaced_probe_row,
     }, project_id=project_id)
+    if claim_guard is not None:
+        claim_guard(db)
     db.commit()
     return {
         "status": "ADOPTED",
@@ -609,35 +667,74 @@ _ADOPTION_BLOCKERS_CACHE: dict[tuple[str, str, str, int], tuple[float, list[str]
 _ADOPTION_BLOCKERS_TTL = 3.0
 
 
+def _confirmed_rows_for(adoption: dict, capability: str) -> list[dict]:
+    confirmed_rows = [row for row in adoption.get("verified_files") or []
+                      if (row.get("capability") or "h3") == capability]
+    if capability == "h3" and not confirmed_rows:
+        # Adoption records written before capabilities existed only carry
+        # the H3 set; that set *is* the H3 evidence.
+        confirmed_rows = adoption.get("verified_h3_files", [])
+    return list(confirmed_rows)
+
+
+def _confirmed_weight_still_matches(item: dict) -> bool:
+    """Detect size/content/same-size weight rewrites immediately outside TTL cache."""
+    from shine.media.integrity import file_sha256, sample_matches
+
+    source = Path(item["source"]) if item.get("source") else None
+    if source is None or not source.is_absolute() or source.resolve() != source or not source.is_file():
+        return False
+    stat = source.stat()
+    if stat.st_size != item.get("size"):
+        return False
+    if item.get("head_sha256") and not sample_matches(source, stat.st_size, item):
+        return False
+    if item.get("mtime_ns") is not None and stat.st_mtime_ns != item.get("mtime_ns"):
+        expected = str(item.get("sha256") or "").lower()
+        if expected and file_sha256(source) != expected:
+            return False
+    return True
+
+
+def _weight_witness_blockers(instance, *, capability: str = "h3") -> list[str]:
+    payload = instance.payload if isinstance(instance.payload, dict) else {}
+    adoption = payload.get("adoption") or {}
+    for item in _confirmed_rows_for(adoption, capability):
+        if item.get("source") or item.get("head_sha256") or item.get("mtime_ns") is not None:
+            try:
+                if not _confirmed_weight_still_matches(item):
+                    return ["ADOPTED_COMFY_FILES_CHANGED"]
+            except OSError:
+                return ["ADOPTED_COMFY_FILES_CHANGED"]
+    return []
+
+
 def adopted_installation_blockers(instance, catalog: dict, *, capability: str = "h3") -> list[str]:
     import time
 
     from shine.comfyops import existing_installation as _ei
 
-    # The computation late-imports existing_installation.inspect; key by that
-    # callable's identity so substituting it (a refreshed read, or a test)
-    # invalidates the cached projection instead of serving a stale verdict.
+    # Live weight witness checks run on every call (stat + 64 KiB head/tail
+    # witness or mtime-triggered rehash), never hidden behind the 3s cache.
+    live_weight_blockers = _weight_witness_blockers(instance, capability=capability)
     key = (str(instance.sha256), graph_hash(catalog), capability, id(_ei.inspect))
     now = time.monotonic()
     hit = _ADOPTION_BLOCKERS_CACHE.get(key)
     if hit is not None and now - hit[0] < _ADOPTION_BLOCKERS_TTL:
-        return list(hit[1])
+        return sorted(set(hit[1]) | set(live_weight_blockers))
     result = _adopted_installation_blockers_uncached(instance, catalog, capability=capability)
     if len(_ADOPTION_BLOCKERS_CACHE) >= 64:
         _ADOPTION_BLOCKERS_CACHE.clear()
     _ADOPTION_BLOCKERS_CACHE[key] = (now, result)
-    return list(result)
+    return sorted(set(result) | set(live_weight_blockers))
 
 
 def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capability: str = "h3") -> list[str]:
-    """Revalidate the selected install's identity without rehashing model weights.
+    """Revalidate the selected install's identity without blindly rehashing intact weights.
 
     ``capability`` scopes which confirmed bytes must still be present.  The
     ownership chain - root, revision, python digest, node fingerprints - is
-    always checked in full; only the weight set follows the capability.  An
-    image-only adoption therefore cannot be invalidated by an absent video
-    model, and an H3 adoption cannot start rendering video because an image
-    recipe asked a laxer question.
+    always checked in full; only the weight set follows the capability.
     """
     from shine.comfyops.deployment import load_default_catalog
     from shine.comfyops.existing_installation import inspect
@@ -650,25 +747,18 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
         if root is None or str(root) != payload.get("root"):
             return ["ADOPTED_COMFY_ROOT_CHANGED"]
         report = inspect(str(root), catalog)
-        # The catalog's own file membership may change (for example when an
-        # optional reviewer package drops repository metadata). That is not a
-        # change to the user's installation. Only the files the user actually
-        # confirmed must still be present; model bytes are never rehashed here.
         present = {
             (row.get("component_id"), row.get("relative_path"))
             for row in report.get("matches", [])
         }
-        confirmed_rows = [row for row in adoption.get("verified_files") or []
-                          if (row.get("capability") or "h3") == capability]
-        if capability == "h3" and not confirmed_rows:
-            # Adoption records written before capabilities existed only carry
-            # the H3 set; that set *is* the H3 evidence.
-            confirmed_rows = adoption.get("verified_h3_files", [])
+        confirmed_rows = _confirmed_rows_for(adoption, capability)
         for item in confirmed_rows:
-            source = Path(item["source"]) if item.get("source") else None
-            if (source is not None and source.is_absolute() and source.resolve() == source
-                    and source.is_file() and source.stat().st_size == item.get("size")):
-                present.add((item["component_id"], item["relative_path"]))
+            pair = (item.get("component_id"), item.get("relative_path"))
+            if item.get("source") or item.get("head_sha256") or item.get("mtime_ns") is not None:
+                if _confirmed_weight_still_matches(item):
+                    present.add(pair)
+                else:
+                    present.discard(pair)
         confirmed = {
             (item.get("component_id"), item.get("relative_path"))
             for item in confirmed_rows

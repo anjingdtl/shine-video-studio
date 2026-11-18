@@ -278,6 +278,9 @@ def _scan_seed(seed: dict, state: dict, specs: dict[int, list[dict]],
     unreadable: list[str] = []
     visited = 0
     truncated = False
+    prior = state["scan"].get("coverage", {}).get(str(root), {})
+    depth_limited = bool(prior.get("depth_truncated"))
+    candidate_limit_hit = bool(prior.get("candidate_limit_hit"))
     resume = seed.get("resume")
     if resume:
         stack: list[tuple[Path, int]] = [(Path(row[0]), int(row[1])) for row in resume]
@@ -302,6 +305,7 @@ def _scan_seed(seed: dict, state: dict, specs: dict[int, list[dict]],
                     stack.append((models, level))
                 continue
             if level >= depth:
+                depth_limited = True
                 continue
             children = list(os.scandir(directory))
         except OSError:
@@ -332,7 +336,10 @@ def _scan_seed(seed: dict, state: dict, specs: dict[int, list[dict]],
                 stat = entry.stat(follow_symlinks=False)
                 for spec in specs.get(stat.st_size, []):
                     key = (entry.path, spec["component_id"])
-                    if key in model_seen or len(resources["model_candidates"]) >= MAX_MODEL_CANDIDATES:
+                    if key in model_seen:
+                        continue
+                    if len(resources["model_candidates"]) >= MAX_MODEL_CANDIDATES:
+                        candidate_limit_hit = True
                         continue
                     model_seen.add(key)
                     resources["model_candidates"].append({
@@ -351,13 +358,15 @@ def _scan_seed(seed: dict, state: dict, specs: dict[int, list[dict]],
             except OSError:
                 unreadable.append(entry.path)
                 continue
-    prior = state["scan"].get("coverage", {}).get(str(root), {})
     record = {
         "root": str(root), "source": seed["source"],
         "status": "TRUNCATED" if truncated else "DONE",
         "directories_visited": int(prior.get("directories_visited", 0)) + visited,
         "unreadable": sorted(set(prior.get("unreadable", [])) | set(unreadable)),
-        "depth": depth, "updated_at": utcnow().isoformat(),
+        "depth": depth,
+        "depth_truncated": depth_limited,
+        "candidate_limit_hit": candidate_limit_hit,
+        "updated_at": utcnow().isoformat(),
     }
     if truncated:
         # The continuation cursor is part of the coverage record: a restarted
@@ -401,6 +410,22 @@ def advance_scan(db, *, budget_s: float = SCAN_BATCH_TIME_BUDGET_S) -> dict:
             "coverage": coverage}
 
 
+def coverage_gaps_present(scan_report: dict) -> bool:
+    """True when an active, truncated, unreadable, depth-limited or capped scan cannot rule out files."""
+    coverage = scan_report.get("coverage") or {}
+    if scan_report.get("status") in {"QUEUED", "RUNNING"}:
+        return True
+    if scan_report.get("queue_remaining"):
+        return True
+    return any(
+        row.get("status") == "TRUNCATED"
+        or bool(row.get("unreadable"))
+        or bool(row.get("depth_truncated"))
+        or bool(row.get("candidate_limit_hit"))
+        for row in coverage.values()
+    )
+
+
 def report(db) -> dict:
     """Read-only snapshot: coverage, candidates and what is still missing.
 
@@ -411,10 +436,15 @@ def report(db) -> dict:
     resources = state["resources"]
     scan = state["scan"]
     coverage = scan.get("coverage") or {}
-    coverage_complete = bool(coverage) and all(
-        row.get("status") == "DONE" for row in coverage.values()) and not (scan.get("queue") or [])
-    # R5 B5/INV-14：只有覆盖完整且没有读不到的区域，「没找到」才是 MISSING；
-    # 截断/不可访问时未找到的文件只能是 UNKNOWN—— absence of evidence 不是证据。
+    coverage_complete = (
+        bool(coverage)
+        and scan.get("status") not in {"QUEUED", "RUNNING"}
+        and all(row.get("status") == "DONE" for row in coverage.values())
+        and not any(row.get("depth_truncated") or row.get("candidate_limit_hit") for row in coverage.values())
+        and not (scan.get("queue") or [])
+    )
+    # R5 B5/INV-14：只有覆盖完整且没有读不到的区域/深度截断/候选上限，「没找到」才是 MISSING；
+    # 截断/不可访问/受限深度时未找到的文件只能是 UNKNOWN—— absence of evidence 不是证据。
     can_assert_missing = coverage_complete and not any(
         row.get("unreadable") for row in coverage.values())
     per_capability: dict[str, dict] = {}

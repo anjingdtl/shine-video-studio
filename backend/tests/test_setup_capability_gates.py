@@ -481,3 +481,49 @@ def test_the_capability_table_is_server_owned():
         "h3-ref2va-lowend-candidate-windows-x64", "h3-ref2va-nvfp4-lowend-windows-x64",
     }
     assert all(capability in CAPABILITIES for capability, _ in CATALOG_CAPABILITIES.values())
+
+
+def test_variant_availability_requires_verified_bound_and_trial_ready(prep, monkeypatch):
+    """R5 CE-7: variant-availability available/TRIAL_READY is False whenever bound is False."""
+    client, _factory, _settings = prep
+    project = create_project(client)
+    monkeypatch.setattr("shine.comfyops.setup_summary.model_file_presence",
+                        lambda *_a, **_k: {"components": {
+                            "minimax-h3-diffusion": {"verified": True, "installed": True, "files": []},
+                            "minimax-h3-encoders-and-vae": {"verified": True, "installed": True, "files": []},
+                        }})
+    monkeypatch.setattr("shine.comfyops.variant_readiness.readiness", lambda *_a, **_k: {
+        "trial_ready": False,
+        "production_ready": False,
+        "workflow_validated": True,
+        "instance_binding": {"bound": False},
+        "next_step": {"action": "BIND", "code": "INSTANCE_NOT_BOUND"},
+        "weights": [{"binding_reason": "NOT_BOUND", "verified": True}],
+        "profiles": ["ref2va"],
+        "real_render": None,
+    })
+    res = client.get(f"/api/v1/setup/variant-availability?project_id={project}")
+    assert res.status_code == 200
+    variants = res.json()["variants"]
+    for row in variants:
+        if not row["bound"]:
+            assert row["trial_ready"] is False
+            assert row["available"] is False
+            assert row["facts"]["TRIAL_READY"] is False
+
+
+def test_bare_image_prepare_plan_includes_runtime_closure_without_h3(prep, monkeypatch):
+    """R5 CE-9: Standalone image prepare-plan on bare machine covers runtime closure + weights."""
+    from shine.comfyops import deployment, setup_summary
+
+    client, _factory, _settings = prep
+    monkeypatch.setattr(setup_summary, "resolve_installation", lambda *_a, **_k: {
+        "selected": None, "candidates": [], "choice_required": False,
+    })
+    res = client.post("/api/v1/setup/prepare-plan", json={"capabilities": ["image"]})
+    assert res.status_code == 200, res.text
+    plan = res.json()["plans"][0]
+    assert "comfyui" in plan["components"]
+    assert deployment.WHEEL_COMPONENT_ID in plan["components"]
+    assert plan["download_bytes"] > 0
+    assert "minimax-h3-diffusion" not in plan["components"]

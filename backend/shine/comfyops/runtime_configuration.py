@@ -327,9 +327,9 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         # v2+ seals the mode capability set; a change in the audited core
         # node classes means the seal was computed against another recipe
         # generation and must be re-derived, not trusted.
-        from shine.comfyops.mode_capabilities import core_mode_node_types
+        from shine.comfyops.mode_capabilities import sealed_mode_nodes_compatible
         sealed = (evidence.get('mode_capabilities') or {}).get('required_nodes') or []
-        if sorted(core_mode_node_types()) != sorted(sealed):
+        if not sealed_mode_nodes_compatible(sealed):
             blockers.append('MODE_CAPABILITY_CONTRACT_CHANGED')
     advisory_reviews = dict(evidence.get('advisory_reviews') or {})
     for role, expected in (evidence.get('review_profiles') or {}).items():
@@ -364,7 +364,11 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
 
 def configuration_identity(db, settings, path):
     from shine.comfyops.deployment import load_default_catalog
-    from shine.comfyops.instances import installation_identity_matches, instance_root
+    from shine.comfyops.instances import (
+        installation_binding_matches,
+        installation_identity_matches,
+        instance_root,
+    )
 
     path = Path(path).resolve()
     if path != recipe_path(settings).resolve():
@@ -395,7 +399,9 @@ def configuration_identity(db, settings, path):
             runtime_root = Path(renderer['runtime_data_root']).resolve()
             if not runtime_root.is_relative_to(settings.comfyops_dir.resolve()):
                 raise HTTPException(409, 'ADOPTED_RUNTIME_DATA_ROOT_INVALID')
-        if renderer.get('installation') != {'id': instance.id, 'sha256': instance.sha256}:
+        inst_ref = renderer.get('installation')
+        if (not isinstance(inst_ref, dict) or inst_ref.get('id') != instance.id
+                or not installation_binding_matches(db, instance, inst_ref.get('sha256'))):
             raise HTTPException(409, 'RUNTIME_INSTALLATION_BINDING_REQUIRED')
         paths = {path}
         if not adopted:
@@ -413,7 +419,7 @@ def configuration_identity(db, settings, path):
                 raise HTTPException(409, 'RUNTIME_PINNED_FILE_MISSING')
             pins[str(target.resolve())] = _pinned_file_digest(target)
         return {'recipe': str(path), 'recipe_sha256': recipe_sha256,
-                'instance_id': instance.id, 'instance_sha256': instance.sha256,
+                'instance_id': instance.id, 'instance_sha256': inst_ref['sha256'],
                 'catalog_sha256': graph_hash(load_default_catalog()), 'files': pins,
                 'comfyui_base_url': f"http://127.0.0.1:{renderer['port']}"}
     except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -518,10 +524,12 @@ def require_idle_configuration(db):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
 
 
-def activate_runtime(db, settings, project_id, recipe_sha256, actor):
+def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_guard=None):
     from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
 
     db.execute(text('BEGIN IMMEDIATE'))
+    if claim_guard is not None:
+        claim_guard(db)
     if project_id is not None:
         require_project(db, project_id)
     candidate = db.get(AppSetting, CANDIDATE_KEY)

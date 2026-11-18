@@ -65,17 +65,36 @@ def _receipts_dir(cache_dir: Path | None) -> Path | None:
     return cache_dir / ".receipts"
 
 
+def write_cache_sidecar(path: Path, expected_sha256: str, size: int, *, cache_dir: Path | None) -> None:
+    """Persist the stat + head/tail witness sidecar after full-hash verification."""
+    directory = _receipts_dir(cache_dir)
+    if directory is None:
+        return
+    expected_sha256 = str(expected_sha256 or "").lower()
+    sidecar = directory / f"{expected_sha256}.json"
+    try:
+        stat = path.stat()
+        sidecar.parent.mkdir(parents=True, exist_ok=True)
+        sidecar.write_text(json.dumps({
+            "path": str(path.resolve()),
+            "size": int(size),
+            "mtime_ns": stat.st_mtime_ns,
+            "sha256": expected_sha256,
+            "verified_at": datetime.now(UTC).isoformat(),
+            **(content_sample(path, stat.st_size) or {}),
+        }, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def file_digest(path: Path, expected_sha256: str, expected_size: int,
-                cache_dir: Path | None = None) -> dict:
+                cache_dir: Path | None = None, *, read_only: bool = False) -> dict:
     """Read one file and return whether it is exactly the pinned bytes.
 
-    The sidecar stores the size and the modification time of the reading, not
-    the file contents: a file that changed - even to the same length - gets a
-    new stat and is hashed again.  A file whose stat is unchanged is not read
-    in full twice; a head/tail content witness is re-checked instead, because
-    two writes within one Windows clock tick can share an mtime.  That is what
-    makes "existing verification reuse" cost zero copies without trusting a
-    same-tick rewrite.
+    When ``read_only=True`` (GET/summary/readiness paths), only an existing
+    matching sidecar + stat + head/tail witness is trusted; the file is never
+    rehashed in full and no sidecar JSON is written.  Write/reconcile paths
+    pass ``read_only=False`` to perform first-time hashing and record sidecars.
     """
     try:
         stat = path.stat()
@@ -102,6 +121,9 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
                 and sample_matches(path, stat.st_size, cached)):
             return {"present": True, "verified": True, "size": stat.st_size,
                     "reused": True}
+    if read_only:
+        return {"present": True, "verified": False, "reason": "RECEIPT_REQUIRED_READ_ONLY",
+                "size": stat.st_size}
     digest = hashlib.sha256()
     try:
         with path.open("rb") as stream:
@@ -114,23 +136,13 @@ def file_digest(path: Path, expected_sha256: str, expected_size: int,
         return {"present": True, "verified": False, "reason": "SHA256_MISMATCH",
                 "sha256": actual, "size": stat.st_size}
     if sidecar is not None:
-        try:
-            sidecar.parent.mkdir(parents=True, exist_ok=True)
-            sidecar.write_text(json.dumps({
-                "path": str(path.resolve()),
-                "size": stat.st_size,
-                "mtime_ns": stat.st_mtime_ns,
-                "sha256": expected_sha256,
-                "verified_at": datetime.now(UTC).isoformat(),
-                **(content_sample(path, stat.st_size) or {}),
-            }, ensure_ascii=False), encoding="utf-8")
-        except OSError:
-            pass
+        write_cache_sidecar(path, expected_sha256, stat.st_size, cache_dir=cache_dir)
     return {"present": True, "verified": True, "size": stat.st_size, "reused": False}
 
 
 def directory_files(directory: Path | None, component: dict,
-                    recorded: dict | None = None, cache_dir: Path | None = None) -> dict:
+                    recorded: dict | None = None, cache_dir: Path | None = None,
+                    *, read_only: bool = False) -> dict:
     """Check every pinned file below one installed package directory.
 
     ``recorded`` is the receipt's own per-file stat (relative path -> size and
@@ -163,7 +175,7 @@ def directory_files(directory: Path | None, component: dict,
                          "size": stat.st_size, "reused": True})
             continue
         result = file_digest(target, str(entry.get("sha256") or ""),
-                             int(entry.get("size") or 0), cache_dir=cache_dir)
+                             int(entry.get("size") or 0), cache_dir=cache_dir, read_only=read_only)
         rows.append({"relative_path": relative, **result})
     present = all(row.get("present") for row in rows) if rows else False
     verified = bool(rows) and all(row.get("verified") for row in rows)
@@ -275,7 +287,7 @@ def find_any_receipt(db, component_id: str) -> dict | None:
 
 
 def _verify_recorded_paths(receipt: dict, component: dict,
-                           cache_dir: Path | None = None) -> dict | None:
+                           cache_dir: Path | None = None, *, read_only: bool = False) -> dict | None:
     """Re-check a receipt whose files were verified at absolute paths.
 
     Returns ``None`` when the receipt is not path-based (older schema).  Every
@@ -332,7 +344,7 @@ def _verify_recorded_paths(receipt: dict, component: dict,
                          "size": stat.st_size, "reused": True, "path": str(resolved)})
             continue
         check = file_digest(resolved, str(entry.get("sha256") or ""),
-                            int(entry.get("size") or 0), cache_dir=cache_dir)
+                            int(entry.get("size") or 0), cache_dir=cache_dir, read_only=read_only)
         rows.append({"relative_path": relative, **check, "path": str(resolved)})
     present = all(row.get("present") for row in rows) if rows else False
     verified = bool(rows) and all(row.get("verified") for row in rows)
@@ -343,7 +355,7 @@ def _verify_recorded_paths(receipt: dict, component: dict,
 
 def verify_receipt(db, *, component: dict, variant_id: str | None,
                    catalog_id: str | None, catalog_version: str | None,
-                   cache_dir: Path | None = None) -> dict:
+                   cache_dir: Path | None = None, read_only: bool = False) -> dict:
     """Does a receipt still describe these bytes on this machine?
 
     A registry row, a same-named cache file or a receipt for another revision
@@ -369,7 +381,7 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
     if catalog_id and receipt.get("catalog_id") not in {None, catalog_id}:
         return {"verified": False, "present": False, "reason": "RECEIPT_CATALOG_CHANGED",
                 "identity": expected, "receipt": receipt}
-    check = _verify_recorded_paths(receipt, component, cache_dir=cache_dir)
+    check = _verify_recorded_paths(receipt, component, cache_dir=cache_dir, read_only=read_only)
     if check is None:
         directory = receipt.get("directory")
         recorded = {
@@ -378,7 +390,7 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
             if isinstance(row, dict)
         }
         check = directory_files(Path(directory) if directory else None, component,
-                                recorded=recorded, cache_dir=cache_dir)
+                                recorded=recorded, cache_dir=cache_dir, read_only=read_only)
     return {
         "verified": check["verified"],
         "present": check["present"],
@@ -390,11 +402,11 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
     }
 
 
-def cache_candidates(cache_dir: Path | None, component: dict) -> dict:
+def cache_candidates(cache_dir: Path | None, component: dict, *, read_only: bool = False) -> dict:
     """Check the verified-bytes cache by content, not by file name.
 
     A cache file is named after its digest, but a name is not a proof: the file
-    is read (or its unchanged-stat receipt reused) before it counts.
+    is read (or its unchanged-stat + sidecar witness reused) before it counts.
     """
     rows = []
     if cache_dir is None:
@@ -403,7 +415,8 @@ def cache_candidates(cache_dir: Path | None, component: dict) -> dict:
     for entry in component.get("files") or []:
         digest = str(entry.get("sha256") or "").lower()
         target = cache_dir / digest
-        result = file_digest(target, digest, int(entry.get("size") or 0), cache_dir=cache_dir)
+        result = file_digest(target, digest, int(entry.get("size") or 0),
+                             cache_dir=cache_dir, read_only=read_only)
         rows.append({"relative_path": str(entry.get("relative_path") or ""), **result})
     present = all(row.get("present") for row in rows) if rows else False
     verified = bool(rows) and all(row.get("verified") for row in rows)

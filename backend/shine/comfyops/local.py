@@ -224,7 +224,8 @@ def validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor="LO
     return plan
 
 
-def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED") -> tuple[str, bool]:
+def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED",
+                          *, claim_guard=None) -> tuple[str, bool]:
     """Queue the persistent attempt.  Nothing is downloaded in this request.
 
     The Worker claims the attempt afterwards, writes its stage and its
@@ -234,6 +235,8 @@ def queue_install_attempt(factory, settings, plan_id, plan_hash, actor, executor
 
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
+        if claim_guard is not None:
+            claim_guard(db)
         plan = validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor)
         attempt, reused = queue_attempt(db, plan, plan_hash, actor)
         attempt_id = attempt.id

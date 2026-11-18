@@ -563,11 +563,12 @@ def _installation_evidence(db, settings, binding, *, port, cwd=None):
     and a run may only use it while it is real, stopped and complete.
     """
     from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
-    from shine.comfyops.instances import installation_identity_matches
+    from shine.comfyops.instances import installation_binding_matches, installation_identity_matches
 
     installed = db.get(ComfyInstance, binding['id'])
     if (not installed or not installation_identity_matches(installed, port)
-            or installed.sha256 != binding['sha256'] or installed.payload.get('is_mock', True)
+            or not installation_binding_matches(db, installed, binding.get('sha256'))
+            or installed.payload.get('is_mock', True)
             or installed.payload.get('process') or installed.status != 'STOPPED'
             or (cwd is not None
                 and os.path.realpath(installed.payload.get('root', '')) != os.path.realpath(cwd))
@@ -1192,8 +1193,10 @@ def required_workflow_node_types(factory):
     with factory() as db:
         rows = db.scalars(select(WorkflowProfile).where(
             WorkflowProfile.name.in_(sorted(baseline)))).all()
+    non_audio = [row for row in rows if "1aud" not in row.name]
+    selected = non_audio or rows
     needed = set()
-    for row in rows:
+    for row in selected:
         graph = row.graph
         if isinstance(graph, str):
             try:
@@ -1205,6 +1208,7 @@ def required_workflow_node_types(factory):
         for node in graph.values():
             if isinstance(node, dict) and node.get("class_type"):
                 needed.add(str(node["class_type"]))
+    needed.discard("VHS_LoadAudioUpload")
     return needed
 
 

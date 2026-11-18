@@ -81,7 +81,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         feature_id="model-download-verify",
         module="comfyops",
         label="重新核验并登记已存在的本机文件",
-        description="复用现有回执、只对变化文件计算哈希，不修改别人的 ComfyUI。",
+        description="复用现有回执、只对变化文件计算哈希，并交给持久整备任务执行，不修改别人的 ComfyUI。",
         params=_sorted_params(
             _P("adopt", type="boolean", required=False),
             _P("capability", required=False, max_length=120),
@@ -90,10 +90,10 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
             _P("project_id", binding="body", required=False, max_length=120),
             _P("variant_id", required=False, max_length=120),
         ),
-        api_route="POST /api/v1/setup/reconcile",
+        api_route="POST /api/v1/setup/prepare/execute",
         request_schema="shine.api_setup:ReconcileRequest",
         response_schema=None,
-        executor="shine.comfyops.setup_reconcile.reconcile_installation",
+        executor="shine.comfyops.setup_preparation.enqueue",
         authority="GET /api/v1/setup/verdict",
         permission_tier="PREVIEW",
         project_scope="OPTIONAL",
@@ -107,6 +107,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         rollback_policy="删除新回执即可恢复原状态；不删除文件。",
         page="基础配置",
         note="adopt 是显式确认；检测本身不会接管外部 ComfyUI。",
+        contract_revision=3,
     ),
     CapabilityDeclaration(
         action_id="managed_release",
@@ -753,7 +754,7 @@ MATRIX: tuple[dict[str, str], ...] = (
     {"area": "设置", "operation": "工作流节点图数值级改写", "api": "workflow JSON", "executor": "—", "ai_status": "NOT_SUPPORTED", "ai_action": "—"},
     {"area": "设置", "operation": "查看环境裁决", "api": "GET /api/v1/setup/verdict", "executor": "api_setup.setup_verdict", "ai_status": "READ_ONLY", "ai_action": "—"},
     {"area": "设置", "operation": "一键整备缺失文件", "api": "POST /api/v1/setup/prepare/execute", "executor": "comfyops.setup_preparation.enqueue", "ai_status": "GUARDED", "ai_action": "setup_repair"},
-    {"area": "设置", "operation": "核验/登记已有文件", "api": "POST /api/v1/setup/reconcile", "executor": "comfyops.setup_reconcile.reconcile_installation", "ai_status": "GUARDED", "ai_action": "setup_reconcile"},
+    {"area": "设置", "operation": "核验/登记已有文件", "api": "POST /api/v1/setup/prepare/execute", "executor": "comfyops.setup_preparation.enqueue", "ai_status": "GUARDED", "ai_action": "setup_reconcile"},
     {"area": "设置", "operation": "安装计划授权与执行", "api": "POST /api/v1/comfyops/install-plans/{identity}/execute", "executor": "comfyops approval", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
     {"area": "设置", "operation": "释放受管渲染服务", "api": "POST /api/v1/setup/managed-processes/release", "executor": "comfyops.renderer_release", "ai_status": "GUARDED", "ai_action": "managed_release"},
     {"area": "设置", "operation": "选择 ComfyUI 实例", "api": "POST /api/v1/setup/installation/select", "executor": "setup summary", "ai_status": "HUMAN_REQUIRED", "ai_action": "—"},
@@ -879,13 +880,14 @@ FEATURES: tuple[FeatureDeclaration, ...] = (
     ),
     FeatureDeclaration(
         "workflow-assembly", "workflow", "动态工作流装配与合同", "IMPLEMENTED",
-        "工作流按策略 + 每条镜头的参考清单在提交前编译，缺参数映射/媒体转运会具名阻断；"
-        "内置模板受 Git 管理，用户级调整只能创建副本。",
+        "仅启用 Ref2VA 参考驱动模式：动态编译器按策略与每条镜头参考清单在提交前编译，"
+        "单镜头支持 1～9 张参考图（内置基线模板含 2 图与 6 图规格）、最多 3 段音频、最多 3 段视频、总参考上限 12 个；"
+        "缺参数映射/媒体转运会具名阻断，内置模板受 Git 管理，用户级调整只能创建副本。",
         sources=("backend/shine/comfy/workflow.py", "backend/shine/comfy/graph_compiler.py", "backend/shine/api_comfy.py"),
         apis=("GET /api/v1/workflow-profiles", "POST /api/v1/workflow-profiles",
               "POST /api/v1/workflow-capabilities/{identity}/validate"),
         evidence=("backend/tests/test_graph_compiler.py", "backend/tests/test_setup_workflow_profiles.py"),
-        tags=("工作流", "合同", "节点", "模板", "副本"),
+        tags=("工作流", "合同", "节点", "模板", "副本", "参考图", "图片", "几张", "上限", "Ref2VA"),
     ),
     FeatureDeclaration(
         "second-pass-upscale", "strategy", "二次采样与 RelayVSR X2", "IMPLEMENTED",

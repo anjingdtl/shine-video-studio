@@ -1,9 +1,9 @@
 # Shine 视频工作台 R5｜基础配置与用户机资源复用 实施报告
 
-> 日期：2026-11-18。分支：`feat/shine-setup-r5-machine-reuse-convergence-20261118`。
-> 基线：`origin/main@46c889a`（拉取时最新）。方案：`docs/SHINE_SETUP_R5_THREE_PRINCIPLES_CONVERGENCE_PLAN.md`（提交 `0f3464b`，cherry-pick 为 `bcb0fd0`）。
-> 审计：`docs/SHINE_SETUP_R5_BASELINE_AUDIT.md`（提交 `3903977`）。
-> 原则：一套事实、一个裁决、一个执行者。本轮全部改动为**归并/删除/兼容修复**，净删代码约 560 行；未新增任何表、状态机、安装器、调度器、资格引擎或缓存。
+> 日期：2026-11-18。分支：`main`（基于 `5246b60` 的待提交工作树收尾）。
+> 方案：`docs/SHINE_SETUP_R5_THREE_PRINCIPLES_CONVERGENCE_PLAN.md`。
+> 审计：`docs/SHINE_SETUP_R5_BASELINE_AUDIT.md`。
+> 原则：一套事实、一个裁决、一个执行者。全部改动为**归并/删除/兼容修复**；未新增任何表、状态机、安装器、调度器、资格引擎或平行入口。
 
 ## 1. 提交清单
 
@@ -73,6 +73,18 @@
 
 - `setup_summary.candidate_installations`：by_root 按 active 行 > 用户确认端口 > 稳定身份 > 最小 id 确定性收敛；adopted/managed 候选遍历排序后的 by_root。
 
+### B9 最终收尾：跨入口绑定裁决、核验委托、下载计划、管家整备与 UI 收敛（`5246b60` 后工作树）
+
+- **唯一安装绑定裁决（`instances.installation_binding_matches`）**：统一 `deployment.generate_configuration`、`runtime_configuration.configuration_identity`、`handoff_startup._installation_evidence`（首次启动与 `verify_managed_startup` 续航）及 `resource_resolver.managed_installation_pin/validate_resource_plan`。收编/核验追加 Qwen Image 证据不再打断既有 H3 配方（兼容历史整行哈希与 `runtime_binding_sha256`），而端点、解释器、H3 权重或节点指纹变化仍具名触发 `409 COMFY_INSTALLATION_BINDING_CHANGED`。
+- **Supervisor 同次核验委托（`setup_preparation.validation_delegation` + `shine_supervisor.py`）**：Worker 在 `VALIDATE` 收到 `202 VALIDATING` 并正常释放租约进入 `PENDING` 等待停机核验时，保留带 `claim_token`、`recipe_sha256`、过期时间的 `validation_delegation`；Supervisor 仅凭匹配委托完成本次 `VALIDATE` 回写，旧任务、候选配方漂移或新 Worker 认领一律拒绝。
+- **唯一下载计划计算（`setup_preparation.plan_prepare_downloads`）**：`/api/v1/setup/prepare-plan` 预览与 `_step_download` 执行共用同一函数；扫描未完成/`UNKNOWN` 文件、混含 `UNKNOWN` 组件、`unplaced_files` 与不完整扫描下的 `runtime_closure_gap` 一律不入下载列表，空机 H3 与独立出图正常计入。
+- **AI 管家与历史 `/setup/reconcile` 收束到既有 Worker**：`support/actions.py` 的 `setup_reconcile` 与 `POST /api/v1/setup/reconcile` 统一走 `setup_preparation.enqueue(..., reconcile_only=True)`，仅排队 `RECONCILE`（或 `SCAN`+`RECONCILE`），不串联 `TOOL_REPAIR/DOWNLOAD/RECIPE`，也不在 HTTP 请求线程同步改库。
+- **服务封条节点兼容（`mode_capabilities.sealed_mode_nodes_compatible`）**：兼容携带历史 `VHS_LoadAudioUpload` 附加节点的有效 v2+ 封条，缺核心模式节点仍拒绝。
+- **升级全链路与 `#setup` / AI 管家体验收敛**：
+  - 删除 `#setup` 底部误重跑 8 步整备的「真实试镜一次」按钮及重复的「素材出图能力」底栏；`RelayVSR 2X 精修` 与 `vlm/asr` 核验落位后统一报告就绪，不再误报「待真实试镜」；「要准备哪些能力」默认全不勾选，完全由用户显式勾选。
+  - `_step_recipe` 在同一物理安装已绑定 `image-runtime.json` 时自动复用 `_step_image_bind` 对齐新 `recipe_sha256`/端口，避免旧版升级后仅勾选 H3 导致素材出图失配。
+  - AI 管家悬浮窗支持宽/高拖拽调节并持久化；`AgentModelRouting` 一键保存、`CopilotSettingsPage` 模型选择器与 `DirectorSetupPanel`/`ShineCopilot` 共读共写唯一 `AgentRoute(role="support_agent")`；`support/agent.py` 注入权威 `workflow_capabilities`（Ref2VA `1～9` 张参考图、最多 `3` 音频/`3` 视频/总计 `12` 份参考）并直接回答用户提问；`support/planner.py` 收敛 `setup` / `materials` / `production` 意图分流。
+
 ## 3. 旧链删除清单
 
 | 删除项 | 位置 | 替代 |
@@ -98,7 +110,7 @@
 
 - SHA-256 钉住、候选显式确认、BLOCKED 拒绝、进程三证、GPU 互斥、Ref2VA 唯一路径、外部 ComfyUI 只读、UNKNOWN 不盲重发：全部保留，反例锁定。
 - 回执复用采用既有 stat+头尾见证威胁模型，未以性能为名削弱。
-- 本轮**未改** `worker.py` / `preproduction.py` / handoff 客户端 / quality 客户端 → 不触发 `client_review_identity` 重校准义务；历史真实正负校准仍未完成，不得声称已校准。
+- **关于 `client_review_identity` 的诚实披露**：收尾中修改了 `backend/shine/comfyops/handoff_startup.py`（统一 `_installation_evidence` 绑定校验与逐图节点校验），该文件位于 `shine/quality/client_identity.py._FILES` 钉住列表内，当前 `review_client_identity()` 变为 `c60549f335b3b32559b9af07549269b8b979421cef07dd2954e652418637740e`。按 `AGENTS.md` 规定，这会使既有 VLM 校准修订按设计失效：在正式启用受引导 VLM 审片修订前，须重跑真实正/负向校准、发布新 VLM 修订并重新分析/冻结前置方案（注：`advisory_model_reviews` 始终不阻塞受管渲染关键路径；历史真实正负校准本轮亦未执行，不声称已校准）。
 
 ## 6. 与方案的技术调整（以真实代码为准）
 

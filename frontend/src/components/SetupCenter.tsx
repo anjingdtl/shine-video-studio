@@ -152,25 +152,19 @@ type DetectionSnapshot = {
   variantChosenByUser?: boolean;
 };
 
+const EMPTY_CAPS = { h3: false, image: false, vlm: false, asr: false, relayvsr: false };
+
 function readSnapshot(): DetectionSnapshot | null {
   try {
     const raw = window.sessionStorage.getItem(SNAPSHOT_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as DetectionSnapshot;
     if (!parsed?.variants) return null;
-    // A snapshot written before the H3 capability became selectable has no
-    // H3 entry; it keeps the product default (H3 selected) instead of
-    // silently dropping the video capability from the person's plan.
-    const saved = parsed.caps ?? ({} as DetectionSnapshot['caps']);
+    // 「要准备哪些能力」始终默认全空，由用户按需自行勾选；快照只保留只读检测结果避免白屏，
+    // 不替用户预勾已下载或未下载的模块。
     return {
       ...parsed,
-      caps: {
-        h3: saved.h3 ?? true,
-        image: saved.image ?? false,
-        vlm: saved.vlm ?? false,
-        asr: saved.asr ?? false,
-        relayvsr: saved.relayvsr ?? false,
-      },
+      caps: { ...EMPTY_CAPS },
     };
   } catch { return null; }
 }
@@ -225,7 +219,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
    */
   const [availabilityRows, setAvailabilityRows] = useState<VariantAvailability[] | null>(null);
   const [variantId, setVariantId] = useState(restored?.variantChosenByUser ? restored.variantId : '');
-  const [caps, setCaps] = useState(restored?.caps ?? { h3: true, image: true, vlm: false, asr: false, relayvsr: false });
+  const [caps, setCaps] = useState(EMPTY_CAPS);
   const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
   /** 用户确认「重复下载」的能力：已有权重也重新下载。 */
   const [force, setForce] = useState({ h3: false, image: false, vlm: false, asr: false, relayvsr: false });
@@ -404,7 +398,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
    * had never asked for.  The label now names the capabilities that are
    * really selected.
    */
+  const anyCapSelected = caps.h3 || caps.image || caps.vlm || caps.asr || caps.relayvsr;
+
   const actionLabel = useMemo(() => {
+    if (!anyCapSelected) {
+      return pendingRepair ? '自动补装缺失基础工具' : '勾选上方能力后开始准备';
+    }
     if (!capabilityRows.length) {
       return pendingRepair ? '自动补装缺失基础工具' : '确认并完成配置（不下载）';
     }
@@ -416,16 +415,18 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     if (row.key === 'relayvsr') return `确认准备 RelayVSR 精修权重（约 ${gib(row.bytes)}）`;
     if (selectedVariant && !selectedVariant.auto_download_allowed) return '确认准备 H3 候选模型';
     return `确认准备 H3 权重（约 ${gib(row.bytes)}）`;
-  }, [capabilityRows, pendingRepair, selectedVariant]);
+  }, [anyCapSelected, capabilityRows, pendingRepair, selectedVariant]);
 
   // The H3 scheme is a condition of the H3 capability alone: preparing only
   // image or review weights must not wait for an H3 variant that was never
   // asked for (a machine with no installable H3 scheme stays able to prepare
   // the other - legal - capabilities).
   // R5 B6：summary 未到达时不做任何「缺件/下载」断言，也不开放提交——
-  // 资格与缺件事实都来自服务端同一份投影，读不到就是未知。
+  // 资格与缺件事实都来自服务端同一份投影，读不到就是未知；能力默认全空，
+  // 至少由用户勾选一项（或存在可自动补装的基础工具）才开放提交。
   const canPrepare = !envBlocked && !running && !!storage && !storage.requires_selection
-    && !!summary && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
+    && !!summary && (anyCapSelected || pendingRepair)
+    && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
 
   /**
    * 一次授权 → 后台持续推进。
@@ -589,13 +590,24 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
                   : '权重已逐字节核验，等待实例绑定')
                 : h3Complete
                   ? '本机已找到权重'
-                  : summary ? `需要下载 ${gib(h3Bytes)}` : '正在读取本机文件状态'}</em></span>
+                  : summary?.capabilities?.h3?.state === 'UNKNOWN'
+                    ? '扫描未完成，待核验'
+                    : summary ? `需要下载 ${gib(h3Bytes)}` : '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.image} disabled={!!running}
             onChange={(event) => toggleCap('image', imagePresent, event.target.checked)} />
           <ImageIcon size={14} /><span><b>素材出图（人物 / 场景 / 道具）</b>
-            <em className={imagePresent ? 'cap-found-warn' : undefined}>{imagePresent ? '本机已找到权重' : summary ? `需要下载 ${gib(imageBytes)}` : '正在读取本机文件状态'}</em></span>
+            <em className={imagePresent ? 'cap-found-warn' : undefined}>
+              {capFacts('image')?.FILES_VERIFIED
+                ? (capFacts('image')?.INSTANCE_BOUND
+                  ? '权重已逐字节核验，并已绑定到当前 ComfyUI 实例'
+                  : '权重已逐字节核验，等待实例绑定')
+                : imagePresent
+                  ? '本机已找到权重'
+                  : summary?.capabilities?.image?.state === 'UNKNOWN'
+                    ? '扫描未完成，待核验'
+                    : summary ? `需要下载 ${gib(imageBytes)}` : '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.vlm} disabled={!!running}
@@ -613,7 +625,16 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           <input type="checkbox" checked={caps.relayvsr} disabled={!!running}
             onChange={(event) => toggleCap('relayvsr', relayvsrPresent, event.target.checked)} />
           <Sparkles size={14} /><span><b>RelayVSR 2X 精修（后期放大，可选）</b>
-            <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>{relayvsrPresent ? '本机已找到权重' : summary ? `需要下载 ${gib(RELAYVSR_BYTES)}` : '正在读取本机文件状态'}</em></span>
+            <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>
+              {capFacts('relayvsr')?.FILES_VERIFIED
+                ? (capFacts('relayvsr')?.INSTANCE_BOUND
+                  ? '权重已逐字节核验，并已落位到当前 ComfyUI 实例'
+                  : '权重已逐字节核验，等待落位')
+                : relayvsrPresent
+                  ? '本机已找到权重'
+                  : summary?.capabilities?.relayvsr?.state === 'UNKNOWN'
+                    ? '扫描未完成，待核验'
+                    : summary ? `需要下载 ${gib(RELAYVSR_BYTES)}` : '正在读取本机文件状态'}</em></span>
         </label>
       </div>
 
@@ -687,18 +708,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           <em>{row.note}</em>
         </li>)}
       </ul>}
-
-      {image?.configured && <div className="setup-image-test">
-        <div>
-          <b>素材出图能力</b>
-          <em>{image.layer === 'RENDER_VERIFIED' ? '三类小样都已验证'
-            : image.layer === 'GRAPH_VERIFIED' ? '节点已核对，可以验证真实出图'
-              : image.renderer.state === 'RUNNING' ? '渲染器运行中' : '权重已就位'}</em>
-        </div>
-        <button type="button" className="btn-secondary" disabled={!!running} onClick={() => void prepare(['image'])}>
-          <ImageIcon size={13} /> 交给后台验证出图
-        </button>
-      </div>}
 
       <details className="setup-details">
         <summary><ChevronRight size={12} /> 检测明细与专业选项</summary>

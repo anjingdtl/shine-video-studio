@@ -76,7 +76,7 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(screen.getAllByText(/正在读取本机文件状态/).length).toBeGreaterThan(0);
     expect(screen.queryByText(/需要下载/)).toBeNull();
     expect(screen.getAllByText(/正在读取本机模型状态/).length).toBeGreaterThan(0);
-    const prepare = screen.getByRole('button', { name: /确认整备所选能力|确认准备 H3 权重/ });
+    const prepare = screen.getByRole('button', { name: /勾选上方能力后开始准备|确认整备所选能力|确认准备 H3 权重/ });
     expect(prepare).toBeDisabled();
   });
 
@@ -91,7 +91,7 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(screen.getByRole('radio', { name: /第三方未核实槽位/ })).toBeDisabled();
   });
 
-  it('已有权重标红；勾选时二次确认是否重复下载', async () => {
+  it('能力默认全部不勾选；已有权重标红，勾选时二次确认是否重复下载', async () => {
     const current = setupSummary();
     current.capabilities.image.facts.FILES_FOUND = true;
     stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(current) });
@@ -105,9 +105,12 @@ describe('制作环境：检测快照与候选下载', () => {
     const found = screen.getByText('本机已找到权重');
     expect(found.className).toContain('cap-found-warn');
 
+    const h3Box = screen.getByRole('checkbox', { name: /H3 视频生成/ });
     const checkbox = screen.getByRole('checkbox', { name: /素材出图/ });
-    await user.click(checkbox); // 取消勾选
-    await user.click(checkbox); // 再勾选 → 二次确认
+    expect(h3Box).not.toBeChecked();
+    expect(checkbox).not.toBeChecked();
+
+    await user.click(checkbox); // 勾选已有权重 → 二次确认
     const group = screen.getByRole('group', { name: '重复下载确认' });
     expect(group).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '重复下载' }));
@@ -135,7 +138,7 @@ describe('制作环境：检测快照与候选下载', () => {
     await detect();
     expect(screen.getByRole('group', { name: '基础工具补装' })).toHaveTextContent('FFmpeg + FFprobe');
     expect(screen.getByText(/服务端口 8189/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /自动补装缺失基础工具|确认(下载|准备|整备|并完成配置)/ })).toBeEnabled();
     expect(screen.queryByText(/先处理硬件或工具阻断项/)).toBeNull();
   });
 
@@ -150,10 +153,10 @@ describe('制作环境：检测快照与候选下载', () => {
     render(<SetupCenter projectId="proj-1" />);
     await detect();
     expect(screen.getByText(/先处理硬件或工具阻断项/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
+    expect(screen.getByRole('button', { name: /勾选上方能力后开始准备|确认(下载|准备|整备|并完成配置)/ })).toBeDisabled();
   });
 
-  it('后端已核验并绑定的权重不被界面当成缺失而重新下载', async () => {
+  it('后端已核验并绑定的权重默认不勾选；用户选仅复用后不重新下载，且无下方重复素材出图条', async () => {
     const current = setupSummary();
     for (const key of ['h3', 'image'] as const) {
       current.capabilities[key].facts = {
@@ -192,13 +195,19 @@ describe('制作环境：检测快照与候选下载', () => {
         },
       }],
     }) });
+    const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
 
     expect(screen.getByText('本机已核验 · 已绑定')).toBeTruthy();
     expect(screen.queryByTestId('setup-next-step')).toBeNull();
-    // H3 is verified by the backend, and the image capability is already
-    // present, so nothing needs downloading: the same 44GB is never planned twice.
+    expect(screen.queryByText('素材出图能力')).toBeNull();
+    expect(screen.queryByRole('button', { name: /交给后台验证出图/ })).toBeNull();
+    expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).not.toBeChecked();
+    expect(screen.getByRole('checkbox', { name: /素材出图/ })).not.toBeChecked();
+
+    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('button', { name: '仅复用，不下载' }));
     expect(screen.getByRole('button', { name: /确认并完成配置（不下载）/ })).toBeEnabled();
   });
 });
@@ -206,6 +215,10 @@ describe('制作环境：检测快照与候选下载', () => {
 describe('页面直连执行旁路已收掉', () => {
   it('不再有空点的「真实试镜一次」；运行核验交给一键准备', async () => {
     stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(setupSummary({
+      action_required: {
+        code: 'TRIAL_NOT_RUN', label: '真实试镜一次', reason: '第一次真实出片会占用显存和较长时间。',
+        action: 'TRIAL', capability: 'h3',
+      },
       capabilities: {
         ...setupSummary().capabilities,
         h3: {
@@ -222,22 +235,65 @@ describe('页面直连执行旁路已收掉', () => {
     expect(screen.getByRole('button', { name: /一键绑定渲染器并核对运行合同/ })).toBeTruthy();
   });
 
-  it('出图验证交给后台一键准备，不在页面直连启动渲染器', async () => {
-    stub.add({ method: 'GET', pattern: /setup\/image-readiness$/, respond: () => jsonResponse({
-      configured: true, layer: 'GRAPH_VERIFIED', families: {}, renderer: { state: 'NOT_STARTED' },
-      blockers: [], upstream: { required_bytes: 0 },
-    }) });
+  it('出图验证通过上方唯一能力卡交给后台一键准备，不在页面重复显示或直连启动渲染器', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(setupSummary({
+      action_required: null,
+      capabilities: {
+        ...setupSummary().capabilities,
+        image: {
+          ...setupSummary().capabilities.image,
+          state: 'VERIFIED',
+          facts: { FILES_FOUND: true, FILES_VERIFIED: true, INSTANCE_BOUND: false, WORKFLOW_VALIDATED: false },
+          two_step: {
+            files: { state: 'READY', label: '文件已就绪并核验' },
+            run: { state: 'BLOCKED', label: '跑不通', reason: '尚未核对运行合同' },
+          },
+        },
+      },
+    })) });
     stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
       status: 'QUEUED', task_id: 'setup-img', steps: ['TOOL_REPAIR', 'RECONCILE', 'DOWNLOAD', 'IMAGE_VERIFY'] }) });
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
-    await user.click(screen.getByRole('button', { name: /交给后台验证出图/ }));
+    expect(screen.queryByText('素材出图能力')).toBeNull();
+    const fixButtons = screen.getAllByRole('button', { name: /一键绑定渲染器并核对运行合同/ });
+    await user.click(fixButtons[fixButtons.length - 1]);
     await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1), { timeout: 20000 });
     const body = stub.callsOf('POST', /setup\/prepare\/execute/)[0].body as { capabilities: string[]; variant_id?: string };
     expect(body.capabilities).toEqual(['image']);
     expect(body.variant_id).toBeUndefined();
     expect(stub.callsOf('POST', /setup\/image-runtime\/start/)).toHaveLength(0);
     expect(stub.callsOf('POST', /setup\/image-runtime\/validate/)).toHaveLength(0);
+  });
+
+  it('扫描未完成处于 UNKNOWN 状态时不误报「需要下载」全档体积', async () => {
+    const unknownSummary = setupSummary({
+      capabilities: {
+        ...setupSummary().capabilities,
+        h3: {
+          ...setupSummary().capabilities.h3,
+          state: 'UNKNOWN',
+          summary: '正在扫描本机资源，待核验。',
+        },
+        image: {
+          ...setupSummary().capabilities.image,
+          state: 'UNKNOWN',
+          summary: '正在扫描本机资源，待核验。',
+        },
+        relayvsr: {
+          ...setupSummary().capabilities.h3,
+          key: 'relayvsr',
+          label: 'RelayVSR 2X',
+          state: 'UNKNOWN',
+          summary: '正在扫描本机资源，待核验。',
+        },
+      },
+    });
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse(unknownSummary) });
+    render(<SetupCenter projectId="proj-1" />);
+    await detect();
+    expect(screen.getAllByText('扫描未完成，待核验')).toHaveLength(3);
+    expect(screen.queryByText(/需要下载/)).toBeNull();
   });
 });

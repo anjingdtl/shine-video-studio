@@ -92,6 +92,45 @@ def test_capability_report_carries_two_step(studio):
     assert report["two_step"]["run"]["state"] == "BLOCKED"
 
 
+def test_relayvsr_ready_needs_no_trial_and_h3_trial_never_emits_fake_setup_action():
+    from shine.comfyops.setup_summary import _next_action
+
+    relay_facts = {
+        "FILES_FOUND": True,
+        "FILES_VERIFIED": True,
+        "INSTANCE_BOUND": True,
+        "WORKFLOW_VALIDATED": True,
+        "PRODUCTION_READY": True,
+        "RENDER_VERIFIED": False,
+    }
+    proj = _two_step_projection("relayvsr", relay_facts, missing_bytes=0, missing_files=[], advisories=[])
+    assert proj["run"] == {"state": "READY", "label": "已验证可运行"}
+    state, msg, step = _capability_verdict(
+        "relayvsr", relay_facts, missing_bytes=0, has_installation=True, missing_files=[]
+    )
+    assert state == "READY"
+    assert step is None
+    assert "后期成片" in msg
+
+    h3_facts = {
+        "FILES_FOUND": True,
+        "FILES_VERIFIED": True,
+        "INSTANCE_BOUND": True,
+        "WORKFLOW_VALIDATED": True,
+        "RUNTIME_SERVICES_VERIFIED": True,
+        "RENDER_VERIFIED": False,
+    }
+    _, _, h3_step = _capability_verdict(
+        "h3", h3_facts, missing_bytes=0, has_installation=True, missing_files=[]
+    )
+    caps = {
+        "h3": {"key": "h3", "optional": False, "next_step": h3_step},
+        "image": {"key": "image", "optional": False, "next_step": None},
+        "relayvsr": {"key": "relayvsr", "optional": True, "next_step": None},
+    }
+    assert _next_action({"choice_required": False}, caps, project_id="proj-1") is None
+
+
 def test_validation_pngs_are_valid_and_aligned():
     base = _solid_png(64, 64, (10, 20, 30))
     mask = _mask_png(64, 64)

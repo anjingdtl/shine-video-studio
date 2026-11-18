@@ -156,10 +156,39 @@ type CopilotSession = {
 };
 
 type ContextResponse = {
-  snapshot: { setup?: { verdict?: { mode?: string; label?: string; code?: string | null } } };
+  snapshot: {
+    setup?: { verdict?: { mode?: string; label?: string; code?: string | null } };
+    runtime?: { llm?: { configured?: boolean; provider?: string | null; model?: string | null } };
+  };
   suggested_questions: string[];
   web_search_enabled: boolean;
 };
+
+const PANEL_SIZE_KEY = 'shine.copilot.panelSize.v1';
+const DEFAULT_PANEL_SIZE = { width: 420, height: 560 };
+const MIN_PANEL_WIDTH = 320;
+const MIN_PANEL_HEIGHT = 320;
+
+function clampPanelSize(width: number, height: number): { width: number; height: number } {
+  const maxW = typeof window !== 'undefined' ? Math.max(MIN_PANEL_WIDTH, Math.min(960, window.innerWidth - 36)) : 960;
+  const maxH = typeof window !== 'undefined' ? Math.max(MIN_PANEL_HEIGHT, Math.min(900, window.innerHeight - 96)) : 900;
+  return {
+    width: Math.round(Math.min(maxW, Math.max(MIN_PANEL_WIDTH, width))),
+    height: Math.round(Math.min(maxH, Math.max(MIN_PANEL_HEIGHT, height))),
+  };
+}
+
+function readPanelSize(): { width: number; height: number } {
+  try {
+    const raw = window.localStorage.getItem(PANEL_SIZE_KEY);
+    if (!raw) return DEFAULT_PANEL_SIZE;
+    const parsed = JSON.parse(raw) as { width?: unknown; height?: unknown };
+    if (typeof parsed.width === 'number' && typeof parsed.height === 'number') {
+      return clampPanelSize(parsed.width, parsed.height);
+    }
+  } catch { /* ignore */ }
+  return DEFAULT_PANEL_SIZE;
+}
 
 type ActionState = {
   id: string;
@@ -271,6 +300,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
   const [delegation, setDelegation] = useState<Record<string, unknown> | null>(null);
   const [delegating, setDelegating] = useState(false);
+  const [panelSize, setPanelSize] = useState<{ width: number; height: number }>(() => readPanelSize());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
   const sessionRef = useRef<CopilotSession | null>(null);
@@ -372,6 +402,45 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- ctx is derived from the same props/fault
   }, [pageId, projectId, fault]);
+
+  useEffect(() => {
+    const onLlmUpdated = () => {
+      if (open) void loadContext();
+    };
+    window.addEventListener('shine:copilot-llm-updated', onLlmUpdated);
+    return () => window.removeEventListener('shine:copilot-llm-updated', onLlmUpdated);
+  }, [open, loadContext]);
+
+  const startResize = useCallback(
+    (axis: 'w' | 'n' | 'nw') => (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      const startX = event.clientX;
+      const startY = event.clientY;
+      const startW = panelSize.width;
+      const startH = panelSize.height;
+      let latest = { width: startW, height: startH };
+      const onMove = (moveEvt: MouseEvent) => {
+        const nextW = axis === 'w' || axis === 'nw' ? startW + (startX - moveEvt.clientX) : startW;
+        const nextH = axis === 'n' || axis === 'nw' ? startH + (startY - moveEvt.clientY) : startH;
+        latest = clampPanelSize(nextW, nextH);
+        setPanelSize(latest);
+      };
+      const onUp = () => {
+        window.removeEventListener('mousemove', onMove);
+        window.removeEventListener('mouseup', onUp);
+        try { window.localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(latest)); } catch { /* ignore */ }
+      };
+      window.addEventListener('mousemove', onMove);
+      window.addEventListener('mouseup', onUp);
+    },
+    [panelSize],
+  );
+
+  const resetPanelSize = useCallback(() => {
+    const reset = clampPanelSize(DEFAULT_PANEL_SIZE.width, DEFAULT_PANEL_SIZE.height);
+    setPanelSize(reset);
+    try { window.localStorage.setItem(PANEL_SIZE_KEY, JSON.stringify(reset)); } catch { /* ignore */ }
+  }, []);
 
   const restore = useCallback(async (ctx = active) => {
     const key = sessionKey(ctx.projectId, fault);
@@ -914,11 +983,43 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
       </button>
 
       {open && (
-        <section className="copilot-panel" role="dialog" aria-modal="false" aria-label={`Shine ${nickname}`}>
+        <section
+          className="copilot-panel"
+          role="dialog"
+          aria-modal="false"
+          aria-label={`Shine ${nickname}`}
+          style={{ width: `${panelSize.width}px`, height: `${panelSize.height}px` }}
+        >
+          <div
+            className="copilot-resize-edge copilot-resize-w"
+            data-testid="copilot-resize-w"
+            aria-hidden="true"
+            onMouseDown={startResize('w')}
+          />
+          <div
+            className="copilot-resize-edge copilot-resize-n"
+            data-testid="copilot-resize-n"
+            aria-hidden="true"
+            onMouseDown={startResize('n')}
+          />
+          <div
+            className="copilot-resize-corner"
+            data-testid="copilot-resize-nw"
+            title="拖拽调节大小，双击恢复默认尺寸"
+            aria-label="拖拽调节浮窗大小"
+            onMouseDown={startResize('nw')}
+            onDoubleClick={resetPanelSize}
+          />
           <header className="copilot-head">
             <div>
               <b><Sparkles size={14} aria-hidden="true" /> SHINE {nickname}</b>
-              <span>{pageLabel} · 只读诊断{faultLabel(fault) ? ` · 已绑定 ${faultLabel(fault)}` : ''}</span>
+              <span>
+                {pageLabel} · 只读诊断
+                {context?.snapshot?.runtime?.llm?.configured
+                  ? ` · 已接入 ${context.snapshot.runtime.llm.provider || context.snapshot.runtime.llm.model}`
+                  : ' · 离线规则模式'}
+                {faultLabel(fault) ? ` · 已绑定 ${faultLabel(fault)}` : ''}
+              </span>
             </div>
             <div className="copilot-head-tools">
               <button

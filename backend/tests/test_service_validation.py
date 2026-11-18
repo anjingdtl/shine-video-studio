@@ -313,3 +313,34 @@ def test_service_validation_requires_candidate_and_operator(prep):
         "project_id": "missing", "recipe_sha256": "a" * 64,
     })
     assert response.status_code in {401, 403}
+
+
+def test_dynamic_ref2va_allows_missing_audio_plugin_for_image_only_and_rejects_core_missing(prep):
+    """R5 CE-8: Image-only Ref2VA passes without VHS_LoadAudioUpload; core/audio selection rejects missing."""
+    from shine.comfy.graph_compiler import compile_ref2va_workflow
+
+    _client, factory, _settings = prep
+    with factory() as db:
+        _files, contracts, _adv = service_validation._workflow_contracts(db, None)
+    object_info = _fake_object_info()
+    object_info.pop("VHS_LoadAudioUpload", None)
+
+    advisories = service_validation._validate_workflows_against_object_info(contracts, object_info)
+    assert any(row["code"] == "OPTIONAL_AUDIO_TEMPLATE_NODES_MISSING" for row in advisories)
+
+    # Selecting an audio shot graph while VHS_LoadAudioUpload is missing must still fail.
+    audio_compiled = compile_ref2va_workflow(image_count=1, audio_count=1, object_info=object_info)
+    with pytest.raises(HTTPException) as exc_audio:
+        service_validation._validate_workflows_against_object_info(
+            contracts, object_info,
+            compiled_graph=audio_compiled.graph,
+            compiled_parameter_map=audio_compiled.parameter_map,
+        )
+    assert exc_audio.value.detail["code"] == "LIVE_WORKFLOW_CONTRACT_FAILED"
+    assert "VHS_LoadAudioUpload" in exc_audio.value.detail["missing_nodes"]
+
+    # Removing a core non-audio node must still fail.
+    object_info.pop("MiniMaxH3ReferenceToVideo", None)
+    with pytest.raises(HTTPException) as exc_core:
+        service_validation._validate_workflows_against_object_info(contracts, object_info)
+    assert exc_core.value.detail["code"] == "LIVE_WORKFLOW_CONTRACT_FAILED"

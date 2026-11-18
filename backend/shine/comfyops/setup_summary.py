@@ -246,25 +246,33 @@ def _verified_components(db, settings, catalog: dict, component_ids,
                 db, component=component, variant_id=None,
                 catalog_id=catalog.get("catalog_id"),
                 catalog_version=str(catalog.get("catalog_version") or ""),
-                cache_dir=cache)
+                cache_dir=cache, read_only=True)
             if receipt.get("verified"):
                 verified.add(component_id)
                 if _receipt_in_place(receipt.get("receipt") or {}, served_roots or []):
                     in_place.add(component_id)
                 continue
-            if cache_candidates(cache, component).get("verified"):
+            if cache_candidates(cache, component, read_only=True).get("verified"):
                 verified.add(component_id)
         except OSError:  # an unreadable file is not evidence
             continue
     return {"verified": verified, "in_place": in_place}
 
 
-def _runtime_instance_id(db) -> str | None:
+def _runtime_instance_id(db, settings=None) -> str | None:
+    from fastapi import HTTPException
+
+    from shine.comfyops.runtime_configuration import ACTIVE_KEY, resolve_runtime
     from shine.models import AppSetting
 
-    row = db.get(AppSetting, "deployment-runtime-active")
+    row = db.get(AppSetting, ACTIVE_KEY)
     if row is None or not isinstance(row.value, dict):
         return None
+    if settings is not None:
+        try:
+            resolve_runtime(db, settings)
+        except HTTPException:
+            return None
     return ((row.value.get("identity") or {}).get("instance_id")) or None
 
 
@@ -282,7 +290,7 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
 
     rows = [row for row in _instance_rows(db) if row.get("root") and Path(row["root"]).is_dir()]
     chosen = _choice(db)
-    active = _runtime_instance_id(db)
+    active = _runtime_instance_id(db, settings)
     # R5 B8：同一物理 root 的历史多行（旧端口漂移遗留）按确定性偏好收敛为一条：
     # 正在服务的行 > 用户确认端口的行 > 稳定 root 身份行 > 较小 id。绝不依赖
     # 表的遍历顺序，选择不得随重启/切页漂移（INV-04）。
@@ -318,6 +326,7 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
         candidates.append({
             "root": resolved,
             "instance_id": (instance or {}).get("instance_id"),
+            "name": (instance or {}).get("name"),
             "port": (instance or {}).get("port"),
             "managed": bool((instance or {}).get("managed")),
             "adopted": bool((instance or {}).get("adopted")),
@@ -550,34 +559,39 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     evidence = _verified_components(
         db, settings, catalog, component_ids, served_roots=served_roots)
     verified_now = evidence["verified"]
-    cache_root = (Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
-                  if settings is not None else None)
-    cached_keys = {(component_id, str(row.get("relative_path")))
-                   for component_id in component_ids
-                   for row in (_catalog_components(catalog).get(component_id) or {}).get("files") or []
-                   if cache_root is not None
-                   and (cache_root / str(row.get("sha256") or "")).is_file()}
-    # One classification per file, two projections of it.  ``unplaced`` is the
-    # executor's question (bytes not yet in the served directory, whether or not
-    # this machine already owns them); ``missing`` is the person's question
-    # (bytes this machine does not have at all, so they must be fetched).  A
-    # receipt proved at the person's own folder or in the verified cache owns
-    # the bytes: placing them is a local copy the preparation performs, never a
-    # download the card may claim.  Reporting those as 「缺少 N 个文件」 next to
-    # 「文件已就绪并核验」 was two verdicts for one fact.
+    # One classification per file, shared across discovery, summary and prepare-plan.
+    # Unverified SHA-named cache bytes without a valid sidecar receipt never count
+    # as owned bytes, and unfound files under an incomplete/truncated/depth-limited
+    # scan stay UNKNOWN instead of claiming MISSING.
+    unknown_keys: set[tuple[str, str]] = set()
+    if db is not None and capability in {"h3", "image"}:
+        from shine.comfyops import resource_discovery
+
+        discovery = resource_discovery.report(db)
+        if resource_discovery.coverage_gaps_present(discovery):
+            bucket = (discovery.get("capabilities") or {}).get(capability) or {}
+            unknown_keys = {
+                (str(row.get("component_id")), Path(str(row.get("relative_path") or "")).as_posix())
+                for row in (bucket.get("unknown") or [])
+            }
     unplaced = [item for item in presence["missing"]
                 if item["component_id"] not in evidence["in_place"]]
-    missing = [item for item in unplaced
-               if item["component_id"] not in verified_now
-               and (item["component_id"], str(item["relative_path"])) not in cached_keys]
+    raw_missing = [item for item in unplaced
+                   if item["component_id"] not in verified_now]
+    missing = [item for item in raw_missing
+               if (item["component_id"], Path(str(item["relative_path"])).as_posix()) not in unknown_keys]
+    unknown_files = [item for item in raw_missing
+                     if (item["component_id"], Path(str(item["relative_path"])).as_posix()) in unknown_keys]
     required = [row for row in (_catalog_components(catalog).get(cid) for cid in component_ids) if row]
     complete_components = {
         cid for cid in component_ids
         if all(item["component_id"] != cid for item in missing)
+        and all(item["component_id"] != cid for item in unknown_files)
     }
     files_found = bool(component_ids) and len(complete_components) == len(component_ids)
     files_verified = bool(component_ids) and set(component_ids) <= verified_now
     missing_bytes = sum(int(item.get("size") or 0) for item in missing)
+    unknown_bytes = sum(int(item.get("size") or 0) for item in unknown_files)
 
     facts: dict[str, Any] = {
         "FILES_FOUND": files_found,
@@ -654,16 +668,20 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             report = relayvsr.relayvsr_readiness(
                 model_root=Path(models_root) / "diffusion_models" if models_root else None,
                 vae_root=Path(models_root) / "vae" if models_root else None)
-            facts["RELAYVSR_AVAILABLE"] = report.get("available", False)
-            facts["INSTANCE_BOUND"] = report.get("available", False)
-            facts["WORKFLOW_VALIDATED"] = report.get("available", False)
+            available = bool(report.get("available", False))
+            facts["RELAYVSR_AVAILABLE"] = available
+            facts["INSTANCE_BOUND"] = available
+            facts["WORKFLOW_VALIDATED"] = available
+            facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and available)
             advisories.extend(report.get("blockers") or [])
         else:
             from shine.comfyops.deployment import advisory_review_readiness
 
             role = advisory_review_readiness(settings).get(capability.upper()) or {}
-            facts["INSTANCE_BOUND"] = role.get("status") == "READY"
-            facts["WORKFLOW_VALIDATED"] = role.get("status") == "READY"
+            role_ready = role.get("status") == "READY"
+            facts["INSTANCE_BOUND"] = role_ready
+            facts["WORKFLOW_VALIDATED"] = role_ready
+            facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and role_ready)
             if role.get("status") != "READY" and role.get("code"):
                 # ② 的原因读同一份审片就绪裁决，不在卡片里另写一套推断。
                 runtime_missing = role.get("runtime_packages_missing") or []
@@ -681,7 +699,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
 
     state, summary, next_step = _capability_verdict(
         capability, facts, missing_bytes=missing_bytes, has_installation=bool(installation),
-        missing_files=missing,
+        missing_files=missing, unknown_files=unknown_files,
     )
     return {
         "key": capability,
@@ -698,17 +716,23 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "next_step": next_step,
         "missing_files": missing,
         "missing_bytes": missing_bytes,
+        "unknown_files": unknown_files,
+        "unknown_bytes": unknown_bytes,
         "unplaced_files": unplaced,
         "advisories": advisories,
         "required_components": sorted(component_ids),
         "required_files": sum(len(row.get("files") or []) for row in required),
         "two_step": _two_step_projection(capability, facts, missing_bytes=missing_bytes,
-                                         missing_files=missing, advisories=advisories),
+                                         missing_files=missing, advisories=advisories,
+                                         unknown_files=unknown_files,
+                                         unknown_bytes=unknown_bytes),
     }
 
 
 def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
-                         missing_files: list, advisories: list) -> dict[str, Any]:
+                         missing_files: list, advisories: list,
+                         unknown_files: list | None = None,
+                         unknown_bytes: int = 0) -> dict[str, Any]:
     """The user-facing model: two questions, not a dozen engineering steps.
 
     ① 文件齐不齐（缺就去下载）；② 跑不跑得通（不通就给出原因，整备任务自动
@@ -716,15 +740,26 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
     「缺」只指本机真的没有的字节（``missing_files``）；已核验但尚未落位的字节
     属于②的绑定/整备，不在①报缺，否则同一张卡片会给出两个互相矛盾的裁决。
     """
+    unknown_list = unknown_files or []
     if facts.get("FILES_VERIFIED"):
         files = {"state": "READY", "label": "文件已就绪并核验"}
     elif facts.get("FILES_FOUND"):
         files = {"state": "UNVERIFIED", "label": "文件已找到，待核验"}
+    elif unknown_list and not missing_files:
+        files = {
+            "state": "UNKNOWN",
+            "label": f"本机检索未完成（{len(unknown_list)} 个文件待确认）",
+            "unknown_count": len(unknown_list),
+            "unknown_bytes": unknown_bytes,
+            "missing_count": 0,
+            "missing_bytes": 0,
+        }
     else:
         files = {
             "state": "MISSING",
             "label": f"缺 {len(missing_files)} 个文件（约 {missing_bytes / 1024 ** 3:.1f} GiB）",
             "missing_count": len(missing_files), "missing_bytes": missing_bytes,
+            **({"unknown_count": len(unknown_list), "unknown_bytes": unknown_bytes} if unknown_list else {}),
         }
     reason = next((str(a.get("message") or a.get("detail")) for a in advisories
                    if a.get("message") or a.get("detail")), None)
@@ -741,7 +776,8 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
 
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
-                        has_installation: bool, missing_files: list) -> tuple[str, str, dict | None]:
+                        has_installation: bool, missing_files: list,
+                        unknown_files: list | None = None) -> tuple[str, str, dict | None]:
     """The one sentence a person reads, and the single action behind it."""
     if capability == "image" and facts.get("BINDING_STATE") == "PENDING_RECIPE":
         # The dominant fact is not "a file is missing": the person already
@@ -754,6 +790,12 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "action": "PREPARE_ENVIRONMENT",
         }
     if not facts.get("FILES_FOUND"):
+        if unknown_files and not missing_files:
+            return "UNKNOWN", "本机资源检索未完成，暂无法断言缺件。", {
+                "code": "SCAN_INCOMPLETE", "label": "完成本机检索",
+                "reason": "本机检索尚未完成或部分目录受限，请等待或完成扫描后再决定是否下载。",
+                "action": "SCAN",
+            }
         label = "准备环境" if not has_installation else "补齐缺失文件"
         reason = ("本机还没有这套资源（需要下载约 %.1f GiB）；也可以手动下载后放进来。"
                   % (missing_bytes / 1024 ** 3)) if missing_bytes else "本机还没有这套资源。"
@@ -781,14 +823,18 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             "reason": "还没有在本机真实服务上核对节点与输入。", "action": "PREPARE_ENVIRONMENT",
         }
     if not facts.get("RENDER_VERIFIED"):
+        if capability == "relayvsr":
+            return "READY", "精修权重已就位，可在作品「⑦ 后期成片」直接使用。", None
+        if capability in {"vlm", "asr"}:
+            return "READY", "审片资源已就绪，将在出片质检时自动提供建议。", None
         if capability == "image":
             return "READY", "出图环境已准备好，尚需生成一次验证样片。", {
                 "code": "TRIAL_NOT_RUN", "label": "生成一次验证样片",
                 "reason": "真实小样会占用显存和几分钟时间。", "action": "TRIAL",
             }
-        return "READY", "视频环境已就绪，尚需用这套方案真实出一次片。", {
-            "code": "TRIAL_NOT_RUN", "label": "真实试镜一次",
-            "reason": "第一次真实出片会占用显存和较长时间。", "action": "TRIAL",
+        return "READY", "视频制作环境已就绪，可在作品「⑥ 视频生产」正式出片。", {
+            "code": "TRIAL_NOT_RUN", "label": "去作品正式出片",
+            "reason": "运行合同已核对，首次真实出片在作品「⑥ 视频生产」进行。", "action": "TRIAL",
         }
     return "VERIFIED_RENDER", "已经在本机真实生成并留证。", None
 
@@ -847,7 +893,7 @@ def summary(db, settings, *, project_id: str | None = None,
     except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
         report = {}
     runtime_verified = bool(report.get("services_verified") and selected
-                            and selected.get("instance_id") == _runtime_instance_id(db))
+                            and selected.get("instance_id") == _runtime_instance_id(db, settings))
     capabilities = {
         key: capability_report(db, settings, key, installation=selected, project_id=project_id,
                                variant_id=variant_id if key == "h3" else None,
@@ -998,6 +1044,10 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
         step = row.get("next_step")
         if step:
             if step["action"] == "TRIAL":
+                # H3 真实出片属于作品「⑥ 视频生产」（强制 Ref2VA），不在基础配置页
+                # 挂一个重跑整备的伪试镜按钮；只有素材出图的验证小样属于整备任务步骤。
+                if row["key"] == "h3":
+                    continue
                 trial = trial or {**step, "capability": row["key"]}
                 continue
             return {**step, "capability": row["key"]}
@@ -1035,12 +1085,14 @@ def preparation_state(db) -> dict[str, Any]:
 # --- missing files ----------------------------------------------------------
 
 
-def runtime_closure_gap(db, settings, installation: dict | None) -> dict[str, Any]:
+def runtime_closure_gap(db, settings, installation: dict | None,
+                        *, capabilities: list[str] | None = None) -> dict[str, Any]:
     """Read-only bare-machine gap: runtime components and the instance ladder.
 
     Weights are reported by ``capability_report``; this adds the runtime closure
-    (ComfyUI source, wheels, node packs) and a read-only preview of the instance
-    ladder, mirroring ``next_instance_plan``'s predicates without creating plans.
+    (ComfyUI source, wheels, node packs when H3 is included) and a read-only
+    preview of the instance ladder, mirroring ``next_instance_plan``'s
+    predicates without creating plans.
     """
     from shine.comfyops import deployment
     from shine.comfyops.existing_installation import resolve_node_pack_dirs
@@ -1048,28 +1100,41 @@ def runtime_closure_gap(db, settings, installation: dict | None) -> dict[str, An
 
     catalog = deployment.load_default_catalog()
     components = deployment._component_map(catalog)
+    include_h3 = capabilities is None or "h3" in capabilities
     instance_present = bool(installation and installation.get("instance_id"))
     gap: list[str] = []
     ladder: list[str] = []
     if installation and installation.get("root"):
         root = Path(installation["root"])
-        _dirs, missing = resolve_node_pack_dirs(root, catalog)
-        gap.extend(missing)
+        if include_h3:
+            _dirs, missing = resolve_node_pack_dirs(root, catalog)
+            gap.extend(missing)
         if not instance_present:
             ladder = ["ADOPT"]
     elif not instance_present:
-        gap.extend(cid for cid, c in components.items()
-                   if c["kind"] in {"source", "wheel", "node"})
-        ladder = ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
+        if include_h3:
+            gap.extend(cid for cid, c in components.items()
+                       if c["kind"] in {"source", "wheel", "node"})
+            ladder = ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
+        else:
+            gap.extend(cid for cid, c in components.items()
+                       if c["kind"] in {"source", "wheel"})
+            ladder = ["CREATE", "BIND_MODELS"]
     if instance_present and not installation.get("adopted"):
         instance = db.get(ComfyInstance, installation["instance_id"])
         payload = instance.payload if instance is not None else {}
-        expected_nodes = {cid for cid, c in components.items() if c["kind"] == "node"}
-        installed = payload.get("node_versions", {})
-        if any(cid not in installed for cid in expected_nodes):
-            ladder.append("INSTALL_NODE")
-        expected_bindings = {c["destination_family"]: cid for cid, c in components.items()
-                             if c["kind"] == "model" and c.get("destination_family")}
+        if include_h3:
+            expected_nodes = {cid for cid, c in components.items() if c["kind"] == "node"}
+            installed = payload.get("node_versions", {})
+            if any(cid not in installed for cid in expected_nodes):
+                ladder.append("INSTALL_NODE")
+            expected_bindings = {c["destination_family"]: cid for cid, c in components.items()
+                                 if c["kind"] == "model" and c.get("destination_family")}
+        else:
+            img_catalog = deployment.load_deployment_catalog(deployment.IMAGE_CAPABILITY_CATALOG)
+            expected_bindings = {c["destination_family"]: c["component_id"]
+                                 for c in img_catalog.get("components", [])
+                                 if c.get("kind") == "model" and c.get("destination_family")}
         if payload.get("model_bindings", {}) != expected_bindings:
             ladder.append("BIND_MODELS")
     return {

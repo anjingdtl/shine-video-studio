@@ -9,7 +9,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from shine.comfyops import deployment, existing_installation, resource_discovery, setup_preparation, setup_reconcile
+from shine.comfyops import (
+    deployment,
+    existing_installation,
+    resource_discovery,
+    setup_preparation,
+    setup_reconcile,
+    setup_summary,
+)
 from shine.comfyops.models import ComfyInstance
 from shine.comfyops.setup_summary import model_file_presence, record_installation_choice, resolve_installation
 
@@ -507,3 +514,318 @@ def test_machine_card_inherits_the_same_bound_and_validated_contract(installed, 
     assert report["state"] == "READY"
     assert report["next_step"]["action"] == "TRIAL"
     assert report["two_step"]["run"]["state"] == "READY"
+
+
+def test_same_endpoint_honors_explicit_choice_a_then_b_then_a_through_recipe(installed, tmp_path):
+    """R5 CE-1: Switching explicit installation on the same port binds TARGET and RECIPE to final choice."""
+    from shine.comfyops import runtime_configuration
+
+    factory, settings, root_a, catalogs = installed
+    # Build second complete H3 installation root_b sharing the same endpoint port 8188.
+    root_b = _second_installation(tmp_path / "other-8188", catalogs)
+
+    with factory() as db:
+        res_a = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root_a), capability="h3", adopt=True, port=8188)
+        res_b = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root_b), capability="h3", adopt=True, port=8188)
+        id_a = res_a["adoption"]["instance_id"]
+        id_b = res_b["adoption"]["instance_id"]
+        assert id_a != id_b
+
+        record_installation_choice(db, root=str(root_a), port=8188, actor="local-user")
+        db.flush()
+        record_installation_choice(db, root=str(root_b), port=8188, actor="local-user")
+        db.flush()
+        record_installation_choice(db, root=str(root_a), port=8188, actor="local-user")
+        db.commit()
+        resolved = resolve_installation(db, settings)
+        assert Path(resolved["selected"]["root"]).resolve() == root_a.resolve()
+        assert resolved["selected"]["instance_id"] == id_a
+        assert setup_summary._runtime_instance_id(db, settings) is None
+
+    task = {"project_id": None, "task_id": "t-choice", "request": {"capabilities": ["h3"]}}
+    target_step = setup_preparation._step_target(factory, settings, task)
+    assert target_step["status"] == "DONE"
+    assert task["target"]["instance_id"] == id_a
+    recipe_step = setup_preparation._step_recipe(factory, settings, task)
+    assert recipe_step["status"] == "DONE"
+    with factory() as db:
+        assert db.get(setup_preparation.AppSetting, runtime_configuration.CANDIDATE_KEY) is not None
+        recipe = json.loads(runtime_configuration.recipe_path(settings).read_text(encoding="utf-8"))
+        assert Path(recipe["renderer"]["root"]).resolve() == root_a.resolve()
+        assert recipe["renderer"]["installation"]["id"] == id_a
+
+
+def test_moved_legacy_id_excludes_old_endpoint_and_matches_new_endpoint(installed):
+    """R5 CE-2: A moved legacy fixed-ID row no longer claims its previous port."""
+    from shine.comfyops.instances import find_instance_by_endpoint, instance_identity
+
+    factory, settings, root, _ = installed
+    legacy_id = instance_identity("local", 8188)
+    with factory.begin() as db:
+        payload = {
+            "managed": True, "adopted": True, "is_mock": False,
+            "root": str(root), "port": 8188, "url": "http://127.0.0.1:8188",
+        }
+        db.add(ComfyInstance(id=legacy_id, payload=payload,
+                             sha256=existing_installation.graph_hash(payload), status="STOPPED"))
+    with factory() as db:
+        res = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8200)
+        assert res["adoption"]["instance_id"] == legacy_id
+        assert find_instance_by_endpoint(db, 8188) is None
+        moved = find_instance_by_endpoint(db, 8200)
+        assert moved is not None and moved.id == legacy_id
+
+
+def test_invalid_active_selection_yields_to_confirmed_installation(installed):
+    """R5 CE-3: Dead active runtime selection falls back to confirmed user choice."""
+    from shine.comfyops import runtime_configuration
+    from shine.models import AppSetting
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        res = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+        id_valid = res["adoption"]["instance_id"]
+        record_installation_choice(db, root=str(root), port=8188, actor="local-user")
+        db.add(AppSetting(key=runtime_configuration.ACTIVE_KEY, value={
+            "recipe_path": str(root / "missing-recipe.json"),
+            "recipe_sha256": "a" * 64,
+            "installation_id": "dead-removed-instance-id",
+            "identity": {"installation_id": "dead-removed-instance-id"},
+        }))
+        db.commit()
+        assert setup_summary._runtime_instance_id(db, settings) is None
+        assert resolve_installation(db, settings)["selected"]["instance_id"] == id_valid
+
+
+def test_image_evidence_keeps_existing_h3_recipe_identity_and_bidirectional_closure(installed, monkeypatch):
+    """R5 CE-10: Reconciling image evidence on shared instance keeps existing H3 service seal READY."""
+    from shine.comfyops import runtime_configuration
+
+    factory, settings, root, catalogs = installed
+    with factory() as db:
+        adopted = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+        assert adopted["adoption"]["instance_id"]
+    task = {"project_id": None, "task_id": "t-h3", "request": {"capabilities": ["h3"]}}
+    assert setup_preparation._step_target(factory, settings, task)["status"] == "DONE"
+    assert setup_preparation._step_recipe(factory, settings, task)["status"] == "DONE"
+    with factory() as db:
+        cand = db.get(setup_preparation.AppSetting, runtime_configuration.CANDIDATE_KEY).value
+        runtime_configuration.record_service_evidence(
+            db, cand["identity"], {"version": 1, "validated_at": "2026-11-18T10:00:00+08:00"})
+        runtime_configuration.activate_runtime(
+            db, settings, None, cand["identity"]["recipe_sha256"], "local-user")
+
+    with factory() as db:
+        assert runtime_configuration.service_evidence_status(db, settings)["status"] == "READY"
+        img = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="image", adopt=True)
+        assert img["status"] == "RECONCILED"
+        assert runtime_configuration.service_evidence_status(db, settings)["status"] == "READY"
+        task_both = {
+            "project_id": None,
+            "task_id": "t-both",
+            "target": task["target"],
+            "request": {"capabilities": ["h3", "image"]},
+        }
+        assert setup_preparation._step_recipe(factory, settings, task_both)["status"] == "DONE"
+        assert runtime_configuration.service_evidence_status(db, settings)["status"] == "READY"
+
+
+def test_busy_and_port_conflicts_refuse_before_endpoint_reassign(installed, monkeypatch):
+    """R5 CE-16: Running instance, active GPU lease, or external port listener blocks adoption mutation."""
+    from datetime import timedelta
+
+    from fastapi import HTTPException
+
+    from shine.comfyops import adoption
+    from shine.comfyops.models import ResourceLease
+    from shine.models import utcnow
+
+    factory, settings, root, catalogs = installed
+    with factory() as db:
+        adopted = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+        iid = adopted["adoption"]["instance_id"]
+        inst = db.get(ComfyInstance, iid)
+        assert inst.payload["port"] == 8188
+
+    # 1. Running instance refuses endpoint reassignment
+    with factory.begin() as db:
+        db.get(ComfyInstance, iid).status = "RUNNING"
+    with factory() as db:
+        with pytest.raises(HTTPException) as exc1:
+            adoption.adopt_existing_installation(
+                db, settings, path=str(root),
+                snapshot=existing_installation.inspect(str(root), catalogs["h3"])["snapshot"],
+                catalog=catalogs["h3"], port=8200, project_id=None, actor="test",
+            )
+        assert exc1.value.status_code == 409
+        assert db.get(ComfyInstance, iid).payload["port"] == 8188
+
+    # 2. Active GPU lease refuses endpoint reassignment
+    with factory.begin() as db:
+        db.get(ComfyInstance, iid).status = "STOPPED"
+        db.add(ResourceLease(
+            id="lease-busy-1", owner="h3:job-1", budget_mb=8192,
+            exclusive=True, priority=100, status="ACTIVE",
+            expires_at=utcnow() + timedelta(minutes=5),
+        ))
+    with factory() as db:
+        with pytest.raises(HTTPException) as exc2:
+            adoption.adopt_existing_installation(
+                db, settings, path=str(root),
+                snapshot=existing_installation.inspect(str(root), catalogs["h3"])["snapshot"],
+                catalog=catalogs["h3"], port=8200, project_id=None, actor="test",
+            )
+        assert exc2.value.status_code == 409
+        assert db.get(ComfyInstance, iid).payload["port"] == 8188
+
+    # 3. External process occupying target port refuses before mutating port
+    with factory.begin() as db:
+        db.get(ResourceLease, "lease-busy-1").status = "RELEASED"
+    monkeypatch.setattr("shine.comfyops.renderer_supervisor.windows_port_listeners", lambda _port: [43210])
+    with factory() as db:
+        with pytest.raises(HTTPException) as exc3:
+            adoption.adopt_existing_installation(
+                db, settings, path=str(root),
+                snapshot=existing_installation.inspect(str(root), catalogs["h3"])["snapshot"],
+                catalog=catalogs["h3"], port=8200, project_id=None, actor="test",
+            )
+        assert exc3.value.status_code == 409
+        assert db.get(ComfyInstance, iid).payload["port"] == 8188
+
+
+def _task_for_recipe(factory, settings, root, *, capability: str = "h3", port: int = 8188) -> dict:
+    from shine.comfyops import setup_preparation
+
+    with factory() as db:
+        task = setup_preparation.enqueue(
+            db, project_id=None, capabilities=[capability],
+            installation_path=str(root), port=port, settings=settings,
+        )
+    assert setup_preparation._step_target(factory, settings, task)["status"] == "DONE"
+    task["request"]["variant_id"] = None
+    return task
+
+
+def test_generated_adopted_recipe_passes_normal_h3_startup_binding(installed):
+    """R5 closeout: Recipe generation, configuration_identity, and H3 startup share one binding verdict."""
+    from fastapi import HTTPException
+
+    from shine.comfyops import setup_preparation
+    from shine.comfyops.handoff_startup import _installation_evidence
+    from shine.comfyops.managed_recipe import managed_run_binding, recipe_path
+    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.runtime_configuration import configuration_identity, load_runtime_recipe
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adopted = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188,
+        )
+    instance_id = adopted["adoption"]["instance_id"]
+    task = _task_for_recipe(factory, settings, root)
+    assert setup_preparation._step_recipe(factory, settings, task)["status"] == "DONE"
+    renderer = load_runtime_recipe(settings)[0]["renderer"]
+    binding, _ = managed_run_binding(renderer, "synthetic-attempt")
+    assert binding["id"] == instance_id
+    with factory() as db:
+        assert configuration_identity(db, settings, recipe_path(settings))["instance_id"] == instance_id
+        assert _installation_evidence(db, settings, binding, port=8188, cwd=root).id == instance_id
+        with pytest.raises(HTTPException) as wrong_port:
+            _installation_evidence(db, settings, binding, port=8199, cwd=root)
+        assert wrong_port.value.status_code == 409
+        assert wrong_port.value.detail == "COMFY_INSTALLATION_BINDING_CHANGED"
+        assert db.get(ComfyInstance, instance_id) is not None
+
+
+def test_legacy_recipe_stays_valid_after_image_adoption(installed):
+    """R5 closeout: Legacy full-row-hash H3 recipe remains valid after adding Qwen Image adoption evidence."""
+    import json
+
+    from fastapi import HTTPException
+
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops import setup_preparation
+    from shine.comfyops.handoff_startup import _installation_evidence
+    from shine.comfyops.installer import durable_json
+    from shine.comfyops.managed_recipe import managed_run_binding, recipe_path
+    from shine.comfyops.models import ComfyInstance
+    from shine.comfyops.runtime_configuration import configuration_identity, load_runtime_recipe
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adopted = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188,
+        )
+    instance_id = adopted["adoption"]["instance_id"]
+    task = _task_for_recipe(factory, settings, root)
+    assert setup_preparation._step_recipe(factory, settings, task)["status"] == "DONE"
+    path = recipe_path(settings)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    with factory() as db:
+        raw["renderer"]["installation"]["sha256"] = db.get(ComfyInstance, instance_id).sha256
+        durable_json(path, raw)
+        old = configuration_identity(db, settings, path)
+    with factory() as db:
+        img = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="image", adopt=True, port=8188,
+        )
+    assert img["adoption"]["instance_id"] == instance_id
+    renderer = load_runtime_recipe(settings)[0]["renderer"]
+    binding, _ = managed_run_binding(renderer, "synthetic-attempt")
+    with factory() as db:
+        assert configuration_identity(db, settings, path) == old
+        assert _installation_evidence(db, settings, binding, port=8188, cwd=root).id == instance_id
+    # Endpoint drift still invalidates the legacy recipe binding.
+    with factory.begin() as db:
+        inst = db.get(ComfyInstance, instance_id)
+        moved = {**inst.payload, "port": 8199}
+        inst.payload = moved
+        inst.sha256 = graph_hash(moved)
+    with factory() as db:
+        with pytest.raises(HTTPException) as exc:
+            configuration_identity(db, settings, path)
+        assert exc.value.status_code == 409
+
+
+def test_h3_only_recipe_refresh_keeps_existing_image_binding_aligned(installed):
+    """Regenerating H3 recipe alone keeps an already-bound image runtime on the same installation aligned."""
+    from shine.comfyops import setup_preparation
+    from shine.comfyops.image_renderer import image_recipe_state
+    from shine.materialprep import runtime as image_runtime
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adopted_h3 = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188,
+        )
+        setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="image", adopt=True, port=8188,
+        )
+    instance_id = adopted_h3["adoption"]["instance_id"]
+    task_both = _task_for_recipe(factory, settings, root, capability="h3", port=8188)
+    assert setup_preparation._step_recipe(factory, settings, task_both)["status"] == "DONE"
+    assert setup_preparation._step_image_bind(factory, settings, task_both)["status"] == "DONE"
+    initial_cfg = image_runtime.load_config(settings)
+    assert initial_cfg.instance_id == instance_id
+    assert initial_cfg.port == 8188
+
+    # User upgrades or switches port checking ONLY H3 (without checking image):
+    with factory() as db:
+        setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8190,
+        )
+    task_h3_only = _task_for_recipe(factory, settings, root, capability="h3", port=8190)
+    assert setup_preparation._step_recipe(factory, settings, task_h3_only)["status"] == "DONE"
+    recipe = image_recipe_state(settings)
+    refreshed_cfg = image_runtime.load_config(settings)
+    assert refreshed_cfg.instance_id == instance_id
+    assert refreshed_cfg.port == 8190
+    assert refreshed_cfg.base_url == "http://127.0.0.1:8190"
+    assert refreshed_cfg.recipe_sha256 == recipe["recipe_sha256"]

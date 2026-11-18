@@ -129,7 +129,7 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
 
 def managed_installation_pin(db, instance_id: str) -> dict:
     """Pin a physical installation without requiring the default INT8 launch recipe."""
-    from shine.comfyops.instances import installation_identity_matches
+    from shine.comfyops.instances import installation_identity_matches, runtime_binding_sha256
     from shine.comfyops.models import ComfyInstance
 
     instance = db.get(ComfyInstance, instance_id)
@@ -139,7 +139,7 @@ def managed_installation_pin(db, instance_id: str) -> dict:
             or not isinstance(port, int) or not installation_identity_matches(instance, port)
             or instance.sha256 != graph_hash(value)):
         raise ValueError("RESOURCE_INSTANCE_UNVERIFIED")
-    return {"id": instance.id, "sha256": instance.sha256}
+    return {"id": instance.id, "sha256": runtime_binding_sha256(instance)}
 
 
 def validate_resource_plan(db, settings, payload: dict) -> None:
@@ -155,21 +155,30 @@ def validate_resource_plan(db, settings, payload: dict) -> None:
     preview = resolve_resources(db, settings, strategy)
     binding = load_binding(strategy.model_variant_id, fresh=True)
     from shine.comfyops.deployment import _catalog_package_spec, _component_map, _resolve_closure
+    from shine.comfyops.instances import installation_binding_matches
+    from shine.comfyops.models import ComfyInstance
 
     # Phase A plans carry no instance pin; phase B plans must still match the
     # exact managed installation they were frozen against.
     instance_id = context.get("instance_id")
+    instance_pin = context.get("instance_pin")
     if instance_id:
         identity = managed_installation_pin(db, str(instance_id))
+        pin_valid = instance_pin == identity or (
+            isinstance(instance_pin, dict)
+            and set(instance_pin) == {"id", "sha256"}
+            and instance_pin.get("id") == identity["id"]
+            and installation_binding_matches(
+                db, db.get(ComfyInstance, str(instance_id)), instance_pin.get("sha256")
+            )
+        )
     else:
-        identity = None
-        if context.get("instance_pin") is not None:
-            raise ValueError("RESOURCE_PLAN_IDENTITY_CHANGED")
+        pin_valid = instance_pin is None
     if (context.get("strategy_sha256") != strategy.strategy_sha256()
             or context.get("catalog_sha256") != graph_hash(binding.catalog)
             or context.get("manifest_sha256") != graph_hash(binding.manifest)
             or context.get("recipe_sha256") != preview.get("compiled_recipe_sha256")
-            or context.get("instance_pin") != identity
+            or not pin_valid
             or (payload.get("variant") or {}).get("variant_id") != binding.variant_id
             or (payload.get("deployment") or {}).get("catalog_id") != binding.catalog_id
             or not preview.get("download_eligible")):

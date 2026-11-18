@@ -195,6 +195,26 @@ def _project_facts(db, project_id: str | None) -> dict[str, Any] | None:
     }
 
 
+def _workflow_capability_facts() -> dict[str, Any]:
+    from shine.comfy.graph_compiler import (
+        AUDIO_REFERENCE_LIMIT,
+        IMAGE_REFERENCE_LIMIT,
+        TOTAL_REFERENCE_LIMIT,
+        VIDEO_REFERENCE_LIMIT,
+    )
+    from shine.comfyops.mode_capabilities import baseline_profile_names
+
+    return {
+        "mode": "Ref2VA",
+        "min_image_references": 1,
+        "max_image_references": IMAGE_REFERENCE_LIMIT,
+        "max_audio_references": AUDIO_REFERENCE_LIMIT,
+        "max_video_references": VIDEO_REFERENCE_LIMIT,
+        "max_total_references": TOTAL_REFERENCE_LIMIT,
+        "baseline_templates": list(baseline_profile_names()),
+    }
+
+
 def _llm_route_facts(db) -> dict[str, Any]:
     from shine.models import AgentRoute
 
@@ -246,6 +266,12 @@ def build_evidence_snapshot(
                     lambda: _task_facts(db, job_id=job_id, attempt_id=attempt_id), fallback=None)
     project = _capture(provenance, "projects ledger", lambda: _project_facts(db, project_id), fallback=None)
     llm = _capture(provenance, "agent_routes ledger", lambda: _llm_route_facts(db), fallback={"configured": False})
+    workflow_caps = _capture(
+        provenance,
+        "shine.comfy.graph_compiler",
+        _workflow_capability_facts,
+        fallback={"mode": "Ref2VA", "min_image_references": 1, "max_image_references": 9},
+    )
 
     setup: dict[str, Any] = {"verdict": verdict, "runtime": report}
     if isinstance(summary, dict):
@@ -299,6 +325,7 @@ def build_evidence_snapshot(
         },
         "task": task,
         "project": project,
+        "workflow_capabilities": workflow_caps,
         "provenance": provenance,
         "notice": "这是现有权威事实的只读投影，不是新的就绪台账；变化后重新读取原事实。",
     }

@@ -2470,11 +2470,23 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-fab .copilot-dot{position:absolute;top:7px;right:10px;width:7px;height:7px;border-radius:50%;background:var(--warn-soft);box-shadow:0 0 0 2px var(--paper)}
 .copilot-panel{
   position:fixed;right:24px;bottom:80px;z-index:7;display:flex;flex-direction:column;
-  width:min(410px,calc(100vw - 32px));max-height:min(72vh,660px);
+  width:420px;height:560px;min-width:320px;min-height:320px;
+  max-width:calc(100vw - 32px);max-height:calc(100vh - 96px);
   border:1px solid var(--line-2);border-radius:14px;background:var(--paper);
   box-shadow:0 18px 48px var(--fx-rgba60502014);overflow:hidden;
   animation:fade-in .16s ease;font-size:var(--fs-body);color:var(--ink);
 }
+.copilot-resize-edge{position:absolute;z-index:3;user-select:none}
+.copilot-resize-w{top:14px;bottom:0;left:0;width:6px;cursor:ew-resize}
+.copilot-resize-n{top:0;left:14px;right:0;height:6px;cursor:ns-resize}
+.copilot-resize-corner{
+  position:absolute;top:0;left:0;width:16px;height:16px;z-index:4;cursor:nwse-resize;user-select:none;
+}
+.copilot-resize-corner::after{
+  content:"";position:absolute;top:4px;left:4px;width:7px;height:7px;
+  border-top:2px solid var(--faint);border-left:2px solid var(--faint);border-top-left-radius:2px;opacity:.7;
+}
+.copilot-resize-corner:hover::after{border-color:var(--olive);opacity:1}
 .copilot-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:12px 13px 9px;border-bottom:1px solid var(--line-soft);background:var(--surface-2)}
 .copilot-head b{display:flex;align-items:center;gap:6px;font-size:var(--fs-body);letter-spacing:.2px}
 .copilot-head b svg{color:var(--olive-mid)}

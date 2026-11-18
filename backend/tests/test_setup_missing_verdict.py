@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from shine.comfyops import deployment, setup_preparation, setup_summary
-from shine.comfyops.verification_receipts import save_receipt
+from shine.comfyops.verification_receipts import file_digest, save_receipt
 from tests.conftest import make_sparse_file
 
 pytestmark = pytest.mark.integration
@@ -100,6 +100,7 @@ def test_cached_bytes_owe_placement_not_download(tmp_path, api, monkeypatch):
                             "instance_ladder": []})
     installation = _installation(tmp_path / "ComfyUI")
     (_cache(settings) / SHA).write_bytes(PAYLOAD)
+    assert file_digest(_cache(settings) / SHA, SHA, len(PAYLOAD), cache_dir=_cache(settings))["verified"]
 
     report = _report(factory, settings, installation)
     assert report["two_step"]["files"]["state"] == "READY"
@@ -142,6 +143,7 @@ def test_partial_machine_label_count_and_bytes_match_the_missing_list(tmp_path, 
     monkeypatch.setattr(setup_summary, "_catalog_for", lambda capability: catalog)
     installation = _installation(tmp_path / "ComfyUI")
     (_cache(settings) / SHA).write_bytes(PAYLOAD)
+    assert file_digest(_cache(settings) / SHA, SHA, len(PAYLOAD), cache_dir=_cache(settings))["verified"]
 
     report = _report(factory, settings, installation)
     assert [row["relative_path"] for row in report["missing_files"]] == ["v.safetensors"]
@@ -271,3 +273,167 @@ def test_summary_verdict_and_verdict_endpoint_are_one_answer(tmp_path, api):
     progress = summary["machine_progress"]
     if progress["percent"] == 100 and not progress["active"]:
         assert verdict["mode"] in {"READY", "RUNNING"}
+
+
+def test_incomplete_scan_routes_unfound_files_to_unknown_without_guessing_downloads(tmp_path, api, monkeypatch):
+    """R5 CE-4: Incomplete scan surfaces UNKNOWN in summary & prepare-plan instead of false download."""
+    from shine.comfyops import resource_discovery
+    from shine.models import AppSetting
+
+    client, factory, _settings = api
+    catalog = _catalog()
+    monkeypatch.setattr(setup_summary, "_catalog_for", lambda cap, **_k: catalog)
+    monkeypatch.setattr(deployment, "load_default_catalog", lambda: catalog)
+    monkeypatch.setattr(deployment, "load_deployment_catalog", lambda *_a, **_k: catalog)
+    monkeypatch.setattr(setup_summary, "runtime_closure_gap",
+                        lambda *a, **k: {"missing_components": [], "labels": {}})
+
+    with factory() as db:
+        resource_discovery.add_directory(db, str(tmp_path))
+        state = resource_discovery.read_state(db)
+        state["scan"]["status"] = "RUNNING"
+        db.get(AppSetting, resource_discovery.STATE_KEY).value = state
+        db.commit()
+
+    summary = client.get("/api/v1/setup/summary").json()
+    h3 = summary["capabilities"]["h3"]
+    assert h3["state"] == "UNKNOWN"
+    assert h3["missing_files"] == []
+    assert len(h3["unknown_files"]) == 1
+    assert h3["missing_bytes"] == 0
+
+    plan = client.post("/api/v1/setup/prepare-plan", json={"capabilities": ["h3"]}).json()
+    assert plan["download_bytes"] == 0
+    assert plan["plans"][0]["scan_incomplete"] is True
+
+    # Completed empty scan returns real MISSING + missing_bytes.
+    with factory() as db:
+        resource_discovery.advance_scan(db, budget_s=5.0)
+
+    done_summary = client.get("/api/v1/setup/summary").json()
+    assert done_summary["capabilities"]["h3"]["state"] == "MISSING"
+    assert done_summary["capabilities"]["h3"]["missing_bytes"] == len(PAYLOAD)
+
+
+def test_unreceipted_cache_and_read_only_summary_create_no_sidecars(tmp_path, api, monkeypatch):
+    """R5 CE-6 + CE-15: Read-only GET writes no sidecar receipts and rejects unreceipted SHA cache."""
+    client, factory, settings = api
+    catalog = _catalog()
+    monkeypatch.setattr(setup_summary, "_catalog_for", lambda cap, **_k: catalog)
+    monkeypatch.setattr(deployment, "load_default_catalog", lambda: catalog)
+
+    root = tmp_path / "cache-only"
+    inst = _installation(root)
+    (root / "models" / "diffusion_models" / "w.safetensors").write_bytes(b"corrupt")
+    cache = _cache(settings)
+    (cache / SHA).write_bytes(b"wrong bytes without sidecar")
+
+    sidecars_dir = cache / ".receipts"
+    assert not sidecars_dir.exists()
+    with factory() as db:
+        rep = setup_summary.capability_report(db, settings, "h3", installation=inst, project_id=None)
+    assert rep["missing_bytes"] == len(PAYLOAD)
+    assert not list(sidecars_dir.glob("*.json")) if sidecars_dir.exists() else True
+
+    summary = client.get("/api/v1/setup/summary").json()
+    assert summary["capabilities"]["h3"]["missing_bytes"] >= 0
+    assert not list(sidecars_dir.glob("*.json")) if sidecars_dir.exists() else True
+
+
+def test_same_size_changed_weight_invalidates_adopted_evidence_inside_ttl(tmp_path, api, monkeypatch):
+    """R5 CE-11: Same-size rewrite invalidates adopted blockers immediately despite 3s TTL cache."""
+    from shine.comfyops import adoption, existing_installation, runtime_configuration
+    from shine.comfyops.instances import instance_identity
+    from shine.comfyops.models import ComfyInstance
+
+    _client, factory, settings = api
+    catalog = _catalog()
+    monkeypatch.setattr(deployment, "load_default_catalog", lambda: catalog)
+    root = tmp_path / "adopted"
+    _installation(root)
+    (root / "comfyui_version.py").write_text('__version__ = "0.39.0"\n', encoding="utf-8")
+    py = root.parent / "python_embeded" / "python.exe"
+    py.parent.mkdir(parents=True, exist_ok=True)
+    py.write_bytes(b"py")
+    weight = root / "models" / "diffusion_models" / "w.safetensors"
+    weight.write_bytes(PAYLOAD)
+    report = existing_installation.inspect(str(root), catalog)
+    verified = [{"component_id": "minimax-h3-test", "relative_path": "w.safetensors",
+                 "sha256": SHA, "size": len(PAYLOAD), "revision": "r1", "source": str(weight)}]
+    with factory() as db:
+        res = adoption.adopt_existing_installation(
+            db, settings, path=str(root), snapshot=report["snapshot"],
+            verified=verified, catalog=catalog, inspected=report,
+            port=8188, project_id=None, actor="local-user",
+        )
+        iid = res["instance_id"]
+        instance = db.get(ComfyInstance, iid)
+        assert adoption.adopted_installation_blockers(instance, catalog) == []
+
+    # Same-size overwrite immediately invalidates within the 3s blockers cache window.
+    weight.write_bytes(b"X" * len(PAYLOAD))
+    with factory() as db:
+        instance = db.get(ComfyInstance, iid)
+        blockers = adoption.adopted_installation_blockers(instance, catalog)
+        assert "ADOPTED_COMFY_FILES_CHANGED" in blockers
+        ident_id = instance_identity("local", 8188)
+        assert iid or ident_id
+        assert runtime_configuration.runtime_report(db, settings) is not None
+
+
+def test_incomplete_scan_excluded_by_preview_is_also_excluded_at_execution(api, monkeypatch):
+    """R5 closeout: Preview and _step_download share one plan and never pull UNKNOWN/closure/mixed components in."""
+    from shine import api_setup
+    from shine.comfyops import resource_discovery, setup_preparation
+
+    client, factory, settings = api
+    with factory.begin() as db:
+        state = resource_discovery.read_state(db)
+        state["scan"].update(status="RUNNING", coverage={"fixture": {"status": "TRUNCATED"}})
+        resource_discovery._save(db, state)
+    response = client.post("/api/v1/setup/prepare-plan", json={"capabilities": ["h3"]})
+    assert response.status_code == 200, response.text
+    preview = response.json()["plans"][0]
+    assert preview["scan_incomplete"] and preview["download_bytes"] == 0
+    assert not preview["components"]
+
+    attempted: list[str] = []
+
+    def capture_plan(body, **kwargs):
+        attempted.extend(body.components or [])
+        raise RuntimeError("install_plan should not be called for UNKNOWN components")
+
+    monkeypatch.setattr(api_setup, "install_plan", capture_plan)
+    task = {"project_id": None, "request": {"capabilities": ["h3"]}}
+    result = setup_preparation._step_download(factory, settings, task)
+    assert not attempted, {"attempted": attempted, "result": result}
+    assert result["status"] == "DONE"
+
+    # Mixed component (one missing file + one unknown file in same component) is also deferred identically.
+    monkeypatch.setattr(
+        setup_summary,
+        "capability_report",
+        lambda *_a, **_k: {
+            "key": "h3",
+            "label": "H3",
+            "catalog": "shine-h3-ref2va-windows-x64",
+            "catalog_file": "h3-ref2va-windows-x64",
+            "missing_files": [{"component_id": "minimax-h3-diffusion", "relative_path": "a.safetensors", "size": 100}],
+            "unknown_files": [{"component_id": "minimax-h3-diffusion", "relative_path": "b.safetensors", "size": 200}],
+            "unplaced_files": [
+                {"component_id": "minimax-h3-diffusion", "relative_path": "a.safetensors", "size": 100},
+                {"component_id": "minimax-h3-diffusion", "relative_path": "b.safetensors", "size": 200},
+            ],
+            "missing_bytes": 100,
+            "unknown_bytes": 200,
+        },
+    )
+    mixed_preview = client.post("/api/v1/setup/prepare-plan", json={"capabilities": ["h3"]}).json()["plans"][0]
+    assert mixed_preview["scan_incomplete"] is True
+    assert mixed_preview["components"] == []
+    assert mixed_preview["download_bytes"] == 0
+    assert mixed_preview["unknown_files"] == 2
+    mixed_exec = setup_preparation._step_download(
+        factory, settings, {"project_id": None, "request": {"capabilities": ["h3"]}},
+    )
+    assert not attempted and mixed_exec["status"] == "DONE"

@@ -258,3 +258,17 @@ def test_catalog_only_registration_resolves_declared_variant():
     binding = resolve_registration_target(catalog_id='h3-ref2va-windows-x64')
     assert binding.variant_id == 'h3-ref2va-int8-convrot'
     assert binding.catalog_id == 'shine-h3-ref2va-windows-x64'
+
+
+def test_existing_v2_seal_with_audio_superset_still_valid(studio):
+    """R5 closeout: Pre-R5 v2 seals carrying core nodes + optional VHS_LoadAudioUpload remain READY."""
+    from shine.comfyops.runtime_configuration import record_service_evidence, service_evidence_status
+
+    factory, _ = studio
+    identity = _identity_stub()
+    old_nodes = sorted(set(mode_capabilities.core_mode_node_types()) | {'VHS_LoadAudioUpload'})
+    with factory.begin() as db:
+        record_service_evidence(db, identity, {'mode_capabilities': {'required_nodes': old_nodes}})
+    with factory() as db:
+        report = service_evidence_status(db, None, identity=identity)
+    assert report['status'] == 'READY', report

@@ -483,6 +483,34 @@ describe('ShineCopilot', () => {
     const call = stub.calls.find((entry) => /\/support\/actions\/preview$/.test(entry.url));
     expect(call?.body).toMatchObject({ kind: 'production_start' });
   });
+
+  it('allows dragging corner handle to resize width and height and double-click to reset', async () => {
+    window.localStorage.removeItem('shine.copilot.panelSize.v1');
+    Object.defineProperty(window, 'innerWidth', { writable: true, configurable: true, value: 1440 });
+    Object.defineProperty(window, 'innerHeight', { writable: true, configurable: true, value: 960 });
+    const user = userEvent.setup();
+    const { fireEvent } = await import('@testing-library/react');
+    render(<ShineCopilot pageId="setup" pageLabel="基础配置" />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    const dialog = screen.getByRole('dialog', { name: /Shine AI 管家/ });
+    expect(dialog.style.width).toBe('420px');
+    expect(dialog.style.height).toBe('560px');
+
+    const grip = screen.getByTestId('copilot-resize-nw');
+    fireEvent.mouseDown(grip, { clientX: 800, clientY: 300 });
+    fireEvent.mouseMove(window, { clientX: 680, clientY: 200 });
+    fireEvent.mouseUp(window);
+    expect(dialog.style.width).toBe('540px');
+    expect(dialog.style.height).toBe('660px');
+    expect(JSON.parse(window.localStorage.getItem('shine.copilot.panelSize.v1') || '{}')).toEqual({
+      width: 540,
+      height: 660,
+    });
+
+    fireEvent.doubleClick(grip);
+    expect(dialog.style.width).toBe('420px');
+    expect(dialog.style.height).toBe('560px');
+  });
 });
 
 describe('action preview contracts', () => {

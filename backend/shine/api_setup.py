@@ -790,6 +790,11 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         # and the current instance really reads them from the registered
         # directory (an adopted external installation counts, and is labelled).
         entry["bound"] = bool(weights) and all(row.get("consumable") for row in weights)
+        accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
+        entry["selectable_for_preparation"] = True
+        entry["trial_ready"] = bool(entry["installed"] and entry["verified"] and entry["bound"]
+                                    and entry["profiles_registered"] and entry["runtime_validated"])
+        entry["available"] = bool(accepted and entry["trial_ready"])
         facts = (readiness_report or {}).get("facts") or {}
         entry["facts"] = {
             "FILES_FOUND": bool(entry["installed"]),
@@ -812,16 +817,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         }
         entry["next_step"] = (readiness_report or {}).get("next_step")
         entry["production_ready"] = bool((readiness_report or {}).get("production_ready"))
-        accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
-        # Seven decoupled facts.  ``available`` keeps its historic meaning -
-        # the production-start gate - while preparation, trial and production
-        # are told apart so an uninstalled candidate can still be selected and
-        # its resources prepared without unlocking production.
-        entry["selectable_for_preparation"] = True
-        entry["trial_ready"] = bool(entry["installed"] and entry["verified"] and entry["bound"]
-                                    and entry["profiles_registered"] and entry["runtime_validated"])
-        entry["available"] = (accepted and entry["installed"]
-                              and entry["profiles_registered"] and entry["runtime_validated"])
         if not entry["installed"]:
             entry["reason"] = "本机没有这套权重：可选择后下载准备"
         elif not entry["verified"]:
@@ -1180,12 +1175,14 @@ def configuration(body: ConfigurationRequest, actor: Operator, settings: Setting
         db, settings, port=body.port, instance_name=body.instance_name)
     port, port_state = _resolve_service_port(db, port)
     runtime = prepare_review_runtime(settings, deployment.load_default_catalog())
+    target_id = (target or {}).get("instance_id") if int((target or {}).get("port") or 0) == port else None
     result = deployment.generate_configuration(
         db, settings, body.project_id, instance_name=instance_name, port=port,
-        variant_id=body.variant_id, capability=body.capability)
+        variant_id=body.variant_id, capability=body.capability,
+        instance_id=target_id)
     return {**result, "review_runtime_preparation": runtime,
             "requested_port": body.port, "port": port,
-            "installation_id": (target or {}).get("instance_id"),
+            "installation_id": result.get("instance_id") or (target or {}).get("instance_id"),
             "port_identity": port_state.get("identity"),
             "port_selected_by_server": port != body.port}
 
@@ -1873,36 +1870,56 @@ def setup_missing_files(settings: SettingsDep, db: DBSession, capabilities: str 
 
 @router.post("/reconcile")
 def setup_reconcile(body: ReconcileRequest, actor: Operator, settings: SettingsDep, db: DBSession):
-    """Prove what is there and register it.  Idempotent, single-flight.
+    """Queue hash-verification (and optional adoption) on the single preparation task.
 
-    This is the "no more manual registration" route: it reuses existing receipts,
-    hashes only what changed, registers verified components exactly once and -
-    when the person explicitly asked for it - adopts the installation.
+    One executor owns verification and adoption: the route validates the target
+    installation and enqueues the durable ``RECONCILE`` step for the resident
+    Worker instead of running a parallel synchronous write path.
     """
-    from shine.comfyops.setup_reconcile import reconcile_installation
-    from shine.comfyops.setup_summary import resolve_installation
+    from shine.comfyops.setup_preparation import enqueue
+    from shine.comfyops.setup_summary import resolve_installation, resolve_setup_port
 
     if body.project_id:
         from shine.services import require_project
 
         require_project(db, body.project_id)
-    path = body.path
-    port = body.port
-    if not path:
-        resolved = resolve_installation(db, settings, discovered=_discovered_roots(settings, db))
-        selected = resolved.get("selected") or {}
-        path = selected.get("root")
-        port = port or selected.get("port")
+    discovered = [] if body.path else _discovered_roots(settings, db)
+    resolved = resolve_installation(db, settings, path=body.path, discovered=discovered)
+    if resolved.get("choice_required") and not body.path:
+        raise HTTPException(409, "INSTALLATION_SELECTION_REQUIRED")
+    selected = resolved.get("selected") or {}
+    path = body.path or selected.get("root")
     if not path:
         raise HTTPException(409, {
             "code": "NO_INSTALLATION_FOUND",
             "message": "这台电脑上还没有可用的 ComfyUI 安装；先准备环境或确认已有安装。",
         })
-    db.rollback()  # hashing and adoption open their own transaction boundaries
-    return reconcile_installation(
-        db, settings, path=path, project_id=body.project_id, capability=body.capability,
-        adopt=body.adopt, port=port, actor=actor, variant_id=body.variant_id,
+    port = (
+        resolve_setup_port(db, settings, selected, body.port)
+        if body.adopt
+        else (body.port or selected.get("port"))
     )
+    value = enqueue(
+        db,
+        project_id=body.project_id,
+        capabilities=[body.capability],
+        installation_path=str(path),
+        port=port,
+        variant_id=body.variant_id,
+        verify_runtime=False,
+        actor=actor,
+        settings=settings,
+        deep_scan=False,
+        adopt=body.adopt,
+        reconcile_only=True,
+    )
+    db.commit()
+    return {
+        "status": value.get("status"),
+        "task_id": value.get("task_id"),
+        "steps": [row["id"] for row in value.get("steps") or []],
+        "message": value.get("message"),
+    }
 
 
 @router.post("/manual-files/reconcile")
@@ -1930,6 +1947,39 @@ def setup_installation_choice(body: InstallationChoiceRequest, actor: Operator, 
     return {"status": "CONFIRMED", **value}
 
 
+def _build_prepare_plan(
+    body: PreparePlanRequest,
+    settings,
+    db,
+    *,
+    discovered: list[str] | None = None,
+) -> dict:
+    """Single shared prepare-plan projection used by HTTP and Copilot preflight."""
+    from shine.comfyops.setup_preparation import plan_prepare_downloads
+    from shine.services import require_project
+
+    if body.project_id:
+        require_project(db, body.project_id)
+    roots = _discovered_roots(settings, db) if discovered is None else discovered
+    bundle = plan_prepare_downloads(
+        db,
+        settings,
+        capabilities=list(body.capabilities),
+        installation_path=body.installation_path,
+        project_id=body.project_id,
+        variant_id=body.variant_id,
+        verify_runtime=body.verify_runtime,
+        discovered=roots,
+    )
+    return {
+        **bundle,
+        "plans": [
+            {k: v for k, v in row.items() if not k.startswith("_")}
+            for row in bundle["plans"]
+        ],
+    }
+
+
 @router.post("/prepare-plan")
 def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSession):
     """What this authorization would change, before anything is approved.
@@ -1940,66 +1990,7 @@ def setup_prepare_plan(body: PreparePlanRequest, settings: SettingsDep, db: DBSe
     fetched.  The actual download plan is still created by ``POST
     /install-plan`` - one approval entry, not two.
     """
-    from shine.comfyops.setup_summary import capability_report, resolve_installation, runtime_closure_gap
-    from shine.services import require_project
-
-    if body.project_id:
-        require_project(db, body.project_id)
-    resolved = resolve_installation(db, settings, path=body.installation_path,
-                                    discovered=_discovered_roots(settings, db))
-    selected = resolved.get("selected") or {}
-    gap = runtime_closure_gap(db, settings, selected)
-    reports = {capability: capability_report(db, settings, capability, installation=selected,
-                                             project_id=body.project_id,
-                                             variant_id=body.variant_id if capability == "h3" else None)
-               for capability in body.capabilities}
-    plans = []
-    for capability, report in reports.items():
-        missing = report.get("missing_files") or []
-        # 计划组件 = 需外取 + 需本地落位（同源一次分类）；下载体积只算需外取
-        # 的字节，与卡片「缺少 N 个文件（X GiB）」同一个数，不再各算一套。
-        unplaced = report.get("unplaced_files") or []
-        components = sorted({row["component_id"] for row in missing}
-                            | {row["component_id"] for row in unplaced})
-        closure: set[str] = set()
-        if capability == "h3":
-            # One plan covers the bare-machine closure: weights plus the runtime
-            # (source / wheels / node packs) the instance ladder will install.
-            closure = set(gap["missing_components"])
-            components = sorted(set(components) | closure)
-        from shine.comfyops.setup_preparation import _catalog_file_for
-
-        catalog = deployment.load_deployment_catalog(_catalog_file_for(capability, body.variant_id, report))
-        cmap = deployment._component_map(catalog)
-        plans.append({
-            "capability": capability,
-            "label": report["label"],
-            "catalog": report.get("catalog"),
-            "download_bytes": int(report.get("missing_bytes") or 0) + sum(
-                int(f.get("size") or 0)
-                for cid in closure for f in cmap.get(cid, {}).get("files", [])),
-            "components": components,
-            "files": len(missing) + sum(len(cmap.get(cid, {}).get("files", [])) for cid in closure),
-            "needs_download": bool(missing),
-            "needs_recipe": capability in {"h3", "image"},
-            "starts_services": bool(body.verify_runtime) and capability == "h3",
-            "changes_external_installation": False,
-        })
-    return {
-        "project_id": body.project_id,
-        "installation": resolved,
-        "runtime_gap": gap,
-        "capabilities": reports,
-        "plans": plans,
-        "download_bytes": sum(row["download_bytes"] for row in plans),
-        "will_start_gpu": any(row["starts_services"] for row in plans),
-        "will_modify_user_comfyui": False,
-        "authorization": {
-            "summary": "本次只下载缺失的固定文件、登记已核验的本机文件并生成运行配置；"
-                       "不会删除你的模型，也不会终止别人的 ComfyUI。",
-            "verify_runtime": body.verify_runtime,
-        },
-    }
+    return _build_prepare_plan(body, settings, db)
 
 
 @router.post("/prepare/execute")

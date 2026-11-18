@@ -247,3 +247,114 @@ def test_tool_repair_is_one_step_of_the_single_preparation_task(env, monkeypatch
     assert called["plan_id"] == "p"
     assert called["actor"] == "worker:setup"
     assert "TOOL_REPAIR" in setup_preparation._steps_for(["h3"], verify_runtime=True)
+
+
+def test_stale_claim_of_same_task_cannot_overwrite_new_claim(env):
+    """R5 CE-12: Stale worker claim of the same task fails ClaimLostError and never overwrites new lease."""
+    from datetime import timedelta
+
+    from shine.models import utcnow
+
+    _client, factory, _, settings = env
+    with factory() as db:
+        setup_preparation.enqueue(db, project_id=None, capabilities=["h3"], settings=settings)
+
+    claim1 = setup_preparation._claim(factory, "worker-1")
+    assert claim1 is not None and claim1.get("claim_token")
+    # Expire lease of worker-1 so worker-2 steals the claim with a fresh claim_token.
+    with factory.begin() as db:
+        row = db.get(setup_preparation.AppSetting, setup_preparation.TASK_KEY)
+        val = dict(row.value)
+        val["lease_expires_at"] = (utcnow() - timedelta(minutes=10)).isoformat()
+        row.value = val
+
+    claim2 = setup_preparation._claim(factory, "worker-2")
+    assert claim2 is not None
+    assert claim2["claim_token"] != claim1["claim_token"]
+
+    claim1["message"] = "stale overwrite attempt"
+    setup_preparation._save(factory, claim1)
+    with pytest.raises(setup_preparation.ClaimLostError):
+        setup_preparation._assert_claim(factory, claim1)
+    with factory() as db:
+        latest = setup_preparation.read_task(db)
+        assert latest["claim_token"] == claim2["claim_token"]
+        assert latest["lease_owner"] == "worker-2"
+
+
+def test_superseded_step_cannot_publish_candidate(env, monkeypatch):
+    """R5 CE-13: Superseded _step_recipe aborts before publishing CANDIDATE_KEY."""
+    from shine.comfyops import deployment, runtime_configuration
+
+    _client, factory, tmp_path, settings = env
+    root = tmp_path / "comfy"
+    (root / "comfy").mkdir(parents=True)
+    (root / "main.py").write_text("# test\n", encoding="utf-8")
+    with factory() as db:
+        setup_preparation.enqueue(db, project_id=None, capabilities=["h3"],
+                                  installation_path=str(root), settings=settings)
+    claimed = setup_preparation._claim(factory, "worker-1")
+
+    orig_gen = deployment.generate_configuration
+
+    def wrapped_gen(db, *args, claim_guard=None, **kwargs):
+        # Simulate another request superseding the task right before the claim gate commits.
+        with factory() as other_db:
+            setup_preparation.enqueue(other_db, project_id=None, capabilities=["image"], settings=settings)
+        if claim_guard is not None:
+            claim_guard(db)
+        return orig_gen(db, *args, claim_guard=claim_guard, **kwargs)
+
+    monkeypatch.setattr(deployment, "generate_configuration", wrapped_gen)
+    claimed["target"] = {"root": str(root), "port": 8188, "instance_id": "i1"}
+    with pytest.raises(setup_preparation.ClaimLostError):
+        setup_preparation._step_recipe(factory, settings, claimed)
+    with factory() as db:
+        assert db.get(setup_preparation.AppSetting, runtime_configuration.CANDIDATE_KEY) is None
+
+
+def test_bare_image_download_and_instance_steps_avoid_h3_qualification_gate(env, monkeypatch):
+    """R5 CE-9: Standalone image DOWNLOAD -> INSTANCE runs without H3 variant qualification."""
+    from shine import api_setup
+    from shine.comfyops import deployment, host_env, variants
+
+    _client, factory, tmp_path, settings = env
+    monkeypatch.setattr("shine.comfyops.storage.disk_info", lambda *_a, **_k: {"free_bytes": 10**12})
+    monkeypatch.setattr(
+        host_env, "probe_host_facts",
+        lambda *_a, **_k: {
+            "platform": {"os": "windows", "arch": "x64"},
+            "gpus": [{"name": "RTX 4070", "vram_mb": 12288, "compute_capability": "8.9"}],
+            "ram": {"ram_mb": 32768},
+            "tools": {"ffmpeg": True, "git": True, "uv": True},
+        },
+    )
+    monkeypatch.setattr(
+        variants, "qualify",
+        lambda *_a, **_k: pytest.fail("H3 host qualification must not run for standalone image"),
+    )
+    queued_plans: list[dict] = []
+    orig_install_plan = api_setup.install_plan
+
+    def spy_install_plan(*, body, settings, db):
+        queued_plans.append({"catalog": body.catalog, "components": list(body.components)})
+        return orig_install_plan(body=body, settings=settings, db=db)
+
+    monkeypatch.setattr(api_setup, "install_plan", spy_install_plan)
+    monkeypatch.setattr("shine.comfyops.local.queue_install_attempt", lambda *_a, **_k: ("attempt-1", False))
+    task = {"project_id": None, "task_id": "t-img", "request": {"capabilities": ["image"]}, "downloads": {}}
+    dl = setup_preparation._step_download(factory, settings, task)
+    assert dl["status"] == "PENDING", dl
+    assert "runtime" in task["downloads"]
+    assert any({"comfyui", deployment.WHEEL_COMPONENT_ID} <= set(p["components"]) for p in queued_plans)
+
+    seen_inst_catalogs: list[dict] = []
+    monkeypatch.setattr(
+        "shine.comfyops.deployment.next_instance_plan",
+        lambda _db, _s, catalog, _pid, **_k: seen_inst_catalogs.append(catalog) or (None, "READY"),
+    )
+    inst = setup_preparation._step_instance(factory, settings, task)
+    assert inst["status"] == "DONE"
+    assert seen_inst_catalogs
+    ids = {c["component_id"] for c in seen_inst_catalogs[0]["components"]}
+    assert "comfyui" in ids

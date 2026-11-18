@@ -232,3 +232,164 @@ def test_a_stopped_worker_is_recorded_offline_at_once(tmp_path, monkeypatch):
         row = db.get(WorkerInstance, "worker-x")
         assert row.status == "stopped"
     engine.dispose()
+
+
+def test_late_supervisor_validation_cannot_affect_newer_task_or_lease(tmp_path, monkeypatch):
+    """R5 CE-17: Stale supervisor validation (both fail and success) leaves newer task/lease untouched."""
+    from shine.comfyops import runtime_configuration, setup_preparation
+    from shine.db import Base, make_engine, make_session_factory
+    from shine.models import AppSetting
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database_url = f"sqlite:///{(data_dir / 'shine.db').as_posix()}"
+    monkeypatch.setenv("SHINE_DATABASE_URL", database_url)
+    engine = make_engine(database_url)
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    with factory.begin() as db:
+        db.add(AppSetting(key=setup_preparation.TASK_KEY, value={
+            "task_id": "new-task",
+            "claim_token": "new-claim-token",
+            "status": "RUNNING",
+            "current": "VALIDATE",
+            "lease_owner": "worker-new",
+            "steps": [{"id": "VALIDATE", "status": "PENDING"}],
+        }))
+        db.add(AppSetting(key=runtime_configuration.CANDIDATE_KEY, value={
+            "recipe_sha256": "b" * 64,
+            "identity": {"recipe_sha256": "b" * 64},
+            "project_id": None,
+        }))
+    engine.dispose()
+
+    # 1. Late failure from an older task/claim must not mark new-task FAILED.
+    monkeypatch.setattr(supervisor, "_stop_worker", lambda _d: (200, {}))
+    monkeypatch.setattr(supervisor, "_start_worker", lambda _d: (200, {}))
+    monkeypatch.setattr(
+        "shine.comfyops.service_validation.validate_services",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LATE_BOOM")),
+    )
+    supervisor._validate_services_background(
+        data_dir,
+        delegation={
+            "task_id": "old-task",
+            "claim_token": "old-claim",
+            "recipe_sha256": "a" * 64,
+        },
+    )
+
+    # 2. Late success from an older task/claim/recipe must not mutate new-task or activate.
+    monkeypatch.setattr(
+        "shine.comfyops.service_validation.validate_services",
+        lambda *a, **k: {"status": "READY", "workflow_profiles": []},
+    )
+    monkeypatch.setattr(
+        "shine.comfyops.runtime_configuration.activate_runtime",
+        lambda *a, **k: pytest.fail("stale delegation must not activate newer recipe"),
+    )
+    supervisor._validate_services_background(
+        data_dir,
+        delegation={
+            "task_id": "new-task",
+            "claim_token": "stale-claim-token",
+            "recipe_sha256": "b" * 64,
+        },
+    )
+
+    engine = make_engine(database_url)
+    factory = make_session_factory(engine)
+    with factory() as db:
+        task = db.get(AppSetting, setup_preparation.TASK_KEY).value
+        assert task["task_id"] == "new-task"
+        assert task["claim_token"] == "new-claim-token"
+        assert task["status"] == "RUNNING"
+        assert task["lease_owner"] == "worker-new"
+    engine.dispose()
+
+
+def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, monkeypatch):
+    """R5 closeout: Worker releasing lease after HTTP 202 VALIDATING keeps same delegation valid for Supervisor."""
+    from shine.comfyops import runtime_configuration, service_validation, setup_preparation
+    from shine.config import Settings
+    from shine.db import Base, make_engine, make_session_factory
+    from shine.models import AppSetting
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database_url = f"sqlite:///{(data_dir / 'shine.db').as_posix()}"
+    monkeypatch.setenv("SHINE_DATABASE_URL", database_url)
+    settings = Settings(data_dir=data_dir, database_url=database_url)
+    engine = make_engine(database_url)
+    Base.metadata.create_all(engine)
+    factory = make_session_factory(engine)
+    recipe_sha = "c" * 64
+    with factory.begin() as db:
+        db.add(AppSetting(key=setup_preparation.TASK_KEY, value={
+            "task_id": "setup-del-1",
+            "project_id": None,
+            "status": "QUEUED",
+            "current": "VALIDATE",
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "request": {"capabilities": ["h3"], "verify_runtime": True},
+            "result": {"recipe_sha256": recipe_sha},
+            "steps": [
+                {"id": "RECIPE", "label": "生成运行配方", "status": "DONE", "detail": "ok"},
+                {"id": "VALIDATE", "label": "核对运行合同", "status": "PENDING", "detail": None},
+            ],
+        }))
+        db.add(AppSetting(key=runtime_configuration.CANDIDATE_KEY, value={
+            "version": 1,
+            "project_id": None,
+            "identity": {"recipe_sha256": recipe_sha},
+        }))
+
+    monkeypatch.setattr(
+        runtime_configuration,
+        "runtime_report",
+        lambda db, _s: {
+            "status": "CANDIDATE_READY",
+            "services_verified": False,
+            "candidate": {"recipe_sha256": recipe_sha, "project_id": None},
+        },
+    )
+    delegations = []
+
+    def accept_http(_settings, delegation):
+        delegations.append(delegation)
+        return {"status": "VALIDATING"}
+
+    monkeypatch.setattr(setup_preparation, "_delegate_supervisor_validation", accept_http)
+    assert setup_preparation.advance(factory, settings, "setup-worker") == "setup:VALIDATE:waiting"
+    assert len(delegations) == 1
+    delegation = delegations[0]
+    assert delegation["task_id"] == "setup-del-1"
+    assert delegation["claim_token"]
+    # Another worker tick while delegation is active must not steal/clobber the pending delegation.
+    assert setup_preparation.advance(factory, settings, "setup-worker") is None
+
+    called = []
+    monkeypatch.setattr(supervisor, "_settings", lambda _d: settings)
+    monkeypatch.setattr(supervisor, "_stack_blockers", lambda _d: [])
+    monkeypatch.setattr(supervisor, "_stop_worker", lambda _d: (200, {}))
+    monkeypatch.setattr(supervisor, "_start_worker", lambda _d: (200, {}))
+    monkeypatch.setattr(
+        service_validation,
+        "validate_services",
+        lambda *a, **k: (called.append("validated") or {"status": "READY", "workflow_profiles": []}),
+    )
+    monkeypatch.setattr(
+        runtime_configuration,
+        "activate_runtime",
+        lambda *a, **k: called.append("activated"),
+    )
+    result = supervisor._validate_services_background(data_dir, delegation)
+    with factory() as db:
+        current = setup_preparation.read_task(db)
+    engine.dispose()
+    assert result["status"] == "READY"
+    assert called == ["validated", "activated"]
+    assert current["task_id"] == "setup-del-1"
+    assert current["status"] == "DONE"
+    assert next(s["status"] for s in current["steps"] if s["id"] == "VALIDATE") == "DONE"

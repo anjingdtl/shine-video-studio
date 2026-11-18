@@ -70,21 +70,44 @@ def _graph_node_types(graph: Any) -> set[str]:
 
 
 def core_mode_node_types() -> set[str]:
-    """Node classes a renderer must expose to serve the baseline Ref2VA mode.
+    """Node classes a renderer must expose to serve image-only Ref2VA mode.
 
-    Derived from the audited repository templates of the default catalog so
-    the statement is about this installation's baseline mode, not about one
-    project's database rows.  Templates of other model variants (candidate
-    low-VRAM graphs, project-local wide graphs) are not part of the baseline:
-    their extra nodes are checked when a shot actually compiles them.
+    Derived from the audited non-audio repository templates of the default
+    catalog so image-only Ref2VA never blocks on optional audio-only nodes
+    (e.g. ``VHS_LoadAudioUpload``).  Audio shots, LoRA extras, second-pass,
+    and candidate graphs check their own compiled nodes per shot against live
+    ``object_info``.
     """
     types: set[str] = set()
     files = _profile_files()
-    for name in baseline_profile_names():
+    non_audio = [name for name in baseline_profile_names() if "1aud" not in name]
+    selected = non_audio or baseline_profile_names()
+    for name in selected:
         raw = files.get(name)
         if raw:
             types |= _graph_node_types(raw.get("graph"))
+    if types:
+        types.discard("VHS_LoadAudioUpload")
     return types
+
+
+def sealed_mode_nodes_compatible(sealed: Any) -> bool:
+    """True when a v2 seal proves every current core Ref2VA node class.
+
+    Pre-R5 v2 seals included optional baseline audio nodes (``VHS_LoadAudioUpload``
+    from the ``1aud`` baseline template) alongside all current core nodes; those
+    seals proved a strict superset of today's core contract and remain valid.
+    Missing core nodes or arbitrary removed node classes still invalidate the seal.
+    """
+    if not isinstance(sealed, list) or not all(isinstance(item, str) and item for item in sealed):
+        return False
+    core = core_mode_node_types()
+    sealed_set = set(sealed)
+    return (
+        len(sealed_set) == len(sealed)
+        and core.issubset(sealed_set)
+        and (sealed_set - core).issubset({"VHS_LoadAudioUpload"})
+    )
 
 
 def template_contract(raw: dict[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,7 @@ import {
   ShieldCheck, Sparkles, Trash2, UserRound,
 } from 'lucide-react';
 
-import { api } from '../api';
+import { api, json, type AgentRoutePreview, type LlmOverview, type ProviderProfile } from '../api';
 import {
   DEFAULT_COPILOT_PROFILE,
   applyCopilotProfile,
@@ -115,9 +115,14 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
   const typed = useRef({ nickname: false, salutation: false, startup: false });
   const [identityError, setIdentityError] = useState('');
   const [startupError, setStartupError] = useState('');
-  const [saving, setSaving] = useState<'identity' | 'startup' | null>(null);
+  const [saving, setSaving] = useState<'identity' | 'startup' | 'llm' | null>(null);
   const [notice, setNotice] = useState('');
   const [error, setError] = useState('');
+  const [llmProfiles, setLlmProfiles] = useState<ProviderProfile[]>([]);
+  const [copilotProfileId, setCopilotProfileId] = useState('');
+  const [savedCopilotProfileId, setSavedCopilotProfileId] = useState('');
+  const [routeRevision, setRouteRevision] = useState('');
+  const [llmError, setLlmError] = useState('');
 
   const [status, setStatus] = useState<MemoryStatus | null>(null);
   const [memories, setMemories] = useState<MemoryRow[]>([]);
@@ -190,10 +195,24 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
     }
   }, [scopeFilter, projectFilter, appliedQuery]);
 
+  const loadLlmRoute = useCallback(async () => {
+    try {
+      const overview = await api<LlmOverview>('/llm/overview');
+      setLlmProfiles(overview.profiles || []);
+      setRouteRevision(overview.route_revision || '');
+      const current = (overview.routes || []).find((row) => row.role === 'support_agent')?.provider_profile_id || '';
+      setCopilotProfileId(current);
+      setSavedCopilotProfileId(current);
+    } catch {
+      // Older test stubs may not register /llm/overview; keep rest of page working.
+    }
+  }, []);
+
   useEffect(() => {
     void loadProfile();
     void loadStatus();
-  }, [loadProfile, loadStatus]);
+    void loadLlmRoute();
+  }, [loadProfile, loadStatus, loadLlmRoute]);
 
   useEffect(() => {
     void loadMemories();
@@ -245,6 +264,33 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
       setError('');
     } catch (err) {
       setIdentityError(err instanceof Error ? err.message : '身份设置没有保存。');
+    } finally {
+      setSaving(null);
+    }
+  };
+
+  const saveCopilotLlm = async () => {
+    setSaving('llm');
+    setLlmError('');
+    try {
+      const preview = await api<AgentRoutePreview>('/agent-routes/preview', json('POST', {
+        updates: [{ role: 'support_agent', provider_profile_id: copilotProfileId || null }],
+      }));
+      if (!preview.can_apply) {
+        const msg = preview.blockers?.[0]?.message || '当前不能保存模型分配，请先在「基础配置 → 文本模型」完成模型连接检查。';
+        setLlmError(msg);
+        return;
+      }
+      await api('/agent-routes/batch', json('PUT', {
+        updates: preview.updates,
+        expected_revision: preview.expected_revision || routeRevision,
+      }));
+      await loadLlmRoute();
+      window.dispatchEvent(new CustomEvent('shine:copilot-llm-updated'));
+      setNotice(copilotProfileId ? 'AI 管家解释模型已保存并立即生效。' : '已切换为纯离线规则诊断模式。');
+      setError('');
+    } catch (err) {
+      setLlmError(err instanceof Error ? err.message : '模型分配没有保存。');
     } finally {
       setSaving(null);
     }
@@ -473,6 +519,59 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
             <button type="button" className="btn-primary" onClick={() => void saveIdentity()} disabled={saving === 'identity'}>
               {saving === 'identity' ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
               保存身份
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section className="card section-card copilot-settings-card" id="copilot-llm">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">解释模型（与 Agent 路由同一台账）</div>
+            <h2>选择用于回答问题与解释诊断的文本模型</h2>
+            <p>与「基础配置 → 文本模型 → AI 管家（support_agent）」读写同一条分配记录；保存后立即对下一条提问生效。</p>
+          </div>
+          <span className="section-icon"><Sparkles size={16} /></span>
+        </div>
+        <label className="copilot-field">
+          <span>AI 管家使用的模型</span>
+          <select
+            aria-label="AI 管家使用的模型"
+            value={copilotProfileId}
+            onChange={(event) => {
+              setCopilotProfileId(event.target.value);
+              setLlmError('');
+            }}
+          >
+            <option value="">未分配（使用本机离线规则诊断与知识库）</option>
+            {llmProfiles.map((row) => (
+              <option
+                key={row.id}
+                value={row.id}
+                disabled={(!row.enabled || row.kind === 'mock' || !row.model.trim()) && row.id !== savedCopilotProfileId}
+              >
+                {row.name} · {row.model || '缺少 Model ID'}{!row.enabled ? '（已停用）' : row.kind === 'mock' ? '（演示模型）' : ''}
+              </option>
+            ))}
+          </select>
+          <small>
+            {savedCopilotProfileId
+              ? `当前生效：${llmProfiles.find((r) => r.id === savedCopilotProfileId)?.name || '已分配模型'}`
+              : '当前生效：离线规则模式（不消耗 Token）'}
+          </small>
+        </label>
+        {llmError && <p className="copilot-settings-error" role="alert">{llmError}</p>}
+        <div className="section-footer">
+          <span><ShieldCheck size={13} /> 模型仅做回答与证据解释，不能绕过预览确认或修改源码。</span>
+          <div>
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => void saveCopilotLlm()}
+              disabled={saving === 'llm' || copilotProfileId === savedCopilotProfileId}
+            >
+              {saving === 'llm' ? <Loader2 size={14} className="spin" /> : <Check size={14} />}
+              保存模型选择
             </button>
           </div>
         </div>

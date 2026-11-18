@@ -24,9 +24,11 @@ MAX_PLAN_STEPS = 8
 SHOOTABLE_STATES = {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING"}
 
 _INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("setup", ("准备环境", "准备制作环境", "补齐环境", "补齐模型", "补齐缺失文件", "下载缺失文件",
+               "修复制作环境", "核验已有文件", "登记已有文件")),
+    ("materials", ("缺失素材", "缺素材", "素材没准备", "备料", "素材准备", "准备素材", "生成素材")),
     ("production", ("准备", "开拍", "开始生成", "开始拍摄", "开始生产", "把它拍", "生成第一集", "拍第一集",
                     "前置条件")),
-    ("materials", ("缺失素材", "缺素材", "素材没准备", "备料", "素材准备")),
     ("release", ("释放", "显存不足", "显卡", "GPU", "占用资源", "显卡显存")),
     ("parameters", ("调参", "参数", "生产策略", "策略", "二次采样", "RelayVSR", "超分", "采样", "画质")),
     ("literary_scripts", ("分集剧本", "文学剧本", "分集文学", "生成剧本", "剧本生成")),
@@ -870,6 +872,123 @@ def _switch_plan(db, *, request: str, project_id: str) -> dict[str, Any]:
     }
 
 
+def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[str, Any]:
+    from shine.comfyops.setup_summary import summary as build_setup_summary
+    from shine.support.occupancy import resource_occupancy
+
+    summary = build_setup_summary(db, settings, project_id=project_id, variant_id=None, discovered=[])
+    verdict = summary.get("verdict") or {}
+    capabilities = summary.get("capabilities") or {}
+    occupancy = resource_occupancy(db)
+    lowered = (request or "").casefold()
+    evidence = [
+        f"生产裁决：{verdict.get('label') or verdict.get('mode') or '未知'}"
+        f"（{verdict.get('code') or '无错误码'}）"
+    ]
+    for key, row in capabilities.items():
+        if isinstance(row, dict) and row.get("missing_count"):
+            evidence.append(f"{row.get('label') or key}：缺 {row.get('missing_count')} 个文件")
+
+    steps: list[dict[str, Any]] = [
+        {
+            "order": 1,
+            "title": "读取制作环境与能力就绪事实",
+            "capability_id": "read_setup_verdict",
+            "state": "READ_ONLY",
+            "state_label": _STEP_LABELS["READ_ONLY"],
+            "evidence": evidence[:6],
+            "readback": "GET /api/v1/setup/summary",
+        }
+    ]
+    if any(word in lowered for word in ("核验", "登记已有")):
+        cap = "image" if "出图" in lowered else "h3"
+        step_state = "BLOCKED" if occupancy["busy"] else "READY"
+        steps.append(
+            {
+                "order": 2,
+                "title": "核验并登记已有本地文件",
+                "capability_id": "setup_reconcile",
+                "state": step_state,
+                "state_label": _STEP_LABELS[step_state],
+                "action": {
+                    "kind": "setup_reconcile",
+                    "params": {"capability": cap, "adopt": False},
+                },
+                "readback": "GET /api/v1/setup/summary",
+                "requires_confirmation": "PREVIEW",
+                "reason": "交给后台整备 Worker 执行字节核验与登记，不产生重复下载。",
+            }
+        )
+        return {
+            "intent": "SETUP",
+            "summary": "读取制作环境台账，并在预览确认后交给后台 Worker 核验登记已有文件。",
+            "project_id": project_id,
+            "steps": steps,
+            "requires_input": [],
+            "notice": "只核验登记已有字节，不会自动发起网络下载。",
+            "bounded": True,
+        }
+
+    explicit_map = (
+        ("h3", ("h3", "视频")),
+        ("image", ("出图", "qwen")),
+        ("vlm", ("审片", "vlm")),
+        ("asr", ("语音", "asr")),
+        ("relayvsr", ("精修", "relayvsr", "超分")),
+    )
+    wanted = [
+        cap
+        for cap, words in explicit_map
+        if any(word in lowered for word in words)
+    ]
+    if not wanted:
+        wanted = [
+            key
+            for key, row in capabilities.items()
+            if isinstance(row, dict)
+            and not row.get("optional")
+            and (row.get("missing_count") or not (row.get("facts") or {}).get("PRODUCTION_READY"))
+        ]
+    if not wanted and verdict.get("mode") == "REAL_READY":
+        return {
+            "intent": "SETUP",
+            "summary": "本机必选制作环境已就绪，无需重复准备；如需可选增强可显式指定能力。",
+            "project_id": project_id,
+            "steps": steps,
+            "requires_input": [],
+            "notice": "不会在环境已就绪时隐式重跑整备或下载可选模块。",
+            "bounded": True,
+        }
+    if not wanted:
+        wanted = ["h3", "image"]
+    step_state = "BLOCKED" if occupancy["busy"] else "READY"
+    steps.append(
+        {
+            "order": 2,
+            "title": "准备并核验指定制作环境能力",
+            "capability_id": "setup_repair",
+            "state": step_state,
+            "state_label": _STEP_LABELS[step_state],
+            "action": {
+                "kind": "setup_repair",
+                "params": {"capabilities": wanted, "verify_runtime": True},
+            },
+            "readback": "GET /api/v1/setup/prepare/{task_id}",
+            "requires_confirmation": "EXECUTE_GUARDED",
+            "reason": "复用统一整备任务队列与下载计划裁决；仍需先预览下载清单并确认。",
+        }
+    )
+    return {
+        "intent": "SETUP",
+        "summary": f"按同一份环境台账准备 {', '.join(wanted)}（需预览确认后由后台整备 Worker 执行）。",
+        "project_id": project_id,
+        "steps": steps,
+        "requires_input": [],
+        "notice": "预览确认前不会写入配置或发起下载。",
+        "bounded": True,
+    }
+
+
 def _build_plan_raw(
     db,
     settings,
@@ -882,6 +1001,8 @@ def _build_plan_raw(
     intent = detect_intent(request or "")
     if project_id is None:
         project_id = _only_project(db)
+    if intent == "setup":
+        return _setup_plan(db, settings, request=request, project_id=project_id)
     if intent == "production":
         if not project_id:
             return _project_required("PRODUCTION", "拍摄必须绑定一个真实项目。")

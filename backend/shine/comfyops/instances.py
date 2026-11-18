@@ -97,16 +97,20 @@ def installation_identity_matches(instance, port) -> bool:
     """One predicate for every enforcement point (R5 B1).
 
     A row proves it owns this endpoint either the legacy way (its id is the
-    port identity) or the stable way (it is an adopted installation whose
-    recorded endpoint is this port).  The physical root is checked separately
-    by each caller against the recipe/binding it is about to use.
+    port identity and it has not moved away) or the stable way (it is an
+    adopted installation whose recorded endpoint is this port).  The physical
+    root is checked separately by each caller against the recipe/binding it is
+    about to use.
     """
     if instance is None:
         return False
-    if instance.id == instance_identity("local", port):
-        return True
     payload = instance.payload if isinstance(instance.payload, dict) else {}
-    return bool(payload.get("adopted")) and payload.get("port") == port
+    if payload.get("adopted"):
+        return payload.get("port") == port
+    if instance.id == instance_identity("local", port):
+        recorded = payload.get("port")
+        return recorded is None or recorded == port
+    return False
 
 
 def find_adopted_instance(db, root, port=None):
@@ -155,6 +159,100 @@ def confirmation_sort_key(db, row) -> str:
     return created.isoformat() if created is not None else ""
 
 
+def _payload_runtime_binding_sha256(instance_id: str, payload: dict, *, capability: str = "h3") -> str:
+    if not isinstance(payload, dict) or not payload.get("adopted"):
+        return graph_hash(payload) if isinstance(payload, dict) else ""
+    adoption = payload.get("adoption") or {}
+    files = [
+        {
+            "component_id": row.get("component_id"),
+            "relative_path": row.get("relative_path"),
+            "sha256": row.get("sha256"),
+            "size": row.get("size"),
+            "capability": row.get("capability") or capability,
+        }
+        for row in (adoption.get("verified_files") or [])
+        if (row.get("capability") or "h3") == capability
+    ]
+    if capability == "h3" and not files:
+        files = [
+            {
+                "component_id": row.get("component_id"),
+                "relative_path": row.get("relative_path"),
+                "sha256": row.get("sha256"),
+                "size": row.get("size"),
+                "capability": "h3",
+            }
+            for row in (adoption.get("verified_h3_files") or [])
+        ]
+    files.sort(key=lambda row: (str(row.get("component_id") or ""), str(row.get("relative_path") or "")))
+    return graph_hash({
+        "id": instance_id,
+        "managed": bool(payload.get("managed")),
+        "adopted": True,
+        "port": payload.get("port"),
+        "root": payload.get("root"),
+        "python": payload.get("python"),
+        "python_sha256": adoption.get("python_sha256"),
+        "source_revision": adoption.get("source_revision"),
+        "node_fingerprints": adoption.get("node_fingerprints") or {},
+        "capability": capability,
+        "files": files,
+    })
+
+
+def runtime_binding_sha256(instance, *, capability: str = "h3") -> str:
+    """Canonical digest of the instance facts that one capability's recipe depends on.
+
+    Adding another capability's weight evidence (e.g. Qwen Image on an
+    already-adopted H3 installation) updates the instance ledger row, but does
+    not invalidate the H3 recipe or service seal unless H3 weights, endpoint,
+    interpreter, revision, or nodes actually changed.
+    """
+    payload = instance.payload if instance is not None and isinstance(instance.payload, dict) else {}
+    if not payload.get("adopted"):
+        return str(getattr(instance, "sha256", "") or "")
+    return _payload_runtime_binding_sha256(instance.id, payload, capability=capability)
+
+
+def installation_binding_matches(db, instance, expected_sha256: str | None, *, capability: str = "h3") -> bool:
+    """One verdict for recipe identity, H3 startup, continuation, and resource pins.
+
+    Accepts the current capability-scoped binding digest, the current full row
+    digest, or a completed real adoption attempt's historical row digest on the
+    same installation when that attempt's capability-scoped binding facts still
+    equal the current installation's.
+    """
+    if (instance is None or not isinstance(expected_sha256, str) or not expected_sha256
+            or not isinstance(instance.payload, dict)
+            or instance.sha256 != graph_hash(instance.payload)):
+        return False
+    current_binding = runtime_binding_sha256(instance, capability=capability)
+    if expected_sha256 in {instance.sha256, current_binding}:
+        return True
+    if not instance.payload.get("adopted") or db is None:
+        return False
+    rows = db.execute(
+        select(InstallationAttempt, InstallationPlan)
+        .join(InstallationPlan, InstallationAttempt.plan_id == InstallationPlan.id)
+        .where(InstallationAttempt.status == "COMPLETED")
+    ).all()
+    for attempt, plan in rows:
+        if (not isinstance(plan.payload, dict) or plan.sha256 != graph_hash(plan.payload)
+                or plan.payload.get("instance_id") != instance.id):
+            continue
+        if (not isinstance(attempt.payload, dict) or attempt.sha256 != graph_hash(attempt.payload)
+                or attempt.payload.get("is_mock", True)):
+            continue
+        result = attempt.payload.get("result")
+        if not isinstance(result, dict) or not result.get("adopted"):
+            continue
+        if graph_hash(result) == expected_sha256:
+            if _payload_runtime_binding_sha256(instance.id, result, capability=capability) == current_binding:
+                return True
+    return False
+
+
 def find_instance_by_endpoint(db, port, *, instance_name=None):
     """The installation row a configuration request is really about (R5 B1).
 
@@ -165,7 +263,7 @@ def find_instance_by_endpoint(db, port, *, instance_name=None):
     """
     matches = []
     legacy = db.get(ComfyInstance, instance_identity("local", port))
-    if legacy is not None:
+    if legacy is not None and installation_identity_matches(legacy, port):
         matches.append(legacy)
     for candidate in db.scalars(select(ComfyInstance)):
         payload = candidate.payload if isinstance(candidate.payload, dict) else {}
@@ -498,12 +596,15 @@ def approve_lifecycle_plan(db, plan, *, actor: str, evidence: str) -> None:
     plan.sha256 = graph_hash(plan.payload)
 
 
-def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None):
+def execute_operation(factory, settings, identity, digest, actor, *, runner=None, http=None, checkpoint=None,
+                      claim_guard=None):
     checkpoint = checkpoint or (lambda stage: None)
     runner = runner or ProcessRunner()
     http = http or build_client("http://127.0.0.1", 10, follow_redirects=False)
     with factory() as db:
         db.execute(text("BEGIN IMMEDIATE"))
+        if claim_guard is not None:
+            claim_guard(db)
         plan = db.get(InstallationPlan, identity)
         if not plan or plan.status != "APPROVED" or plan.sha256 != digest or graph_hash(plan.payload) != digest:
             raise HTTPException(409, "INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED")

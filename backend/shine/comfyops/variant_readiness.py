@@ -225,8 +225,9 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
             catalog_id=binding.catalog_id,
             catalog_version=str((binding.catalog or {}).get("catalog_version") or ""),
             cache_dir=cache,
+            read_only=True,
         )
-        cached = cache_candidates(cache, component)
+        cached = cache_candidates(cache, component, read_only=True)
         files = [
             {
                 "relative_path": entry.get("relative_path"),

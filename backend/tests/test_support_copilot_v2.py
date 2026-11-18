@@ -654,3 +654,69 @@ def test_production_start_binds_the_original_run_and_reports_real_status(api, mo
         row = db.get(SupportAction, action["id"])
         assert row.kind == "production_start"
         assert row.original_task_id == "run-fixed-1"
+
+
+def test_setup_and_materials_intents_route_without_stealing_episode_prep(api, monkeypatch):
+    """Setup and materials requests route to their own plans without stealing episode prep."""
+    client, _, _ = api
+
+    setup_resp = client.post(
+        "/api/v1/support/plans/preview",
+        json={"request": "帮我准备制作环境"},
+        headers=HEADERS,
+    )
+    assert setup_resp.status_code == 200, setup_resp.text
+    setup_plan = setup_resp.json()["plan"]
+    assert setup_plan["intent"] == "SETUP"
+    assert any(
+        (step.get("action") or {}).get("kind") == "setup_repair"
+        for step in setup_plan["steps"]
+    )
+
+    reconcile_resp = client.post(
+        "/api/v1/support/plans/preview",
+        json={"request": "帮我核验已有文件"},
+        headers=HEADERS,
+    )
+    assert reconcile_resp.status_code == 200, reconcile_resp.text
+    reconcile_plan = reconcile_resp.json()["plan"]
+    assert reconcile_plan["intent"] == "SETUP"
+    assert any(
+        (step.get("action") or {}).get("kind") == "setup_reconcile"
+        for step in reconcile_plan["steps"]
+    )
+
+    project_id = client.post("/api/v1/projects", json={"title": "意图分流项目"}).json()["id"]
+    monkeypatch.setattr(
+        "shine.director.overview.build_overview",
+        lambda db, project: {
+            "episodes": [
+                {
+                    "episode_id": "ep-1",
+                    "order": 1,
+                    "title": "第一集",
+                    "state": "MATERIAL_MISSING",
+                    "state_label": "等待备料",
+                    "shots": {"confirmed": False, "landed_count": 0},
+                    "materials": {"missing_count": 1, "missing": ["主角定妆"]},
+                    "package": None,
+                    "next_action": {"kind": "PREPARE_MATERIALS", "label": "补齐这一集缺少的素材"},
+                }
+            ]
+        },
+    )
+    mat_resp = client.post(
+        "/api/v1/support/plans/preview",
+        json={"request": "帮我准备素材", "project_id": project_id},
+        headers=HEADERS,
+    )
+    assert mat_resp.status_code == 200, mat_resp.text
+    assert mat_resp.json()["plan"]["intent"] == "MATERIALS"
+
+    ep_resp = client.post(
+        "/api/v1/support/plans/preview",
+        json={"request": "帮我把第一集准备好", "project_id": project_id},
+        headers=HEADERS,
+    )
+    assert ep_resp.status_code == 200, ep_resp.text
+    assert ep_resp.json()["plan"]["intent"] == "PRODUCTION"

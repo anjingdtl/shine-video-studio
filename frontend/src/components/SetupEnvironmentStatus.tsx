@@ -123,7 +123,7 @@ const STATE_LABEL: Record<string, string> = {
   FOUND: '已找到',
   VERIFIED: '已核验',
   BOUND: '已就绪',
-  READY: '可试镜',
+  READY: '已就绪',
   VERIFIED_RENDER: '已真实验证',
   UNKNOWN: '未知',
 };
@@ -218,11 +218,11 @@ export function SetupEnvironmentStatus({
       // 选哪一套必须是人点的：这里不替人挑列表第一项。
       return;
     }
-    if (action.action === 'TRIAL' || action.action === 'PREPARE_ENVIRONMENT'
-        || action.action === 'RECONCILE') {
+    if (action.action === 'PREPARE_ENVIRONMENT' || action.action === 'RECONCILE'
+        || action.action === 'SCAN'
+        || (action.action === 'TRIAL' && action.capability === 'image')) {
       // 只有一个执行入口：核验、登记、下载、绑定、运行核验都是同一个「一键准备」
-      // 后台任务的步骤。页面不再直调 /setup/reconcile——那是绕过任务、关页面就断
-      // 的旁路，且与任务各自推进同一件事。
+      // 后台任务的步骤。H3 真实出片属于作品「⑥ 视频生产」，不在基础配置伪造试镜按钮。
       if (onPrepare && action.capability) await onPrepare(action.capability, summary as SetupSummary);
       return;
     }
@@ -417,6 +417,7 @@ export function SetupEnvironmentStatus({
       })()}
 
       {!readOnly && summary.action_required && summary.action_required.action !== 'SELECT_PROJECT'
+        && !(summary.action_required.action === 'TRIAL' && summary.action_required.capability === 'h3')
         && !summary.installation.choice_required
         && <div className="setup-primary-action">
           <button type="button" className="btn-primary" disabled={!!busy} onClick={() => void handleAction()}>

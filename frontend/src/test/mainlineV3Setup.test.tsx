@@ -89,8 +89,8 @@ describe('C-01：一次提交后台任务，浏览器不做全局一刀切', () 
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
-    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
     expect(screen.getByRole('checkbox', { name: /H3 视频生成/ })).not.toBeChecked();
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     await user.click(screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ }));
     await user.click(screen.getByRole('button', { name: '开始准备' }));
 
@@ -111,7 +111,7 @@ describe('C-02：H3 方案只约束 H3 能力', () => {
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);
     await detect();
-    await user.click(screen.getByRole('checkbox', { name: /H3 视频生成/ }));
+    await user.click(screen.getByRole('checkbox', { name: /素材出图/ }));
     expect(screen.getByRole('checkbox', { name: /素材出图/ })).toBeChecked();
     const confirm = screen.getByRole('button', { name: /确认(下载|准备|整备|并完成配置)/ });
     expect(confirm).toBeEnabled();

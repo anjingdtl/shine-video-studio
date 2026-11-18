@@ -446,7 +446,7 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
     return 200, {"status": "RUNNING", "pid": process.pid}
 
 
-def _validate_services_background(data_dir: Path) -> dict:
+def _validate_services_background(data_dir: Path, delegation: dict | None = None) -> dict:
     """Validate and activate the runtime while the Worker is stopped.
 
     The preparation task runs *inside* the Worker, but service validation
@@ -454,8 +454,14 @@ def _validate_services_background(data_dir: Path) -> dict:
     therefore cannot stop itself: the supervisor does it.  Order: stop Worker →
     clear the task lease → validate + activate → record the VALIDATE step →
     restart Worker.  The restarted Worker resumes the task at the next step.
+
+    R5 INV-10/P0-2：委托携带原任务/认领与候选配方身份；任何外部调用在
+    SQLite 写事务之外，晚到成功或失败回写都受相同身份栅栏约束，绝不清理
+    新 Worker 租约、标记新任务失败或激活已过期配置。
     """
-    from shine.comfyops.runtime_configuration import activate_runtime, runtime_report
+    from sqlalchemy import text
+
+    from shine.comfyops.runtime_configuration import CANDIDATE_KEY, activate_runtime, runtime_report
     from shine.comfyops.service_validation import validate_services
     from shine.comfyops.setup_preparation import TASK_KEY
     from shine.db import make_engine, make_session_factory
@@ -467,15 +473,75 @@ def _validate_services_background(data_dir: Path) -> dict:
     settings = _settings(data_dir)
     engine = make_engine(settings.database_url)
     factory = make_session_factory(engine)
+    delegated_info = dict(delegation) if isinstance(delegation, dict) else {}
+
+    with factory() as db:
+        task_row = db.get(AppSetting, TASK_KEY)
+        initial_task = dict(task_row.value) if task_row is not None and isinstance(task_row.value, dict) else {}
+        initial_report = runtime_report(db, settings)
+    initial_candidate = initial_report.get("candidate") or {}
+    expected_task_id = (
+        delegated_info["task_id"] if delegated_info.get("task_id") is not None
+        else (initial_task.get("task_id") if initial_task.get("status") in {"QUEUED", "RUNNING"} else None)
+    )
+    has_delegated_claim = "claim_token" in delegated_info and delegated_info.get("claim_token") is not None
+    expected_claim_token = (
+        delegated_info.get("claim_token") if has_delegated_claim
+        else (initial_task.get("claim_token") if expected_task_id == initial_task.get("task_id") else None)
+    )
+    expected_recipe_sha256 = delegated_info.get("recipe_sha256") or initial_candidate.get("recipe_sha256")
+
+    def _delegation_matches(current: dict) -> bool:
+        if expected_claim_token is None:
+            return True
+        if current.get("claim_token") == expected_claim_token:
+            return True
+        delegated = current.get("validation_delegation")
+        return (
+            current.get("claim_token") is None
+            and isinstance(delegated, dict)
+            and delegated.get("claim_token") == expected_claim_token
+        )
+
+    def _task_and_candidate_valid(db) -> bool:
+        cand = db.get(AppSetting, CANDIDATE_KEY)
+        cand_sha = ((cand.value.get("identity") or {}).get("recipe_sha256")
+                    if cand is not None and isinstance(cand.value, dict) else None)
+        if expected_recipe_sha256 and cand_sha != expected_recipe_sha256:
+            return False
+        row = db.get(AppSetting, TASK_KEY)
+        current = dict(row.value) if row is not None and isinstance(row.value, dict) else {}
+        if expected_task_id is None:
+            return current.get("status") not in {"QUEUED", "RUNNING"}
+        if current.get("task_id") != expected_task_id:
+            return False
+        if current.get("status") in {"CANCELLED", "SUPERSEDED", "DONE", "FAILED"}:
+            return False
+        if not _delegation_matches(current):
+            return False
+        return True
+
+    def _claim_guard(db) -> None:
+        if not _task_and_candidate_valid(db):
+            raise RuntimeError("SUPERVISOR_TASK_OR_CANDIDATE_SUPERSEDED")
 
     def mark_task(step_status: str, code: str | None, detail: str) -> None:
         with factory.begin() as db:
+            db.execute(text("BEGIN IMMEDIATE"))
             row = db.get(AppSetting, TASK_KEY)
             if row is None or not isinstance(row.value, dict):
                 return
             task = dict(row.value)
+            if task.get("task_id") != expected_task_id:
+                return
+            if task.get("status") in {"CANCELLED", "SUPERSEDED", "DONE", "FAILED"}:
+                return
+            if not _delegation_matches(task):
+                return
             task["lease_owner"] = None
             task["lease_expires_at"] = None
+            task["claim_token"] = None
+            task.pop("validation_delegation", None)
             for step in task.get("steps", []):
                 if step.get("id") == "VALIDATE":
                     step["status"] = step_status
@@ -484,6 +550,12 @@ def _validate_services_background(data_dir: Path) -> dict:
             if step_status == "FAILED":
                 task["status"] = "FAILED"
                 task["error"] = code
+                task["message"] = detail
+            elif step_status == "DONE" and all(
+                step.get("status") in {"DONE", "SKIPPED"} for step in task.get("steps", [])
+            ):
+                task["status"] = "DONE"
+                task["current"] = None
                 task["message"] = detail
             task["updated_at"] = utcnow().isoformat()
             row.value = task
@@ -494,6 +566,9 @@ def _validate_services_background(data_dir: Path) -> dict:
             return {"status": "FAILED", "code": payload.get("code", "WORKER_STOP_FAILED"),
                     "detail": payload.get("detail", "Worker 未能停止，未进行核验。")}
         with factory() as db:
+            if not _task_and_candidate_valid(db):
+                _start_worker(data_dir)
+                return {"status": "STALE", "code": "TASK_SUPERSEDED"}
             report = runtime_report(db, settings)
         candidate = report.get("candidate") or {}
         recipe_sha256 = candidate.get("recipe_sha256")
@@ -511,7 +586,10 @@ def _validate_services_background(data_dir: Path) -> dict:
                 mark_task("FAILED", str(validated.get("status") or "SERVICE_VALIDATION_FAILED"), detail)
                 return {"status": "FAILED", "code": validated.get("status"), "detail": detail}
             with factory() as db:
-                activate_runtime(db, settings, project_id, recipe_sha256, "supervisor:setup")
+                if not _task_and_candidate_valid(db):
+                    return {"status": "STALE", "code": "TASK_SUPERSEDED"}
+                activate_runtime(db, settings, project_id, recipe_sha256, "supervisor:setup",
+                                 claim_guard=_claim_guard)
             # One-click preparation also finishes the project-level node check:
             # validate each registered profile against the live renderer so the
             # director package shows ready without a separate manual step.
@@ -522,6 +600,8 @@ def _validate_services_background(data_dir: Path) -> dict:
                       f"服务核验通过，本机配置已激活；已核对 {checked} 个生成方案节点（Worker 已自动恢复）。")
             return {"status": "READY"}
         except Exception as exc:  # noqa: BLE001 - the named refusal is the answer
+            if str(exc) == "SUPERVISOR_TASK_OR_CANDIDATE_SUPERSEDED":
+                return {"status": "STALE", "code": "TASK_SUPERSEDED"}
             detail = str(getattr(exc, "detail", exc))[:300]
             mark_task("FAILED", "SERVICE_VALIDATION_FAILED", detail)
             return {"status": "FAILED", "code": "SERVICE_VALIDATION_FAILED", "detail": detail}
@@ -666,10 +746,22 @@ class Handler(BaseHTTPRequestHandler):
             if not _VALIDATE_BUSY.acquire(blocking=False):
                 self._send(409, {"code": "VALIDATION_IN_PROGRESS"}, origin)
                 return
+            delegation = None
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length > 0:
+                try:
+                    parsed = json.loads(self.rfile.read(min(length, 65536)).decode("utf-8"))
+                    if isinstance(parsed, dict):
+                        delegation = parsed
+                except ValueError:
+                    delegation = None
 
             def _run() -> None:
                 try:
-                    _validate_services_background(self.data_dir)
+                    _validate_services_background(self.data_dir, delegation=delegation)
                 finally:
                     _VALIDATE_BUSY.release()
 
