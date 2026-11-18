@@ -286,7 +286,7 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
     # R5 B8：同一物理 root 的历史多行（旧端口漂移遗留）按确定性偏好收敛为一条：
     # 正在服务的行 > 用户确认端口的行 > 稳定 root 身份行 > 较小 id。绝不依赖
     # 表的遍历顺序，选择不得随重启/切页漂移（INV-04）。
-    from shine.comfyops.instances import adopted_instance_identity
+    from shine.comfyops.instances import adopted_instance_identity, confirmation_sort_key
 
     def root_priority(row: dict[str, Any]) -> tuple[int, str]:
         score = 0
@@ -337,11 +337,16 @@ def candidate_installations(db, settings, *, discovered: list[str] | None = None
         if Path(root).is_dir():
             add(root, instance=by_root.get(root) or {"port": chosen.get("port")},
                 source="user_choice", reason="你上次确认使用的这套安装")
-    for key in sorted(by_root):
-        row = by_root[key]
-        if row["adopted"]:
-            add(str(row["root"]), instance=row, source="adopted",
-                reason="已经确认复用的本机 ComfyUI")
+    # 多套已收编安装：最近一次显式确认优先（与端点查找同一排序规则），
+    # 用户显式选择（user_choice）仍高于一切自动排序。
+    def _confirmed_at(facts: dict[str, Any]) -> str:
+        instance = db.get(ComfyInstance, facts["instance_id"]) if facts.get("instance_id") else None
+        return confirmation_sort_key(db, instance)
+
+    adopted_rows = [by_root[key] for key in sorted(by_root) if by_root[key]["adopted"]]
+    for row in sorted(adopted_rows, key=_confirmed_at, reverse=True):
+        add(str(row["root"]), instance=row, source="adopted",
+            reason="已经确认复用的本机 ComfyUI")
     for key in sorted(by_root):
         row = by_root[key]
         if row["managed"]:

@@ -289,7 +289,7 @@ def test_same_port_different_root_is_not_a_dead_end(installed):
             db, settings, path=str(root), capability="h3", adopt=True, port=8188)
     with factory() as db:
         second = setup_reconcile.reconcile_installation(
-            db, settings, path=str(other), capability="h3", adopt=True, port=8188)
+            db, settings, path=str(other), capability="image", adopt=True, port=8188)
     assert second["adoption"]["status"] == "ADOPTED", second
     assert second["adoption"]["instance_id"] != first["adoption"]["instance_id"]
     with factory() as db:
@@ -298,6 +298,13 @@ def test_same_port_different_root_is_not_a_dead_end(installed):
         assert prior.payload["port"] == 8188
         rows = db.scalars(select(ComfyInstance)).all()
         assert len(rows) == 2
+    # 同端口两行（历史端口行 + 新稳定身份行）不得把配置生成卡成歧义死路：
+    # 最近显式确认的安装优先，配方指向第二套物理 root。
+    with factory() as db:
+        result = deployment.generate_configuration(
+            db, settings, None, capability="image", instance_name="shine-h3", port=8188)
+    recipe = json.loads(Path(result["recipe"]).read_text(encoding="utf-8"))
+    assert recipe["renderer"]["root"] == str(other)
 
 
 def test_duplicate_legacy_rows_resolve_deterministically_to_the_chosen_port(installed):

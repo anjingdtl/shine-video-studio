@@ -141,6 +141,20 @@ def find_adopted_instance(db, root, port=None):
     return sorted(matches, key=lambda candidate: candidate.id)[0]
 
 
+def confirmation_sort_key(db, row) -> str:
+    """最近一次显式确认的时间序（收编/实例操作都会留下 attempt）。
+
+    同一端点存在多个声明时，最近一次用户确认优先；没有 attempt 的历史行
+    排在最后。键是稳定字符串，与遍历顺序无关。
+    """
+    from shine.comfyops.models import InstallationAttempt
+
+    payload = row.payload if row is not None and isinstance(row.payload, dict) else {}
+    attempt = db.get(InstallationAttempt, payload.get("last_attempt")) if payload.get("last_attempt") else None
+    created = getattr(attempt, "created_at", None)
+    return created.isoformat() if created is not None else ""
+
+
 def find_instance_by_endpoint(db, port, *, instance_name=None):
     """The installation row a configuration request is really about (R5 B1).
 
@@ -163,6 +177,19 @@ def find_instance_by_endpoint(db, port, *, instance_name=None):
                  if isinstance(row.payload, dict) and row.payload.get("name") == instance_name]
         if named:
             matches = named
+    if len(matches) > 1:
+        # 多个行声明同一端点：最近一次显式确认优先；旧行保留历史，
+        # 但其端点声明已被新确认取代。稳定 root 身份行先于历史端口行。
+        def rank(row):
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            stable = bool(payload.get("root")) and row.id == adopted_instance_identity(payload["root"])
+            return (stable, confirmation_sort_key(db, row))
+
+        matches = sorted(matches, key=rank, reverse=True)
+        top, second = matches[0], matches[1]
+        if rank(top) > rank(second):
+            return top
+        return None
     return matches[0] if len(matches) == 1 else None
 
 
