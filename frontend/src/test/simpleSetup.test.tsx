@@ -4,6 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SetupPanel } from '../components/SetupPanel';
 import { StudioStub, baseRoutes, jsonResponse } from './studioStub';
 
+/**
+ * R5 B7/INV-16 收敛后的专家诊断页合同：
+ * 新的整备（下载/实例/登记/核验/激活）唯一入口是「制作环境」卡的持久整备任务；
+ * 本页保留只读诊断、已有安装的原目录核验，以及既有计划的恢复（批准/整理）。
+ * 浏览器不再创建并串行执行新的安装/实例链。
+ */
+
 let stub: StudioStub;
 let refresh: ReturnType<typeof vi.fn>;
 beforeEach(() => {
@@ -22,33 +29,7 @@ afterEach(() => { stub.restore(); vi.restoreAllMocks(); });
 
 async function detect(user: ReturnType<typeof userEvent.setup>) {
   await user.click(screen.getByRole('button', { name: '检测本机' }));
-  await waitFor(() => expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeEnabled());
-}
-
-function automaticRoutes(failValidation = false) {
-  stub.add({ method: 'POST', pattern: /setup\/install-plan$/, respond: () => jsonResponse({ plan_id: 'download', sha256: 'p', status: 'AWAITING_APPROVAL' }) });
-  stub.add({ method: 'POST', pattern: /install-plans\/.*\/approve$/, respond: () => jsonResponse({ sha256: 'p' }) });
-  stub.add({ method: 'POST', pattern: /install-plans\/download\/execute$/, respond: () => jsonResponse({
-    attempt_id: 'attempt-download', status: 'QUEUED', stage: 'QUEUED', plan_hash: 'p',
-  }) });
-  stub.add({ method: 'GET', pattern: /installation-attempts\/attempt-download$/, respond: () => jsonResponse({
-    attempt_id: 'attempt-download', plan_id: 'download', stage: 'FILES_VERIFIED_PENDING_RUNTIME',
-    status: 'FILES_VERIFIED_PENDING_RUNTIME', confirmed_bytes: 4, total_bytes: 4, speed_bps: 0,
-    retry_count: 0, cancel_requested: false, pause_requested: false, terminal: true, resumable: false,
-  }) });
-  let next = 0;
-  stub.add({ method: 'POST', pattern: /setup\/next-instance-plan$/, respond: () => jsonResponse(next++ === 0
-    ? { complete: false, plan_id: 'instance', sha256: 'p', status: 'AWAITING_APPROVAL', action: 'CREATE' }
-    : { complete: true }) });
-  stub.add({ method: 'POST', pattern: /instance-plans\/instance\/execute$/, respond: () => jsonResponse({ status: 'COMPLETED' }) });
-  stub.add({ method: 'POST', pattern: /setup\/profiles$/, respond: () => jsonResponse({ profiles: [] }) });
-  stub.add({ method: 'POST', pattern: /setup\/configuration$/, respond: () => jsonResponse({}) });
-  stub.add({ method: 'GET', pattern: /setup\/runtime$/, respond: () => jsonResponse({
-    status: 'NOT_ACTIVATED', render_provider: 'mock', candidate: { project_id: 'proj-1', recipe_sha256: 'a'.repeat(64) },
-  }) });
-  stub.add({ method: 'POST', pattern: /setup\/services\/validate$/, respond: () => failValidation
-    ? jsonResponse({ detail: 'WORKFLOW_CHANGED' }, 409) : jsonResponse({ status: 'READY' }) });
-  stub.add({ method: 'POST', pattern: /setup\/runtime\/activate$/, respond: () => jsonResponse({ status: 'ACTIVE' }) });
+  await screen.findByText('基础环境');
 }
 
 function catalogComponent(component_id: string, kind: string, role: string | null, files: number, bytes: number) {
@@ -59,8 +40,8 @@ function catalogComponent(component_id: string, kind: string, role: string | nul
   };
 }
 
-describe('本机环境简化流程', () => {
-  it('发现已有安装时先检查复用，不能直接要求重新下载', async () => {
+describe('专家诊断页：只读诊断与唯一执行者', () => {
+  it('发现已有安装时先检查复用，本页不创建任何安装计划', async () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({
       installations: ['F:\\AI\\ComfyUI'],
     }) });
@@ -75,23 +56,23 @@ describe('本机环境简化流程', () => {
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await user.click(screen.getByRole('button', { name: '检测本机' }));
     await screen.findByText('发现 1 个已有安装。');
-    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
     // 检测只读：允许只读盘点（inspect），不得发起安装、导入或接管。
     expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
     expect(stub.callsOf('POST', /import-models$/)).toHaveLength(0);
     expect(stub.callsOf('POST', /existing-installations\/adopt$/)).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: '检查已有目录' }));
     await screen.findByText('h3 / model.safetensors：待哈希校验');
-    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
     vi.mocked(window.confirm).mockReturnValueOnce(false);
     await user.click(screen.getByRole('button', { name: '校验并复用匹配模型' }));
     expect(stub.callsOf('POST', /import-models$/)).toHaveLength(0);
     await user.click(screen.getByRole('button', { name: '校验并复用匹配模型' }));
-    await waitFor(() => expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeEnabled());
+    await screen.findAllByText(/已校验并缓存 13 B/);
     expect(stub.callsOf('POST', /install-plan$/)).toHaveLength(0);
-    expect(stub.callsOf('GET', /connectivity$/)).toHaveLength(0);
-    await user.type(screen.getByRole('textbox', { name: '已有 ComfyUI 目录' }), 'changed');
-    expect(screen.getByRole('button', { name: '下载缺项并自动配置' })).toBeDisabled();
+    // 浏览器串行链已删除：本页没有「下载缺项并自动配置」这类第二执行入口。
+    expect(screen.queryByRole('button', { name: /下载缺项并自动配置/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /一键准备（自动登记并激活）/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /生成安装计划/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /生成实例链计划/ })).toBeNull();
   });
 
   it('已有 ComfyUI 被明确确认已安装，模型只读哈希核验且不复制或创建重复计划', async () => {
@@ -119,13 +100,12 @@ describe('本机环境简化流程', () => {
     await screen.findByText(/ComfyUI 已安装：主程序版本与固定清单一致/);
     await user.click(screen.getByRole('button', { name: '确认已安装并核验' }));
     await waitFor(() => expect(document.body).toHaveTextContent(/原目录未修改、未复制、未下载/));
-    expect(screen.getByRole('button', { name: '已有安装等待兼容性验证' })).toBeDisabled();
     expect(stub.callsOf('POST', /existing-installations\/verify$/)).toHaveLength(1);
     expect(stub.callsOf('POST', /existing-installations\/import-models$/)).toHaveLength(0);
     expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
   });
 
-  it('新机自检区分不完整的建议审片模型，不把局部文件显示为已就绪', async () => {
+  it('扫描事实不冒充生产资格：局部审片文件如实报未就绪，视频卡不给核验绿灯', async () => {
     const components = [
       catalogComponent('comfyui', 'source', null, 0, 0),
       catalogComponent('minimax-h3-diffusion', 'model', null, 1, 100),
@@ -167,41 +147,34 @@ describe('本机环境简化流程', () => {
     await screen.findByText('发现 1 个已有安装。');
     await user.click(screen.getByRole('button', { name: '检查已有目录' }));
     await screen.findByText(/候选可复用 5 项.*未找到固定版本文件 3 项/);
-    expect(screen.getByText(/minimax-h3-diffusion \/ h3.safetensors：待哈希校验/)).toBeInTheDocument();
-    expect(screen.queryByText(/哈希不匹配或文件已变化/)).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '确认已安装并核验' }));
 
     expect(await screen.findByText(/建议审片模型未就绪（1 个模型包 · 已核验 1\/3 个文件，不阻断 H3 出片）/)).toBeInTheDocument();
     expect(screen.getByText(/建议审片模型未就绪（1 个模型包 · 已核验 3\/4 个文件，不阻断 H3 出片）/)).toBeInTheDocument();
-    expect(screen.getByText(/默认安装只准备 H3 所需组件，不会自动下载 ASR\/VLM 审片模型/)).toBeInTheDocument();
-    expect(screen.queryByText('已安装并核验（原目录，未复制）')).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '已有安装等待兼容性验证' })).toBeDisabled();
+    // R5 B7：视频卡只报扫描事实，就绪结论指向唯一裁决（制作环境卡）。
+    expect(screen.getByText(/扫描事实：1\/1 个固定版本文件哈希匹配（就绪结论见上方制作环境卡）/)).toBeInTheDocument();
+    expect(screen.queryByText(/固定版本文件已安装并哈希核验/)).not.toBeInTheDocument();
   });
 
-  it('自动检索失败时不开放下载，允许重新检测', async () => {
+  it('自动检索失败时如实报错，允许重新检测，不发起任何写操作', async () => {
     stub.add({ method: 'GET', pattern: /setup\/existing-installations(?:\?.*)?$/, respond: () => jsonResponse({ detail: '扫描失败' }, 503) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await user.click(screen.getByRole('button', { name: '检测本机' }));
     await screen.findByText('扫描失败');
-    expect(screen.queryByRole('button', { name: '下载缺项并自动配置' })).toBeNull();
     expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
   });
 
-  it('检测只读，取消下载不发起安装；无需密码', async () => {
+  it('检测只读；无需密码', async () => {
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
     expect(screen.getByLabelText('API Key')).toHaveAttribute('type', 'password');
     expect(screen.queryByLabelText(/操作员.*密码|操作员.*凭据/)).toBeNull();
     expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
-    vi.mocked(window.confirm).mockReturnValue(false);
-    await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));
-    expect(stub.calls.filter(c => c.method !== 'GET')).toHaveLength(0);
   });
 
-  it('一次确认依次完成下载、实例、工作流、服务验证和激活', async () => {
-    automaticRoutes();
+  it('可选审片补装提交同一持久整备入口，不直建安装计划', async () => {
     stub.add({ method: 'GET', pattern: /setup\/catalog$/, respond: () => jsonResponse({
       catalog_id: 'c', catalog_version: '1', generated: '', platform: {}, total_bytes: 800,
       components: [
@@ -211,68 +184,73 @@ describe('本机环境简化流程', () => {
         catalogComponent('qwen3-asr-0.6b', 'review-model', 'ASR', 4, 400),
       ],
     }) });
+    stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
+      status: 'QUEUED', task_id: 'setup-task', steps: ['RECONCILE', 'DOWNLOAD'], message: '等待后台开始',
+    }) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
-    await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));
-    await screen.findByText(/环境已配置并通过服务检测/);
-    const posts = stub.calls.filter(c => c.method === 'POST').map(c => c.url);
-    const index = (suffix: string) => posts.findIndex(url => url.endsWith(suffix));
-    expect(index('/download/execute')).toBeLessThan(index('/instance/execute'));
-    expect(index('/instance/execute')).toBeLessThan(index('/setup/configuration'));
-    expect(index('/setup/configuration')).toBeLessThan(index('/services/validate'));
-    expect(index('/services/validate')).toBeLessThan(index('/runtime/activate'));
-    expect(stub.callsOf('POST', /approval-grants$/)).toHaveLength(2);
-    const installPlan = stub.callsOf('POST', /setup\/install-plan$/)[0];
-    expect((installPlan.body as { components: string[] }).components).toEqual(['comfyui', 'minimax-h3-diffusion']);
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining('ASR/VLM 仅用于建议审片，不会自动下载'));
-    expect(window.confirm).toHaveBeenCalledTimes(1);
-    expect(refresh).toHaveBeenCalledTimes(1);
-    for (const call of stub.calls) expect(new Headers(call.init?.headers).get('X-Shine-Local-Action')).toBe('1');
+    await user.click(screen.getByRole('button', { name: /补装建议审片模型/ }));
+    await screen.findByText(/已交给后台整备/);
+    expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+    const submitted = stub.callsOf('POST', /setup\/prepare\/execute$/);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0].body).toMatchObject({ project_id: 'proj-1', capabilities: ['vlm', 'asr'], verify_runtime: false });
   });
 
-  it('服务验证失败后停止，不激活、不重试', async () => {
-    automaticRoutes(true);
+  it('单步服务核验失败即停，不自动激活、不重试', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/runtime$/, respond: () => jsonResponse({
+      status: 'ACTIVE', render_provider: 'comfyui',
+      candidate: { project_id: 'proj-1', recipe_sha256: 'a'.repeat(64) },
+    }) });
+    stub.add({ method: 'POST', pattern: /setup\/services\/validate$/, respond: () => jsonResponse({ detail: 'WORKFLOW_CHANGED' }, 409) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
-    await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));
+    await user.click(screen.getByRole('button', { name: '验证服务与工作流' }));
     await screen.findByText('WORKFLOW_CHANGED');
     expect(stub.callsOf('POST', /services\/validate$/)).toHaveLength(1);
     expect(stub.callsOf('POST', /runtime\/activate$/)).toHaveLength(0);
   });
 
-  it('已有不确定安装时停止，不创建重复计划', async () => {
+  it('已有不确定安装时只展示恢复入口，不创建重复计划', async () => {
     stub.add({ method: 'GET', pattern: /comfyops\/install-plans/, respond: () => jsonResponse([
       { id: 'old', sha256: 'p', status: 'NEEDS_REVIEW', payload: { deployment: true } },
     ]) });
+    stub.add({ method: 'GET', pattern: /install-plans\/old\/attempts/, respond: () => jsonResponse([
+      { id: 'attempt-old', status: 'FAILED_RECONCILE_REQUIRED' },
+    ]) });
+    stub.add({ method: 'POST', pattern: /preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }) });
+    stub.add({ method: 'POST', pattern: /install-attempts\/attempt-old\/reconcile$/, respond: () => jsonResponse({ status: 'RECONCILED' }) });
     const user = userEvent.setup();
     render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
     await detect(user);
-    await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));
-    await screen.findByText(/已有未完成的安装记录/);
+    await screen.findByText('整理中断的安装');
     expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+    await user.click(screen.getByRole('button', { name: '整理中断的安装' }));
+    await screen.findByText(/没有重新下载/);
+    expect(stub.callsOf('POST', /install-attempts\/attempt-old\/reconcile$/)).toHaveLength(1);
+    expect(stub.callsOf('POST', /install-plans\/.*\/execute$/)).toHaveLength(0);
   });
 
-  it('下载期间切换页面，已发出的安装保留，后续实例步骤不再启动', async () => {
-    automaticRoutes();
-    let finish: (value: ReturnType<typeof jsonResponse>) => void = () => undefined;
-    stub.add({ method: 'POST', pattern: /install-plans\/download\/execute$/, respond: () =>
-      new Promise(resolve => { finish = resolve; }) });
-    stub.add({ method: 'GET', pattern: /installation-attempts\//, respond: () => jsonResponse({
-      attempt_id: 'attempt-download', plan_id: 'download', stage: 'QUEUED', status: 'QUEUED',
-      confirmed_bytes: 0, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
+  it('安装进度是只读投影：重附着既有尝试，不发起任何执行请求', async () => {
+    stub.add({ method: 'GET', pattern: /comfyops\/install-plans/, respond: () => jsonResponse([
+      { id: 'download', sha256: 'p', status: 'INSTALLING', payload: { deployment: true } },
+    ]) });
+    stub.add({ method: 'GET', pattern: /install-plans\/download\/attempts/, respond: () => jsonResponse([
+      { attempt_id: 'attempt-download', plan_id: 'download', stage: 'DOWNLOADING', status: 'INSTALLING',
+        confirmed_bytes: 1, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
+        pause_requested: false, terminal: false, resumable: true },
+    ]) });
+    stub.add({ method: 'GET', pattern: /installation-attempts\/attempt-download$/, respond: () => jsonResponse({
+      attempt_id: 'attempt-download', plan_id: 'download', stage: 'DOWNLOADING', status: 'INSTALLING',
+      confirmed_bytes: 1, total_bytes: 4, speed_bps: 0, retry_count: 0, cancel_requested: false,
       pause_requested: false, terminal: false, resumable: true,
     }) });
-    const user = userEvent.setup();
-    const view = render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
-    await detect(user);
-    await user.click(screen.getByRole('button', { name: '下载缺项并自动配置' }));
-    await waitFor(() => expect(stub.callsOf('POST', /download\/execute$/)).toHaveLength(1));
-    view.unmount();
-    finish(jsonResponse({ status: 'FILES_VERIFIED' }));
-    await waitFor(() => expect(stub.callsOf('GET', /setup\/runtime$/).length).toBeGreaterThan(2));
-    expect(stub.callsOf('POST', /next-instance-plan$/)).toHaveLength(0);
-    expect(stub.callsOf('POST', /runtime\/activate$/)).toHaveLength(0);
+    render(<SetupPanel projectId="proj-1" onRefresh={refresh} />);
+    await screen.findByText(/安装进度/);
+    // 重附着后只读轮询真实阶段（2s 节拍）；不发起任何执行请求。
+    await waitFor(() => expect(stub.callsOf('GET', /installation-attempts\/attempt-download$/).length).toBeGreaterThanOrEqual(1), { timeout: 6000 });
+    expect(stub.calls.filter(c => c.method === 'POST')).toHaveLength(0);
   });
 });

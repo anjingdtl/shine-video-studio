@@ -1,5 +1,4 @@
 import { render, screen } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, expect, it } from 'vitest';
 import { ImageCapabilityCard } from '../components/ImageCapabilityCard';
 import { StudioStub, jsonResponse } from './studioStub';
@@ -54,9 +53,9 @@ function routes(readiness: unknown) {
     { method: 'POST', pattern: /setup\/image-runtime\/validate$/, respond: () => jsonResponse({ run_id: 'run-9' }) },
     { method: 'POST', pattern: /setup\/image-runtime\/start$/, respond: () => jsonResponse({ status: 'RUNNING', base_url: 'http://127.0.0.1:8188' }) },
     { method: 'POST', pattern: /setup\/image-runtime\/stop$/, respond: () => jsonResponse({ status: 'STOPPED' }) },
-    { method: 'POST', pattern: /preparation\/rights$/, respond: () => jsonResponse({ id: 'rights-1' }) },
-    { method: 'POST', pattern: /preparation\/rights\/rights-1\/approve$/, respond: () => jsonResponse({ id: 'rights-1' }) },
-    { method: 'POST', pattern: /preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }) },
+    { method: 'POST', pattern: /setup\/image-runtime$/, respond: () => jsonResponse({ readiness: READY }) },
+    { method: 'POST', pattern: /setup\/install-plan$/, respond: () => jsonResponse({ plan_id: 'plan-1' }) },
+    { method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({ status: 'QUEUED', task_id: 't1', steps: [] }) },
   ];
 }
 
@@ -76,77 +75,24 @@ it('按四层显示三类素材的就绪度，不把未验证说成可用', asyn
   expect(screen.getByText(/研究或评估/)).toBeTruthy();
 });
 
-it('没有绑定受管渲染器时说明原因，并且不排队验证', async () => {
+it('没有绑定受管渲染器时说明原因', async () => {
   stub = new StudioStub(routes(UNBOUND));
-  const user = userEvent.setup();
   render(<ImageCapabilityCard projectId="p1" busy={false} />);
   expect(await screen.findByText(/还没有绑定本机的受管渲染器/)).toBeTruthy();
-  const button = screen.getByRole('button', { name: /验证三类真实小样/ }) as HTMLButtonElement;
-  expect(button.disabled).toBe(true);
-  await user.click(button);
-  expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)).toHaveLength(0);
 });
 
-it('可从界面绑定已登记的真实实例和模型目录', async () => {
-  const binding = { instance_id: 'i1', base_url: 'http://127.0.0.1:8188', model_root: 'D:\\ComfyUI\\models' };
-  stub = new StudioStub(routes({ ...UNBOUND, binding_candidate: binding }));
-  stub.add({ method: 'POST', pattern: /setup\/image-runtime$/, respond: () => jsonResponse({ readiness: READY }) });
-  const user = userEvent.setup();
+it('R5 B7/INV-16：只读诊断卡没有第二执行入口，也不发任何执行请求', async () => {
+  stub = new StudioStub(routes(UNBOUND));
   render(<ImageCapabilityCard projectId="p1" busy={false} />);
-  await user.click(await screen.findByRole('button', { name: '绑定现有实例用于出图' }));
-  expect(await screen.findByText(/已绑定本机受管实例/)).toBeInTheDocument();
-  expect(stub.callsOf('POST', /setup\/image-runtime$/)[0].body).toEqual({
-    ...binding, expected_config_revision: UNBOUND.config_revision,
-  });
-});
-
-it('验证三类小样直接排队真实渲染', async () => {
-  stub = new StudioStub(routes(READY));
-  const user = userEvent.setup();
-  render(<ImageCapabilityCard projectId="p1" busy={false} />);
-  await screen.findByText('角色');
-  await user.click(screen.getByRole('button', { name: /验证三类真实小样/ }));
-  expect(await screen.findByText(/三类真实小样已排队/)).toBeTruthy();
-  expect(stub.callsOf('POST', /preparation\/rights$/)).toHaveLength(0);
-  expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)).toHaveLength(1);
-  expect(stub.callsOf('POST', /setup\/image-runtime\/validate$/)[0].body).toMatchObject({
-    project_id: 'p1',
-    families: ['character', 'scene', 'prop'],
-  });
-});
-
-it('出图渲染器由工作台启动和停止，停止按钮只在运行中可用', async () => {
-  stub = new StudioStub(routes(READY));
-  const user = userEvent.setup();
-  render(<ImageCapabilityCard projectId="p1" busy={false} />);
-  await screen.findByText('角色');
-  expect(screen.getByText('本机出图渲染器')).toBeTruthy();
-  expect(screen.getByText('未启动')).toBeTruthy();
-  const stop = screen.getByRole('button', { name: '停止出图渲染器并释放显存' }) as HTMLButtonElement;
-  expect(stop.disabled).toBe(true);
-  await user.click(screen.getByRole('button', { name: /启动本机出图渲染器/ }));
-  expect(await screen.findByText(/本机出图渲染器已启动/)).toBeTruthy();
-  expect(stub.callsOf('POST', /setup\/image-runtime\/start$/)).toHaveLength(1);
-});
-
-it('可以登记出图权重安装计划，并展示下载量、占用与目标盘', async () => {
-  stub = new StudioStub(routes(READY));
-  stub.add({ method: 'GET', pattern: /setup\/storage$/, respond: () => jsonResponse({
-    root: 'D:\\ComfyUI', free_bytes: 200 * 1024 ** 3, requires_selection: false,
-  }) });
-  stub.add({ method: 'POST', pattern: /setup\/install-plan$/, respond: () => jsonResponse({
-    plan_id: 'plan-1', download_bytes: 17283091112, disk_required: 34566182224,
-  }) });
-  const user = userEvent.setup();
-  render(<ImageCapabilityCard projectId="p1" busy={false} />);
-  await screen.findByText('角色');
-  await user.click(screen.getByRole('button', { name: '登记出图权重安装计划' }));
-  expect(await screen.findByText(/预计下载 16.10 GiB/)).toBeTruthy();
-  expect(screen.getByText(/需要 32.19 GiB/)).toBeTruthy();
-  expect(screen.getByText(/目标盘 D:\\ComfyUI/)).toBeTruthy();
-  expect(stub.callsOf('POST', /setup\/install-plan$/)[0].body).toMatchObject({
-    catalog: 'qwen-image-2.1-windows-x64',
-    components: ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 'qwen-image-2.1-vae'],
-    project_id: 'p1',
-  });
+  await screen.findByText(/还没有绑定本机的受管渲染器/);
+  // 下载/绑定/启停/验证的唯一入口是制作环境的持久整备任务与工作台后台管理。
+  expect(screen.queryByRole('button', { name: /登记出图权重安装计划/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: /绑定现有实例用于出图/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: /启动本机出图渲染器/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: /停止出图渲染器并释放显存/ })).toBeNull();
+  expect(screen.queryByRole('button', { name: /验证三类真实小样/ })).toBeNull();
+  expect(screen.getByText(/统一在「制作环境」一次确认/)).toBeTruthy();
+  expect(stub.callsOf('POST', /setup\/install-plan$/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /setup\/image-runtime/)).toHaveLength(0);
+  expect(stub.callsOf('POST', /setup\/prepare\/execute$/)).toHaveLength(0);
 });

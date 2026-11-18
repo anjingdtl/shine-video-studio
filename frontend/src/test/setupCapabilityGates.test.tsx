@@ -35,7 +35,15 @@ function routes4070(options: { h3FilesPresent?: boolean } = {}): ReturnType<type
   const routes = baseRoutes();
   routes.push(
     { method: 'GET', pattern: /setup\/connectivity$/, respond: () => jsonResponse({ blocked: [] }) },
-    { method: 'GET', pattern: /setup\/variant-availability/, respond: () => jsonResponse({ adopted_root: null }) },
+    { method: 'GET', pattern: /setup\/variant-availability/, respond: () => jsonResponse({
+      adopted_root: null,
+      variants: present ? [{
+        variant_id: INT8.variant_id, installed: true, verified: true, bound: true,
+        profiles_registered: true, runtime_validated: true, available: false,
+        selectable_for_preparation: true, trial_ready: false, production_ready: false,
+        acceptance_status: 'SUPPORTED', reason: '本机已就绪',
+      }] : [],
+    }) },
     {
       method: 'GET', pattern: /setup\/variant-recommendations$/,
       respond: () => jsonResponse({

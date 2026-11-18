@@ -376,6 +376,33 @@ def test_recipe_step_regenerates_when_the_active_variant_is_not_the_requested_on
     assert len(calls) == 1, "变体变化必须重新生成运行配方"
 
 
+def test_a_superseded_task_cannot_be_resurrected_by_a_late_worker_write(installed):
+    """R5 INV-10：旧任务被取代/取消后，旧 Worker 的迟到回写不得覆盖新任务。"""
+    factory, settings, _, _ = installed
+    with factory() as db:
+        first = setup_preparation.enqueue(db, project_id=None, capabilities=["image"], settings=settings)
+    with factory() as db:
+        second = setup_preparation.enqueue(db, project_id=None, capabilities=["h3"], settings=settings)
+    assert second["task_id"] != first["task_id"]
+    stale = dict(first)
+    stale["status"] = "RUNNING"
+    stale["message"] = "旧 Worker 的迟到回写"
+    setup_preparation._save(factory, stale)
+    with factory() as db:
+        current = setup_preparation.read_task(db)
+    assert current["task_id"] == second["task_id"]
+    assert current["status"] == "QUEUED"
+    assert current["message"] != "旧 Worker 的迟到回写"
+    # 取消后的任务同样不得被迟到回写复活。
+    with factory() as db:
+        setup_preparation.cancel(db, actor="local-user")
+    cancelled = dict(second)
+    cancelled["status"] = "RUNNING"
+    setup_preparation._save(factory, cancelled)
+    with factory() as db:
+        assert setup_preparation.read_task(db)["status"] == "CANCELLED"
+
+
 def test_root_identity_ignores_windows_case_and_spaces(installed):
     """INV-13：同一物理 root 的大小写/空格变体只对应一个稳定身份。"""
     import os

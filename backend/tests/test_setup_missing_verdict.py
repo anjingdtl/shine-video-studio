@@ -259,3 +259,17 @@ def test_named_code_in_a_bare_value_error_is_the_recorded_code(tmp_path, api, mo
     assert task["error"] == named, "页面要读到具名原因，不是异常类名"
     failed = next(row for row in task["steps"] if row["status"] == "FAILED")
     assert failed["code"] == named
+
+
+def test_summary_verdict_and_verdict_endpoint_are_one_answer(tmp_path, api):
+    """R5 INV-07：同一台机器，summary 内嵌裁决与 /setup/verdict 必须是同一答案。"""
+    client, _factory, _settings = api
+    summary = client.get("/api/v1/setup/summary").json()
+    verdict = client.get("/api/v1/setup/verdict").json()
+    assert summary["verdict"], "summary 必须内嵌唯一裁决"
+    for key in ("mode", "label", "detail", "action", "code", "services_verified"):
+        assert summary["verdict"][key] == verdict[key], key
+    # 机器进度条的 100% 只允许出现在唯一裁决 READY/RUNNING 时。
+    progress = summary["machine_progress"]
+    if progress["percent"] == 100 and not progress["active"]:
+        assert verdict["mode"] in {"READY", "RUNNING"}

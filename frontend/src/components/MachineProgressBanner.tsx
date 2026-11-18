@@ -47,7 +47,7 @@ export function MachineProgressBanner({ refreshEpoch = 0 }: { refreshEpoch?: num
       <Meter value={progress.percent} max={100} tone="spectrum"
         label={progress.label} count={`${progress.percent}%`} />
       <div className="machine-progress-text">
-        <b>{ready ? '整备完成 · 真实制作已就绪' : progress.label}</b>
+        <b>{ready ? `整备完成 · ${progress.label}` : progress.label}</b>
         <span>{progress.detail}</span>
       </div>
       {progress.active && (

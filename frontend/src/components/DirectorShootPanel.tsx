@@ -123,17 +123,19 @@ export function describeAccelerator(acceleratorId: string, steps?: number): stri
   return steps ? `${acceleratorId} · ${steps} 步` : acceleratorId;
 }
 
-/** 服务端读不到选项时的最保守回退：只给已验收的 INT8 + PDD8，其余不可选。 */
+/** 服务端读不到选项时的最保守回退：只列已验收的 INT8 + PDD8，但「已核验」
+ *  是服务端事实，读不到就是未知，显示层不得伪造 verified（R5 B6/INV-14）。
+ *  提交仍由服务端门禁最终裁决。 */
 const FALLBACK_OPTIONS: StrategyOptions = {
   model_variants: [{
     variant_id: 'h3-ref2va-int8-convrot', label: 'h3-ref2va-int8-convrot',
-    acceptance_status: 'SUPPORTED', verified: true, default_recommended: true,
+    acceptance_status: 'SUPPORTED', verified: false, default_recommended: true,
   }],
   accelerators: [
-    { accelerator_id: 'pdd8', steps: 8, verified: true },
-    { accelerator_id: 'native20', steps: 20, verified: true },
+    { accelerator_id: 'pdd8', steps: 8, verified: false },
+    { accelerator_id: 'native20', steps: 20, verified: false },
   ],
-  second_pass: { supported: true, recipes: ['h3-tail-refine-v1'] },
+  second_pass: { supported: false, recipes: ['h3-tail-refine-v1'] },
   upscale: [],
 };
 

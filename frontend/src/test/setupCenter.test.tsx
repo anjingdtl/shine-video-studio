@@ -68,6 +68,18 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(screen.getByText(/上次检测/)).toBeTruthy();
   });
 
+  it('R5 B6/INV-14：summary 读不到时是未知，不是缺整档权重，也不开放提交', async () => {
+    stub.add({ method: 'GET', pattern: /setup\/summary/, respond: () => jsonResponse({ detail: '暂时不可用' }, 503) });
+    render(<SetupCenter projectId="proj-1" />);
+    await detect();
+    // 超时/未到达不得显示成「需要下载几十 GiB」。
+    expect(screen.getAllByText(/正在读取本机文件状态/).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/需要下载/)).toBeNull();
+    expect(screen.getAllByText(/正在读取本机模型状态/).length).toBeGreaterThan(0);
+    const prepare = screen.getByRole('button', { name: /确认整备所选能力|确认准备 H3 权重/ });
+    expect(prepare).toBeDisabled();
+  });
+
   it('已有一套权重不锁死候选：候选可选、BLOCKED 仍禁用', async () => {
     const user = userEvent.setup();
     render(<SetupCenter projectId="proj-1" />);

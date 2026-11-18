@@ -266,7 +266,7 @@ export default function DirectorSetupPanel({
           </span>
         </div>
         <p className="capability-facts">
-          模型文件 {vlm?.model_files_present ?? 0}/{vlm?.model_files_expected ?? 13}
+          模型文件 {vlm ? `${vlm.model_files_present}/${vlm.model_files_expected}` : '读取中'}
           {vlm && !vlm.runtime_ready ? ' · 运行依赖还需要补齐' : ''}
           {vlm?.code ? ' · 只影响建议，不影响出片' : ''}
         </p>
@@ -289,7 +289,7 @@ export default function DirectorSetupPanel({
           </span>
         </div>
         <p className="capability-facts">
-          模型文件 {asr?.model_files_present ?? 0}/{asr?.model_files_expected ?? 10}
+          模型文件 {asr ? `${asr.model_files_present}/${asr.model_files_expected}` : '读取中'}
           {asr && !asr.runtime_ready ? ' · 运行依赖还需要补齐' : ''}
           {asr?.code ? ' · 只影响建议，不影响出片' : ''}
         </p>

@@ -140,20 +140,6 @@ function mbAsGib(mb?: number | null): string {
   return `${(mb / 1024).toFixed(1)} GiB`;
 }
 
-function variantPresence(variant: VariantOption, scan: ExistingScan | null): { found: number; required: number } {
-  const required = weightIdsOf(variant);
-  if (!scan || required.length === 0) return { found: 0, required: required.length };
-  const found = required.filter((id) => scan.matches.some((row) => row.component_id === id)).length;
-  return { found, required: required.length };
-}
-
-/** 候选变体的 required_component_ids 可能为空（图推导权重），下载与 presence 用 install 清单。 */
-function weightIdsOf(variant: VariantOption): string[] {
-  return variant.required_component_ids?.length
-    ? variant.required_component_ids
-    : (variant.install_component_ids ?? []);
-}
-
 const SNAPSHOT_KEY = 'shine-setup-center-snapshot-v1';
 
 type DetectionSnapshot = {
@@ -225,7 +211,6 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const [problem, setProblem] = useState('');
   const [env, setEnv] = useState<EnvReport | null>(restored?.env ?? null);
   const [storage, setStorage] = useState<Storage | null>(restored?.storage ?? null);
-  const [runtime, setRuntime] = useState<RuntimeState | null>(restored?.runtime ?? null);
   const [readiness, setReadiness] = useState<Readiness | null>(restored?.readiness ?? null);
   /** The one verdict the badge and both configuration pages read. */
   const [setupVerdict, setSetupVerdict] = useState<SetupVerdict | null>(null);
@@ -289,7 +274,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         ).catch(() => null)
         : null;
       if (!mounted.current) return;
-      setEnv(environment); setStorage(disk); setRuntime(state); setReadiness(ready);
+      setEnv(environment); setStorage(disk); setReadiness(ready);
       setImage(imageState); setVariants(variantRows);
       setAdoptedRoot(availability?.adopted_root ?? null);
       setAvailabilityRows(availability?.variants ?? null);
@@ -387,21 +372,22 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
 
   const h3Bytes = selectedVariant?.total_bytes ?? 0;
   // 下载量读后端同一结论里的「实际缺项」字节；只有用户明确重复下载时才按整档
-  // 体积计。后端读不到时退回整档估算，不在浏览器另算一套缺件。
-  const capDownloadBytes = (key: CapabilityKey, fullBytes: number) => {
+  // 体积计。R5 B6/INV-14：summary 读不到时是「未知」，不是「缺整档」——
+  // 不得把超时/未到达显示成「需要下载几十 GiB」。
+  const capDownloadBytes = (key: CapabilityKey, fullBytes: number): number | null => {
     if (force[key]) return fullBytes;
-    const missing = summary?.capabilities?.[key]?.missing_bytes;
-    return missing ?? fullBytes;
+    if (!summary) return null;
+    return summary.capabilities?.[key]?.missing_bytes ?? fullBytes;
   };
-  const downloadBytes = (h3Want ? capDownloadBytes('h3', h3Bytes) : 0)
-    + (imageWant ? capDownloadBytes('image', imageBytes) : 0)
-    + (vlmWant ? capDownloadBytes('vlm', REVIEW_BYTES.vlm) : 0)
-    + (asrWant ? capDownloadBytes('asr', REVIEW_BYTES.asr) : 0)
-    + (relayvsrWant ? capDownloadBytes('relayvsr', RELAYVSR_BYTES) : 0);
+  const downloadBytes = (h3Want ? capDownloadBytes('h3', h3Bytes) ?? 0 : 0)
+    + (imageWant ? capDownloadBytes('image', imageBytes) ?? 0 : 0)
+    + (vlmWant ? capDownloadBytes('vlm', REVIEW_BYTES.vlm) ?? 0 : 0)
+    + (asrWant ? capDownloadBytes('asr', REVIEW_BYTES.asr) ?? 0 : 0)
+    + (relayvsrWant ? capDownloadBytes('relayvsr', RELAYVSR_BYTES) ?? 0 : 0);
 
-  /** 这次真正要准备的能力，按各自的分项体积列出。 */
+  /** 这次真正要准备的能力，按各自的分项体积列出（未知体积为 null，显示 —）。 */
   const capabilityRows = useMemo(() => {
-    const rows: Array<{ key: CapabilityKey; label: string; bytes: number }> = [];
+    const rows: Array<{ key: CapabilityKey; label: string; bytes: number | null }> = [];
     if (h3Want) rows.push({ key: 'h3', label: selectedVariant && !selectedVariant.auto_download_allowed ? 'H3 候选模型' : 'H3 视频权重', bytes: capDownloadBytes('h3', h3Bytes) });
     if (imageWant) rows.push({ key: 'image', label: '素材出图权重', bytes: capDownloadBytes('image', imageBytes) });
     if (vlmWant) rows.push({ key: 'vlm', label: '画面审片权重', bytes: capDownloadBytes('vlm', REVIEW_BYTES.vlm) });
@@ -436,8 +422,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   // image or review weights must not wait for an H3 variant that was never
   // asked for (a machine with no installable H3 scheme stays able to prepare
   // the other - legal - capabilities).
+  // R5 B6：summary 未到达时不做任何「缺件/下载」断言，也不开放提交——
+  // 资格与缺件事实都来自服务端同一份投影，读不到就是未知。
   const canPrepare = !envBlocked && !running && !!storage && !storage.requires_selection
-    && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
+    && !!summary && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
 
   /**
    * 一次授权 → 后台持续推进。
@@ -553,25 +541,21 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         <h3>选一套 H3 生成方案 <GuideTip tight>只有「可直接安装」的方案会真的下载；候选方案要先在本机跑通</GuideTip></h3>
         <div className="setup-preset-list">
           {allVariants.map((row) => {
-            const presence = variantPresence(row, scan);
+            // R5 B6/INV-07：presence 只读后端 availability 同一份台账结论；
+            // 读不到就是「读取中」，不再用浏览器自查扫描另算一套「本机已有」。
             const fact = availabilityOf(row.variant_id);
-            const local = fact ? fact.installed : presence.required > 0 && presence.found === presence.required;
+            const local = !!fact?.installed;
             const blocked = row.acceptance_status === 'BLOCKED';
             // 已有一套权重不锁死其他方案：候选也可选、可显式确认后下载；
             // 只有没有可核对权重来源的 BLOCKED 槽位才禁用。
             const selectable = !blocked;
-            // 后端台账优先：它同时知道“文件在不在”“有没有逐字节核验”“有没有绑定”。
-            // "文件已找到" is not "生产就绪": a machine that cannot run the
-            // scheme still holds the files, and the card has to say so.
+            // 两份服务端事实的合成：availability 说字节在不在，recommendation
+            // 说硬件够不够。硬件不足时「文件已有」不得读成「可以生产」。
             const reason = fact
-              ? fact.reason
-              : local
-                ? (row.status === 'BLOCKED'
-                  ? '本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件'
-                  : '本机已找到这套权重')
-                : row.auto_download_allowed ? `需要下载 ${gib(row.total_bytes)}`
-                  : blocked ? '这套没有可核对的权重来源，暂不能使用'
-                    : '候选 · 未真机验收；确认后可下载权重（下载不等于验收）';
+              ? (row.status === 'BLOCKED' && fact.installed
+                ? '本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件'
+                : fact.reason)
+              : '正在读取本机模型状态…';
             return <label key={row.variant_id} className={`setup-preset${variantId === row.variant_id ? ' active' : ''}${selectable ? '' : ' disabled'}`}>
               <input type="radio" name="h3-preset" checked={variantId === row.variant_id} disabled={!selectable || !!running}
                 onChange={() => {
@@ -585,7 +569,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
               <span className={`chip ${local ? 'ok' : row.auto_download_allowed ? '' : 'warn'}`}>
                 {fact?.verified && fact.bound ? '本机已核验 · 已绑定'
                   : fact?.verified ? '本机已核验'
-                    : local ? '本机已有' : row.auto_download_allowed ? '可安装' : blocked ? '候选' : '候选 · 可下载'}
+                    : local ? '本机已有' : !fact ? '读取中' : row.auto_download_allowed ? '可安装' : blocked ? '候选' : '候选 · 可下载'}
               </span>
             </label>;
           })}
@@ -605,13 +589,13 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
                   : '权重已逐字节核验，等待实例绑定')
                 : h3Complete
                   ? '本机已找到权重'
-                  : `需要下载 ${gib(h3Bytes)}`}</em></span>
+                  : summary ? `需要下载 ${gib(h3Bytes)}` : '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.image} disabled={!!running}
             onChange={(event) => toggleCap('image', imagePresent, event.target.checked)} />
           <ImageIcon size={14} /><span><b>素材出图（人物 / 场景 / 道具）</b>
-            <em className={imagePresent ? 'cap-found-warn' : undefined}>{imagePresent ? '本机已找到权重' : `需要下载 ${gib(imageBytes)}`}</em></span>
+            <em className={imagePresent ? 'cap-found-warn' : undefined}>{imagePresent ? '本机已找到权重' : summary ? `需要下载 ${gib(imageBytes)}` : '正在读取本机文件状态'}</em></span>
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.vlm} disabled={!!running}
@@ -629,7 +613,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           <input type="checkbox" checked={caps.relayvsr} disabled={!!running}
             onChange={(event) => toggleCap('relayvsr', relayvsrPresent, event.target.checked)} />
           <Sparkles size={14} /><span><b>RelayVSR 2X 精修（后期放大，可选）</b>
-            <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>{relayvsrPresent ? '本机已找到权重' : `需要下载 ${gib(RELAYVSR_BYTES)}`}</em></span>
+            <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>{relayvsrPresent ? '本机已找到权重' : summary ? `需要下载 ${gib(RELAYVSR_BYTES)}` : '正在读取本机文件状态'}</em></span>
         </label>
       </div>
 
@@ -726,7 +710,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
             还缺固定版本文件 {scan?.missing.length ?? 0} 项</p>
           <p>服务状态：{setupVerdict
             ? `${setupVerdict.label}${setupVerdict.services_verified ? '（服务已核验）' : ''}`
-            : runtime?.status === 'ACTIVE' && runtime.services_verified ? '配置已激活，服务已核验' : '待配置或待核验'}
+            : '读取中…'}
             {' · '}就绪层 {readiness?.layers.filter((layer) => layer.status === 'READY').length ?? 0}/{readiness?.layers.length ?? 0}
           </p>
           {setupVerdict && !['READY', 'RUNNING'].includes(setupVerdict.mode) && <p role="status" className="run-hint">

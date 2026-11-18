@@ -1,6 +1,6 @@
 import { Sparkles } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, timeoutSignal, knownFreeBytes, startWorker, type SetupVerdict } from '../api';
+import { api, timeoutSignal, type SetupVerdict } from '../api';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { nodePackWarning, type NodePackNote } from './nodePackNotes';
 import { SetupCenter } from './SetupCenter';
@@ -18,7 +18,6 @@ import {
   rememberInstallationAttempt,
   resumeInstallationAttempt,
   storedInstallationAttempt,
-  waitForInstallationAttempt,
 } from '../setupExecution';
 import type { InstallationAttemptView, SetupExecutionResult } from '../setupExecution';
 import { label, prepRowLabels, providerLabels, serviceStatusLabels } from '../constants';
@@ -204,14 +203,6 @@ function purposeOf(component: CatalogComponent): 'video' | 'vision' | 'audio' | 
   return 'video';
 }
 
-function productionCatalogComponents(components: CatalogComponent[]): CatalogComponent[] {
-  return components.filter((component) => {
-    const role = (component.role ?? '').toUpperCase();
-    const purpose = purposeOf(component);
-    return role !== 'VLM' && role !== 'ASR' && purpose !== 'vision' && purpose !== 'audio';
-  });
-}
-
 type ModelCard = {
   key: string;
   label: string;
@@ -252,10 +243,12 @@ function buildModelCards(
     const packageCount = Math.max(1, components.length);
     let resolvedState: { text: string; tone: string } | undefined;
     if (resolved && importedResult) {
+      // R5 B7/INV-16：这张卡只报扫描/核验事实，不再由浏览器给出「已安装并核验」
+      // 的生产资格绿灯——就绪结论唯一来自服务端能力裁决（上方制作环境卡）。
       if (purpose === 'program' && scan?.software?.installed) {
         resolvedState = { text: 'ComfyUI 已安装，运行兼容性待核验', tone: 'candidate' };
       } else if (expectedCount > 0 && incompleteCount === 0) {
-        resolvedState = { text: optionalReview ? '模型文件已安装并核验（可选建议项）' : '固定版本文件已安装并哈希核验', tone: 'verified' };
+        resolvedState = { text: `扫描事实：${verifiedCount}/${expectedCount} 个固定版本文件哈希匹配（就绪结论见上方制作环境卡）`, tone: 'candidate' };
       } else if (optionalReview) {
         resolvedState = { text: `建议审片模型未就绪（${packageCount} 个模型包 · 已核验 ${verifiedCount}/${expectedCount} 个文件，不阻断 H3 出片）`, tone: verifiedCount ? 'candidate' : 'absent' };
       } else {
@@ -268,10 +261,10 @@ function buildModelCards(
       components,
       state: scan
         ? (resolvedState
-          ? resolvedMode === 'installed' && resolvedState.tone === 'verified'
+          ? resolvedMode === 'installed' && purpose !== 'program'
             ? { ...resolvedState, text: `${resolvedState.text}（原目录，未复制）` }
-            : resolvedMode === 'cached' && resolvedState.tone === 'verified'
-              ? { ...resolvedState, text: '已校验并缓存（尚未激活）' }
+            : resolvedMode === 'cached'
+              ? { ...resolvedState, text: `${resolvedState.text}（已缓存，尚未激活）` }
               : resolvedState
           : candidateCount > 0 ? { text: `发现文件，待校验（${candidateCount} 项）`, tone: 'candidate' }
             : optionalReview
@@ -288,7 +281,7 @@ function buildModelCards(
   return cards;
 }
 
-export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImageCapability = false }: {
+export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0 }: {
   projectId: string; onRefresh: () => Promise<void>; refreshEpoch?: number;
   /** The combination chosen on the recommendation card; it is sent with the
    *  plan so the approved plan really is the configuration the person saw. */
@@ -498,30 +491,9 @@ export function SetupPanel({ projectId, onRefresh, refreshEpoch = 0, includeImag
     }
   }
 
-  function createInstallPlan() {
-    if (existingChoice === 'reuse' && existingScan?.software?.installed) {
-      say('已发现本机 ComfyUI 已安装。先完成运行兼容性核验；当前不会创建另一套安装计划。', 'bad');
-      return;
-    }
-    void run(async () => {
-      const core = productionCatalogComponents(catalog?.components ?? []).map((component) => component.component_id);
-      const result = await api<{ plan_id: string; sha256: string; download_bytes: number; disk_required: number }>(
-        '/setup/install-plan', withJson('POST', { components: core, project_id: projectRef.current, disk_free: knownFreeBytes(storage?.free_bytes) }));
-      setPlans(previous => [...previous, { ...result, kind: 'INSTALL', status: 'AWAITING_APPROVAL' }]);
-      return `安装计划 ${result.plan_id} 已创建（下载 ${fmtBytes(result.download_bytes)}，预留 ${fmtBytes(result.disk_required)}）`;
-    });
-  }
-
-  function createInstanceChain() {
-    void run(async () => {
-      const result = await api<PlanRef & { complete: boolean }>('/setup/next-instance-plan', withJson('POST', {
-        project_id: projectRef.current, instance_name: 'shine-h3', port: 8188, mode: 'local',
-      }));
-      if (result.complete) return '实例准备已完成并保持停止，请生成受管配置。生产时由 Worker 启动渲染器。';
-      setPlans(previous => [...previous.filter(p => p.plan_id !== result.plan_id), { ...result, kind: 'INSTANCE_LIFECYCLE' }]);
-      return `下一步：${result.action}，请审核后批准执行`;
-    });
-  }
+  // R5 B7/INV-16：浏览器不再创建并串行执行新的安装/实例计划——那是持久整备
+  // 任务（/setup/prepare/execute → Worker）的唯一职责。本页保留既有计划的
+  // 批准/执行/整理（恢复入口）与只读诊断；新整备一律走上方「制作环境」卡。
 
   async function runPlan(plan: PlanRef) {
     setBusy(true);
@@ -608,47 +580,6 @@ function activateRuntime() {    const candidate = runtime?.candidate;
       }));
       await loadRuntime(); await loadReadiness();
       return `服务与工作流验证完成：${result.status} · ${result.workflow_profiles.length} 个工作流 · ${result.node_count} 个节点 · 审片 ${Object.values(result.review_models).join(' / ')}`;
-    });
-  }
-
-  /**
-   * 一键准备：登记生成方案 → 生成运行配置 → 核验服务与工作流 → 激活。
-   *
-   * 这四步以前要人依次点四个按钮，顺序错了就得到「还没有候选配方」这类
-   * 与用户无关的报错。检测到什么就登记什么，中间不再要求人做技术选择。
-   */
-  function prepareAll() {
-    const project = projectRef.current;
-    if (!project) return;
-    void run(async () => {
-      setProgress('正在自动登记生成方案并核验本机服务…');
-      const steps: string[] = [];
-      const profiles = await api<{ profiles: Array<{ name: string; status: string }> }>(
-        '/setup/profiles', withJson('POST', { project_id: project }));
-      steps.push(`登记 ${profiles.profiles.length} 套生成方案`);
-      await api('/setup/configuration', withJson('POST', { project_id: project }));
-      steps.push('生成运行配置');
-      const state = await api<RuntimeState>('/setup/runtime');
-      setRuntime(state);
-      const candidate = state.candidate;
-      if (!candidate || candidate.project_id !== project) {
-        throw new Error('运行配置没有为本项目生成候选配方：请确认本机已安装 H3 组件后再试。');
-      }
-      const services = await api<{ status: string }>('/setup/services/validate', withJson('POST', {
-        project_id: project, recipe_sha256: candidate.recipe_sha256,
-      }));
-      steps.push(`服务核验 ${services.status}`);
-      await api('/setup/runtime/activate', withJson('POST', {
-        project_id: project, recipe_sha256: candidate.recipe_sha256,
-      }));
-      steps.push('激活');
-      // 核验前置条件要求 Worker 停下，准备完成后必须自己把它叫回来：
-      // 否则人只看到「准备成功」，关掉页面后本机再也没有后台能出片。
-      const restored = await startWorker().catch(() => null);
-      if (restored && !restored.code) steps.push('恢复 Worker');
-      await loadRuntime(); await loadReadiness(); await onRefresh();
-      setProgress('');
-      return `已自动完成：${steps.join(' → ')}。`;
     });
   }
 
@@ -767,114 +698,17 @@ function activateRuntime() {    const candidate = runtime?.candidate;
     });
   }
 
+  /** R5 B7：可选审片补装与导演页同一入口——提交持久整备任务，浏览器不直建计划。 */
   function installOptionalReviewers() {
     const selected = projectRef.current;
-    const reviewers = (catalog?.components ?? []).filter(component => component.kind === 'review-model');
-    if (!selected || !storage || !reviewers.length) return;
-    const bytes = reviewers.reduce((sum, component) => sum + component.bytes, 0);
-    if (!window.confirm(`补装建议审片模型？\n每类只安装 1 个模型包（画面检查、语音检查），约 ${fmtBytes(bytes)}；不会替换 H3 权重，也不会改动已冻结的作品设置。它们只提供建议，不阻断出片。`)) return;
+    if (!selected) return;
+    if (!window.confirm('补装建议审片模型？\n画面检查、语音核对各 1 个模型包；不会替换 H3 权重，也不会改动已冻结的作品设置。它们只提供建议，不阻断出片。下载、核验与登记由后台「一键准备」完成。')) return;
     void run(async () => {
-      const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
-        components: reviewers.map(component => component.component_id), project_id: selected,
-        disk_free: storage.free_bytes,
+      await api('/setup/prepare/execute', withJson('POST', {
+        project_id: selected, capabilities: ['vlm', 'asr'], verify_runtime: false,
       }));
-      await approveAndExecute({ ...plan, kind: 'INSTALL' }, '补装建议审片模型');
       await Promise.allSettled([loadRuntime(), loadReadiness(), loadPlans()]);
-      return '建议审片模型的安装计划已提交。装好后可在「验证服务与工作流」里确认它们是否就绪；缺失仍不阻断 H3 出片。';
-    });
-  }
-
-  function prepareAutomatically() {
-    if (!projectId || !checked || !storage || storage.requires_selection || !existingResolved) return;
-    if (existingChoice === 'reuse' && existingScan?.software?.installed) {
-      say('已确认现有 ComfyUI 与权重安装。当前向导尚不能安全接管这套外部运行环境，因此不会创建新安装计划或重复下载；请先在专业设置核验 Python、节点修订版本和服务兼容性。', 'bad');
-      return;
-    }
-    const selected = projectId;
-    const productionComponents = productionCatalogComponents(catalog?.components ?? []);
-    const productionBytes = productionComponents.reduce((sum, component) => sum + component.bytes, 0);
-    if (!window.confirm(`准备本机 H3 生产环境？\n目录：${storage.root}\n本次只包含 H3 出片所需程序和权重，约 ${fmtBytes(productionBytes)}；ASR/VLM 仅用于建议审片，不会自动下载。${includeImageCapability ? '\n图片素材生成（Qwen Image）是独立能力与独立安装计划，会在计划回执里单列，不并入这次 H3 下载。' : '\n不安装图片生成能力：素材全部由你上传，正式视频生产不受影响。'}\n已校验复用的模型与缓存不会重复下载。\n将独立安装缺少的固定版本组件，保留原 ComfyUI，自动登记工作流、生成并激活配置，短暂启动服务检测后停止。不会生成视频。`)) return;
-    void run(async () => {
-      const ensureCurrent = () => {
-        if (!mounted.current || projectRef.current !== selected) throw new Error('页面或项目已切换，自动准备已停止；已执行记录保留，请重新检测。');
-      };
-      // Text readiness is a parallel branch, not a precondition of the H3
-      // download (J03).  Whatever is missing is reported once the environment
-      // is ready, and only the action that really calls a role asks for it.
-      let textNote = '';
-      try {
-        const llm = await api<{ status: string }>('/setup/llm-readiness');
-        ensureCurrent();
-        if (llm.status !== 'READY') {
-          textNote = '；文本模型还有角色未配置：不影响 H3 安装与已可拍镜头的开拍，生成大纲/分镜时会按实际角色提示配置';
-        }
-      } catch {
-        textNote = '；文本模型就绪状态暂时读不到：不影响 H3 安装';
-      }
-      try {
-        setProgress('检查下载网络…');
-        const network = await api<Connectivity>('/setup/connectivity');
-        setConnectivity(network);
-        if (network.blocked.length) throw new Error(`下载源无法连接：${network.blocked.join('、')}。请检查网络后重新检测。`);
-        ensureCurrent();
-        const pending = await api<Array<{ id: string; sha256: string; status: string; payload: { deployment?: unknown; kind?: string } }>>(
-          `/comfyops/install-plans?project_id=${selected}`);
-        if (pending.some(p => (p.payload.deployment || p.payload.kind === 'INSTANCE_LIFECYCLE')
-          && !['FILES_VERIFIED_PENDING_RUNTIME', 'STOPPED', 'MOCK_VERIFIED', 'CANCELLED', 'RECONCILED_NO_RETRY'].includes(p.status))) {
-          throw new Error('已有未完成的安装记录，请展开安装详情继续原计划或对账；不会新建重复安装。');
-        }
-        const ready = await api<Readiness>('/setup/readiness');
-        if (!ready.layers.some(layer => layer.layer === 'L2_files_verified' && layer.status === 'READY')) {
-          setProgress('准备 H3 出片所需程序与权重；ASR/VLM 建议审片模型不在本次下载内…');
-          const plan = await api<PlanRef>('/setup/install-plan', withJson('POST', {
-            components: productionComponents.map(component => component.component_id), project_id: selected,
-            disk_free: storage.free_bytes, include_image_capability: includeImageCapability,
-          }));
-          ensureCurrent();
-          const queued = await approveAndExecute({ ...plan, kind: 'INSTALL' }, '下载安装');
-          ensureCurrent();
-          if (isQueuedInstallation(queued)) {
-            // The install is a persistent task now: the automatic chain waits
-            // for its real stage instead of assuming it already finished.
-            await waitForInstallationAttempt(queued.attempt_id, view => setAttempt(view));
-            ensureCurrent();
-          }
-        }
-        let complete = false;
-        for (let step = 0; step < 8; step += 1) {
-          ensureCurrent();
-          setProgress('自动准备运行环境…');
-          const plan = await api<PlanRef & { complete: boolean }>('/setup/next-instance-plan', withJson('POST', {
-            project_id: selected, instance_name: 'shine-h3', port: 8188, mode: 'local',
-          }));
-          if (plan.complete) { complete = true; break; }
-          ensureCurrent();
-          await approveAndExecute({ ...plan, kind: 'INSTANCE_LIFECYCLE' }, '准备运行环境');
-        }
-        if (!complete) throw new Error('环境准备步骤超过预期，已停止，请检查安装详情。');
-        ensureCurrent();
-        setProgress('登记工作流并生成配置…');
-        await api('/setup/profiles', withJson('POST', { project_id: selected }));
-        ensureCurrent();
-        await api('/setup/configuration', withJson('POST', { project_id: selected }));
-        const state = await api<RuntimeState>('/setup/runtime');
-        setRuntime(state);
-        if (state.candidate?.project_id !== selected) throw new Error('没有匹配的运行配置，请检查安装详情。');
-        const body = { project_id: selected, recipe_sha256: state.candidate.recipe_sha256 };
-        ensureCurrent();
-        setProgress('启动服务并检测工作流，完成后自动停止…');
-        const validation = await api<{ status: string }>('/setup/services/validate', {
-          ...withJson('POST', body), signal: timeoutSignal(3_600_000),
-        });
-        if (validation.status !== 'READY') throw new Error(`服务检测未通过：${validation.status}。配置尚未激活。`);
-        ensureCurrent();
-        await api('/setup/runtime/activate', withJson('POST', body));
-        await onRefresh();
-        return '环境已配置并通过服务检测，可以回到制片。真实 H3 生成效果将在实际任务中验证' + textNote + '。';
-      } finally {
-        setProgress(''); setChecked(false);
-        await Promise.allSettled([loadRuntime(), loadReadiness(), loadPlans()]);
-      }
+      return '建议审片模型已交给后台整备（关闭页面也会继续）；缺失仍不阻断 H3 出片。';
     });
   }
 
@@ -923,13 +757,15 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             <div className="env-summary-item"><b>安装空间</b><span>{storage ? `${storage.root} · 可用 ${storage.free_gb} GB` : '读取中'}</span></div>
             <div className="env-summary-item"><b>生成服务</b><span>{verdict
               ? `${verdict.label}${verdict.services_verified ? '（服务已核验）' : ''}`
-              : runtime?.status === 'ACTIVE' && runtime.services_verified ? '服务验证通过' : '待配置/验证'}</span></div>
+              : '读取中…'}</span></div>
             <div className="env-summary-item"><b>文本模型</b><span>在本页上方配置；不需要先安装 H3</span></div>
             <div className="env-summary-item"><b>语音能力</b><span>{voiceSummary(voice)}</span></div>
             <div className="env-summary-item"><b>真实出片</b><span>只能由真实生产证据更新；Mock/演示不改变它</span></div>
           </div>
           {env?.blockers.length ? <p role="status">{env.blockers.map(blockerText).join('；')}。基础工具可重新运行「一键安装并启动.cmd」补齐；显存、内存或磁盘不足需要先处理。</p> :
-          <p role="status">{runtime?.status === 'ACTIVE' && runtime.services_verified ? '当前配置已激活，服务已核验。' : '工作台尚未配置就绪；这不代表本机没有安装 ComfyUI 或模型。'}</p>}
+          <p role="status">{verdict
+            ? verdict.detail
+            : '正在读取本机裁决；读不到不代表本机没有安装 ComfyUI 或模型。'}</p>}
           <VariantRecommendationCard />
           <h3>本机已有模型</h3>
           <p className="env-model-note">画面检查和语音转写只提供建议；缺失时留待人工复核，不阻断 H3 出片。默认安装只准备 H3 所需组件，不会自动下载 ASR/VLM 审片模型。</p>
@@ -986,14 +822,8 @@ function activateRuntime() {    const candidate = runtime?.candidate;
           <p className="env-next-note">下一步只有一个主动作：检测 → 确认已安装的软件和权重 → 核验兼容性 → 验证服务 → 进入制作。只有明确选择新建独立环境时才会准备另一套程序。</p>
           <p>检测不会下载模型或提交视频。下载前会显示目录、体积与安装范围，由你确认。</p>
           {existingComfyInstalled && <p role="status">{existingResolved
-            ? '已确认本机软件与权重安装；当前版本尚不能直接接管外部目录，因此自动安装已停用，不会重复下载。请先在专业设置完成运行兼容性检查。'
+            ? '已确认本机软件与权重安装（只读核验，未复制、未下载）。复用与运行核验在上方「制作环境」卡一次完成。'
             : '已发现本机 ComfyUI。先核验原目录的软件版本与模型哈希；确认之前不会另行下载或复制。'}</p>}
-          <button className="btn-secondary" disabled={busy || !projectId || !catalog?.components.length || !!env?.blockers.length || !storage || storage.requires_selection
-            || !existingResolved
-            || existingComfyInstalled
-            || (runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId)}
-            onClick={prepareAutomatically}>{existingComfyInstalled ? '已有安装等待兼容性验证' : runtime?.status === 'ACTIVE' && runtime.services_verified && runtime.candidate?.project_id === projectId ? '本项目环境已配置' : '下载缺项并自动配置'}</button>
-          {!projectId && <p>先在下方给项目起个名字，即可开始自动配置。</p>}
           {storage?.requires_selection && <p>请选择下载安装目录：<a href="#deployment-storage">选择目录</a></p>}
         </>}
         {progress && <p role="status">{progress}</p>}
@@ -1090,12 +920,8 @@ function activateRuntime() {    const candidate = runtime?.candidate;
             <a href="#deployment-storage">修改下载安装目录</a>
             {storage?.requires_selection && ' 请先选择非系统盘目录，才能自动安装。'}
           </p>
-          <div className="inline-form">
-            <button className="btn-primary" disabled={busy || !projectId || !storage || storage.requires_selection}
-              onClick={prepareAll}>一键准备（自动登记并激活）</button>
-            <button className="btn-secondary" disabled={busy || !projectId || !storage || storage.requires_selection} onClick={createInstallPlan}>生成安装计划</button>
-            <button className="btn-secondary" disabled={busy || !projectId} onClick={createInstanceChain}>生成实例链计划</button>
-          </div>
+          <p className="guardrail-note">新的整备（下载/实例/登记/核验/激活）只在上方「制作环境」卡一次确认，
+            由后台持久任务连续完成；这里保留既有计划的恢复与单步排查。</p>
           <details className="inline-manual-path">
             <summary>单步操作（高级）</summary>
             <div className="inline-form">

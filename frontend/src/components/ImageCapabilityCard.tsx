@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { AlertTriangle, Check, CircleDashed, Image as ImageIcon, Loader2 } from 'lucide-react';
-import { api, knownFreeBytes } from '../api';
+import { AlertTriangle, Check, CircleDashed, Image as ImageIcon } from 'lucide-react';
+import { api } from '../api';
 
 export type ImageFamilyReadiness = {
   layer: string;
@@ -56,9 +56,6 @@ const FAMILY_LABELS: Record<string, string> = {
   prop: '道具',
 };
 
-const IMAGE_CATALOG = 'qwen-image-2.1-windows-x64';
-const IMAGE_COMPONENTS = ['qwen-image-2.1-unet', 'qwen-image-2.1-text-encoder', 'qwen-image-2.1-vae'];
-
 const RENDERER_LABELS: Record<string, string> = {
   NOT_BOUND: '未绑定',
   NOT_STARTED: '未启动',
@@ -79,113 +76,22 @@ const BLOCKER_LABELS: Record<string, string> = {
   IMAGE_RENDERER_EXITED_DURING_STARTUP: '出图渲染器在启动过程中自己退出了，没有开始监听端口。',
 };
 
-export function ImageCapabilityCard({ projectId, busy }: { projectId: string; busy: boolean }) {
+/**
+ * 出图能力的只读诊断视图（R5 B7/INV-16）。
+ *
+ * 这里只显示服务端 /setup/image-readiness 的四层事实与具名阻塞，不再自带
+ * 安装计划、绑定、启停、验证等执行按钮——那些动作的唯一入口是「制作环境」
+ * 的持久整备任务与工作台后台管理。显示层不定义第二套生产资格。
+ */
+export function ImageCapabilityCard({ projectId }: { projectId: string; busy?: boolean }) {
   const [state, setState] = useState<ImageReadiness | null>(null);
-  const [working, setWorking] = useState(false);
-  const [problem, setProblem] = useState<string | null>(null);
-  const [note, setNote] = useState<string | null>(null);
-  const [plan, setPlan] = useState<{ plan_id: string; download_bytes: number; disk_required: number; root: string } | null>(null);
 
   const load = useCallback(async () => {
     setState(await api<ImageReadiness>('/setup/image-readiness'));
   }, []);
 
-  useEffect(() => { void load().catch(() => undefined); }, [load]);
+  useEffect(() => { void load().catch(() => undefined); }, [load, projectId]);
 
-  const jsonPost = <T,>(path: string, body: unknown): Promise<T> => api<T>(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-
-  const registerInstall = async () => {
-    setWorking(true);
-    setProblem(null);
-    setNote(null);
-    try {
-      const storage = await api<{ root: string; free_bytes: number }>('/setup/storage');
-      const created = await jsonPost<{ plan_id: string; download_bytes: number; disk_required: number }>(
-        '/setup/install-plan',
-        {
-          catalog: IMAGE_CATALOG,
-          components: IMAGE_COMPONENTS,
-          project_id: projectId,
-          disk_free: knownFreeBytes(storage.free_bytes),
-        },
-      );
-      setPlan({ ...created, root: storage.root });
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const startRenderer = async () => {
-    setWorking(true);
-    setProblem(null);
-    setNote(null);
-    try {
-      const result = await jsonPost<{ base_url: string }>('/setup/image-runtime/start', {});
-      setNote(`本机出图渲染器已启动（${result.base_url}）。它属于本工作台，完成后可以用下面的按钮关闭并释放显存。`);
-      await load();
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const bindRenderer = async () => {
-    if (!state?.binding_candidate) return;
-    setWorking(true); setProblem(null); setNote(null);
-    try {
-      const result = await jsonPost<{ readiness: ImageReadiness }>('/setup/image-runtime', {
-        ...state.binding_candidate, expected_config_revision: state.config_revision,
-      });
-      setState(result.readiness);
-      setNote('已绑定本机受管实例。下一步是验证真实出图。');
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-      await load().catch(() => undefined);
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const stopRenderer = async () => {
-    setWorking(true);
-    setProblem(null);
-    setNote(null);
-    try {
-      await jsonPost('/setup/image-runtime/stop', {});
-      setNote('本机出图渲染器已停止，显存已释放。');
-      await load();
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorking(false);
-    }
-  };
-
-  const validate = async () => {
-    setWorking(true);
-    setProblem(null);
-    setNote(null);
-    try {
-      const result = await jsonPost<{ run_id: string }>('/setup/image-runtime/validate', {
-        project_id: projectId,
-        idempotency_key: `image-validate-${projectId}-${state?.fingerprint ?? 'unknown'}`,
-        families: ['character', 'scene', 'prop'],
-      });
-      setNote(`三类真实小样已排队（批次 ${result.run_id}）。后台出图期间可以继续做别的；完成后这里会显示验证结果。`);
-      await load();
-    } catch (error) {
-      setProblem(error instanceof Error ? error.message : String(error));
-    } finally {
-      setWorking(false);
-    }
-  };
   const families = Object.entries(state?.families ?? {});
   const rendererState = state?.renderer?.state ?? 'NOT_STARTED';
   const generatable = families.filter(([, row]) => row.can_generate).map(([name]) => FAMILY_LABELS[name] ?? name);
@@ -247,18 +153,6 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
           </div>
         </div>
       ))}
-      {problem && (
-        <div className="blocker-item is-action" role="alert">
-          <AlertTriangle size={14} className="required-icon" />
-          <div className="blocker-reason"><b>这一步没有完成</b><small>{problem}</small></div>
-        </div>
-      )}
-      {note && (
-        <div className="notice" role="status">
-          <Check size={13} />
-          <div><p>{note}</p></div>
-        </div>
-      )}
 
       <div className="image-capability-foot">
         <span>
@@ -267,43 +161,10 @@ export function ImageCapabilityCard({ projectId, busy }: { projectId: string; bu
         <span>{state?.license.note}</span>
       </div>
 
-      {plan && (
-        <div className="notice" role="status">
-          <Check size={13} />
-          <div>
-            <p>
-              已登记出图权重安装计划 <b>{plan.plan_id}</b>：预计下载 {(plan.download_bytes / 1024 ** 3).toFixed(2)} GiB，
-              需要 {(plan.disk_required / 1024 ** 3).toFixed(2)} GiB（含下载临时空间），目标盘 {plan.root}。
-            </p>
-            <p>到「安装与下载」核对并批准这个计划后才会开始下载；每份文件都会按固定哈希校验。</p>
-          </div>
-        </div>
-      )}
-      <button type="button" className="btn-secondary" disabled={working || busy} onClick={registerInstall}>
-        登记出图权重安装计划
-      </button>
-      <button type="button" className="btn-secondary" disabled={working || busy || !state?.configured}
-        onClick={startRenderer}>
-        {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 启动本机出图渲染器
-      </button>
-      <button type="button" className="btn-secondary" disabled={working || busy || rendererState !== 'RUNNING'}
-        onClick={stopRenderer}>
-        停止出图渲染器并释放显存
-      </button>
-      <button type="button" className="btn-primary" disabled={working || busy || !state?.configured} onClick={validate}>
-        {working ? <Loader2 size={13} /> : <ImageIcon size={13} />} 验证三类真实小样
-      </button>
-      {!state?.configured && state?.binding_candidate && <div className="notice">
-        <p>可复用已登记的本机实例，模型目录为 {state.binding_candidate.model_root}。绑定后核验固定权重。</p>
-        <button type="button" className="btn-primary" disabled={working || busy} onClick={bindRenderer}>
-          {working ? '正在核验出图权重…' : '绑定现有实例用于出图'}
-        </button>
-      </div>}
-      {!state?.configured && !state?.binding_candidate && (
-        <p className="material-hint">
-          还没有绑定受管渲染器，出图能力无法验证。先在「安装与下载」完成本机环境检测与受管实例绑定。
-        </p>
-      )}
+      <p className="material-hint">
+        出图权重的下载、实例绑定、渲染器启停与三类真实小样验证，统一在「制作环境」一次确认、
+        由后台整备任务完成；本卡只读同一份服务端事实，不提供第二个执行入口。
+      </p>
     </section>
   );
 }
