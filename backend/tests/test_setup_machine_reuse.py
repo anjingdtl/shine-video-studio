@@ -255,21 +255,26 @@ def test_port_change_keeps_one_installation_and_its_byte_evidence(installed):
 
 def test_legacy_port_row_keeps_its_id_when_the_endpoint_moves(installed):
     """历史端口主键行不重算 ID：同一 root 在新端口被继承，证据保留。"""
+    from shine.comfy.workflow import graph_hash
     from shine.comfyops.instances import instance_identity
 
     factory, settings, root, _ = installed
     with factory() as db:
         first = setup_reconcile.reconcile_installation(
             db, settings, path=str(root), capability="h3", adopt=True, port=8188)
-    legacy_id = first["adoption"]["instance_id"]
-    with factory() as db:
-        row = db.get(ComfyInstance, legacy_id)
-        # 模拟历史行：旧版本以端口 uuid 为主键（当前实现即如此）。
-        assert row is not None
+    current_id = first["adoption"]["instance_id"]
+    # 把行改造成历史形态：旧版本以端口 uuid 为主键写下的行。
+    legacy_id = instance_identity("local", 8188)
+    with factory.begin() as db:
+        row = db.get(ComfyInstance, current_id)
+        payload = dict(row.payload)
+        db.delete(row)
+        db.add(ComfyInstance(id=legacy_id, payload=payload,
+                             sha256=graph_hash(payload), status="STOPPED"))
     with factory() as db:
         again = setup_reconcile.reconcile_installation(
             db, settings, path=str(root), capability="h3", adopt=True, port=8200)
-    assert again["adoption"]["instance_id"] == legacy_id
+    assert again["adoption"]["instance_id"] == legacy_id, "历史行必须保留原 ID"
     with factory() as db:
         assert db.get(ComfyInstance, legacy_id).payload["port"] == 8200
         assert len(db.scalars(select(ComfyInstance)).all()) == 1
@@ -374,6 +379,53 @@ def test_recipe_step_regenerates_when_the_active_variant_is_not_the_requested_on
     result = setup_preparation._step_recipe(factory, settings, task)
     assert result["status"] == "DONE"
     assert len(calls) == 1, "变体变化必须重新生成运行配方"
+
+
+def test_multiple_discovered_installations_ask_once_then_remember(installed):
+    """R5 INV-04：多套可信候选只问一次；选定后重启/切页读取不漂移。"""
+    factory, settings, root, _ = installed
+    other = _second_installation(Path(settings.data_dir), None)
+    with factory() as db:
+        state = resource_discovery.read_state(db)
+        state["resources"]["comfy_roots"] = [{"root": str(root)}, {"root": str(other)}]
+        resource_discovery._save(db, state)
+        db.commit()
+    with factory() as db:
+        resolved = resolve_installation(db, settings)
+    assert resolved["choice_required"] is True
+    assert resolved["selected"] is None
+    with factory() as db:
+        record_installation_choice(db, root=str(other), port=8189, actor="local-user")
+        db.commit()
+    for _ in range(3):
+        with factory() as db:
+            resolved = resolve_installation(db, settings)
+        assert resolved["choice_required"] is False
+        assert resolved["selected"]["root"] == str(other)
+        assert resolved["selected"]["port"] == 8189
+
+
+def test_port_change_invalidates_the_seal_but_not_the_byte_evidence(installed):
+    """R5 INV-03/09：端点变化精准失效运行封条，权重核验证据不受牵连。"""
+    from shine.comfyops.runtime_configuration import same_configuration
+
+    factory, settings, root, _ = installed
+    with factory() as db:
+        adoption = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8188)
+    base = {"instance_id": adoption["adoption"]["instance_id"], "instance_sha256": "s",
+            "catalog_sha256": "c", "recipe_sha256": "r",
+            "comfyui_base_url": "http://127.0.0.1:8188", "files": {"/x/main.py": "d"}}
+    moved = {**base, "comfyui_base_url": "http://127.0.0.1:8189"}
+    assert same_configuration(base, dict(base), settings=settings) is True
+    assert same_configuration(base, moved, settings=settings) is False, "端点变化必须让旧封条失效"
+    # 权重回执与端点无关：换端口后同一份字节证据仍然有效，且不重下。
+    with factory() as db:
+        again = setup_reconcile.reconcile_installation(
+            db, settings, path=str(root), capability="h3", adopt=True, port=8189)
+    assert again["complete"] is True
+    assert again["downloaded_bytes"] == 0
+    assert again["adoption"]["instance_id"] == adoption["adoption"]["instance_id"]
 
 
 def test_a_superseded_task_cannot_be_resurrected_by_a_late_worker_write(installed):

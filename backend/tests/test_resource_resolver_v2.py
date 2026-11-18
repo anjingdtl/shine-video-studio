@@ -412,7 +412,7 @@ def test_variant_availability_reads_the_same_installation_selection(studio, tmp_
         (root / "main.py").write_text("# synthetic\n", encoding="utf-8")
         roots.append(root)
     with factory.begin() as db:
-        for port, root in zip((8188, 8189), roots):
+        for port, root in zip((8188, 8189), roots, strict=True):
             payload = {"managed": True, "adopted": True, "external_installation": True,
                        "root": str(root), "port": port, "name": "shine-h3", "is_mock": False}
             db.add(ComfyInstance(id=instance_identity("local", port), payload=payload,
