@@ -767,3 +767,61 @@ def test_cannot_begin_handoff_for_superseded_shot(handoff):
     with pytest.raises(HTTPException, match="HANDOFF_JOB_CLAIM_LOST"):
         begin_handoff(factory, job_id, attempt_id, lease_id, instance_id, "worker-a", version,
                       "http://127.0.0.1:8190")
+
+
+def test_an_expired_validation_lease_without_target_evidence_stays_blocked(api, monkeypatch):
+    """空台账与过期时间不构成安全释放。
+
+    复现（2026-11-18 接手轮）：一条到期的 ``workflow_validation:*`` 租约只有租约行，
+    没有目标实例与进程证据时被标成 RELEASED——「全部已知端口空闲」证明不了这一条
+    租约自己的执行者从未启动过渲染器。没有可核对对象的释放必须保留待核对。
+    """
+    client, factory, _ = api
+    from shine.comfyops.models import ResourceLease
+
+    with factory.begin() as db:
+        lease = ResourceLease(owner="workflow_validation:" + "b" * 12, budget_mb=1, exclusive=True,
+                              priority=10, status="ACTIVE", expires_at=utcnow() - timedelta(seconds=60))
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+
+    from shine.comfyops import handoff_startup
+
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    handoff_startup.reconcile_dead_renderer_leases(factory)
+
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status != "RELEASED", \
+            "缺目标实例与进程证据的验证租约不得凭空台账释放"
+
+
+def test_an_expired_validation_lease_with_a_proven_gone_target_releases(api, monkeypatch):
+    """带启动 journal 的验证租约：三证（进程退出、组无成员、端口空闲）齐全才释放。"""
+    client, factory, _ = api
+    from shine.comfyops.models import ResourceLease
+
+    with factory.begin() as db:
+        lease = ResourceLease(owner="workflow_validation:" + "c" * 12, budget_mb=1, exclusive=True,
+                              priority=10, status="ACTIVE", expires_at=utcnow() - timedelta(seconds=60))
+        db.add(lease)
+        db.flush()
+        lease_id = lease.id
+        db.add(AppSetting(key="workflow-validation:" + lease_id, value={
+            "lease_id": lease_id,
+            "port": 8189,
+            "process": {"pid": 4321, "birth": "gone", "job_name": "Local\\ShineHandoff-" + "d" * 32},
+        }))
+
+    from shine.comfyops import handoff_startup
+
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: None)
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [])
+    monkeypatch.setattr(handoff_startup, "named_group_active_processes", lambda name: 0)
+    findings = handoff_startup.reconcile_dead_renderer_leases(factory)
+
+    assert lease_id in [finding["lease_id"] for finding in findings]
+    with factory() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"

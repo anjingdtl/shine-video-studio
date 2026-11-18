@@ -2026,6 +2026,45 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
   tsc/build/Ruff 全绿；隔离浏览器实测顶栏 `D:\Shine\data`、真实制作已就绪、14 个真实作品。
 - 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
 
+## 2026-11-18 接手轮（整备 60% 解阻、恢复入口解互锁、管家口径收敛）
+
+- **同一授权失败后续跑**：`setup_preparation.enqueue` 对 FAILED/CANCELLED 且请求身份完全一致的任务走
+  `_resume_stopped_task`——同一 task_id 从首个未完成步骤继续，DONE/SKIPPED 与回执保留，
+  旧 claim/租约/supervisor 委托失效；不同请求仍 SUPERSEDED。新审计码
+  `SETUP_PREPARATION_RESUMED` 已登记前端 `auditEventCodes.json`。
+- **停摆安装对账与人工对账同一套硬校验**：`reconcile_stopped_isolated_attempts` 复用
+  `reconcile_failed_install` 的 plan/attempt 摘要、executor/isolated、逐包 spec 校验；
+  观察循环包 savepoint（坏包不留部分晋升）；收尾时 status 与 stage 一次写成
+  `RECONCILED_NO_RETRY`（`installation.TERMINAL_STAGES` 收录该值，`attempt_view.terminal` 一致）。
+- **租约释放只认本租约目标证据**：`workflow_validation:*` 需要
+  `validate_registered_workflow` 落的 `workflow-validation:<lease_id>` journal 三证
+  （PID/birth + named Job Object + 端口空闲）；无 journal 的旧记录保留核对，全局端口空闲不再是释放证明。
+  `image:*` 仅在「无任何 image 启动 journal + 无在途 image 工作 + 全机静默」的启动前证明下释放。
+- **已结清失败史不再永久挡取消/恢复**：`production/runner._job_submission_settled`（终态 + 无活租约 +
+  最新核对结论非 `requires_reconciliation`，或无外部 ID/ack/graph/submit-intent 硬证据）；
+  `_series_has_unreconciled_submission` 跳过已结清，cancel 与 `resume_series_in_session`
+  （新接受已证结清的 NEEDS_REVIEW 序列回 QUEUED）共用该裁决；真正未决仍具名拒绝。
+- **P4 收敛**：`runtime_orchestrator/executor._reconcile` 把「三证死亡」的独占租约委托给
+  Worker 恢复拍同一个 `reconcile_dead_renderer_leases` 收尾后重读事实；不新增第二条释放链，
+  活渲染器/归属不明/PID 重用保护不变。
+- **Worker 每 tick 一个职责一次**：控制操作只在 `_reconcile_pre_runtime_control_and_leases`
+  推进（前置 storage-migration 守卫），`_run_configured_once` 里的重复调用删除；runtime 失效时
+  安装/整备/文本队列照常。异常分支的图片小样只跑本任务 `image_sample_run_id` 的 run
+  （`run_pending_image_items(run_id=…)`，run 范围内不回退无关 LibraryRenderTask）。
+- **搬迁容忍唯一判定**：`instances.relocated_managed_root`；`configuration_identity` 与
+  `deployment.generate_configuration` 两个消费点同用，受管自有行搬迁后按当前锚定读写。
+- **管家口径**：`STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE` 精确映射（预检不可达≠缺节点，
+  关键词 `object_info_unavailable` 不再落 NODE_MISSING）；`idle_blockers` 读取失败是
+  `None`（无法核实），诊断区分「无法核实/为空/逐项」，`root_cause_confirmed` 只授予权威读取事实；
+  取消 run 的建议只指向实际阻塞配置门禁的 run。
+- **P2 结论**：默认 1344×768/24fps/17k+5 是钉住的产品事实（`test_output_spec_and_identity` 锁定），
+  容量门禁需真机实测登记目录后由既有 production admission 消费；不得单机实测写全局上限、
+  不得静默降分辨率。
+- 回归：五个复现 8 红测转绿；定向 25 模块全绿；8 分片全量与前端 433 例/build/tsc/Ruff/
+  Copilot `--check`/Alembic 干净；隔离旧库 `f180b0010001→f180f0010006` 由实际启动器完成。
+  证据：`docs/ACCEPTANCE_20261118_TAKEOVER_RECIPE_UNBLOCK.md`。本轮改了 `worker.py`/
+  `handoff_startup.py`/`service_validation.py`（钉住清单内），VLM 真实正负校准待相应本机能力。
+
 ## Copilot V2.1 — mandatory contract rule (do not duplicate)
 
 The AI copilot's knowledge index and capability registry are **build outputs**, not

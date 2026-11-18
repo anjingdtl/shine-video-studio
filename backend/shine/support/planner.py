@@ -25,7 +25,8 @@ SHOOTABLE_STATES = {"READY_TO_SHOOT", "READY_TO_PACKAGE", "SHOOTING"}
 
 _INTENT_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("setup", ("准备环境", "准备制作环境", "补齐环境", "补齐模型", "补齐缺失文件", "下载缺失文件",
-               "修复制作环境", "核验已有文件", "登记已有文件")),
+               "修复制作环境", "修复环境", "重新配置", "重新检查配置", "核对运行合同",
+               "核验已有文件", "登记已有文件")),
     ("materials", ("缺失素材", "缺素材", "素材没准备", "备料", "素材准备", "准备素材", "生成素材")),
     ("production", ("准备", "开拍", "开始生成", "开始拍摄", "开始生产", "把它拍", "生成第一集", "拍第一集",
                     "前置条件")),
@@ -947,9 +948,16 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
             for key, row in capabilities.items()
             if isinstance(row, dict)
             and not row.get("optional")
-            and (row.get("missing_count") or not (row.get("facts") or {}).get("PRODUCTION_READY"))
+            and (
+                row.get("missing_count")
+                or (
+                    row.get("state") not in {"READY", "VERIFIED_RENDER"}
+                    and not (row.get("facts") or {}).get("PRODUCTION_READY")
+                    and not (row.get("facts") or {}).get("RUNTIME_SERVICES_VERIFIED")
+                )
+            )
         ]
-    if not wanted and verdict.get("mode") == "REAL_READY":
+    if not wanted and verdict.get("mode") in {"REAL_READY", "READY", "RUNNING"}:
         return {
             "intent": "SETUP",
             "summary": "本机必选制作环境已就绪，无需重复准备；如需可选增强可显式指定能力。",
@@ -961,6 +969,9 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
         }
     if not wanted:
         wanted = ["h3", "image"]
+    repair_params: dict[str, Any] = {"capabilities": wanted, "verify_runtime": True}
+    if project_id:
+        repair_params["project_id"] = project_id
     step_state = "BLOCKED" if occupancy["busy"] else "READY"
     steps.append(
         {
@@ -971,7 +982,7 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
             "state_label": _STEP_LABELS[step_state],
             "action": {
                 "kind": "setup_repair",
-                "params": {"capabilities": wanted, "verify_runtime": True},
+                "params": repair_params,
             },
             "readback": "GET /api/v1/setup/prepare/{task_id}",
             "requires_confirmation": "EXECUTE_GUARDED",

@@ -122,12 +122,13 @@ def _normalize_released_h3(factory, installation_id: str) -> list[dict[str, Any]
 
 
 def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
-    """Read-only evidence gathering plus the one provably safe cleanup.
+    """Read-only evidence gathering plus the provably safe cleanups.
 
     The worker's own recovery tick owns task-level reconciliation.  A control
-    operation must never resubmit a prompt, release a lease or kill a process;
-    the single mutation allowed here is clearing a startup record whose process
-    is proven gone, which is what unblocks the next start.
+    operation must never resubmit a prompt or kill a process; the mutations
+    allowed here are clearing a startup record whose process is proven gone
+    and delegating provably-dead exclusive leases to the same single executor
+    (``reconcile_dead_renderer_leases``) the Worker's recovery tick uses.
     """
     from shine.comfyops.image_renderer import reconcile_dead_image_renderer
     from shine.comfyops.renderer_release import describe_managed_processes
@@ -203,6 +204,36 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
                      if not (item.get("kind") == "h3_renderer" and item.get("run_id") in closed_runs)]
     except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
         uncertain.append({"kind": "h3_renderer", "state": "REFUSED", "code": str(exc)})
+
+    # Exclusive leases whose renderer is *proven* gone (process identity,
+    # named Job Object, free port) are closed through the same single
+    # executor the Worker's recovery tick uses - never a second release
+    # path.  This is what lets a reconcile control action actually converge
+    # the P4 interlock: stop and abandon both re-check the lease afterwards.
+    # A lease whose target cannot be proven stays blocked and is reported
+    # above as uncertain, exactly as before.
+    try:
+        from shine.comfyops.handoff_startup import reconcile_dead_renderer_leases
+
+        released = reconcile_dead_renderer_leases(factory, settings)
+        for finding in released:
+            normalized.append({"kind": "gpu_lease", "lease_id": finding.get("lease_id"),
+                               "owner": finding.get("owner"),
+                               "outcome": "released_renderer_proven_gone"})
+    except Exception as exc:  # noqa: BLE001 - a failed delegation is reported, not fatal
+        logger.warning("reconcile dead-renderer lease delegation failed: %s", type(exc).__name__)
+        uncertain.append({"kind": "gpu_lease", "state": "REFUSED", "code": type(exc).__name__})
+    if any(item.get("kind") == "gpu_lease" and item.get("outcome") for item in normalized):
+        try:
+            with factory() as db:
+                remaining = [lease for lease in lease_facts(db) if lease["status"] == "RECONCILE_REQUIRED"]
+            checked["leases"] = len(remaining)
+            uncertain = [item for item in uncertain if item.get("kind") != "gpu_lease"]
+            for lease in remaining:
+                uncertain.append({"kind": "gpu_lease", "lease_id": lease["lease_id"],
+                                  "owner": lease["owner"]})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("reconcile lease re-read failed: %s", type(exc).__name__)
 
     if uncertain:
         return {"outcome": OUTCOME_NEEDS_REVIEW, "checked": checked, "uncertain": uncertain,

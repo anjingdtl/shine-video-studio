@@ -22,12 +22,21 @@ type WorkStack = {
   close_blocked_reason: string | null;
 };
 
+type IdleBlocker = {
+  kind: string;
+  id: string;
+  status?: string | null;
+  label: string;
+};
+
 type WorkStackSnapshot = {
   checked_at: string;
   stacks: WorkStack[];
   workers: Array<{ worker_id: string; online: boolean; phase: string | null; current_job_id: string | null; project_title: string | null }>;
   jobs: Array<{ job_id: string; project_title: string | null; status: string }>;
-  counts: { stacks: number; working_stacks: number; historical_stacks?: number; workers_online: number; running_jobs: number };
+  idle_blockers?: IdleBlocker[] | null;
+  idle_blockers_unreadable?: boolean;
+  counts: { stacks: number; working_stacks: number; historical_stacks?: number; workers_online: number; running_jobs: number; idle_blockers?: number };
   process_error: string | null;
 };
 
@@ -177,7 +186,15 @@ export function WorkStackMonitor() {
         {confirmExit && <button type="button" className="ghost-mini" onClick={() => { setConfirmExit(false); setMessage(''); }}>取消</button>}
       </div>
       <div className="stack-monitor-list" role="log" aria-live="polite">
-        {visible.length === 0 && <p className="stack-monitor-empty">当前没有后台进程在跑。</p>}
+        {visible.length === 0 && !snapshot?.idle_blockers?.length && !snapshot?.idle_blockers_unreadable && <p className="stack-monitor-empty">当前没有后台进程在跑。</p>}
+        {visible.length === 0 && snapshot?.idle_blockers_unreadable && (
+          <p className="stack-monitor-empty">无活动渲染进程；配置等待项暂时读取失败，不能据此判断为空。</p>
+        )}
+        {visible.length === 0 && Boolean(snapshot?.idle_blockers?.length) && (
+          <p className="stack-monitor-empty">
+            无活动渲染进程；配置等待项：{snapshot!.idle_blockers!.slice(0, 2).map((row) => row.label).join('；')}
+          </p>
+        )}
         {visible.map((stack) => <div className={`stack-row ${STATE_TONE[stack.state] ?? 'unknown'}`} key={stack.id}>
           <span className="stack-dot" aria-hidden="true" />
           <div className="stack-row-text">

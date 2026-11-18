@@ -89,6 +89,17 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   },
   REAL_RUNTIME_NOT_ACTIVATED: { reason: '真实制作配置还没验证激活', action: { label: '去基础配置完成', target: 'setup-env' } },
   SERVICE_VALIDATION_REQUIRED: { reason: '本机服务或工作流变化，需要重新验证', action: { label: '去重新验证', target: 'setup-env' } },
+  ACTIVE_RUNTIME_CONFIGURATION_CHANGED: {
+    reason: '本机制作环境的固定文件或运行配方发生了变化，需要重新核对配置',
+    why: '在基础配置的「H3 视频生成」卡片点击「一键绑定渲染器并核对运行合同」即可重新生成配置并完成验证激活。',
+    action: { label: '去基础配置核对', target: 'setup-env' },
+  },
+  RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK: {
+    reason: '本机仍有在途任务、GPU 租约或待整理的安装记录，暂不能重写运行配置',
+    why: '请先在「视频生产」结束或取消排队/暂停中的拍摄任务，或在左侧「工作栈」释放空闲后台服务，再点一次「核对运行合同」从当前步骤继续。',
+    action: { label: '去视频生产查看', target: 'run-stage' },
+    serverMessage: true,
+  },
   ASSET_RIGHTS_NOT_APPROVED: { reason: '素材权利还没确认', action: { label: '去确认素材', target: 'assets-stage' } },
   CHARACTER_NAME_ALREADY_IN_USE: { reason: '这个名字已绑定另一张人物素材', action: { label: '去素材页核对', target: 'assets-stage' } },
   OUTPUT_DIRECTORY_BUSY: { reason: '有活动任务，输出目录暂不能迁移', action: { label: '查看活动任务', target: 'setup-env' } },
@@ -113,8 +124,8 @@ export function describeBlocker(
   const known = code ? ERROR_ACTIONS[code] : undefined;
   if (known) {
     // 状态相关码（serverMessage）：reason 用服务端按真实状态算出的 message，
-    // 静态 reason 只在服务端没给文案时兜底；动作仍由前端映射。
-    const reason = known.serverMessage && message ? message : known.reason;
+    // 静态 reason 只在服务端没给文案或仅回了裸错误码时兜底；动作仍由前端映射。
+    const reason = known.serverMessage && message && message !== code ? message : known.reason;
     return { reason, why: known.why, action: known.action, selfLoopAction: known.selfLoopAction };
   }
   return { reason: message || code || '需要处理' };

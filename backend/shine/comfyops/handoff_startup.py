@@ -222,6 +222,102 @@ def renderer_is_gone(record: dict) -> bool:
         return False
 
 
+def _no_live_managed_renderer_or_port(db) -> bool:
+    """True only when every recorded managed process/group is gone and all instance ports are free."""
+    for row in db.scalars(select(AppSetting).where(AppSetting.key.like(STARTUP_PREFIX + "%"))).all():
+        value = row.value if isinstance(row.value, dict) else {}
+        process = value.get("process") or {}
+        pid, birth = process.get("pid"), process.get("birth")
+        if type(pid) is int and pid > 0 and isinstance(birth, str) and birth:
+            try:
+                if process_identity(pid) == birth:
+                    return False  # a recorded renderer is still alive
+            except (OSError, ValueError):
+                return False  # an unreadable identity is uncertainty, never death
+        job_name = process.get("job_name")
+        if isinstance(job_name, str) and job_name:
+            try:
+                if named_group_active_processes(job_name) > 0:
+                    return False
+            except (OSError, ValueError):
+                return False
+    for instance in db.scalars(select(ComfyInstance)).all():
+        # The port lives in the row payload, not as a column attribute; the
+        # previous getattr(instance, "port", ...) was always None, so this
+        # port-free proof never actually ran (audit R11).
+        payload = instance.payload if isinstance(instance.payload, dict) else {}
+        port = payload.get("port")
+        if not port:
+            continue
+        try:
+            if windows_port_listeners(int(port)):
+                return False
+        except (OSError, ValueError):
+            return False
+    return True
+
+
+def _release_orphan_ephemeral_renderer_lease(db, lease) -> bool:
+    """Release an expired validation/pre-startup image lease proven to hold no renderer.
+
+    The proof is about *this lease's own target*, never about the machine in
+    general: "every recorded port is free right now" says nothing about a
+    renderer nobody journaled.  Two target-bound proofs are accepted:
+
+    * ``workflow_validation:`` owns the fenced renderer that
+      ``validate_registered_workflow`` launches.  Its journal
+      (``workflow-validation:<lease_id>``) names the process identity, the
+      named Job Object and the port; the same three-fact death proof as any
+      managed renderer must hold.  A legacy lease without a journal cannot be
+      proven and stays for explicit reconciliation.
+    * ``image:`` renderers are started by the single image executor, which
+      journals its startup before launching.  A lease with no image startup
+      journal anywhere and no in-flight image work provably never entered
+      startup; that pre-startup proof plus a quiet machine releases it.
+    """
+    owner = lease.owner or ""
+    if lease.expires_at is None or lease.expires_at > utcnow():
+        return False
+    evidence = None
+    if owner.startswith("workflow_validation:"):
+        row = db.get(AppSetting, "workflow-validation:" + lease.id)
+        if row is None or not isinstance(row.value, dict):
+            return False  # a target that cannot be named cannot be proven gone
+        if not renderer_is_gone(row.value):
+            return False
+        evidence = "validation_journal"
+    elif owner.startswith("image:"):
+        from shine.runtime_orchestrator.identity import in_flight_image_work
+
+        if in_flight_image_work(db):
+            return False
+        has_image_journal = db.scalar(
+            select(AppSetting.id).where(AppSetting.key.like(STARTUP_PREFIX + "image:%")).limit(1)
+        )
+        if has_image_journal:
+            # A journaled image renderer belongs to release_dead_renderer_lease's
+            # record path; this orphan proof may not speak for it.
+            return False
+        if not _no_live_managed_renderer_or_port(db):
+            return False
+        evidence = "pre_startup_proof"
+    else:
+        return False
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+    add_audit(
+        db,
+        "comfy-worker",
+        "RESOURCE_RELEASE_RECONCILED",
+        "resource_lease",
+        lease.id,
+        {"owner": owner, "renderer_gone": True, "port_free": True,
+         "target_evidence": evidence, "resubmitted": False},
+    )
+    return True
+
+
 def _release_orphan_h3_lease(db, lease) -> bool:
     """Release an h3: lease whose managed-startup record was never written.
 
@@ -259,36 +355,8 @@ def _release_orphan_h3_lease(db, lease) -> bool:
         job_active = job.status in ("QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING")
         if job_active and lease.expires_at is not None and lease.expires_at > utcnow():
             return False
-    for row in db.scalars(select(AppSetting).where(AppSetting.key.like(STARTUP_PREFIX + "%"))).all():
-        value = row.value if isinstance(row.value, dict) else {}
-        process = value.get("process") or {}
-        pid, birth = process.get("pid"), process.get("birth")
-        if type(pid) is int and pid > 0 and isinstance(birth, str) and birth:
-            try:
-                if process_identity(pid) == birth:
-                    return False  # a recorded renderer is still alive
-            except (OSError, ValueError):
-                return False  # an unreadable identity is uncertainty, never death
-        job_name = process.get("job_name")
-        if isinstance(job_name, str) and job_name:
-            try:
-                if named_group_active_processes(job_name) > 0:
-                    return False
-            except (OSError, ValueError):
-                return False
-    for instance in db.scalars(select(ComfyInstance)).all():
-        # The port lives in the row payload, not as a column attribute; the
-        # previous getattr(instance, "port", ...) was always None, so this
-        # port-free proof never actually ran (audit R11).
-        payload = instance.payload if isinstance(instance.payload, dict) else {}
-        port = payload.get("port")
-        if not port:
-            continue
-        try:
-            if windows_port_listeners(int(port)):
-                return False
-        except (OSError, ValueError):
-            return False
+    if not _no_live_managed_renderer_or_port(db):
+        return False
     from shine.comfyops.scheduler import ResourceScheduler
 
     ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
@@ -419,6 +487,8 @@ def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bo
         # No journal was ever written for this lease: fall back to the
         # conservative orphan proof instead of deadlocking the GPU ledger.
         if _release_orphan_h3_lease(db, lease):
+            return True
+        if _release_orphan_ephemeral_renderer_lease(db, lease):
             return True
         # A text slot owns no renderer, so the proof above can never match it.
         return release_orphan_agent_lease(db, lease, text_unloaded=text_unloaded)

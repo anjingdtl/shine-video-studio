@@ -130,18 +130,31 @@ def work_stack_snapshot(db, settings=None) -> dict[str, Any]:
     jobs = _job_facts(db)
     workers = _worker_facts(db)
     running = [row for row in jobs]
+    try:
+        from shine.comfyops.runtime_configuration import idle_configuration_blockers
+
+        idle_blockers = idle_configuration_blockers(db)
+        idle_blockers_unreadable = False
+    except Exception:  # noqa: BLE001 - optional read-only diagnostic projection
+        # None means "could not be read" - an unreadable ledger must not be
+        # displayed as "nothing is waiting".
+        idle_blockers = None
+        idle_blockers_unreadable = True
 
     return {
         "checked_at": utcnow().isoformat(),
         "stacks": stacks,
         "workers": workers,
         "jobs": jobs,
+        "idle_blockers": idle_blockers,
+        "idle_blockers_unreadable": idle_blockers_unreadable,
         "counts": {
             "stacks": len(stacks),
             "working_stacks": sum(1 for row in stacks if row["working"]),
             "historical_stacks": sum(1 for row in stacks if row["historical"]),
             "workers_online": sum(1 for row in workers if row["online"]),
             "running_jobs": len(running),
+            "idle_blockers": len(idle_blockers or []),
         },
         "process_error": process_error,
     }

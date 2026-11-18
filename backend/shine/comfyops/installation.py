@@ -87,6 +87,9 @@ TERMINAL_STAGES = frozenset(
         FILES_VERIFIED_PENDING_RUNTIME,
         RUNTIME_CONTRACT_READY,
         MOCK_VERIFIED,
+        # A stopped installation closed by reconciliation (human grant or the
+        # setup RECONCILE step) is one terminal fact: status and stage agree.
+        "RECONCILED_NO_RETRY",
     }
 )
 ACTIVE_STAGES = frozenset(

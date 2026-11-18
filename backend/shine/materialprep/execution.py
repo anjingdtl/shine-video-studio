@@ -134,13 +134,14 @@ healthy Worker never loses its row; a dead one stops blocking the batch.
 """
 
 
-def claim_next_item(factory, worker_id: str) -> str | None:
+def claim_next_item(factory, worker_id: str, *, run_id: str | None = None) -> str | None:
     """Atomically claim the oldest claimable item.
 
     Items that already persisted a submit intent are deliberately not claimable:
     an external submission may be in flight, and re-claiming one would be the
     shortest path to rendering the same image twice.  Those go through
-    ``reconcile_item`` instead.
+    ``reconcile_item`` instead.  ``run_id`` narrows the claim to one material
+    run, so a setup sample step never grabs an unrelated production item.
     """
     with factory() as db:
         # A capability validation must run before the production items that depend
@@ -162,7 +163,7 @@ def claim_next_item(factory, worker_id: str) -> str | None:
             or_(MaterialItem.heartbeat_at.is_(None),
                 MaterialItem.heartbeat_at < stale_after),
         )
-        row = db.scalar(
+        query = (
             select(MaterialItem)
             .join(MaterialRun, MaterialRun.id == MaterialItem.run_id)
             .where(or_(MaterialItem.status.in_(sorted(ITEM_CLAIMABLE)), stale))
@@ -170,8 +171,10 @@ def claim_next_item(factory, worker_id: str) -> str | None:
                 case((MaterialRun.payload["kind"].as_string() == "validation", 0), else_=1),
                 MaterialItem.created_at, MaterialItem.id,
             )
-            .limit(1)
         )
+        if run_id is not None:
+            query = query.where(MaterialItem.run_id == run_id)
+        row = db.scalar(query.limit(1))
         if row is None:
             return None
         item_id, expected = row.id, row.state_version
@@ -955,28 +958,33 @@ def recover_lost_image_items(factory) -> int:
     return recovered
 
 
-def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1) -> int:
+def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1,
+                            run_id: str | None = None) -> int:
     """Claim and execute image items, one lease at a time.
 
     Each item acquires and releases the exclusive lease on its own, so a long
     batch cannot starve the H3 queue: after every item the Worker returns to its
-    normal dispatch order and a waiting series goes first.
+    normal dispatch order and a waiting series goes first.  ``run_id`` limits
+    the pass to one material run's items and disables the unrelated
+    library-task fallback, so a caller waiting on its own samples cannot
+    execute someone else's work.
     """
     from shine.asset_center.execution import recover_stale_projectless_tasks
     from shine.materialprep import service
     from shine.materialprep.brief import reconcile_orphan_brief_tasks
 
-    recover_stale_projectless_tasks(factory)
-    # A brief task row left RUNNING by a lost worker still counts as a live
-    # task for its provider profile, which locks the text model configuration.
-    reconcile_orphan_brief_tasks(factory)
-    # A render acknowledged by a renderer whose worker then died has no live
-    # owner to harvest it; record the unknown outcome instead of queueing forever.
-    recover_lost_image_items(factory)
+    if run_id is None:
+        recover_stale_projectless_tasks(factory)
+        # A brief task row left RUNNING by a lost worker still counts as a live
+        # task for its provider profile, which locks the text model configuration.
+        reconcile_orphan_brief_tasks(factory)
+        # A render acknowledged by a renderer whose worker then died has no live
+        # owner to harvest it; record the unknown outcome instead of queueing forever.
+        recover_lost_image_items(factory)
 
     processed = 0
     for _ in range(max(1, limit)):
-        item_id = claim_next_item(factory, worker_id)
+        item_id = claim_next_item(factory, worker_id, run_id=run_id)
         if item_id is None:
             break
         try:
@@ -1008,9 +1016,11 @@ def run_pending_image_items(factory, settings, worker_id: str, *, limit: int = 1
         if result.get("status") == ITEM_QUEUED:
             # Still waiting for the GPU; do not spin on it this pass.
             break
-    if not processed:
+    if not processed and run_id is None:
         # Projectless image and voice requests share this Worker. Preserve
         # arrival order so a sustained image backlog cannot starve audio.
+        # A run-scoped pass (a setup sample step waiting on its own batch)
+        # never falls through to unrelated library work.
         from shine.asset_center.models import LibraryRenderTask
 
         with factory() as db:

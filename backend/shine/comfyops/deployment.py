@@ -613,7 +613,13 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
     exists to bind it to.
     """
     _require_project(db, project_id)
-    from shine.comfyops.instances import InstanceOperation, instance_identity, instance_root, plan_operation
+    from shine.comfyops.instances import (
+        InstanceOperation,
+        instance_identity,
+        instance_root,
+        plan_operation,
+        relocated_managed_root,
+    )
     components = _component_map(catalog)
     expected_nodes = {cid: c['revision'] for cid, c in components.items() if c['kind'] == 'node'}
     expected_bindings = {c['destination_family']: cid for cid, c in components.items()
@@ -623,11 +629,12 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
             row.payload.get('managed') and row.payload.get('root') == str(instance_root(settings, instance_name, mode))
             for row in db.scalars(select(ComfyInstance))):
         raise HTTPException(409, 'INSTANCE_IDENTITY_CHANGED')
+    expected_ladder_root = instance_root(settings, instance_name, mode).resolve()
     if instance and (not instance.payload.get('managed') or instance.payload.get('name') != instance_name
                      or instance.payload.get('port') != port
                      or bool(instance.payload.get('is_mock')) != (mode == 'fake')
-                     or Path(instance.payload.get('root', '')).resolve()
-                     != instance_root(settings, instance_name, mode).resolve()):
+                     or (Path(instance.payload.get('root', '')).resolve() != expected_ladder_root
+                         and not relocated_managed_root(instance, expected_ladder_root))):
         raise HTTPException(409, 'INSTANCE_IDENTITY_CHANGED')
     if instance and instance.status not in {'STOPPED', 'MOCK_VERIFIED', 'RUNNING_PENDING_HEALTH'}:
         raise HTTPException(409, 'INSTANCE_REQUIRES_RECONCILIATION')
@@ -720,6 +727,8 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 
 
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
+RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
+OPTIONAL_INSTALL_COMPONENTS = frozenset({*REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS})
 
 
 def review_only_plan(payload: dict | None) -> bool:
@@ -731,6 +740,12 @@ def review_only_plan(payload: dict | None) -> bool:
     """
     packages = [str(row.get("id") or "") for row in ((payload or {}).get("packages") or [])]
     return bool(packages) and set(packages).issubset(set(REVIEW_COMPONENTS.values()))
+
+
+def optional_only_plan(payload: dict | None) -> bool:
+    """Whether an install plan carries only optional enhancement components (VLM/ASR/RelayVSR)."""
+    packages = [str(row.get("id") or "") for row in ((payload or {}).get("packages") or [])]
+    return bool(packages) and set(packages).issubset(OPTIONAL_INSTALL_COMPONENTS)
 
 IMAGE_CAPABILITY_CATALOG = "qwen-image-2.1-windows-x64"
 """The image capability's own catalogue: separate bytes, separate licence."""
@@ -817,7 +832,12 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     forever.  Ownership requirements (adapter, python, revision, nodes) are
     identical in both cases.
     """
-    from shine.comfyops.instances import find_instance_by_endpoint, instance_root, runtime_binding_sha256
+    from shine.comfyops.instances import (
+        find_instance_by_endpoint,
+        instance_root,
+        relocated_managed_root,
+        runtime_binding_sha256,
+    )
 
     if capability not in {'h3', 'image'}:
         raise HTTPException(409, 'RUNTIME_CAPABILITY_UNKNOWN')
@@ -864,18 +884,21 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         else:
             instance = find_instance_by_endpoint(db, port, instance_name=instance_name)
     adopted = bool(instance and instance.payload.get('adopted'))
+    ladder_root = instance_root(settings, instance_name, 'local').resolve()
     if (instance is None or not instance.payload.get('managed') or instance.payload.get('is_mock')
             or instance.payload.get('name') != instance_name
             or instance.payload.get('port') != port
-            or (not adopted and Path(instance.payload.get('root', '')).resolve()
-                != instance_root(settings, instance_name, 'local').resolve())):
+            or (not adopted and Path(instance.payload.get('root', '')).resolve() != ladder_root
+                and not relocated_managed_root(instance, ladder_root))):
         raise HTTPException(409, "MANAGED_INSTANCE_REQUIRED")
     payload = instance.payload
     if payload.get('process') or instance.status != 'STOPPED':
         raise HTTPException(409, 'STOP_OWNED_INSTANCE_BEFORE_CONFIGURATION')
     from shine.comfyops.runtime_configuration import require_idle_configuration
     require_idle_configuration(db)
-    root = Path(payload["root"]).resolve()
+    # A relocated managed row keeps its historical root as a record; the files
+    # and the generated recipe follow the ladder's *current* anchor.
+    root = Path(payload["root"]).resolve() if adopted else ladder_root
     if adopted:
         from shine.comfyops.adoption import adopted_installation_blockers
         evidence_catalog = (load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)

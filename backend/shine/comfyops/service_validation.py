@@ -130,14 +130,54 @@ def _stop_group(group) -> None:
         raise HTTPException(409, "SERVICE_VALIDATION_CLEANUP_FAILED") from exc
 
 
-def _probe_renderer(recipe: dict) -> dict:
+def _write_validation_journal(factory, lease_id, *, pid, job_name, port) -> None:
+    """Persist the fenced validation renderer's identity before probing it.
+
+    The WORKFLOW_VALIDATION lease alone names no target: without this journal a
+    crashed validation leaves a lease whose renderer cannot be proven gone, and
+    an unprovable lease stays blocked for reconciliation by design.  The write
+    runs in its own short session so no caller's transaction covers the launch.
+    """
+    from shine.comfyops.installer import process_identity
+
+    try:
+        birth = process_identity(pid)
+    except (OSError, ValueError):
+        birth = None
+    try:
+        with factory.begin() as db:
+            db.merge(AppSetting(key="workflow-validation:" + lease_id, value={
+                "lease_id": lease_id,
+                "port": port,
+                "process": {"pid": pid, "birth": birth, "job_name": job_name},
+            }))
+    except Exception:  # noqa: BLE001 - journal durability must not abort validation
+        pass
+
+
+def _clear_validation_journal(factory, lease_id) -> None:
+    if lease_id is None:
+        return
+    try:
+        with factory.begin() as db:
+            row = db.get(AppSetting, "workflow-validation:" + lease_id)
+            if row is not None:
+                db.delete(row)
+    except Exception:  # noqa: BLE001 - cleanup failure must not mask the real error
+        pass
+
+
+def _probe_renderer(recipe: dict, *, lease_id: str | None = None, factory=None) -> dict:
     argv, cwd, env, pins, token, port = build_renderer_launch(recipe["renderer"])
     if not _port_free(port):
         raise HTTPException(409, f"SERVICE_VALIDATION_PORT_IN_USE:{port}")
+    job_name = "Local\\ShineHandoff-" + uuid4().hex
     group = OwnedProcessGroup.launch(
         argv, cwd=cwd, env=env, pinned_files=pins,
-        job_name="Local\\ShineHandoff-" + uuid4().hex,
+        job_name=job_name,
     )
+    if lease_id is not None and factory is not None:
+        _write_validation_journal(factory, lease_id, pid=group.pid, job_name=job_name, port=port)
     try:
         object_info = _wait_json(
             f"http://127.0.0.1:{port}/object_info",
@@ -157,9 +197,12 @@ def _probe_renderer(recipe: dict) -> dict:
         try:
             _stop_group(group)
         except HTTPException as cleanup_error:
+            _clear_validation_journal(factory, lease_id)
             raise cleanup_error
+        _clear_validation_journal(factory, lease_id)
         raise
     _stop_group(group)
+    _clear_validation_journal(factory, lease_id)
     return result
 
 
@@ -187,8 +230,9 @@ def validate_registered_workflow(db: Session, settings: Settings, profile_id: st
         if not clean["confirmed"]:
             raise RuntimeError("SERVICE_VALIDATION_CLEANUP_FAILED")
 
-    with resource_slot(make_session_factory(db.get_bind()), "WORKFLOW_VALIDATION", 1,
-                       release_models=require_clean_stop):
+    validation_factory = make_session_factory(db.get_bind())
+    with resource_slot(validation_factory, "WORKFLOW_VALIDATION", 1,
+                       release_models=require_clean_stop) as validation_lease_id:
         db.expire_all()
         if _current_identity(db, settings) != identity:
             raise HTTPException(409, "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")
@@ -198,7 +242,8 @@ def validate_registered_workflow(db: Session, settings: Settings, profile_id: st
         recipe, _sha = load_runtime_recipe(settings,
                                           expected_sha256=identity["recipe_sha256"])
         try:
-            probe = _probe_renderer(recipe)  # returns only after the owned process has stopped
+            probe = _probe_renderer(recipe, lease_id=validation_lease_id,
+                                    factory=validation_factory)  # returns only after the owned process has stopped
         except HTTPException as exc:
             if "SERVICE_VALIDATION_CLEANUP_FAILED" in str(exc.detail):
                 clean["confirmed"] = False

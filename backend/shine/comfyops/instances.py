@@ -71,6 +71,30 @@ def package(db, identity):
     return row
 
 
+def relocated_managed_root(instance, expected_root) -> bool:
+    """Whether a managed row's recorded root differs from *expected_root* only
+    because the data directory moved.
+
+    The row still carries this workbench's own ladder shape -
+    ``…/instances/<name>`` - so it is our own instance recorded under a
+    previous data directory, and the current anchor says where the
+    installation lives now.  Adopted (external) installations never qualify:
+    their root is the user's own path and must keep matching exactly.
+    """
+    from pathlib import Path as _Path
+
+    payload = instance.payload or {}
+    recorded = _Path(payload.get("root", "") or "")
+    if not str(recorded) or payload.get("adopted"):
+        return False
+    try:
+        if recorded.resolve() == _Path(expected_root).resolve():
+            return False  # not relocated: the ordinary exact comparison applies
+    except OSError:
+        return False
+    return recorded.name == payload.get("name") and recorded.parent.name == "instances"
+
+
 def instance_root(settings, name, mode):
     return safe_target(settings.comfyops_dir / ("fake-instances" if mode == "fake" else "instances"), name)
 

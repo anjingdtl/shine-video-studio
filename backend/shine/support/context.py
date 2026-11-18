@@ -99,6 +99,12 @@ def _managed_processes(db) -> list[dict[str, Any]]:
     return describe_managed_processes(db)
 
 
+def _idle_blockers(db) -> list[dict[str, Any]]:
+    from shine.comfyops.runtime_configuration import idle_configuration_blockers
+
+    return idle_configuration_blockers(db)[:12]
+
+
 def _workers(db) -> list[dict[str, Any]]:
     rows = db.scalars(select(WorkerInstance).order_by(WorkerInstance.last_heartbeat_at.desc())).all()
     return [
@@ -261,6 +267,14 @@ def build_evidence_snapshot(
     )
     processes = _capture(provenance, "GET /api/v1/setup/managed-processes",
                          lambda: _managed_processes(db), fallback=[])
+    idle_blockers = _capture(
+        provenance,
+        "shine.comfyops.runtime_configuration.idle_configuration_blockers",
+        lambda: _idle_blockers(db),
+        # None means "could not be read"; an empty list means "verified idle".
+        # Collapsing the two made a failed read look like "blockers cleared".
+        fallback=None,
+    )
     workers = _capture(provenance, "worker_instances ledger", lambda: _workers(db), fallback=[])
     task = _capture(provenance, "jobs/job_attempts ledger",
                     lambda: _task_facts(db, job_id=job_id, attempt_id=attempt_id), fallback=None)
@@ -273,7 +287,11 @@ def build_evidence_snapshot(
         fallback={"mode": "Ref2VA", "min_image_references": 1, "max_image_references": 9},
     )
 
-    setup: dict[str, Any] = {"verdict": verdict, "runtime": report}
+    setup: dict[str, Any] = {
+        "verdict": verdict,
+        "runtime": report,
+        "idle_blockers": idle_blockers,
+    }
     if isinstance(summary, dict):
         setup["summary"] = {
             "computed_at": summary.get("computed_at"),

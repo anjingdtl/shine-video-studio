@@ -135,6 +135,22 @@ def render_markdown(
             f"- 受管渲染服务：{len(runtime.get('managed_processes') or [])} 个",
         ]
     )
+    preparation = ((snapshot.get("setup") or {}).get("summary") or {}).get("preparation") or {}
+    if isinstance(preparation, dict) and preparation.get("status"):
+        prep_line = f"- 最近整备任务：`{_md_escape(preparation.get('status'))}`"
+        if preparation.get("current"):
+            prep_line += f"（步骤 `{_md_escape(preparation.get('current'))}`）"
+        if preparation.get("error"):
+            prep_line += f" / 错误码 `{_md_escape(preparation.get('error'))}`"
+        lines.append(prep_line)
+    idle_blockers = (snapshot.get("setup") or {}).get("idle_blockers") or []
+    if idle_blockers:
+        lines.append(f"- 配置空闲门禁阻塞项：{len(idle_blockers)} 项")
+        for row in idle_blockers[:5]:
+            if isinstance(row, dict):
+                lines.append(
+                    f"  - `{_md_escape(row.get('kind'))}`：{_md_escape(row.get('label') or row.get('id'))}"
+                )
     if task:
         attempt = task.get("attempt") or {}
         lines.extend(

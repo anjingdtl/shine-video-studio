@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from shine.comfy.workflow import graph_hash
 from shine.comfyops import deployment, resource_discovery, setup_summary
 from shine.comfyops.setup_reconcile import reconcile_installation
 
@@ -348,3 +349,83 @@ def test_presence_accepts_family_prefixed_relative_paths(tmp_path, api):
     presence = setup_summary.model_file_presence(models, catalog)
     assert presence["missing"] == []
     assert presence["present"], presence
+
+
+def _stopped_install_records(factory, *, attempt_plan_hash="correct", with_spec=True):
+    """一条停摆的本地隔离安装记录：FAILED_RECONCILE_REQUIRED、无租约、stage 待收尾。"""
+    from shine.comfyops.models import InstallationAttempt, InstallationPlan
+    from shine.models import utcnow
+
+    spec = {
+        "name": "stopped-pkg", "kind": "model", "revision": "r1",
+        "license_id": "test-license", "usage": "research",
+        "files": [{"relative_path": "w.bin", "sha256": "a" * 64, "size": 4,
+                   "url": "https://example.invalid/w"}],
+    }
+    package = {"id": "stopped-pkg", "hash": graph_hash(spec)}
+    if with_spec:
+        package["spec"] = spec
+    payload = {"executor": "LOCAL_ISOLATED", "isolated": True, "packages": [package]}
+    plan_sha = graph_hash(payload)
+    with factory.begin() as db:
+        plan = InstallationPlan(project_id=None, payload=payload, sha256=plan_sha, status="NEEDS_REVIEW")
+        db.add(plan)
+        db.flush()
+        attempt_payload = {"plan_hash": plan_sha if attempt_plan_hash == "correct" else "0" * 64}
+        attempt = InstallationAttempt(
+            plan_id=plan.id, payload=attempt_payload, sha256=graph_hash(attempt_payload),
+            stage="NEEDS_REVIEW", status="FAILED_RECONCILE_REQUIRED",
+            error_code="DOWNLOAD_FAILED", lease_owner=None, heartbeat_at=utcnow(),
+        )
+        db.add(attempt)
+        db.flush()
+        return plan.id, attempt.id
+
+
+def test_a_stopped_attempt_with_a_wrong_plan_digest_stays_blocked(tmp_path, api):
+    """计划摘要对不上的停摆记录是对账硬校验：不能被收编成 RECONCILED_NO_RETRY。"""
+    client, factory, settings = api
+    _plan_id, attempt_id = _stopped_install_records(factory, attempt_plan_hash="wrong")
+    from shine.comfyops.local import reconcile_stopped_isolated_attempts
+
+    with factory.begin() as db:
+        reconciled = reconcile_stopped_isolated_attempts(db, settings, actor="worker:setup")
+    assert attempt_id not in [row["attempt_id"] for row in reconciled]
+    with factory() as db:
+        from shine.comfyops.models import InstallationAttempt as Attempt
+
+        assert db.get(Attempt, attempt_id).status == "FAILED_RECONCILE_REQUIRED"
+
+
+def test_a_stopped_attempt_with_a_package_entry_missing_its_spec_stays_blocked(tmp_path, api):
+    """包条目缺 spec 是损坏的记录，不是可跳过的条目：静默收编会留下误晋升。"""
+    client, factory, settings = api
+    _plan_id, attempt_id = _stopped_install_records(factory, with_spec=False)
+    from shine.comfyops.local import reconcile_stopped_isolated_attempts
+
+    with factory.begin() as db:
+        reconciled = reconcile_stopped_isolated_attempts(db, settings, actor="worker:setup")
+    assert attempt_id not in [row["attempt_id"] for row in reconciled]
+    with factory() as db:
+        from shine.comfyops.models import InstallationAttempt as Attempt
+
+        assert db.get(Attempt, attempt_id).status == "FAILED_RECONCILE_REQUIRED"
+
+
+def test_a_reconciled_stopped_attempt_writes_one_consistent_terminal_state(tmp_path, api):
+    """合法停摆记录收尾时，status 与 stage 必须一次写成同一个终态。"""
+    client, factory, settings = api
+    plan_id, attempt_id = _stopped_install_records(factory)
+    from shine.comfyops.local import reconcile_stopped_isolated_attempts
+
+    with factory.begin() as db:
+        reconciled = reconcile_stopped_isolated_attempts(db, settings, actor="worker:setup")
+    assert attempt_id in [row["attempt_id"] for row in reconciled]
+    with factory() as db:
+        from shine.comfyops.models import InstallationAttempt as Attempt
+        from shine.comfyops.models import InstallationPlan as Plan
+
+        attempt = db.get(Attempt, attempt_id)
+        assert attempt.status == "RECONCILED_NO_RETRY"
+        assert attempt.stage not in {"NEEDS_REVIEW", "INSTALLING", None}, "stage 不得停留在待核对"
+        assert db.get(Plan, plan_id).status == "RECONCILED_NO_RETRY"

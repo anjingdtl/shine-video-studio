@@ -77,7 +77,7 @@ def test_machine_service_validation_needs_no_project(prep, monkeypatch):
         candidate.value = {**candidate.value, "project_id": None}
         digest = candidate.value["identity"]["recipe_sha256"]
     monkeypatch.setattr(service_validation, "_probe_renderer",
-                        lambda recipe: {"port": recipe["renderer"]["port"], "object_info": _fake_object_info()})
+                        lambda recipe, **_kw: {"port": recipe["renderer"]["port"], "object_info": _fake_object_info()})
     with factory() as db:
         result = service_validation.validate_services(db, settings, None, digest, actor="local-user")
     assert result["status"] == "READY"
@@ -99,7 +99,8 @@ def test_registered_workflow_managed_probe_records_only_node_validation(prep, mo
     monkeypatch.setattr('shine.comfyops.runtime_configuration._current_identity', lambda db, settings: identity)
     monkeypatch.setattr(service_validation, 'load_runtime_recipe',
                         lambda *a, **kw: ({'renderer': {}}, identity['recipe_sha256']))
-    monkeypatch.setattr(service_validation, '_probe_renderer', lambda recipe: {'object_info': _fake_object_info()})
+    monkeypatch.setattr(service_validation, '_probe_renderer',
+                         lambda recipe, **_kw: {'object_info': _fake_object_info()})
 
     response = client.post(f'/api/v1/workflow-profiles/{profile_id}/validate-managed')
     assert response.status_code == 200, response.text
@@ -108,7 +109,7 @@ def test_registered_workflow_managed_probe_records_only_node_validation(prep, mo
     assert proof['generation_verified'] is False and proof['services_stopped'] is True
     assert proof['source'] == 'managed_live_object_info'
 
-    def cleanup_failed(recipe):
+    def cleanup_failed(recipe, **_kw):
         raise HTTPException(409, 'SERVICE_VALIDATION_CLEANUP_FAILED')
 
     monkeypatch.setattr(service_validation, '_probe_renderer', cleanup_failed)
@@ -131,7 +132,7 @@ def test_service_validation_binds_reviewer_models_and_l4_evidence(prep, monkeypa
     post(client, "/setup/profiles", {"project_id": project_id})
 
     monkeypatch.setattr(service_validation, "_probe_renderer",
-                        lambda recipe: {"object_info": _fake_object_info(),
+                        lambda recipe, **_kw: {"object_info": _fake_object_info(),
                                         "port": recipe["renderer"]["port"]})
     monkeypatch.setattr(service_validation, "_probe_review", _fake_review)
     monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda recipe: [])
@@ -181,7 +182,7 @@ def test_service_validation_rejects_live_workflow_contract_missing_node(prep, mo
     object_info = _fake_object_info()
     object_info.pop("MiniMaxH3ReferenceToVideo", None)
     monkeypatch.setattr(service_validation, "_probe_renderer",
-                        lambda recipe: {"object_info": object_info,
+                        lambda recipe, **_kw: {"object_info": object_info,
                                         "port": recipe["renderer"]["port"]})
     monkeypatch.setattr(service_validation, "_review_resource_blockers", lambda recipe: [])
     response = client.post("/api/v1/setup/services/validate", json={

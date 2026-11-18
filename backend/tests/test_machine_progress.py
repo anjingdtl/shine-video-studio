@@ -48,6 +48,9 @@ def test_download_step_commits_its_approval_before_queueing(tmp_path, api, monke
         "catalog_file": "test-catalog",
     })
     monkeypatch.setattr(setup_summary, "resolve_installation", lambda *a, **k: {"selected": {}})
+    # R5 之后下载计划与预览共用 plan_prepare_downloads，会按报告的 catalog_file
+    # 装载目录；stub 报告的 test-catalog 并不存在，目录内容以本文件的 _catalog 为准。
+    monkeypatch.setattr(deployment, "load_deployment_catalog", lambda name="h3-ref2va-windows-x64": _catalog())
 
     import shine.api_setup as api_setup
 

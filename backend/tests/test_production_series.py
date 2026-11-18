@@ -19,7 +19,9 @@ from sqlalchemy import select
 
 from shine.comfyops.models import ResourceLease
 from shine.models import (
+    ExternalJobReconciliation,
     Job,
+    JobAttempt,
     JobDependency,
     ProductionSeries,
     ProductionSeriesItem,
@@ -1286,3 +1288,153 @@ def test_a_failing_shot_callback_still_releases_the_renderer(api, monkeypatch):
     # The renderer and its exclusive lease are released even though the run
     # ended with an exception.
     assert released == [series.id]
+
+
+def _settled_failed_item(factory, series, *, uncertain=False):
+    """把序列的第一镜写成一条已结清的失败历史（或真正不确定的尝试）。"""
+    with factory.begin() as db:
+        item = db.scalar(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series.id,
+            ProductionSeriesItem.status != "PASSED",
+        ).order_by(ProductionSeriesItem.position))
+        job = db.get(Job, item.job_id)
+        job.status = "FAILED"
+        job.failure_code = "USER_ABANDONED_UNRECONCILED"
+        job.lease_owner = None
+        job.lease_expires_at = None
+        job.provider_job_id = None
+        attempt = db.scalar(select(JobAttempt).where(JobAttempt.job_id == job.id))
+        if attempt is not None:
+            attempt.status = "FAILED"
+            attempt.failure_code = "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"
+            if uncertain:
+                attempt.submit_ack_at = utcnow()
+        db.add(ExternalJobReconciliation(
+            job_id=job.id, provider_job_id=None, action="user_abandon", result="abandoned",
+            evidence={"artifact_kept": None, "resubmitted": False, "note": "测试收尾"},
+        ))
+        item.status = "FAILED"
+        series_row = db.get(ProductionSeries, series.id)
+        series_row.status = "PAUSED"
+        db.commit()
+        return item.id
+
+
+def test_a_settled_failed_job_does_not_block_cancelling_the_series(api):
+    """已结清的失败历史（终态 FAILED、无租约、无外部 ID、user_abandon/abandoned 核对在案）
+    允许取消尚未执行的镜头；只有 attempt 存在就永久拒绝是 2026-11-18 现场复现的 P3。"""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.lease_id = None
+        series.renderer_identity = None
+        series.finalization_state = "NONE"
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        db.add(JobAttempt(job_id=item.job_id, attempt_no=1, request_fingerprint="a" * 64,
+                          status="FAILED", lease_owner="worker-dead",
+                          lease_expires_at=utcnow()))
+        db.commit()
+    _settled_failed_item(factory, series)
+
+    response = client.post(
+        f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel",
+        headers={"x-shine-local-action": "1"},
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "CANCELLED"
+
+
+def test_a_genuinely_uncertain_attempt_still_refuses_cancellation(api):
+    """真正不确定的尝试（有 ack、无核对结论）仍然拒绝取消——保护不因上一条放宽。"""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.lease_id = None
+        series.renderer_identity = None
+        series.finalization_state = "NONE"
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        db.add(JobAttempt(job_id=item.job_id, attempt_no=1, request_fingerprint="a" * 64,
+                          status="ACKNOWLEDGED", submit_ack_at=utcnow(), prompt_graph_sha256="b" * 64,
+                          lease_owner="worker-dead", lease_expires_at=utcnow()))
+        db.commit()
+    _settled_failed_item(factory, series, uncertain=True)
+    with factory.begin() as db:
+        # 不确定尝试没有核对结论：抹掉 user_abandon 行，只剩 ack。
+        db.query(ExternalJobReconciliation).filter(
+            ExternalJobReconciliation.job_id == item.job_id).delete()
+
+    response = client.post(
+        f"/api/v1/production-series/{_series_id(factory, project_id)}/cancel",
+        headers={"x-shine-local-action": "1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED"
+
+
+def test_a_settled_needs_review_series_resumes_at_its_first_unfinished_shot(api):
+    """P5：已结清的 NEEDS_REVIEW 序列由显式恢复操作回到队列，续跑剩余镜头。"""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.lease_id = None
+        series.renderer_identity = None
+        series.finalization_state = "NONE"
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        db.add(JobAttempt(job_id=item.job_id, attempt_no=1, request_fingerprint="a" * 64,
+                          status="FAILED", lease_owner="worker-dead",
+                          lease_expires_at=utcnow()))
+        db.commit()
+        _settled_failed_item(factory, series)
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+
+    response = client.post(
+        f"/api/v1/production-series/{_series_id(factory, project_id)}/resume",
+        headers={"x-shine-local-action": "1"},
+    )
+    assert response.status_code == 200, response.text
+    with factory() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        assert series.status == "QUEUED"
+        assert series.worker_id is None
+        assert series.failure_code is None
+
+
+def test_an_unresolved_needs_review_series_still_refuses_resume(api):
+    """真正未决的 NEEDS_REVIEW 序列（有 ack 的尝试、无核对结论）恢复仍被拒绝。"""
+    client, factory, settings = api
+    project_id, style, shots = _studio_with_shots(client, factory, settings, count=2)
+    profile = _register_ref2va_profile(client)
+    client.post(f"/api/v1/projects/{project_id}/production-series", json=_series_body(shots, profile))
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.lease_id = None
+        series.renderer_identity = None
+        series.finalization_state = "NONE"
+        item = db.scalar(select(ProductionSeriesItem).where(ProductionSeriesItem.series_id == series.id))
+        db.add(JobAttempt(job_id=item.job_id, attempt_no=1, request_fingerprint="a" * 64,
+                          status="ACKNOWLEDGED", submit_ack_at=utcnow(), prompt_graph_sha256="b" * 64,
+                          lease_owner="worker-dead", lease_expires_at=utcnow()))
+        db.commit()
+    with factory.begin() as db:
+        series = db.scalar(select(ProductionSeries).where(ProductionSeries.project_id == project_id))
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "SERIES_INCOMPLETE"
+
+    response = client.post(
+        f"/api/v1/production-series/{_series_id(factory, project_id)}/resume",
+        headers={"x-shine-local-action": "1"},
+    )
+    assert response.status_code == 409
+    assert response.json()["detail"] == "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED"

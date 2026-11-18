@@ -139,6 +139,32 @@ def _with_scan_candidates(report: dict, candidates: list[dict]) -> dict:
     return report
 
 
+def _is_managed_non_adopted_instance(db, settings, path: str | None) -> bool:
+    """Whether *path* is already this workbench's own non-adopted managed instance."""
+    if not path:
+        return False
+    try:
+        resolved = Path(path).resolve()
+        if resolved.is_relative_to((Path(settings.comfyops_dir) / "instances").resolve()):
+            return True
+    except OSError:
+        return False
+    from sqlalchemy import select
+
+    from shine.comfyops.models import ComfyInstance
+
+    for row in db.scalars(select(ComfyInstance)):
+        payload = row.payload if isinstance(row.payload, dict) else {}
+        if not payload.get("managed") or payload.get("adopted") or not payload.get("root"):
+            continue
+        try:
+            if Path(payload["root"]).resolve() == resolved:
+                return True
+        except OSError:
+            continue
+    return False
+
+
 def reconcile_installation(db, settings, *, path: str | None, project_id: str | None = None,
                            capability: str = "h3", adopt: bool = False, port: int | None = None,
                            actor: str = "local-user", variant_id: str | None = None,
@@ -227,6 +253,11 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         # 只加钉住文件：同名不同字节拒绝覆盖，已存在则跳过。
         if claim_guard is not None:
             claim_guard(db)
+        from shine.comfyops.local import reconcile_stopped_isolated_attempts
+
+        reconciled_attempts = reconcile_stopped_isolated_attempts(
+            db, settings, actor=actor, evidence=f"setup-reconcile:{capability}"
+        )
         served_placed: list[str] = []
         if capability == "relayvsr" and path:
             served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
@@ -238,7 +269,8 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         required = _required_keys(catalog, capability)
         complete = bool(required) and required <= verified_keys
         adoption = None
-        if adopt and path and capability in {"h3", "image"}:
+        managed_own_instance = _is_managed_non_adopted_instance(db, settings, path)
+        if adopt and path and not managed_own_instance and capability in {"h3", "image"}:
             if complete:
                 try:
                     adoption = adopt_existing_installation(
@@ -271,6 +303,7 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
             "rejected_components": sorted({row["component_id"] for row in rejected}),
             "registered": sorted(registered), "adopted": adopted,
             "scan_candidates": len(candidates), "cached_from_scan": len(imported),
+            "reconciled_attempts": [row["attempt_id"] for row in reconciled_attempts],
         }, project_id=project_id)
         payload: dict[str, Any] = {
             "status": "RECONCILED",
@@ -288,6 +321,7 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
             "cached_from_scan": [row["sha256"] for row in imported],
             "manual_imported_bytes": manual.get("imported_bytes", 0),
             "served_root_placed": served_placed,
+            "reconciled_attempts": reconciled_attempts,
             "downloaded_bytes": 0,
             "copied_bytes": sum(int(row.get("size") or 0) for row in imported),
             "user_install_modified": False,

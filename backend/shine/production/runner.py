@@ -40,6 +40,7 @@ from shine.director.package import (
 from shine.models import (
     AppSetting,
     AuditEvent,
+    ExternalJobReconciliation,
     Job,
     JobAttempt,
     MediaArtifact,
@@ -409,6 +410,49 @@ def run_owned_passed_jobs(
     return passed
 
 
+def _job_submission_settled(db: Session, job: Job) -> bool:
+    """Whether a terminal job provably has no external request still awaiting a decision.
+
+    Settled means the ledger closed the question, not that the shot passed:
+    a terminal FAILED/CANCELLED job with no live lease whose latest
+    reconciliation closed the uncertainty, or one that provably never reached
+    a submission boundary (no external id, no durable attempt evidence of a
+    submit, no persisted submit intent).  Anything else - an acknowledged
+    attempt, a persisted intent, an external id with no reconciliation - keeps
+    the job uncertain, exactly as before.
+    """
+    if job.status not in {"FAILED", "CANCELLED"}:
+        return False
+    if job.lease_owner or job.lease_expires_at:
+        return False
+    reconciliation = db.scalar(select(ExternalJobReconciliation).where(
+        ExternalJobReconciliation.job_id == job.id,
+    ).order_by(ExternalJobReconciliation.created_at.desc(),
+               ExternalJobReconciliation.id.desc()).limit(1))
+    if reconciliation is not None:
+        # The newest reconciliation decision is the current state of the
+        # uncertainty: "requires_reconciliation" is the one result that says
+        # the question is still open.
+        return reconciliation.result != "requires_reconciliation"
+    if job.provider_job_id:
+        return False
+    if db.scalar(select(JobAttempt.id).where(
+        JobAttempt.job_id == job.id,
+        or_(JobAttempt.provider_job_id.is_not(None),
+            JobAttempt.submit_ack_at.is_not(None),
+            JobAttempt.prompt_graph_sha256.is_not(None),
+            JobAttempt.output_sha256.is_not(None)),
+    ).limit(1)):
+        return False
+    if db.scalar(select(AuditEvent.id).where(
+        AuditEvent.entity_type == "job",
+        AuditEvent.entity_id == job.id,
+        AuditEvent.event_type == "COMFY_SUBMIT_INTENT",
+    ).limit(1)):
+        return False
+    return True
+
+
 def _series_has_unreconciled_submission(db: Session, series: ProductionSeries) -> bool:
     """Whether an unfinished item still has a possible external H3 request."""
     items = db.scalars(select(ProductionSeriesItem).where(
@@ -423,6 +467,11 @@ def _series_has_unreconciled_submission(db: Session, series: ProductionSeries) -
         if (job.status in INFLIGHT_JOB_STATUSES or job.lease_owner or job.lease_expires_at
                 or job.provider_job_id):
             return True
+        # A settled failure is history: cancelling or resuming the remaining
+        # work of this series neither replays nor rewrites it (2026-11-18 P3:
+        # "any attempt at all" made a paused series permanently uncancelable).
+        if _job_submission_settled(db, job):
+            continue
         if db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == job.id).limit(1)):
             return True
         if db.scalar(select(AuditEvent.id).where(

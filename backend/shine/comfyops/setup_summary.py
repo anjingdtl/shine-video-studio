@@ -37,7 +37,9 @@ IMAGE_CATALOG = "qwen-image-2.1-windows-x64"
 IMAGE_COMPONENTS = ("qwen-image-2.1-unet", "qwen-image-2.1-text-encoder", "qwen-image-2.1-vae")
 REVIEW_COMPONENTS = {"vlm": "qwen3-vl-8b-fp8", "asr": "qwen3-asr-0.6b"}
 RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
-RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
+# One definition of the optional-enhancement component set: deployment.py owns
+# it (the install/optional-plan verdicts read the same tuple from there).
+RELAYVSR_COMPONENTS = deployment.RELAYVSR_COMPONENTS
 #: capability -> catalog file stem (the name load_deployment_catalog accepts).
 #: The catalog's own ``catalog_id`` (shine-…) is an identity, not a file name.
 CATALOG_FILE_BY_CAPABILITY = {"image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG}

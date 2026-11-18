@@ -157,6 +157,9 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
         approval.consume(db, actor, "install_reconcile", attempt, decision.grant_id, decision.snapshot)
         previous_status = attempt.status
         attempt.status = "RECONCILED_NO_RETRY"
+        # One terminal fact, written once: a reconciled attempt must not keep a
+        # stage that still says "awaiting review" while its status is terminal.
+        attempt.stage = "RECONCILED_NO_RETRY"
         advanced = [row["package_id"] for row in observations if row["registry_advanced"]]
         attempt.payload = {**attempt.payload, "reconciliation": {
             "actor": actor, "at": str(utcnow()), "evidence": decision.evidence, "packages": observations,
@@ -175,6 +178,225 @@ def reconcile_failed_install(db, settings, attempt, actor, decision):
                       project_id=plan.project_id)
         db.commit()
     return attempt
+
+
+_PRE_START_INSTALL_FAILURE_CODES = frozenset({
+    "INSTALL_PLAN_MISSING",
+    "PLAN_HASH_CHANGED",
+    "LOCAL_PLAN_REQUIRED",
+})
+
+
+def reconcile_stopped_isolated_attempts(
+    db,
+    settings,
+    *,
+    actor: str,
+    evidence: str = "setup-reconcile",
+) -> list[dict]:
+    """Reconcile stopped failed/abandoned isolated package attempts under the single setup executor.
+
+    ``SetupPanel``'s legacy manual button was retired when ``SetupCenter`` became
+    the single preparation entrypoint.  Without closing stopped
+    ``FAILED_RECONCILE_REQUIRED`` (or provably dead ``SUBMIT_INTENT``) package
+    attempts during ``RECONCILE``, ``require_idle_configuration`` blocks ``RECIPE``
+    forever with no live process running.  Every filesystem check here uses the
+    same OS lock and ``LocalInstaller.recover`` contract as ``reconcile_failed_install``;
+    any tampered or unrecoverable destination stays ``FAILED_RECONCILE_REQUIRED``.
+    """
+    from shine.comfyops.installer import process_identity
+    from shine.comfyops.verification_receipts import save_receipt
+
+    root = settings.comfyops_dir / "isolated-packages"
+    if not root.resolve().is_relative_to(settings.comfyops_dir.resolve()):
+        return []
+
+    candidates = db.scalars(
+        select(InstallationAttempt).where(
+            InstallationAttempt.status.in_(["FAILED_RECONCILE_REQUIRED", "SUBMIT_INTENT"]),
+            InstallationAttempt.lease_owner.is_(None),
+        )
+    ).all()
+    if not candidates:
+        return []
+
+    reconciled: list[dict] = []
+    for attempt in candidates:
+        payload = attempt.payload if isinstance(attempt.payload, dict) else {}
+        if attempt.status == "SUBMIT_INTENT":
+            owner_pid = payload.get("owner_pid")
+            owner_birth = payload.get("owner_birth")
+            if type(owner_pid) is not int or owner_pid <= 0 or not isinstance(owner_birth, str) or not owner_birth:
+                continue
+            try:
+                current_birth = process_identity(owner_pid)
+            except (OSError, ValueError):
+                continue  # unreadable identity is uncertainty, never death
+            if current_birth == owner_birth:
+                continue
+            if db.scalar(
+                select(InstallationAttempt.id).where(
+                    InstallationAttempt.status == "SUBMIT_INTENT",
+                    InstallationAttempt.id != attempt.id,
+                ).limit(1)
+            ):
+                continue
+
+        plan = db.get(InstallationPlan, attempt.plan_id) if attempt.plan_id else None
+        plan_payload = (plan.payload if plan is not None and isinstance(plan.payload, dict) else None) or {}
+        # The same hard admission as reconcile_failed_install: a missing plan,
+        # a non-isolated plan, or a digest that no longer matches the record is
+        # a corrupt ledger row, not a stopped installation to close silently.
+        if plan is None:
+            continue
+        if (plan_payload.get("kind")
+                or plan_payload.get("executor") != "LOCAL_ISOLATED"
+                or not plan_payload.get("isolated")):
+            continue
+        if graph_hash(plan_payload) != plan.sha256 or attempt.payload.get("plan_hash") != plan.sha256:
+            continue
+        packages = plan_payload.get("packages") or []
+        if not isinstance(packages, list) or not packages:
+            continue
+        # A package entry without its spec is a damaged record; it must block
+        # the reconciliation instead of being skipped as "not interesting".
+        if any(not isinstance(p, dict) or not isinstance(p.get("spec"), dict) for p in packages):
+            continue
+
+        error_code = str(attempt.error_code or "")
+        error_message = str(attempt.error_message or "")
+        pre_start_refusal = (
+            error_code in _PRE_START_INSTALL_FAILURE_CODES
+            or (
+                error_code in {"RESOURCE_DOWNLOAD_CHANGED", "RESOURCE_PLAN_REVALIDATION_FAILED"}
+                and ("no download was started" in error_message.lower()
+                     or plan.status == "APPROVED")
+            )
+        )
+        if not pre_start_refusal and plan.status not in {"NEEDS_REVIEW", "INSTALLING"}:
+            continue
+
+        observations: list[dict] = []
+        savepoint = db.begin_nested()
+        try:
+            with ExitStack() as locks:
+                for package in sorted(packages, key=lambda p: str((p.get("spec") or {}).get("name") or "")):
+                    spec = PackageSpec.model_validate(package["spec"])
+                    if root.exists():
+                        LocalInstaller(root, None).recover(spec.name)
+                        locks.enter_context(exclusive_file_lock(safe_target(root, spec.name + ".lock")))
+                    for suffix in (".journal", ".staging", ".rollback"):
+                        if safe_target(root, spec.name + suffix).exists():
+                            raise ValueError("INSTALL_FILESYSTEM_RECOVERY_REQUIRED")
+                    destination = safe_target(root, spec.name)
+                    file_status = "ABSENT"
+                    if destination.exists():
+                        expected = {f.relative_path.replace("\\", "/").casefold() for f in spec.files}
+                        actual = {
+                            p.relative_to(destination).as_posix().casefold()
+                            for p in destination.rglob("*") if p.is_file()
+                        }
+                        if actual != expected or not all(
+                            ControlledDownloader.valid(safe_target(destination, f.relative_path), f) for f in spec.files
+                        ):
+                            raise ValueError("INSTALL_DESTINATION_CHANGED")
+                        file_status = "MATCHES_PINNED_FILES"
+
+                    cls = ModelPackage if spec.kind == "model" else NodePackage
+                    registered = db.get(cls, package.get("id"))
+                    hash_matches = bool(
+                        registered is not None
+                        and registered.sha256 == package.get("hash")
+                        and graph_hash(registered.payload) == package.get("hash")
+                        and graph_hash(package["spec"]) == package.get("hash")
+                    )
+                    advanced = (
+                        advance_verified_package(db, registered)
+                        if file_status == "MATCHES_PINNED_FILES" and hash_matches
+                        else False
+                    )
+                    if file_status == "MATCHES_PINNED_FILES" and hash_matches:
+                        plan_variant = plan_payload.get("variant") or {}
+                        plan_deployment = plan_payload.get("deployment") or {}
+                        save_receipt(
+                            db,
+                            variant_id=plan_variant.get("variant_id"),
+                            catalog_id=plan_deployment.get("catalog_id"),
+                            catalog_version=plan_deployment.get("catalog_version"),
+                            component={
+                                "component_id": spec.name,
+                                "revision": spec.revision,
+                                "files": [file.model_dump() for file in spec.files],
+                            },
+                            root=root,
+                            directory=destination,
+                        )
+                    observations.append({
+                        "package_id": package.get("id"),
+                        "package_sha256": package.get("hash"),
+                        "files": file_status,
+                        "registry_status": registered.status if registered is not None else None,
+                        "registry_advanced": advanced,
+                    })
+        except ValueError:
+            # Roll the savepoint back: a package that advanced earlier in this
+            # loop must not leave a partial promotion behind when a later
+            # package proves the record tampered or unrecoverable.
+            savepoint.rollback()
+            continue
+        else:
+            savepoint.commit()
+
+        previous_status = attempt.status
+        attempt.status = "RECONCILED_NO_RETRY"
+        attempt.stage = "RECONCILED_NO_RETRY"
+        advanced_ids = [
+            row["package_id"]
+            for row in observations
+            if row.get("registry_advanced") and row.get("package_id")
+        ]
+        attempt.payload = {
+            **payload,
+            "reconciliation": {
+                "actor": actor,
+                "at": str(utcnow()),
+                "evidence": evidence,
+                "packages": observations,
+                "previous_status": previous_status,
+                "files_modified": False,
+                "runtime_verified": False,
+                "resubmitted": False,
+                "packages_advanced": advanced_ids,
+            },
+        }
+        attempt.sha256 = graph_hash(attempt.payload)
+        if plan is not None and plan.status in {"APPROVED", "NEEDS_REVIEW", "INSTALLING"}:
+            plan.status = "RECONCILED_NO_RETRY"
+        project_id = plan.project_id if plan is not None else None
+        add_audit(
+            db, actor, "LOCAL_INSTALL_FAILURE_RECONCILED", "installation_attempt", attempt.id,
+            attempt.payload["reconciliation"], project_id=project_id,
+        )
+        if advanced_ids:
+            add_audit(
+                db, actor, "VERIFIED_PACKAGES_ADVANCED", "installation_attempt", attempt.id,
+                {
+                    "packages": advanced_ids,
+                    "status": "FILES_VERIFIED_PENDING_RUNTIME",
+                    "evidence": "pinned file set hash-verified in place; runtime not yet proven",
+                },
+                project_id=project_id,
+            )
+        reconciled.append(
+            {
+                "attempt_id": attempt.id,
+                "previous_status": previous_status,
+                "packages_advanced": advanced_ids,
+            }
+        )
+    if reconciled:
+        db.flush()
+    return reconciled
 
 
 def validate_approved_plan(db, settings, plan_id, plan_hash, actor, executor="LOCAL_ISOLATED"):

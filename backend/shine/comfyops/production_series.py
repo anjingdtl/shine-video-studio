@@ -1618,23 +1618,65 @@ def pause_series(session_factory, series_id: str) -> str:
         return series.status
 
 
+def resume_series_in_session(db, series_id: str, *, actor: str = "user") -> str:
+    """Revive a paused - or provably settled review - series at its first unfinished shot.
+
+    A ``NEEDS_REVIEW`` series whose external questions the ledger already
+    closed (settled failures, released lease, no live renderer) is waiting for
+    a person, not for evidence: this explicit operator action requeues it so
+    the Worker continues with the remaining shots while the settled history
+    stays untouched.  Anything genuinely unresolved still refuses by name
+    (2026-11-18 P5: a review series previously had no recovery path at all).
+    """
+    series = db.get(ProductionSeries, series_id)
+    if series is None:
+        raise HTTPException(404, "Production series not found")
+    if series.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+        raise HTTPException(409, "This production series is already finished")
+    if series.status not in {"PAUSED", "PAUSE_REQUESTED", "NEEDS_REVIEW"}:
+        raise HTTPException(409, "This production series is not paused")
+    from_status = series.status
+    if series.status == "NEEDS_REVIEW":
+        from shine.production.runner import _series_has_inflight_work
+
+        if _series_has_inflight_work(db, series):
+            raise HTTPException(409, "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED")
+        # The dead run's bookkeeping belongs to the review record, not to the
+        # revived queue entry.
+        series.failure_code = None
+        series.finished_at = None
+        series.control_reason = None
+        series.lease_id = None
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.heartbeat_at = None
+        series.status = "QUEUED"
+        kept_owner = False
+    else:
+        # A series whose owner still holds an unexpired lease is still alive:
+        # its renderer may be running.  Handing it to another worker would let
+        # two workers decide the same series, so the owner keeps it.
+        kept_owner = bool(
+            series.worker_id
+            and series.lease_expires_at is not None
+            and series.lease_expires_at > utcnow()
+        )
+        if kept_owner:
+            series.status = "RUNNING"
+        else:
+            series.status = "QUEUED"
+            series.worker_id = None
+            series.lease_expires_at = None
+    series.state_version += 1
+    from shine.services import add_audit
+
+    add_audit(db, actor, "PRODUCTION_SERIES_RESUMED", "production_series", series.id,
+              {"kept_owner": kept_owner, "from_status": from_status},
+              project_id=series.project_id)
+    return series.status
+
+
 def resume_series(session_factory, series_id: str) -> str:
     """Resume a paused series without taking it away from a living owner."""
     with session_factory.begin() as db:
-        series = db.get(ProductionSeries, series_id)
-        if series is None:
-            raise HTTPException(404, "Production series not found")
-        if series.status in {"PAUSED", "PAUSE_REQUESTED"}:
-            owner_is_alive = bool(
-                series.worker_id
-                and series.lease_expires_at is not None
-                and series.lease_expires_at > utcnow()
-            )
-            if owner_is_alive:
-                series.status = "RUNNING"
-            else:
-                series.status = "QUEUED"
-                series.worker_id = None
-                series.lease_expires_at = None
-            series.state_version += 1
-        return series.status
+        return resume_series_in_session(db, series_id)

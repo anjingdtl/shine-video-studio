@@ -100,6 +100,10 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
 
     Enqueuing the same request twice returns the running task instead of
     creating a second one: the physical work is the same, so the identity is.
+    A task that stopped by name (FAILED, or cancelled from the page) resumes
+    the *same* identity from its first unfinished step, because both the page
+    and the cancel receipt promise "already completed steps are kept".  A
+    different request supersedes the old one as before.
     ``project_id`` may be None: the machine can be prepared before any work
     exists; project-scoped steps then skip themselves by name.
     """
@@ -115,7 +119,8 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
         variant_id = None
     existing = db.get(AppSetting, TASK_KEY)
     current = dict(existing.value) if existing is not None and isinstance(existing.value, dict) else {}
-    if current.get("status") in {"QUEUED", "RUNNING"}:
+    resumable = current.get("status") in {"QUEUED", "RUNNING", "FAILED", "CANCELLED"}
+    if resumable:
         cur_req = current.get("request") or {}
         cur_reconcile_mode = bool(cur_req.get("reconcile_only", not cur_req.get("adopt", True)))
         if (current.get("project_id") == project_id
@@ -127,7 +132,9 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
                 and cur_req.get("deep_scan", False) == deep_scan
                 and cur_req.get("adopt", True) == adopt
                 and cur_reconcile_mode == reconcile_mode):
-            return current
+            if current.get("status") in {"QUEUED", "RUNNING"}:
+                return current
+            return _resume_stopped_task(db, existing, current, actor=actor)
         # A different request supersedes the old one: the previous task is
         # cancelled by name so nothing later claims to be "in progress".
         current["status"] = "SUPERSEDED"
@@ -186,6 +193,47 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
     return value
 
 
+def _resume_stopped_task(db, existing, current: dict, *, actor: str) -> dict[str, Any]:
+    """Revive one stopped task under the same identity and authorization.
+
+    Steps that already finished (DONE / SKIPPED) keep their receipts; the task
+    restarts at its first unfinished step instead of from scratch, matching the
+    page's「前面完成的步骤会保留」promise.  Any stale claim, lease or supervisor
+    delegation from the stopped run is invalidated so a late worker write can
+    neither own the revived task nor complete an outdated VALIDATE receipt.
+    """
+    from shine.services import add_audit
+
+    steps = [dict(row) if isinstance(row, dict) else {"id": str(row), "status": "PENDING"}
+             for row in (current.get("steps") or [])]
+    unfinished = next((row for row in steps if row.get("status") not in {"DONE", "SKIPPED"}), None)
+    if unfinished is None:
+        # Nothing is left to continue: the stopped record stays history and the
+        # caller must issue a genuinely different request to start over.
+        return current
+    for row in steps:
+        if row.get("status") not in {"DONE", "SKIPPED"}:
+            row["status"] = "PENDING"
+            row["detail"] = None
+    current["status"] = "QUEUED"
+    current["current"] = unfinished["id"]
+    current["message"] = "从上次停下的步骤继续"
+    current["error"] = None
+    current["updated_at"] = utcnow().isoformat()
+    current["lease_owner"] = None
+    current["lease_expires_at"] = None
+    current["claim_token"] = None
+    current.pop("validation_delegation", None)
+    current["steps"] = steps
+    existing.value = current
+    add_audit(db, actor, "SETUP_PREPARATION_RESUMED", "setup_task", current.get("task_id"), {
+        "current": current["current"],
+        "finished_steps_kept": sum(1 for row in steps if row.get("status") in {"DONE", "SKIPPED"}),
+    }, project_id=current.get("project_id"))
+    db.commit()
+    return current
+
+
 def cancel(db, *, actor: str = "local-user") -> dict[str, Any]:
     from shine.services import add_audit
 
@@ -230,7 +278,7 @@ def _live_installation_work(db, project_id: str) -> list[str]:
       suggestions and never gate a production, so a review download that is
       still running must not hold the H3 chain either.
     """
-    from shine.comfyops.deployment import review_only_plan
+    from shine.comfyops.deployment import optional_only_plan
     from shine.comfyops.models import InstallationAttempt, InstallationPlan
 
     rows = db.scalars(select(InstallationAttempt).where(
@@ -243,8 +291,8 @@ def _live_installation_work(db, project_id: str) -> list[str]:
         payload = plan.payload or {}
         if payload.get("project_id") not in (None, project_id):
             continue
-        if review_only_plan(payload):
-            # Advisory review models never gate the production chain.
+        if optional_only_plan(payload):
+            # Optional enhancement models (VLM / ASR / RelayVSR) never gate the production chain.
             continue
         live.append(attempt.id)
     return live
@@ -552,11 +600,20 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
     request = task.get("request") or {}
     capabilities = [row for row in request.get("capabilities") or [] if row in {"h3", "image", "relayvsr"}]
     if not capabilities:
+        from shine.comfyops.local import reconcile_stopped_isolated_attempts
+
+        with factory.begin() as db:
+            _assert_claim_in_tx(db, task)
+            reconcile_stopped_isolated_attempts(db, settings, actor="worker:setup", evidence="setup-reconcile")
         return {"status": "SKIPPED", "detail": "这次没有需要核验已有字节的能力。"}
     with factory() as db:
         resolved = resolve_installation(db, settings, path=request.get("installation_path"))
         selected = resolved.get("selected") or {}
     root = selected.get("root")
+    adopt_external = bool(
+        request.get("adopt", True)
+        and not (selected.get("managed") and not selected.get("adopted"))
+    )
     if resolved.get("choice_required"):
         return {"status": "FAILED", "code": "INSTALLATION_SELECTION_REQUIRED",
                 "detail": "检索发现多套 ComfyUI，请选择本次使用的安装。"}
@@ -571,7 +628,7 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
                 extra = {"claim_guard": guard} if _accepts_kwarg(reconcile_installation, "claim_guard") else {}
                 result = reconcile_installation(
                     db, settings, path=root, project_id=task.get("project_id"),
-                    capability=capability, adopt=bool(request.get("adopt", True)),
+                    capability=capability, adopt=adopt_external,
                     port=request.get("port"),
                     actor="worker:setup",
                     variant_id=request.get("variant_id") if capability == "h3" else None,
@@ -1160,13 +1217,18 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
         or (requested_variant in {None, default_variant_id()}
             and active_variant in {None, default_variant_id()})
     )
-    if (report.get("status") == "ACTIVE" and report.get("services_verified")
-            and active_instance == target["instance_id"]
-            and active_port is not None and target.get("port")
-            and active_port == int(target["port"])
-            and variant_matches):
+    same_active_endpoint = (
+        report.get("status") == "ACTIVE"
+        and active_instance == target["instance_id"]
+        and active_port is not None and target.get("port")
+        and active_port == int(target["port"])
+    )
+    if same_active_endpoint and (
+        (report.get("services_verified") and variant_matches)
+        or "h3" not in capabilities
+    ):
         _align_existing_image_binding(factory, settings, task)
-        return {"status": "DONE", "detail": "运行合同已激活并核验，沿用现有配置，无需重新生成。"}
+        return {"status": "DONE", "detail": "运行合同已激活，沿用现有配置，无需重新生成。"}
     # Both capabilities share one physical recipe. H3 owns it when requested,
     # and the image binding consumes that exact recipe instead of rewriting it.
     capability = "h3" if "h3" in capabilities else "image"
@@ -1174,13 +1236,30 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
         return {"status": "SKIPPED", "detail": "这次没有需要生成运行配置的能力。"}
     guard = _claim_guard_for(task)
     gen_extra = {"claim_guard": guard} if _accepts_kwarg(deployment.generate_configuration, "claim_guard") else {}
-    with factory() as db:
-        _assert_claim_in_tx(db, task)
-        result = deployment.generate_configuration(
-            db, settings, task.get("project_id"), instance_name=target.get("name") or "shine-h3",
-            port=int(target.get("port") or 8188), capability=capability,
-            variant_id=request.get("variant_id") if capability == "h3" else None,
-            instance_id=target["instance_id"], **gen_extra)
+    try:
+        with factory() as db:
+            _assert_claim_in_tx(db, task)
+            result = deployment.generate_configuration(
+                db, settings, task.get("project_id"), instance_name=target.get("name") or "shine-h3",
+                port=int(target.get("port") or 8188), capability=capability,
+                variant_id=request.get("variant_id") if capability == "h3" else None,
+                instance_id=target["instance_id"], **gen_extra)
+    except ClaimLostError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - enrich idle-gate refusal with exact ledger blockers
+        code = _code_of(exc)
+        if code == "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK":
+            from shine.comfyops.runtime_configuration import idle_configuration_blockers
+
+            with factory() as db:
+                items = [row.get("label") for row in idle_configuration_blockers(db) if row.get("label")]
+            summary_note = ("；".join(items[:4])) if items else "存在尚未释放的任务或租约"
+            return {
+                "status": "FAILED",
+                "code": code,
+                "detail": f"暂不能重写运行配置（{summary_note}）。请先在「视频生产」或左侧「工作栈」处理后再继续。",
+            }
+        raise
     task.setdefault("result", {})["recipe_sha256"] = result.get("recipe_sha256")
     _align_existing_image_binding(factory, settings, task)
     return {"status": "DONE", "detail": "共用渲染器运行配置已生成。"}

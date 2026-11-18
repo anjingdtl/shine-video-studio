@@ -364,3 +364,33 @@ def test_every_later_shot_of_a_series_reads_the_same_output_spec(api):
         body = _create_body(series, db.get(Shot, shot["id"]))
     assert body.output is not None
     assert (body.output.width, body.output.height, body.output.clip_seconds) == (1344, 768, 6)
+
+
+def test_the_unspecified_output_compiles_at_the_pinned_default_frame():
+    """P2（2026-11-18 用户机 12GB 复现）：未指定 output_spec 时的默认渲染框架。
+
+    默认是 1344×768、24fps、17k+5 帧网格——这是产品钉住的事实，不是bug修复的对象：
+    本测试把它钉在合同里，防止未来有人静默改默认或在准入处静默降分辨率。
+    「分辨率×帧数×变体」的容量边界只能由真机实测声明（目录 min_vram_mb /
+    variant requirements），当前标准目录已声明 min_vram_mb=15360；任何按机器实测
+    收紧默认值的改动都必须先有真机证据并更新目录声明，而不是改这里的常量。
+    """
+    from shine.comfy import graph_compiler
+
+    assert graph_compiler.WIDTH_DEFAULT == 1344
+    assert graph_compiler.HEIGHT_DEFAULT == 768
+    assert graph_compiler.FPS == 24.0
+    # 10 秒在 17k+5 网格上是 243 帧：用户机实测该默认在 12GB 卡上全量 offload。
+    length = max(5, round(10 * 24)) + (5 - (max(5, round(10 * 24)) % 17)) % 17
+    assert length == 243
+    # 准入只拒绝「未映射」，不静默改写请求的尺寸（size_blockers 的合同）。
+    from shine.comfyops.profile_gate import size_blockers
+
+    class _Profile:
+        parameter_map = {"width": "31.inputs.width", "height": "31.inputs.height"}
+
+    assert size_blockers(_Profile(), {"width": 672, "height": 384, "fps": 24}) == []
+    class _Unmapped:
+        parameter_map = {}
+
+    assert [row["code"] for row in size_blockers(_Unmapped(), {"width": 672})] == ["WORKFLOW_SIZE_NOT_MAPped".upper()]

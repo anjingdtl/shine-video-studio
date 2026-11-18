@@ -4272,9 +4272,91 @@ def _text_gateway(settings):
     return _gateway(settings)
 
 
+def _reconcile_pre_runtime_control_and_leases(session_factory, settings, worker_id: str) -> None:
+    """Execute control-plane intents and reconcile dead-process leases before ``resolve_runtime``.
+
+    When ``ACTIVE_RUNTIME_CONFIGURATION_CHANGED`` blocks H3 video execution,
+    ``resolve_runtime`` raises before ``_run_configured_once``.  Keeping control
+    operations and dead-renderer lease reconciliation ahead of that gate breaks
+    the deadlock where a stale ``ACTIVE`` lease or pending release intent could
+    never clear while configuration was invalid, and ``require_idle_configuration``
+    refused to regenerate configuration while that lease remained.
+
+    This pre-runtime block is the *single* place a tick advances control
+    operations: ``_run_configured_once`` no longer calls it again behind the
+    runtime gate, so one responsibility runs exactly once per tick.  The same
+    storage-migration guard that precedes the in-runtime call applies here, so
+    a migration window stays quiet on both sides of the gate.
+    """
+    try:
+        from shine.media.output_layout import storage_migration_active
+
+        with session_factory() as guard_db:
+            if storage_migration_active(guard_db):
+                return
+    except Exception:  # noqa: BLE001 - an unreadable guard defers to the next beat
+        logger.warning("pre_runtime_storage_migration_guard_unreadable")
+        return
+    try:
+        from shine.runtime_orchestrator.executor import advance_control_operations
+
+        advance_control_operations(
+            session_factory,
+            settings,
+            worker_id=worker_id,
+            worker_birth=_worker_birth(),
+        )
+    except Exception:  # noqa: BLE001 - control-plane tick must never kill worker loop
+        logger.exception("pre_runtime_control_operations_failed")
+
+    try:
+        from shine.comfyops.models import ResourceLease
+        from shine.models import AppSetting
+
+        with session_factory() as check_db:
+            has_open_lease = bool(
+                check_db.scalar(
+                    select(ResourceLease.id)
+                    .where(ResourceLease.status.in_(["ACTIVE", "RECONCILE_REQUIRED"]))
+                    .limit(1)
+                )
+            )
+            has_unstopped_startup = False
+            for row in check_db.scalars(
+                select(AppSetting).where(
+                    AppSetting.key.like("renderer-startup:%")
+                    | AppSetting.key.like("review-startup:%")
+                )
+            ).all():
+                stage = (row.value or {}).get("stage") if isinstance(row.value, dict) else None
+                if stage not in {"STOPPED", "RECONCILE_COMPLETE", "RELEASED", "FAILED"}:
+                    has_unstopped_startup = True
+                    break
+        if not has_open_lease and not has_unstopped_startup:
+            return
+        from shine.comfyops.handoff_startup import (
+            reconcile_dead_renderer_leases,
+            reconcile_managed_startups,
+            reconcile_stopped_handoffs,
+        )
+
+        reconcile_managed_startups(session_factory, settings)
+        reconcile_stopped_handoffs(session_factory)
+        if has_open_lease:
+            reconcile_dead_renderer_leases(session_factory, settings)
+            if not settings.offline_simulation:
+                from shine.quality.advisory_queue import reconcile_review_leases
+
+                reconcile_review_leases(session_factory, settings)
+    except Exception as exc:  # noqa: BLE001 - reconciliation failure must not kill setup tick
+        logger.warning("pre_runtime_lease_reconciliation_failed error=%s", type(exc).__name__)
+
+
 def run_configured_once(session_factory, provider, worker_id, *, settings, comfy_client=None):
     global _text_preparation_ticks
     from shine.comfyops.runtime_configuration import resolve_runtime
+
+    _reconcile_pre_runtime_control_and_leases(session_factory, settings, worker_id)
 
     # A setup-type installation is durable work that does not need the video
     # runtime: the new-machine flow installs the renderer before any runtime
@@ -4358,6 +4440,20 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
         # failure between two bursts would freeze the counter above the
         # limit forever and a running outline would stall mid-run.
         _text_preparation_ticks = 0
+        if setup_step in {"setup:IMAGE_SAMPLES:waiting", "setup:IMAGE_EDIT_SAMPLES:waiting"}:
+            # Only this task's own sample batch runs here: the runtime gate is
+            # down for video, and an unscoped claim would execute whatever
+            # unrelated production item happened to be oldest.
+            from shine.comfyops.setup_preparation import read_task
+            from shine.materialprep.execution import run_pending_image_items
+
+            with session_factory() as setup_db:
+                sample_run_id = (read_task(setup_db).get("result") or {}).get("image_sample_run_id")
+            if sample_run_id:
+                images = run_pending_image_items(
+                    session_factory, settings, worker_id, limit=1, run_id=str(sample_run_id))
+                if images:
+                    return f"material-image:{images}"
         raise
     if current != settings:
         # No inherited client may point at an old port after activation. Use a
@@ -4409,18 +4505,9 @@ def _run_configured_once(session_factory, provider, worker_id, *, settings, comf
             # produce bytes with nowhere agreed to put them.
             return "storage-migration"
     # Lifecycle control intents (start/stop/probe/release from the unified
-    # control plane) are short and claimed first; this worker is their only
-    # executor, and a control-plane failure must never kill the loop.
-    try:
-        from shine.runtime_orchestrator.executor import advance_control_operations
-
-        advance_control_operations(
-            session_factory, settings,
-            worker_id=worker_id,
-            worker_birth=_worker_birth(),
-        )
-    except Exception:  # noqa: BLE001 - defensive: the executor guards itself
-        logger.exception("runtime control operations tick failed")
+    # control plane) were already advanced exactly once by the pre-runtime
+    # block in ``run_configured_once``; re-running them here would execute one
+    # responsibility twice per tick.
     semantic, asr = configured_reviewers(session_factory, settings)
     if settings.render_provider == "comfyui" and not settings.offline_simulation:
         from shine.quality.advisory_queue import reconcile_review_leases

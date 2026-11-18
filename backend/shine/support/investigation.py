@@ -174,9 +174,11 @@ def _plan(
 
     page = snapshot.get("page_context") or {}
     task = snapshot.get("task") or {}
+    preparation = ((snapshot.get("setup") or {}).get("summary") or {}).get("preparation") or {}
+    prep_error = str(preparation.get("error") or "") if isinstance(preparation, dict) else ""
     job_id = str(task.get("job_id") or page.get("job_id") or "")
     attempt_id = str((task.get("attempt") or {}).get("attempt_id") or page.get("attempt_id") or "") or None
-    code_upper = (code or page.get("error_code") or "").upper()
+    code_upper = " ".join(filter(None, [code, page.get("error_code"), prep_error])).upper()
     question_lower = (question or "").casefold()
 
     plan: list[tuple[str, Callable[[], dict[str, Any]]]] = []
@@ -188,13 +190,19 @@ def _plan(
         or any(word in question_lower for word in ("节点", "工作流", "node", "workflow"))
     ):
         plan.append(("read_workflow_contract", lambda: _workflow_contract(db, job_id)))
-    if any(word in code_upper for word in ("MODEL", "DOWNLOAD", "FILE", "HASH", "INSTALL")) or any(
-        word in question_lower for word in ("模型", "下载", "安装", "文件")
+    if any(
+        word in code_upper
+        for word in ("MODEL", "DOWNLOAD", "FILE", "HASH", "INSTALL", "CONFIGURATION", "RECONCILED_WORK")
+    ) or any(
+        word in question_lower for word in ("模型", "下载", "安装", "文件", "配置", "整备", "60%")
     ):
         plan.append(("read_installation_receipts", lambda: _installation_receipts(db)))
-    # GPU / lease questions always get the authoritative occupancy answer.
-    if any(word in code_upper for word in ("OOM", "CUDA", "GPU", "LEASE")) or any(
-        word in question_lower for word in ("显存", "显卡", "gpu", "占用", "忙")
+    # GPU / lease / idle-configuration questions always get the authoritative occupancy answer.
+    if any(
+        word in code_upper
+        for word in ("OOM", "CUDA", "GPU", "LEASE", "IDLE", "RECONCILED_WORK", "ACTIVE_RUNTIME_CONFIGURATION_CHANGED")
+    ) or any(
+        word in question_lower for word in ("显存", "显卡", "gpu", "占用", "忙", "卡在", "卡住")
     ):
         plan.append(("read_gpu_occupancy", lambda: {"status": "OK", "occupancy": resource_occupancy(db)}))
     plan.append(("search_local_knowledge", lambda: {"status": "OK", "entries": search_local(question, limit=3)}))

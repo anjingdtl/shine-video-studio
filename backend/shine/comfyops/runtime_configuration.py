@@ -368,6 +368,7 @@ def configuration_identity(db, settings, path):
         installation_binding_matches,
         installation_identity_matches,
         instance_root,
+        relocated_managed_root,
     )
 
     path = Path(path).resolve()
@@ -383,11 +384,18 @@ def configuration_identity(db, settings, path):
         expected_root = (Path(instance.payload.get('root', '')).resolve() if adopted
                          else instance_root(settings, instance.payload['name'], 'local').resolve()
                          if instance else None)
+        recorded_root = Path(instance.payload.get('root', '')) if instance else Path()
+        relocated_managed = (
+            bool(instance)
+            and expected_root is not None
+            and relocated_managed_root(instance, expected_root)
+            and Path(renderer['root']).resolve() == expected_root
+        )
         if (not instance or not instance.payload.get('managed') or instance.payload.get('is_mock', True)
                 or instance.sha256 != graph_hash(instance.payload)
                 or not installation_identity_matches(instance, renderer['port'])
                 or Path(renderer['root']).resolve() != expected_root
-                or Path(instance.payload['root']).resolve() != Path(renderer['root']).resolve()
+                or (not relocated_managed and recorded_root.resolve() != Path(renderer['root']).resolve())
                 or instance.payload['port'] != renderer['port']):
             raise HTTPException(409, 'REAL_RUNTIME_INSTANCE_IDENTITY_REQUIRED')
         if adopted:
@@ -470,20 +478,21 @@ def _live_installation_attempts(db) -> list[str]:
     An attempt that already failed (``FAILED_RECONCILE_REQUIRED``) is waiting
     for a person to reconcile it.  It holds no lease and installs nothing, so
     it cannot touch the GPU - but counting it anyway froze the whole
-    workbench: one failed download of the *advisory* review models (画面审片 /
-    语音核对) made service validation, runtime activation and the production
-    badge refuse forever, with nothing in the UI able to clear it.
+    workbench: one failed download of optional enhancement models (画面审片 /
+    语音核对 / RelayVSR 2X 精修) made service validation, runtime activation
+    and the production badge refuse forever, with nothing in the UI able to
+    clear it.
 
     Two rules, both about not letting an unrelated download freeze everything:
 
     * a failed attempt only counts while it still owns a lease;
-    * a plan that contains nothing but advisory review components never counts
-      - those models give suggestions and never gate a production.
+    * a plan that contains nothing but optional components (VLM / ASR /
+      RelayVSR) never counts once stopped - optional enhancements never gate
+      H3 production.
     """
-    from shine.comfyops.deployment import REVIEW_COMPONENTS
+    from shine.comfyops.deployment import OPTIONAL_INSTALL_COMPONENTS
     from shine.comfyops.models import InstallationPlan
 
-    review_only = set(REVIEW_COMPONENTS.values())
     live: list[str] = []
     rows = db.scalars(select(InstallationAttempt).where(
         InstallationAttempt.status.in_(['SUBMIT_INTENT', 'INSTALLING',
@@ -494,15 +503,128 @@ def _live_installation_attempts(db) -> list[str]:
             plan = db.get(InstallationPlan, attempt.plan_id)
             payload = (plan.payload or {}) if plan is not None else {}
             packages = [str(row.get('id') or '') for row in (payload.get('packages') or [])]
-            if not packages or set(packages).issubset(review_only):
+            if not packages or set(packages).issubset(OPTIONAL_INSTALL_COMPONENTS):
                 continue
         live.append(attempt.id)
     return live
 
 
-def require_idle_configuration(db):
+def idle_configuration_blockers(db) -> list[dict]:
+    """Single authoritative verdict of what currently blocks runtime configuration.
+
+    Every surface (``require_idle_configuration``, setup preparation step details,
+    the work-stack monitor, and Shine Copilot diagnostics/reports) reads this one
+    list so no screen can claim the machine is idle while configuration refuses.
+    """
+    from shine.comfyops.models import InstallationPlan
+    from shine.models import Project, Shot
     from shine.services import ACTIVE_JOB_STATUSES
 
+    def _project_title(project_id: str | None) -> str | None:
+        if not project_id:
+            return None
+        row = db.get(Project, project_id)
+        return row.title if row is not None else None
+
+    blockers: list[dict] = []
+    for lease in db.scalars(
+        select(ResourceLease).where(ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(8)
+    ).all():
+        blockers.append({
+            'kind': 'gpu_lease',
+            'id': lease.id,
+            'owner': lease.owner,
+            'status': lease.status,
+            'project_id': None,
+            'project_title': None,
+            'run_id': None,
+            'label': f"GPU 租约未释放（{lease.owner} · {lease.status}）",
+        })
+
+    run_by_series: dict[str, str] = {}
+    try:
+        from shine.production.models import ACTIVE_RUN_STATUSES, ProductionRun, ProductionRunBatch
+
+        for batch, run in db.execute(
+            select(ProductionRunBatch, ProductionRun)
+            .join(ProductionRun, ProductionRun.id == ProductionRunBatch.run_id)
+            .where(ProductionRun.status.in_(ACTIVE_RUN_STATUSES))
+        ).all():
+            if batch.series_id:
+                run_by_series[str(batch.series_id)] = str(run.id)
+    except Exception:  # noqa: BLE001 - optional join enrichment only
+        run_by_series = {}
+
+    for series in db.scalars(
+        select(ProductionSeries).where(ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(8)
+    ).all():
+        title = _project_title(series.project_id)
+        prefix = f"作品《{title}》" if title else f"作品 {str(series.project_id)[:8]}"
+        run_id = run_by_series.get(str(series.id))
+        blockers.append({
+            'kind': 'production_series',
+            'id': series.id,
+            'status': series.status,
+            'project_id': series.project_id,
+            'project_title': title,
+            'run_id': run_id,
+            'label': f"{prefix} 的拍摄序列尚未结束（{series.status}）",
+        })
+
+    for job in db.scalars(
+        select(Job).where(Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(8)
+    ).all():
+        title = _project_title(job.project_id)
+        shot = db.get(Shot, job.shot_id) if job.shot_id else None
+        shot_label = shot.name if shot and shot.name else str(job.shot_id or job.id)[:8]
+        prefix = f"作品《{title}》" if title else f"作品 {str(job.project_id)[:8]}"
+        blockers.append({
+            'kind': 'job',
+            'id': job.id,
+            'status': job.status,
+            'project_id': job.project_id,
+            'project_title': title,
+            'shot_id': job.shot_id,
+            'shot_name': shot.name if shot else None,
+            'run_id': None,
+            'label': f"{prefix} 镜头「{shot_label}」处于 {job.status}",
+        })
+
+    leased_review = db.scalars(
+        select(InstallationAttempt).where(
+            (InstallationAttempt.status == 'NEEDS_REVIEW')
+            & (InstallationAttempt.lease_owner.is_not(None))
+        ).limit(8)
+    ).all()
+    live_attempt_ids = set(_live_installation_attempts(db))
+    seen_attempts: set[str] = set()
+    for attempt in [
+        *leased_review,
+        *(db.get(InstallationAttempt, aid) for aid in sorted(live_attempt_ids)),
+    ]:
+        if attempt is None or attempt.id in seen_attempts:
+            continue
+        seen_attempts.add(attempt.id)
+        plan = db.get(InstallationPlan, attempt.plan_id) if attempt.plan_id else None
+        payload = (plan.payload or {}) if plan is not None and isinstance(plan.payload, dict) else {}
+        packages = [str(row.get('id') or '') for row in (payload.get('packages') or []) if isinstance(row, dict)]
+        pkg_note = '、'.join([p for p in packages if p][:3]) or '未知组件'
+        blockers.append({
+            'kind': 'installation_attempt',
+            'id': attempt.id,
+            'plan_id': attempt.plan_id,
+            'status': attempt.status,
+            'error_code': attempt.error_code,
+            'packages': packages,
+            'project_id': plan.project_id if plan is not None else None,
+            'project_title': _project_title(plan.project_id if plan is not None else None),
+            'run_id': None,
+            'label': f"安装记录待收尾（{pkg_note} · {attempt.error_code or attempt.status}）",
+        })
+    return blockers
+
+
+def require_idle_configuration(db):
     # Only work that can still touch the GPU blocks a re-validation. A
     # NEEDS_REVIEW record with no active lease is an audit trail, not live work.
     #
@@ -512,15 +634,7 @@ def require_idle_configuration(db):
     # A NEEDS_REVIEW series is blocked and unclaimable - it holds no lease and
     # cannot render - so an unrelated project's blocked series must not freeze
     # the whole workbench.
-    if (db.scalar(select(ResourceLease.id).where(ResourceLease.status.in_(['ACTIVE', 'RECONCILE_REQUIRED'])).limit(1))
-            or db.scalar(select(Job.id).where(
-                Job.status.in_(list(ACTIVE_JOB_STATUSES)), Job.stale.is_(False)).limit(1))
-            or db.scalar(select(ProductionSeries.id).where(
-                ProductionSeries.status.in_(LIVE_SERIES_STATUSES)).limit(1))
-            or db.scalar(select(InstallationAttempt.id).where(
-                (InstallationAttempt.status == 'NEEDS_REVIEW')
-                & (InstallationAttempt.lease_owner.is_not(None))).limit(1))
-            or _live_installation_attempts(db)):
+    if idle_configuration_blockers(db):
         raise HTTPException(409, 'RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK')
 
 

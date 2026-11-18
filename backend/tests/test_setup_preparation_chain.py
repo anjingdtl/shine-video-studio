@@ -13,6 +13,7 @@ import pytest
 
 from shine.comfyops import setup_preparation
 from shine.comfyops.models import InstallationAttempt, InstallationPlan
+from shine.models import AppSetting
 
 LOCAL = {"x-shine-local-action": "1"}
 
@@ -358,3 +359,41 @@ def test_bare_image_download_and_instance_steps_avoid_h3_qualification_gate(env,
     assert seen_inst_catalogs
     ids = {c["component_id"] for c in seen_inst_catalogs[0]["components"]}
     assert "comfyui" in ids
+
+def test_an_identical_request_after_failure_resumes_from_the_first_unfinished_step(env):
+    """同一授权在 RECIPE 失败后重发必须续跑，而不是从 SCAN 整单重来。
+
+    页面与取消路径都承诺「前面完成的步骤会保留」（2026-11-18 复现：整备停在
+    RECIPE 后再点「核对运行合同」，得到新 task_id、已完成步骤数归零）。同一
+    请求身份恢复同一任务，旧 claim/委托写回必须失效。
+    """
+    client, factory, _, _ = env
+    body = {"capabilities": ["h3"], "verify_runtime": True}
+    first = client.post("/api/v1/setup/prepare/execute", json=body, headers=LOCAL).json()
+    assert first["status"] == "QUEUED"
+    assert "RECIPE" in first["steps"]
+
+    with factory.begin() as db:
+        task = setup_preparation.read_task(db)
+        value = dict(task)
+        value["status"] = "FAILED"
+        value["current"] = "RECIPE"
+        value["error"] = "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK"
+        value["claim_token"] = "stale"
+        steps = [dict(row) for row in value["steps"]]
+        for step in steps:
+            step["status"] = "FAILED" if step["id"] == "RECIPE" else "DONE"
+        value["steps"] = steps
+        db.get(AppSetting, setup_preparation.TASK_KEY).value = value
+
+    again = client.post("/api/v1/setup/prepare/execute", json=body, headers=LOCAL).json()
+    assert again["task_id"] == first["task_id"], "同一授权是同一个任务身份，不是一条新任务"
+    assert again["status"] == "QUEUED"
+    with factory() as db:
+        task = setup_preparation.read_task(db)
+        assert task["current"] == "RECIPE", "必须从第一个未完成步骤继续"
+        statuses = {row["id"]: row["status"] for row in task["steps"]}
+        assert all(status == "DONE" for step_id, status in statuses.items() if step_id != "RECIPE"), statuses
+        assert statuses["RECIPE"] == "PENDING", statuses
+        assert task.get("claim_token") is None
+        assert task.get("lease_owner") is None

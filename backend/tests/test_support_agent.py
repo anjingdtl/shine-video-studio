@@ -1759,3 +1759,29 @@ def test_copilot_answers_workflow_image_limit_with_llm_and_offline_without_irrel
 
     assert "1～9 张参考图" in res_offline["message"]["content"]
     assert "本机状态正常" not in res_offline["message"]["content"]
+
+
+def test_an_unreachable_renderer_preflight_is_not_diagnosed_as_missing_nodes():
+    """预检连不上渲染器（STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE）不是缺节点。
+
+    复现（SUPPORT-20261118-111440）：历史任务已被放弃（USER_ABANDONED_UNRECONCILED）、
+    attempt 无 ack 无 prompt graph hash，快照机器裁决 RUNNING；诊断把含 object_info 的
+    失败码按关键词误判成「ComfyUI 缺少工作流需要的节点」。
+    """
+    snapshot = {
+        "evidence_id": "ev-strategy-unavailable",
+        "page_context": {"screen": "run", "job_id": "job-9", "error_code": None},
+        "setup": {"verdict": {"mode": "RUNNING", "code": None, "label": "正在生成影片"}},
+        "runtime": {"status": "ACTIVE", "services_verified": True, "workers": [{"worker_id": "w"}]},
+        "task": {
+            "job_id": "job-9",
+            "status": "FAILED",
+            "failure_code": "USER_ABANDONED_UNRECONCILED",
+            "attempt": {"status": "FAILED", "progress": 0,
+                        "failure_code": "STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"},
+        },
+    }
+    diagnosis = diagnose_snapshot(snapshot, question="为什么失败了", db=None)
+    assert "渲染器" in diagnosis["symptom"], diagnosis["symptom"]
+    assert "不可达" in diagnosis["symptom"] or "未启动" in diagnosis["symptom"], diagnosis["symptom"]
+    assert "缺少工作流需要的节点" not in diagnosis["symptom"], diagnosis["symptom"]

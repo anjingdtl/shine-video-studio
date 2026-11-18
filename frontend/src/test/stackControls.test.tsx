@@ -53,3 +53,35 @@ describe('工作栈监控生命周期控制', () => {
     await waitFor(() => expect(stopStack).toHaveBeenCalled());
   });
 });
+describe('工作栈监控的配置等待项口径', () => {
+  afterEach(() => cleanup());
+
+  it('台账读取失败时不得显示为“没有等待项”', async () => {
+    const { api } = await import('../api');
+    (api as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      stacks: [], workers: [], jobs: [],
+      idle_blockers: null,
+      idle_blockers_unreadable: true,
+      counts: { stacks: 0, working_stacks: 0, workers_online: 1, running_jobs: 0, idle_blockers: 0 },
+      process_error: null,
+    });
+    render(<WorkStackMonitor />);
+    expect(await screen.findByText(/配置等待项暂时读取失败/)).toBeTruthy();
+    expect(screen.queryByText('当前没有后台进程在跑。')).toBeNull();
+  });
+
+  it('有阻塞台账项时逐条显示，不再误报空闲', async () => {
+    const { api } = await import('../api');
+    (api as unknown as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      stacks: [], workers: [], jobs: [],
+      idle_blockers: [
+        { kind: 'gpu_lease', id: 'lease-1', status: 'RECONCILE_REQUIRED', label: 'GPU 租约未释放（h3:job-9 · RECONCILE_REQUIRED）' },
+      ],
+      counts: { stacks: 0, working_stacks: 0, workers_online: 1, running_jobs: 0, idle_blockers: 1 },
+      process_error: null,
+    });
+    render(<WorkStackMonitor />);
+    expect(await screen.findByText(/GPU 租约未释放/)).toBeTruthy();
+    expect(screen.queryByText('当前没有后台进程在跑。')).toBeNull();
+  });
+});
