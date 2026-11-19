@@ -429,4 +429,4 @@ execute_under_grant(
 
 ### 供本地/云端 Agent 开发的关键提示
 
-> 基于当下远端 `main` 完整审计 `support/delegation.py`、`support/actions.py`、`support/models.py`、`copilot/declarations.py`、`llm/gateway.py`、`comfyops/{deployment,installer,setup_preparation}.py`、`api_comfy.py`、`comfy/graph_compiler.py`，按本方案实施。使用独立开发分支，不直接修改主仓，先给出差异与红灯测试。必须证明一次 grant 对动态子动作的约束在服务端执行，保留原 `SupportAction` 预检/指纹/幂等、原 Worker 任务身份、原受控安装器和原 Graph/生产裁决；不得新增第二套检查/下载/安装/生产链，且 AI 运行时禁止源码修改。每阶段提供测试结果与残留阻滞。不得以 LLM 文字或模拟对象冒充真实用户机出片 PASS。
+> 基于当下远端 `main` 完整审计 `support/delegation.py`、`support/actions.py`、`support/models.py`、`copilot/declarations.py`、`llm/gateway.py`、`comfyops/{deployment,installer,setup_preparation}.py`、`api_comfy.py`、`comfy/graph_compiler.py`，按本方案实施。本轮实施在本地开发机的 main 分支直接开发与测试；文档分支仅用于读取方案，不在文档分支开发，也不将整个文档分支合并到 main。开始前确认本地工作区状态、备份未提交修改，先给出差异审计与红灯测试；未经进一步授权不得强制重置历史或直接推送远端 main。必须证明一次 grant 对动态子动作的约束在服务端执行，保留原 `SupportAction` 预检/指纹/幂等、原 Worker 任务身份、原受控安装器和原 Graph/生产裁决；不得新增第二套检查/下载/安装/生产链，且 AI 运行时禁止源码修改。每阶段提供测试结果与残留阻滞。不得以 LLM 文字或模拟对象冒充真实用户机出片 PASS。
