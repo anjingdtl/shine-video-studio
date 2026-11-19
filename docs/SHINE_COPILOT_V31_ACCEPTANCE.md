@@ -202,4 +202,23 @@ shards_with_failure_markers=0
 
 ## 10. 最终提交
 
-见本报告随附的本地提交（`git log -1 --format='%H %s'`）。
+| 项 | 值 |
+|---|---|
+| 功能提交（本地 `main`） | `00a39bf4d0d6dc29595436578118ab1c837db443` |
+| 提交标题 | `feat(copilot): V3.1 任务级一次授权——受控自主执行与源码零写入` |
+| 基线（父提交） | `ae3cd990f64b1b22d24657a79b41417d23831c2c` |
+| 规模 | 36 个文件，+7,632 / −19 |
+| 未推送 | 本次不推送远端 `main`、不建 PR（按授权范围） |
+
+核验命令：
+
+```
+git log --oneline -2
+git show --stat 00a39bf
+git status --short          # 仅剩他人本轮之外的工作区改动，未被本提交触碰
+```
+
+**未纳入本提交的工作区内容（有意保留）**：`.trae/`、`.gitattributes`、`README.md`、
+`scripts/start_dev.ps1`、`scripts/update_dev_shortcut.ps1`、`启动 Shine 工作台.cmd`、
+`scripts/update_checkout.ps1` 属于另一条并行工作线（启动器自动更新检查），
+不在 V3.1 授权范围内，故未暂存、未提交、未修改。
