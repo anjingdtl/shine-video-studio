@@ -12,10 +12,9 @@ from __future__ import annotations
 
 import httpx
 import pytest
-from sqlalchemy import select
 
 from shine.llm.base import LLMNotConfigured, ProviderConfig
-from shine.llm.gateway import LLMGateway, ROLE_INHERITANCE, inherited_profile
+from shine.llm.gateway import ROLE_INHERITANCE, LLMGateway, inherited_profile
 from shine.llm.openai_compatible import OpenAICompatibleProvider
 from shine.llm.secrets import SecretStore
 from shine.llm.tool_calls import ToolSpec

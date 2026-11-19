@@ -297,6 +297,11 @@ def main() -> int:
     parser.add_argument(
         "--data-dir", default=os.environ.get("SHINE_DATA_DIR", str(DEFAULT_DATA_DIR))
     )
+    parser.add_argument(
+        "--supervisor-only", action="store_true",
+        help="finish only the resident supervisor through the same verified stop; "
+             "the stack manifest is left untouched (launcher supervisor replacement)",
+    )
     args = parser.parse_args()
     data_dir = Path(args.data_dir)
     guard = None
@@ -305,6 +310,8 @@ def main() -> int:
         # the data directory, so a stop never tears down a stack the launcher
         # is halfway through recording (or vice versa).
         guard = _acquire_startup_guard(data_dir)
+        if args.supervisor_only:
+            return stop_supervisor(data_dir)
         return _stop_with_manifest(data_dir)
     finally:
         _release_startup_guard(guard)

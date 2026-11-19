@@ -26,9 +26,11 @@ export type GrantPreview = {
   blocked_capabilities: Array<{ capability_id: string; state: string; notice?: string }>;
   limits: GrantLimits;
   risks: string[];
+  selection_required?: string[];
   installation?: {
     selected?: Record<string, unknown> | null;
     choice_required?: boolean;
+    candidates?: Array<Record<string, unknown>>;
     error?: string;
   };
   model?: {
@@ -160,29 +162,41 @@ type Props = {
   sessionId: string;
   projectId?: string | null;
   objective: string;
+  /** A grant already authorized for this session: the card reconnects to it
+   *  (same task, same budget) instead of previewing a second authorization. */
+  initialGrant?: TaskGrant | null;
   onClose?: () => void;
   onFinished?: (grant: TaskGrant | null) => void;
 };
 
-export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFinished }: Props) {
+const ACTIVE_STATUSES = new Set(['AUTHORIZED', 'RUNNING', 'WAITING_EXECUTOR', 'VERIFYING']);
+/** A pause that asked for the user's decision is resumable by an explicit click. */
+const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, 'PAUSED_USER_DECISION']);
+
+export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, onClose, onFinished }: Props) {
   const [preview, setPreview] = useState<GrantPreview | null>(null);
-  const [grant, setGrant] = useState<TaskGrant | null>(null);
+  const [grant, setGrant] = useState<TaskGrant | null>(initialGrant || null);
   const [execution, setExecution] = useState<GrantExecution | null>(null);
   const [previewing, setPreviewing] = useState(false);
   const [authorizing, setAuthorizing] = useState(false);
+  const [continuing, setContinuing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
+  const [selectedInstallation, setSelectedInstallation] = useState<string | null>(null);
 
   const loadPreview = useCallback(async () => {
+    if (initialGrant) return;  // reconnecting, never a second authorization
     setPreviewing(true);
     setError(null);
     try {
       const body = await api<GrantPreview>('/support/task-grants/preview', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           objective,
           project_id: projectId || null,
+          installation_id: selectedInstallation || undefined,
           capability_groups: ['inspect', 'resources', 'nodes', 'workflows', 'runtime', 'test'],
         }),
       });
@@ -192,11 +206,50 @@ export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFini
     } finally {
       setPreviewing(false);
     }
-  }, [sessionId, projectId, objective]);
+  }, [sessionId, projectId, objective, selectedInstallation, initialGrant]);
 
   useEffect(() => {
     void loadPreview();
   }, [loadPreview]);
+
+  // A live grant is polled from the SAME row: closing the panel or restarting
+  // the API never forks the task, and progress made by the Worker is visible.
+  const grantId = grant?.grant_id;
+  const grantStatus = grant?.status;
+  useEffect(() => {
+    if (!grantId || !grantStatus || !ACTIVE_STATUSES.has(grantStatus)) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const detail = await api<TaskGrant>(`/support/task-grants/${grantId}`);
+        setGrant(detail);
+        onFinished?.(detail);
+      } catch {
+        // A transient read failure keeps the last real projection on screen.
+      }
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [grantId, grantStatus, onFinished]);
+
+  const continueRun = useCallback(async () => {
+    if (!grant) return;
+    setContinuing(true);
+    setError(null);
+    try {
+      const body = await api<GrantExecution>(`/support/task-grants/${grant.grant_id}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId, max_steps: 12 }),
+      });
+      setExecution(body);
+      const detail = await api<TaskGrant>(`/support/task-grants/${grant.grant_id}`);
+      setGrant(detail);
+      onFinished?.(detail);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : '无法继续推进');
+    } finally {
+      setContinuing(false);
+    }
+  }, [grant, sessionId, onFinished]);
 
   const authorize = useCallback(async () => {
     if (!preview) return;
@@ -208,6 +261,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFini
       // if the run request itself times out - the person can simply resume.
       const created = await api<{ grant_id: string }>('/support/task-grants/authorize', {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           session_id: sessionId,
           preview_id: preview.preview_id,
@@ -220,6 +274,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFini
       setGrant(early);
       const body = await api<GrantExecution>(`/support/task-grants/${created.grant_id}/run`, {
         method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session_id: sessionId, max_steps: 12 }),
       });
       setExecution(body);
@@ -318,6 +373,28 @@ export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFini
             )}
           </ul>
 
+          {preview.installation?.choice_required && (preview.installation.candidates?.length || 0) > 0 ? (
+            <div className="copilot-grant-choice" role="radiogroup" aria-label="选择本次任务使用的 ComfyUI 安装">
+              <h4>发现多套安装，请先选定一套（只选一次，随后冻结进授权）</h4>
+              {(preview.installation.candidates || []).map((candidate) => {
+                const id = String(candidate.instance_id || '');
+                return (
+                  <label key={id} className="copilot-grant-choice-row">
+                    <input
+                      type="radio"
+                      name="grant-installation"
+                      value={id}
+                      checked={selectedInstallation === id}
+                      onChange={() => setSelectedInstallation(id)}
+                    />
+                    <span>{String(candidate.root || id)}</span>
+                    <em>{candidate.managed ? '工作台受管' : candidate.adopted ? '已收编（外部只读保护）' : '外部'}</em>
+                  </label>
+                );
+              })}
+            </div>
+          ) : null}
+
           {limitRows.length ? (
             <>
               <h4>资源上限</h4>
@@ -392,6 +469,11 @@ export function TaskGrantCard({ sessionId, projectId, objective, onClose, onFini
           ) : null}
 
           <div className="copilot-grant-actions">
+            {grant && RESUMABLE_STATUSES.has(grant.status) ? (
+              <button type="button" className="link" disabled={continuing} onClick={() => void continueRun()}>
+                {continuing ? <Loader2 size={12} className="spin" aria-hidden /> : null} 继续推进
+              </button>
+            ) : null}
             <button type="button" className="link" onClick={() => void refresh()}>
               刷新进度
             </button>

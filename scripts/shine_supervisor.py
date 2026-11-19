@@ -48,6 +48,16 @@ from urllib.parse import urlparse
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 8790
 DEFAULT_IDLE_SHUTDOWN_MINUTES = 5
+
+
+def _source_identity() -> dict:
+    """Which code this supervisor runs — the same fact the launcher records."""
+    try:
+        from shine.source_identity import source_identity
+
+        return source_identity(REPO_ROOT)
+    except Exception:  # noqa: BLE001 - an unreadable identity stays unknown
+        return {"kind": "unknown", "digest": "", "display": "unknown"}
 WATCHDOG_TICK_SECONDS = 20
 RESTART_STALE_AFTER_SECONDS = 900.0
 """A restart that has not reported back for this long is treated as dead.
@@ -698,6 +708,7 @@ class Handler(BaseHTTPRequestHandler):
                              "pid": os.getpid(),
                              "repo_root": str(REPO_ROOT),
                              "data_dir": str(self.data_dir),
+                             "source_identity": getattr(self, "source_identity", None),
                              "stack": "up" if live else "down",
                              "api_port": api_port, "web_port": web_port}, origin)
         elif path == "/restart-status":
@@ -842,6 +853,7 @@ def main() -> int:
     Handler.api_port = args.api_port
     Handler.web_port = args.web_port
     Handler.idle_minutes = args.idle_shutdown_minutes
+    Handler.source_identity = _source_identity()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     # Recorded outside processes.json so a restart never kills the supervisor
     # mid-flight; a full stop finishes it through stop_shine.py's verified stop
@@ -851,7 +863,8 @@ def main() -> int:
     (data_dir / "run" / "supervisor.json").write_text(
         json.dumps({"pid": os.getpid(), "birth": process_identity(os.getpid()),
                     "port": args.port, "data_dir": str(data_dir),
-                    "repo_root": str(REPO_ROOT)}, indent=2),
+                    "repo_root": str(REPO_ROOT),
+                    "source_identity": Handler.source_identity}, indent=2),
         encoding="utf-8",
     )
     threading.Thread(target=_watchdog, args=(data_dir, args.idle_shutdown_minutes),

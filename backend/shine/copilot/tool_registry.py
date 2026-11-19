@@ -11,7 +11,8 @@ operation invites the model to keep trying it.
 """
 from __future__ import annotations
 
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 from shine.copilot import declarations as decl
 from shine.copilot import task_grant as grant_contract
@@ -27,6 +28,7 @@ AUTONOMOUS_CAPABILITIES: tuple[str, ...] = (
     "resource_install_plan",
     "workflow_graph_register",
     "workflow_user_copy",
+    "production_start",
 )
 
 _TYPE_MAP = {

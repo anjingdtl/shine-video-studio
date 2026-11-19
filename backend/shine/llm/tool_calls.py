@@ -16,8 +16,9 @@ builds a command line, or maps a free-form string onto a Python callable.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 from shine.llm.base import LLMFormatError
 

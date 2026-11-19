@@ -126,7 +126,14 @@ def test_health_and_production_gate_requires_explicit_style_freeze(studio):
     client, _factory, _root = studio
     from shine.main import _code_schema_head
 
-    assert client.get("/health").json() == {
+    health = client.get("/health").json()
+    # The running-code identity is part of the contract: the launcher records
+    # the same fact and compares it before reusing a live stack.
+    identity = health.pop("source_identity")
+    assert identity["kind"] in {"git", "package", "unknown"}
+    assert isinstance(identity["digest"], str)
+    assert isinstance(identity["display"], str)
+    assert health == {
         "status": "ok",
         "service": "shine-api",
         "render_provider": "mock",

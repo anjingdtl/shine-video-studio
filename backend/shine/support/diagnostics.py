@@ -282,31 +282,81 @@ def _facts(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     return facts
 
 
-def _repair_action(snapshot: dict[str, Any]) -> dict[str, Any]:
-    capabilities = ((snapshot.get("setup") or {}).get("summary") or {}).get("capabilities") or {}
-    has_missing = False
-    wanted = [
+#: Verdict codes whose root cause is the *runtime contract* of the managed
+#: video environment. The active configuration serves H3; the image runtime
+#: has its own readiness and is only included when its own evidence shows a gap.
+_RUNTIME_CONTRACT_CODES = frozenset(
+    {
+        "ACTIVE_RUNTIME_CONFIGURATION_CHANGED",
+        "SERVICE_VALIDATION_REQUIRED",
+        "GENERATE_RUNTIME_CONFIGURATION_FIRST",
+        "REAL_RUNTIME_NOT_ACTIVATED",
+        "RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK",
+    }
+)
+
+
+def minimal_repair_scope(snapshot: dict[str, Any]) -> tuple[list[str], bool]:
+    """The ONE decision for "which capabilities does this repair actually need".
+
+    Evidence order (all from the same authoritative snapshot the diagnosis
+    reads): missing files from the capability reports / file receipts first;
+    then the Setup verdict code; then each capability's own readiness facts.
+    A runtime-contract failure repairs the video runtime it invalidated (h3),
+    never an uninvolved capability. When nothing is determinable the scope is
+    empty — the caller must recommend read-only verification, not a blind
+    ``["h3", "image"]`` double preparation.
+
+    Returns ``(capabilities, has_missing)``.
+    """
+    setup = snapshot.get("setup") or {}
+    capabilities = (setup.get("summary") or {}).get("capabilities") or {}
+    verdict = setup.get("verdict") or {}
+    code = str(verdict.get("code") or "")
+    missing = sorted(
         key
         for key, row in capabilities.items()
         if isinstance(row, dict) and row.get("missing_count") and not row.get("optional")
-    ]
-    if wanted:
-        has_missing = True
-    else:
-        wanted = [
-            key
-            for key, row in capabilities.items()
-            if isinstance(row, dict)
-            and not row.get("optional")
-            and ("state" in row or "facts" in row)
-            and row.get("state") not in {"READY", "VERIFIED_RENDER"}
-            and not (row.get("facts") or {}).get("PRODUCTION_READY")
-            and not (row.get("facts") or {}).get("RUNTIME_SERVICES_VERIFIED")
-        ]
-    if not wanted:
-        wanted = ["h3", "image"]
-    params: dict[str, Any] = {"capabilities": wanted, "verify_runtime": True}
+    )
+    if missing:
+        return missing, True
+    not_ready = sorted(
+        key
+        for key, row in capabilities.items()
+        if isinstance(row, dict)
+        and not row.get("optional")
+        and ("state" in row or "facts" in row)
+        and row.get("state") not in {"READY", "VERIFIED_RENDER"}
+        and not (row.get("facts") or {}).get("PRODUCTION_READY")
+        and not (row.get("facts") or {}).get("RUNTIME_SERVICES_VERIFIED")
+    )
+    if code in _RUNTIME_CONTRACT_CODES:
+        # The changed contract is the managed VIDEO runtime's. An unprepared
+        # image/review capability is a separate goal, not collateral of this
+        # failure: repairing it here would be the unfounded double preparation.
+        return ["h3"], False
+    return not_ready, False
+
+
+def _repair_action(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    wanted, has_missing = minimal_repair_scope(snapshot)
     project_id = (snapshot.get("page_context") or {}).get("project_id")
+    if not wanted:
+        # No evidence names a capability to prepare. A read-only reconcile is
+        # the honest next step; preparing "everything" would be a guess.
+        spec = ACTION_SPECS["setup_reconcile"]
+        params: dict[str, Any] = {"capability": "h3", "adopt": False}
+        if isinstance(project_id, str) and project_id.strip():
+            params["project_id"] = project_id.strip()
+        return {
+            "kind": spec.kind,
+            "label": spec.label,
+            "reason": "现有证据没有指明要补齐的能力；先只读核验已有文件与运行合同，再按核验结果决定最小修复。",
+            "requires_authorization": True,
+            "mutates": False,
+            "params": params,
+        }
+    params = {"capabilities": wanted, "verify_runtime": True}
     if isinstance(project_id, str) and project_id.strip():
         params["project_id"] = project_id.strip()
     spec = ACTION_SPECS["setup_repair"]
@@ -392,7 +442,8 @@ def _apply_setup_diagnosis_detail(
         base["outcome"] = "WAIT"
         base["next_step"] = str(preparation.get("message") or "整备已交给后台，打开基础配置即可查看进度。")
         return
-    base["recommended_actions"] = [_repair_action(snapshot)]
+    action = _repair_action(snapshot)
+    base["recommended_actions"] = [action] if action else []
 
 
 def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) -> dict[str, Any]:
@@ -541,7 +592,7 @@ def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) 
             }
         )
         if rule["category"] == "CONFIG":
-            action = _repair_action(snapshot, db=db)
+            action = _repair_action(snapshot)
             if action:
                 base["recommended_actions"] = [action]
         return base

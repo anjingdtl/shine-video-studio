@@ -3029,11 +3029,12 @@ def rollback_action(
 # ---------------------------------------------------------------------------
 
 #: Capabilities whose declared cost is a *count* of new business artefacts.
+#: Only declared capabilities appear here: a name without a declaration has
+#: no contract and must never be costed (the old fake names are gone).
 _COUNT_COSTS: dict[str, dict[str, int]] = {
     "workflow_graph_register": {"max_new_workflow_profiles": 1},
-    "node_package_plan": {"max_installed_node_packages": 1},
-    "node_package_execute": {"max_installed_node_packages": 1},
-    "test_inference": {"max_test_inference_jobs": 1},
+    "workflow_user_copy": {"max_new_workflow_profiles": 1},
+    "production_start": {"max_test_inference_jobs": 1},
 }
 
 
@@ -3252,7 +3253,17 @@ def execute_under_grant(
             project_id=row.project_id,
             original_task_id=row.original_task_id,
         )
-        grant_service.settle(db, grant_id, cost=cost)
+        # Settle THIS step's reservation against the executor's real receipt.
+        # A frozen installation plan reports its own download bytes; a delegated
+        # task has no final bytes yet and keeps its reservation until readback.
+        actual_cost = dict(cost)
+        if capability_id == "resource_install_plan":
+            verified_bytes = (row.verification or {}).get("download_bytes")
+            if isinstance(verified_bytes, int) and verified_bytes >= 0:
+                actual_cost["max_download_bytes"] = verified_bytes
+                actual_cost["max_disk_write_bytes"] = verified_bytes
+        grant_service.settle(db, grant_id, reserved=cost, actual=actual_cost,
+                             step_key=tool_call_id)
         receipt = _grant_receipt(db, settings, row, receipt, reused=False)
         receipt["observed_facts"]["executor_status"] = result.get("status")
         return receipt
@@ -3426,7 +3437,6 @@ def read_under_grant(
     grant_id: str,
 ) -> dict[str, Any]:
     """Read one sub-action's original result back, never resubmitting it."""
-    from shine.support import grants as grant_service
 
     row = db.get(SupportAction, action_id)
     if row is None:

@@ -79,6 +79,9 @@ def render_markdown(
     facts = diagnosis.get("facts") or []
     hypotheses = diagnosis.get("hypotheses") or []
     actions = diagnosis.get("recommended_actions") or []
+    from shine.source_identity import source_identity
+
+    identity = source_identity()
 
     lines: list[str] = [
         f"# [{kind}] {_md_escape(title)}",
@@ -90,6 +93,8 @@ def render_markdown(
         "- 报告格式版本：support-report-v1",
         "- 本地知识库：shine-support-kb-2026.11.16",
         f"- 构建提交：{_md_escape(os.environ.get('SHINE_BUILD_COMMIT') or '本机构建（未注入提交号）')}",
+        f"- 运行代码身份：{_md_escape(identity.get('display') or 'unknown')}"
+        f"（{_md_escape(identity.get('kind') or 'unknown')}，digest {str(identity.get('digest') or '')[:12] or '无'}）",
         f"- 页面：{page.get('screen') or 'unknown'}",
         f"- 项目：{page.get('project_id') or '未指定'}",
         f"- 任务：{page.get('job_id') or task.get('job_id') or '未指定'}",

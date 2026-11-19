@@ -940,20 +940,13 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
         if any(word in lowered for word in words)
     ]
     if not wanted:
-        wanted = [
-            key
-            for key, row in capabilities.items()
-            if isinstance(row, dict)
-            and not row.get("optional")
-            and (
-                row.get("missing_count")
-                or (
-                    row.get("state") not in {"READY", "VERIFIED_RENDER"}
-                    and not (row.get("facts") or {}).get("PRODUCTION_READY")
-                    and not (row.get("facts") or {}).get("RUNTIME_SERVICES_VERIFIED")
-                )
-            )
-        ]
+        # The same minimal-scope decision the diagnosis uses: missing files
+        # first, then the verdict code, then each capability's own facts.
+        from shine.support.diagnostics import minimal_repair_scope
+
+        wanted, _has_missing = minimal_repair_scope(
+            {"setup": {"summary": summary, "verdict": verdict}}
+        )
     if not wanted and verdict.get("mode") in {"REAL_READY", "READY", "RUNNING"}:
         return {
             "intent": "SETUP",
@@ -965,7 +958,33 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
             "bounded": True,
         }
     if not wanted:
-        wanted = ["h3", "image"]
+        # No evidence names a capability to prepare: verify read-only first,
+        # never a blind h3+image double preparation.
+        steps.append(
+            {
+                "order": 2,
+                "title": "只读核验已有文件与运行合同",
+                "capability_id": "setup_reconcile",
+                "state": "READY",
+                "state_label": _STEP_LABELS["READY"],
+                "action": {
+                    "kind": "setup_reconcile",
+                    "params": {"capability": "h3", "adopt": False},
+                },
+                "readback": "GET /api/v1/setup/summary",
+                "requires_confirmation": "PREVIEW",
+                "reason": "现有证据没有指明要补齐的能力；先核验，再按结果决定最小修复。",
+            }
+        )
+        return {
+            "intent": "SETUP",
+            "summary": "先只读核验本机环境与运行合同，再按核验结果决定最小修复范围。",
+            "project_id": project_id,
+            "steps": steps,
+            "requires_input": [],
+            "notice": "不会在证据不足时隐式准备全部能力。",
+            "bounded": True,
+        }
     repair_params: dict[str, Any] = {"capabilities": wanted, "verify_runtime": True}
     if project_id:
         repair_params["project_id"] = project_id
@@ -980,7 +999,10 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
                 "kind": "setup_repair",
                 "params": repair_params,
             },
-            "readback": "GET /api/v1/setup/prepare/{task_id}",
+            # The durable preparation task is read through the setup summary's
+            # preparation section (the same authority the diagnosis reads);
+            # there is no GET /setup/prepare/{task_id} route.
+            "readback": "GET /api/v1/setup/summary",
             "requires_confirmation": "EXECUTE_GUARDED",
             "reason": "确认后交给原整备任务。需要释放资源时，后台会等待后继续。",
         }

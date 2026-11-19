@@ -19,8 +19,9 @@ existing ``SupportAction`` envelope is executed inside.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterable
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 from shine.copilot.contracts import digest
 
@@ -70,6 +71,10 @@ CAPABILITY_PERMISSIONS: dict[str, str] = {
     # V3.1 additions
     "resource_install_plan": "download_models",
     "workflow_graph_register": "manage_user_workflow_profiles",
+    # A budget-bounded real shoot through the ONE production entry (director
+    # package + Run engine + GPU lease). The "test" group authorizes it; the
+    # original gates (style frozen, plan confirmed, package ready) still apply.
+    "production_start": "run_test_inference",
 }
 
 #: Capability -> capability group the preview asks the person to confirm.  The

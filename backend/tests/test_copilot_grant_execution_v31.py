@@ -12,7 +12,6 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from shine.copilot import task_grant as grant_contract
 from shine.models import new_id, utcnow
 from shine.support import actions as action_service
 from shine.support import grants as grant_service

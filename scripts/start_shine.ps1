@@ -25,6 +25,7 @@ $PSNativeCommandUseErrorActionPreference = $false
 if ($ApiPort -eq $WebPort -and -not $AutoPorts) { throw 'API and Web require different ports.' }
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 . (Join-Path $PSScriptRoot 'shine_local_config.ps1')
+. (Join-Path $PSScriptRoot 'shine_source_identity.ps1')
 $stackSettings = Get-ShineStackSettings $repoRoot $DataDir
 # The machine's default entry ports belong to the configured daily data
 # directory. Resolve it before any environment override so an isolated or
@@ -42,6 +43,11 @@ if (-not $PSBoundParameters.ContainsKey('Provider')) {
     if ($persistedProvider -eq 'mock' -or $persistedProvider -eq 'comfyui') { $Provider = $persistedProvider }
 }
 $venvPython = $stackSettings.Python
+# Which code this checkout holds right now. Recorded on every process start and
+# compared against a running stack's record: "did Git fast-forward this run"
+# (update_checkout.ps1) and "must the running processes be replaced" are two
+# separate decisions, and only this one may stop a live stack.
+$sourceIdentity = Get-ShineSourceIdentity $repoRoot $venvPython
 $env:SHINE_DATA_DIR = $stackSettings.DataDir
 # One entry, one owner: a non-daily directory must not take over the machine's
 # default ports even when they happen to be free, unless the operator pinned
@@ -132,8 +138,15 @@ $receiptPath = Join-Path $env:SHINE_DATA_DIR 'run/receipts.json'
 function Test-ShineSupervisor([int]$Port) {
     try {
         $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
-        return ($health.role -eq 'supervisor' -and $health.repo_root -eq $repoRoot -and
-            $health.data_dir -eq $env:SHINE_DATA_DIR)
+        if (-not ($health.role -eq 'supervisor' -and $health.repo_root -eq $repoRoot -and
+            $health.data_dir -eq $env:SHINE_DATA_DIR)) { return $false }
+        # A supervisor that answers but runs other code is not this request's
+        # supervisor. Legacy health without the field is accepted here; the
+        # record-level identity check in Ensure-ShineSupervisor decides replacement.
+        if ($health.source_identity -and $health.source_identity.digest) {
+            return (Test-ShineSourceIdentityMatch $health.source_identity $sourceIdentity)
+        }
+        return $true
     } catch { return $false }
 }
 
@@ -220,6 +233,70 @@ $manifestPath = Join-Path $env:SHINE_DATA_DIR 'run/processes.json'
 # The residual reconcile below therefore also recognises its record.
 $supervisorRecordPath = Join-Path $env:SHINE_DATA_DIR 'run/supervisor.json'
 
+function Ensure-ShineSupervisor([int]$StackApiPort, [int]$StackWebPort) {
+    # One supervisor implementation for both the fresh-start and the reuse
+    # path: a matching live supervisor is kept, a dead one is started, and a
+    # live one running OTHER code is finished through the same verified stop
+    # executor (supervisor-only) before a current one starts.
+    $runDir = Join-Path $env:SHINE_DATA_DIR 'run'
+    $logDir = Join-Path $runDir 'logs'
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $saved = $null
+    if (Test-Path -LiteralPath $supervisorRecordPath) {
+        try { $saved = Get-Content -LiteralPath $supervisorRecordPath -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $saved = $null }
+    }
+    $supervisorPort = $SupervisorPort
+    if ($saved -and $saved.port) { $supervisorPort = [int]$saved.port }
+    if ((Test-ShineSupervisor $supervisorPort) -and
+        (Test-ShineSourceIdentityMatch $saved.source_identity $sourceIdentity)) {
+        $script:SupervisorPort = $supervisorPort
+        return
+    }
+    # Not ours-or-current: dead, running other code, or a legacy record without
+    # an identity (same rule as the stack manifest: missing identity is not
+    # proven current). An alive supervisor that names this installation is
+    # owned (health proof); it must be finished through the stop executor
+    # BEFORE a new one starts, never sidestepped onto another port.
+    $aliveButStale = $false
+    try {
+        $health = Invoke-RestMethod "http://127.0.0.1:$supervisorPort/health" -TimeoutSec 2
+        $aliveButStale = ($health.role -eq 'supervisor' -and $health.repo_root -eq $repoRoot -and
+            $health.data_dir -eq $env:SHINE_DATA_DIR)
+    } catch { $aliveButStale = $false }
+    if ($aliveButStale) {
+        Write-Warning 'The resident supervisor runs other code; finishing it through the verified stop executor.'
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $env:SHINE_STARTUP_GUARD_HELD = '1'
+        try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR --supervisor-only } finally {
+            Remove-Item Env:\SHINE_STARTUP_GUARD_HELD -ErrorAction SilentlyContinue
+            $ErrorActionPreference = $previous
+        }
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning 'The old supervisor could not be verified for stopping; it is left running and the page restart entry may stay unavailable.'
+            return
+        }
+    }
+    $supervisorPort = Get-FreeShinePort $supervisorPort @($StackApiPort, $StackWebPort)
+    $arguments = @((Join-Path $PSScriptRoot 'shine_supervisor.py'), '--data-dir', $env:SHINE_DATA_DIR,
+        '--port', "$supervisorPort", '--api-port', "$StackApiPort", '--web-port', "$StackWebPort")
+    $supervisor = New-ShineProcess 'supervisor' $venvPython $arguments $repoRoot
+    $supervisorAlive = $false
+    for ($i = 0; $i -lt 20 -and -not $supervisor.HasExited; $i++) {
+        if (Test-ShineSupervisor $supervisorPort) {
+            $supervisorAlive = $true
+            break
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($supervisorAlive) {
+        $script:SupervisorPort = $supervisorPort
+        Write-Host "Started supervisor on port $supervisorPort (page can restart the stack)"
+    } else {
+        Write-Warning "The workbench started, but the supervisor is unavailable. See $(Join-Path $logDir 'supervisor.err.log')."
+    }
+}
+
 function Save-StackManifest([string]$Path, [object[]]$Entries) {
     # Write the manifest atomically (temp file on the same volume, then a
     # replace), so a reader never observes a half-written record even after
@@ -230,6 +307,7 @@ function Save-StackManifest([string]$Path, [object[]]$Entries) {
         data_dir = $env:SHINE_DATA_DIR
         database_url = $databaseUrl
         render_provider = $Provider
+        source_identity = $sourceIdentity
         api_port = $ApiPort
         web_port = $WebPort
         review_port = if ($startReview) { $ReviewPort } else { $null }
@@ -263,6 +341,45 @@ function Add-ProcessOwners([object]$Entry) {
     $Entry.owners = @($parsedIdentities)
 }
 
+# A child that reads stdin must not inherit the launcher's console handle:
+# when the parent shell exits, that pipe breaks and the child dies of an
+# unhandled EPIPE (vite reads stdin for its shortcuts, so the whole stack
+# vanished after the launcher returned).  An empty file is the empty
+# device: the child reads EOF at once, every time.
+function Get-ShineEmptyStdin {
+    $path = Join-Path $logDir 'stdin.empty'
+    if (-not (Test-Path -LiteralPath $path)) {
+        [System.IO.File]::WriteAllText($path, '')
+    }
+    return $path
+}
+
+function New-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
+    $stdout = Join-Path $logDir "$Name.out.log"
+    $stderr = Join-Path $logDir "$Name.err.log"
+    # A child must never inherit the launcher's stdin.  When the parent shell
+    # exits, that pipe breaks and the child dies of an unhandled EPIPE: vite
+    # reads stdin for its shortcuts, so the whole stack (the API included)
+    # vanished right after the launcher returned.
+    $startArgs = @{
+        PassThru              = $true
+        WindowStyle           = 'Hidden'
+        FilePath              = $FilePath
+        ArgumentList          = ($Arguments | ForEach-Object { '"' + $_ + '"' })
+        WorkingDirectory      = $WorkingDirectory
+        RedirectStandardOutput = $stdout
+        RedirectStandardError = $stderr
+    }
+    if ($PSVersionTable.PSVersion.Major -ge 6) {
+        # PowerShell resolves a device name such as 'NUL' to a normal path
+        # and then refuses it, so the empty device is a real empty file:
+        # the child reads EOF at once and never sees the launcher's
+        # console handle.
+        $startArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
+    }
+    return (Start-Process @startArgs)
+}
+
 $startupGuard = Enter-ShineStartupGuard -DataDir $env:SHINE_DATA_DIR
 $existingWebPort = $null
 $started = @()
@@ -282,9 +399,70 @@ try {
             if ($record.repo_root -ne $repoRoot) {
                 throw "This data directory is serving another checkout: $($record.repo_root). Stop that stack before starting this checkout."
             }
-            # Deliberately no exit here: the guard must be released in the
-            # finally below before this process may terminate.
-            $existingWebPort = [int]$record.web_port
+            # A live stack is only "this request's stack" when every recorded
+            # fact matches: the code identity, the data directory, the render
+            # provider and the requested Worker shape. A manual pull, a local
+            # commit, an uncommitted runtime edit, an old manifest without a
+            # version, a newer package build or a -NoWorker record all fail
+            # this match and are replaced through the one stop executor.
+            $stale = @()
+            if (-not (Test-ShineSourceIdentityMatch $record.source_identity $sourceIdentity)) {
+                $runningDisplay = if ($record.source_identity -and $record.source_identity.display) { [string]$record.source_identity.display } else { 'unrecorded (older launcher)' }
+                $stale += "running code [$runningDisplay] is not this checkout [$($sourceIdentity.display)]"
+            }
+            if ($record.data_dir -and ([string]$record.data_dir -ne $env:SHINE_DATA_DIR)) {
+                $stale += "the record names another data directory: $($record.data_dir)"
+            }
+            if ([string]$record.render_provider -ne [string]$Provider) {
+                $stale += "running render provider [$($record.render_provider)] is not the requested [$Provider]"
+            }
+            $recordedWorker = @($record.processes) | Where-Object { $_.name -eq 'worker' } | Select-Object -First 1
+            if ($NoWorker -and $recordedWorker) {
+                $stale += 'this request asks for -NoWorker but the running stack has a Worker'
+            }
+            if ((-not $NoWorker) -and (-not $recordedWorker)) {
+                $stale += 'the running stack was started with -NoWorker; this request needs the full stack'
+            }
+            if ($stale.Count) {
+                Write-Warning ("The running stack does not match this request: " + ($stale -join '; ') + ". Replacing it through the verified stop executor.")
+                $previous = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                $env:SHINE_STARTUP_GUARD_HELD = '1'
+                try { & $venvPython (Join-Path $PSScriptRoot 'stop_shine.py') --data-dir $env:SHINE_DATA_DIR } finally {
+                    Remove-Item Env:\SHINE_STARTUP_GUARD_HELD -ErrorAction SilentlyContinue
+                    $ErrorActionPreference = $previous
+                }
+                $stopCode = $LASTEXITCODE
+                if ($stopCode -ne 0 -and (Test-RecordedApiAlive $record)) {
+                    # The old stack is still serving and could not be stopped.
+                    # Keep the reason; never deliver its old page as a success.
+                    if (Test-Path -LiteralPath $manifestPath) {
+                        $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                        Move-Item -LiteralPath $manifestPath -Destination $archived -Force
+                        Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
+                    }
+                    throw "Cannot replace the running stack: stop_shine.py exited $stopCode while the previous API is still alive. Its old page is NOT a successful start of this checkout. Resolve the retained record, then start again."
+                }
+                if (Test-Path -LiteralPath $manifestPath) {
+                    # The API is gone but some identities stayed unresolved:
+                    # archive them (never blind-kill) and let the port check decide.
+                    $archived = Join-Path $env:SHINE_DATA_DIR ('run/processes.unresolved-{0}.json' -f (Get-Date -Format 'yyyyMMdd-HHmmss'))
+                    Move-Item -LiteralPath $manifestPath -Destination $archived -Force
+                    Write-Host "Preserved the unverified record at $archived; no unverified process was killed." -ForegroundColor Yellow
+                    Get-ChildItem -LiteralPath (Split-Path -Parent $manifestPath) -Filter 'processes.unresolved-*.json' -File |
+                        Sort-Object Name -Descending | Select-Object -Skip 5 |
+                        ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+                }
+                # Fall through to a fresh start of the current code.
+            } else {
+                # Deliberately no exit here: the guard must be released in the
+                # finally below before this process may terminate.
+                $existingWebPort = [int]$record.web_port
+                Write-Host "Running code: $($record.source_identity.display) (matches this checkout)"
+                # A matching stack still needs its supervisor: a dead one is
+                # started, a stale one is replaced through the stop executor.
+                Ensure-ShineSupervisor ([int]$record.api_port) ([int]$record.web_port)
+            }
         } else {
             # A half-dead stack must not brick the only start button. Stop what this
             # record really owns; if its identity cannot be proven, archive the record
@@ -486,44 +664,8 @@ try {
             }
         }
 
-        # A child that reads stdin must not inherit the launcher's console handle:
-        # when the parent shell exits, that pipe breaks and the child dies of an
-        # unhandled EPIPE (vite reads stdin for its shortcuts, so the whole stack
-        # vanished after the launcher returned).  An empty file is the empty
-        # device: the child reads EOF at once, every time.
-        function Get-ShineEmptyStdin {
-            $path = Join-Path $logDir 'stdin.empty'
-            if (-not (Test-Path -LiteralPath $path)) {
-                [System.IO.File]::WriteAllText($path, '')
-            }
-            return $path
-        }
-
-        function New-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
-            $stdout = Join-Path $logDir "$Name.out.log"
-            $stderr = Join-Path $logDir "$Name.err.log"
-            # A child must never inherit the launcher's stdin.  When the parent
-            # shell exits, that pipe breaks and the child dies of an unhandled
-            # EPIPE: vite reads stdin for its shortcuts, so the whole stack (the
-            # API included) vanished right after the launcher returned.
-            $startArgs = @{
-                PassThru              = $true
-                WindowStyle           = 'Hidden'
-                FilePath              = $FilePath
-                ArgumentList          = ($Arguments | ForEach-Object { '"' + $_ + '"' })
-                WorkingDirectory      = $WorkingDirectory
-                RedirectStandardOutput = $stdout
-                RedirectStandardError = $stderr
-            }
-            if ($PSVersionTable.PSVersion.Major -ge 6) {
-                # PowerShell resolves a device name such as 'NUL' to a normal path
-                # and then refuses it, so the empty device is a real empty file:
-                # the child reads EOF at once and never sees the launcher's
-                # console handle.
-                $startArgs['RedirectStandardInput'] = Get-ShineEmptyStdin
-            }
-            return (Start-Process @startArgs)
-        }
+        # Get-ShineEmptyStdin / New-ShineProcess live at script scope so the
+        # reuse path starts a supervisor with the same implementation.
 
         function Start-ShineProcess([string]$Name, [string]$FilePath, [string[]]$Arguments, [string]$WorkingDirectory) {
             $process = New-ShineProcess $Name $FilePath $Arguments $WorkingDirectory
@@ -653,32 +795,7 @@ try {
         # The resident supervisor lets the page restart a dead backend (the API
         # cannot restart itself). It is recorded in run/supervisor.json, NOT in
         # processes.json, so stop_shine.py never kills it mid-restart.
-        $supervisorRecord = Join-Path $runDir 'supervisor.json'
-        if (Test-Path -LiteralPath $supervisorRecord) {
-            try {
-                $saved = Get-Content -LiteralPath $supervisorRecord -Raw -Encoding UTF8 | ConvertFrom-Json
-                if ($saved.port) { $SupervisorPort = [int]$saved.port }
-            } catch { }
-        }
-        if (-not (Test-ShineSupervisor $SupervisorPort)) {
-            $SupervisorPort = Get-FreeShinePort $SupervisorPort @($ApiPort, $WebPort)
-            $arguments = @((Join-Path $PSScriptRoot 'shine_supervisor.py'), '--data-dir', $env:SHINE_DATA_DIR,
-                '--port', "$SupervisorPort", '--api-port', "$ApiPort", '--web-port', "$WebPort")
-            $supervisor = New-ShineProcess 'supervisor' $venvPython $arguments $repoRoot
-            $supervisorAlive = $false
-            for ($i = 0; $i -lt 20 -and -not $supervisor.HasExited; $i++) {
-                if (Test-ShineSupervisor $SupervisorPort) {
-                    $supervisorAlive = $true
-                    break
-                }
-                Start-Sleep -Milliseconds 250
-            }
-            if ($supervisorAlive) {
-                Write-Host "Started supervisor on port $SupervisorPort (page can restart the stack)"
-            } else {
-                Write-Warning "The workbench started, but the supervisor is unavailable. See $(Join-Path $logDir 'supervisor.err.log')."
-            }
-        }
+        Ensure-ShineSupervisor $ApiPort $WebPort
     }
 } catch {
     # Roll back only still-owned launcher trees created during this invocation.
@@ -702,6 +819,7 @@ if ($existingWebPort) {
 Write-Host ''
 Write-Host "Shine API:      http://127.0.0.1:$ApiPort/health"
 Write-Host "Shine Web:      http://127.0.0.1:$WebPort"
+Write-Host "Code identity:  $($sourceIdentity.display)"
 Write-Host "Worker mode:    $Provider"
 Write-Host "Logs:           $logDir"
 Write-Host "Process record: $manifestPath"

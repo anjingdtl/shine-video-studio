@@ -688,6 +688,10 @@ class SystemStatus(APIModel):
     api_online: bool = True
     data_dir: str
     supervisor_port: int | None
+    #: Which code the serving processes run (git commit+dirty digest or package
+    #: build). The launcher records the same fact; the topbar displays it so a
+    #: stale stack is visible, not silent.
+    source_identity: dict[str, Any] | None = None
     worker_online: bool
     mock_provider_available: bool
     h3_connected: bool

@@ -15,7 +15,7 @@ import pytest
 from shine.copilot import task_grant as grant_contract
 from shine.models import new_id, utcnow
 from shine.support import grants as grant_service
-from shine.support.models import SupportSession, SupportDelegation
+from shine.support.models import SupportDelegation, SupportSession
 
 pytestmark = pytest.mark.integration
 
@@ -274,8 +274,11 @@ def test_budget_reservation_is_monotonic_and_bounded(studio):
                 cost={"max_download_bytes": 600},
             )
         assert exc.value.code == "GRANT_BUDGET_EXCEEDED"
-        # A settlement may only shrink the reservation.
-        settled = grant_service.settle(db, loaded.id, cost={"max_download_bytes": 100})
+        # A settlement may only shrink THIS step's reservation.
+        settled = grant_service.settle(
+            db, loaded.id,
+            reserved={"max_download_bytes": 600}, actual={"max_download_bytes": 100},
+        )
         assert grant_contract.usage_of(settled.grant)["max_download_bytes"] == 100
 
 
@@ -292,7 +295,10 @@ def test_settle_never_widens_a_frozen_boundary(studio):
             db, loaded.id, capability_id="resource_install_plan",
             cost={"max_download_bytes": 300},
         )
-        settled = grant_service.settle(db, loaded.id, cost={"max_download_bytes": 9_000})
+        settled = grant_service.settle(
+            db, loaded.id,
+            reserved={"max_download_bytes": 300}, actual={"max_download_bytes": 9_000},
+        )
         assert grant_contract.usage_of(settled.grant)["max_download_bytes"] == 300
 
 

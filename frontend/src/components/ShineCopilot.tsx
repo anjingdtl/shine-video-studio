@@ -11,7 +11,7 @@ import {
   subscribeCopilotProfile,
   type CopilotProfile,
 } from '../copilotProfile';
-import { TaskGrantCard } from './TaskGrantCard';
+import { TaskGrantCard, type TaskGrant } from './TaskGrantCard';
 
 type Fact = { key: string; value: string; source: string };
 
@@ -303,6 +303,9 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   //: The objective of the one task-level authorization currently on screen.
   //: Non-null means the person asked for the "one click, let it work" flow.
   const [taskObjective, setTaskObjective] = useState<string | null>(null);
+  //: A grant already authorized for this session: reopening the panel
+  //: reconnects to the SAME task instead of previewing a second one.
+  const [restoredGrant, setRestoredGrant] = useState<TaskGrant | null>(null);
   const [delegating, setDelegating] = useState(false);
   const [panelSize, setPanelSize] = useState<{ width: number; height: number }>(() => readPanelSize());
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -451,17 +454,34 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     const stored = window.localStorage.getItem(key);
     if (!stored) {
       applySession(null);
+      setRestoredGrant(null);
       await loadContext(ctx);
       return null;
     }
     try {
       const restored = await api<CopilotSession>(`/support/sessions/${stored}`);
       applySession(restored);
+      // Reconnect to the session's ONE authorization, if any: the same grant,
+      // the same original tasks and the same budget survive a closed panel.
+      try {
+        const grantState = await api<{ grant: TaskGrant | null }>(
+          `/support/sessions/${restored.id}/task-grant`,
+        );
+        if (grantState.grant) {
+          setRestoredGrant(grantState.grant);
+          setTaskObjective(grantState.grant.objective);
+        } else {
+          setRestoredGrant(null);
+        }
+      } catch {
+        setRestoredGrant(null);
+      }
       await loadContext(ctx);
       return restored;
     } catch {
       window.localStorage.removeItem(key);
       applySession(null);
+      setRestoredGrant(null);
       await loadContext(ctx);
       return null;
     }
@@ -486,14 +506,16 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     setNotice('');
     void (async () => {
       const restored = await restore();
-      if (restored) return;
       const question = `帮我诊断这个失败${fault.label ? `：${fault.label}` : fault.errorCode ? `：${fault.errorCode}` : ''}`;
-      await ask(question);
+      // An existing session must not swallow a NEW fault: rebind it to the
+      // current job/attempt/error and diagnose again, instead of returning
+      // silently with the old context on screen.
+      await ask(question, { rebind: Boolean(restored) });
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fault, busy]);
 
-  const ask = async (question: string) => {
+  const ask = async (question: string, opts?: { rebind?: boolean }) => {
     const content = question.trim();
     if (!content || busy) return;
     setBusy(true);
@@ -522,7 +544,16 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         const result = await api<{ session: CopilotSession }>(`/support/sessions/${current.id}/messages`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
+          body: JSON.stringify(opts?.rebind
+            ? {
+              content,
+              page_id: active.pageId,
+              job_id: active.jobId || null,
+              attempt_id: active.attemptId || null,
+              task_id: active.taskId || null,
+              error_code: active.errorCode || null,
+            }
+            : { content }),
         });
         applySession(result.session);
       }
@@ -531,6 +562,35 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
       setError(err instanceof Error ? err.message : '诊断请求没有完成。');
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** The first natural-language objective can enter the one-click grant flow
+   *  directly: a session is created on demand (no diagnosis turn is bought). */
+  const startTaskObjective = async () => {
+    const objective = draft.trim();
+    if (objective.length < 4 || busy) return;
+    try {
+      if (!sessionRef.current) {
+        const created = await api<{ session: CopilotSession }>('/support/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            page_id: active.pageId,
+            project_id: active.projectId || null,
+            job_id: active.jobId || null,
+            attempt_id: active.attemptId || null,
+            task_id: active.taskId || null,
+            error_code: active.errorCode || null,
+            question: '',
+          }),
+        });
+        applySession(created.session);
+        window.localStorage.setItem(sessionKey(active.projectId, fault), created.session.id);
+      }
+      setTaskObjective(objective);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法创建会话。');
     }
   };
 
@@ -1212,6 +1272,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                 sessionId={session.id}
                 projectId={projectId || null}
                 objective={taskObjective}
+                initialGrant={restoredGrant}
                 onClose={() => setTaskObjective(null)}
               />
             ) : null}
@@ -1227,12 +1288,12 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                 ))}
               </div>
             )}
-            {session && draft.trim().length >= 4 && !taskObjective && (
+            {draft.trim().length >= 4 && !taskObjective && (
               <div className="copilot-suggestions">
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={() => setTaskObjective(draft.trim())}
+                  onClick={() => void startTaskObjective()}
                   title="AI 先展示一次授权范围，你点一次授权后它自动完成后续步骤"
                 >
                   一次授权，让 AI 自动完成这件事

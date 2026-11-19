@@ -4272,6 +4272,77 @@ def _text_gateway(settings):
     return _gateway(settings)
 
 
+def _advance_task_grants(session_factory, settings, worker_id) -> str | None:
+    """Drive one authorized copilot task by ONE bounded model turn per tick.
+
+    The grant's transcript, step ledger and pending original task live in the
+    grant row (V3.1).  A closed page or an API restart therefore loses nothing:
+    this tick reconnects to the same grant, the same original tasks and the
+    same budget.  A delegated original task is waited on by readback inside the
+    loop; a step-budget yield is NOT a pause — the next tick continues.
+    """
+    from sqlalchemy import select
+
+    from shine.copilot import task_grant as grant_contract
+    from shine.copilot import tool_loop, tool_registry
+    from shine.support import grants as grant_service
+    from shine.support.models import SupportDelegation
+
+    with session_factory() as db:
+        rows = db.scalars(
+            select(SupportDelegation)
+            .where(
+                SupportDelegation.grant_id.is_not(None),
+                SupportDelegation.status.in_(["RUNNING", "PAUSED"]),
+            )
+            .order_by(SupportDelegation.updated_at.asc())
+        ).all()
+        candidate: tuple[str, dict] | None = None
+        for row in rows:
+            grant = (row.payload or {}).get("grant") or {}
+            status = grant_contract.grant_status(grant, now=utcnow())
+            if status in {"AUTHORIZED", "RUNNING", "WAITING_EXECUTOR"}:
+                candidate = (str(row.grant_id), grant)
+                break
+    if candidate is None:
+        return None
+    grant_id, grant = candidate
+    try:
+        with session_factory() as db:
+            result = tool_loop.advance(
+                db,
+                settings,
+                grant_id=grant_id,
+                objective=str(grant.get("objective") or ""),
+                tools=tool_registry.grant_tool_specs(grant),
+                actor=str(grant.get("actor_id") or "local-user"),
+                session_id=str(grant.get("session_id") or "") or None,
+                gateway=_text_gateway(settings),
+                max_steps=1,
+                owner=f"worker:{worker_id}",
+            )
+    except Exception as exc:  # noqa: BLE001 - a grant step must not kill the tick
+        logger.warning("task_grant_step_failed grant=%s error=%s", grant_id, type(exc).__name__)
+        return None
+    if result.stop_reason in {"STEP_BUDGET_EXHAUSTED", "WALL_CLOCK_EXHAUSTED",
+                              "ORIGINAL_TASK_PENDING", "LOOP_ALREADY_RUNNING"}:
+        # Still the same live task: a yield is not a pause.  WAITING_EXECUTOR
+        # is the loop's own named state for a delegated original task.
+        if result.status == "WAITING_EXECUTOR":
+            try:
+                with session_factory() as db:
+                    grant_service.set_status(db, grant_id, "WAITING_EXECUTOR")
+            except Exception:  # noqa: BLE001
+                pass
+        return f"grant:{grant_id}:waiting"
+    try:
+        with session_factory() as db:
+            grant_service.set_status(db, grant_id, result.status, reason=result.stop_reason)
+    except Exception:  # noqa: BLE001 - a concurrent revoke wins; report the real state
+        pass
+    return f"grant:{grant_id}:{result.status}"
+
+
 def _reconcile_pre_runtime_control_and_leases(session_factory, settings, worker_id: str) -> None:
     """Execute control-plane intents and reconcile dead-process leases before ``resolve_runtime``.
 
@@ -4402,6 +4473,18 @@ def run_configured_once(session_factory, provider, worker_id, *, settings, comfy
     # a step that really advanced, or a failure, owns the rest of this tick.
     if setup_step and not setup_step.endswith(":waiting"):
         return setup_step
+
+    # An authorized copilot task is durable work too: one bounded model turn
+    # per tick reconnects to the same grant after a closed page or a restart.
+    # It runs before the video-runtime gate on purpose — a task repairing a
+    # blocked runtime must be reachable exactly while the runtime is blocked.
+    try:
+        grant_step = _advance_task_grants(session_factory, settings, worker_id)
+    except Exception as exc:  # noqa: BLE001 - a grant step must not kill the tick
+        logger.warning("task_grant_step_failed error=%s", type(exc).__name__)
+        grant_step = None
+    if grant_step and not grant_step.endswith(":waiting"):
+        return grant_step
 
     # Text preparation is durable work that does not use or validate the video
     # runtime.  It is bounded so that a long outline cannot starve the H3 queue.

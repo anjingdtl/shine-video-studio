@@ -2683,5 +2683,10 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-grant-details{margin-top:8px;padding-top:7px;border-top:1px dashed var(--line-2)}
 .copilot-grant-details dl{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0;font-size:var(--fs-caption)}
 .copilot-grant-details dt{color:var(--muted)}
+.copilot-grant-choice{margin:8px 0 0;padding:7px 8px;border:1px solid var(--line-2);border-radius:7px;background:var(--surface-2)}
+.copilot-grant-choice h4{margin:0 0 5px}
+.copilot-grant-choice-row{display:flex;align-items:center;gap:7px;margin:4px 0;cursor:pointer}
+.copilot-grant-choice-row span{flex:1;word-break:break-all}
+.copilot-grant-choice-row em{font-style:normal;color:var(--muted);white-space:nowrap}
 .copilot-grant-details dd{margin:0;word-break:break-all;font-family:var(--mono)}
 .copilot-grant-loading{display:flex;align-items:center;gap:6px;margin:7px 0 0;font-size:var(--fs-caption);color:var(--muted)}

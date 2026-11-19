@@ -16,9 +16,10 @@ Two rules the code below enforces rather than documents:
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
@@ -417,30 +418,51 @@ def reserve(
 
 
 def settle(
-    db, grant_id: str, *, cost: dict[str, int] | None = None
+    db,
+    grant_id: str,
+    *,
+    reserved: dict[str, int] | None = None,
+    actual: dict[str, int] | None = None,
+    step_key: str | None = None,
 ) -> GrantRow:
-    """Replace a reservation with the executor's real usage when it is smaller.
+    """Refund the unused part of THIS step's reservation — nothing else.
 
-    Only reductions are applied: a step that turned out to cost more than the
-    declared estimate keeps the declared reservation rather than quietly
-    widening the frozen boundary.
+    The ledger is cumulative: step 1 spending 80 and step 2 spending 40 must
+    read 120, never 40.  The old form compared one step's actual against the
+    whole cumulative usage and overwrote it, so every cheap step erased the
+    expensive ones.  Here only ``reserved - actual`` (clamped at zero) is
+    subtracted, per key, under the same CAS as every other budget write.
+
+    A step that cost MORE than its estimate keeps the reservation: settlement
+    never widens the frozen boundary.  ``actual=None`` means the executor has
+    not reported yet (a delegated task): the reservation stands until a real
+    receipt arrives.  ``step_key`` (the tool call id) makes a replayed
+    settlement a no-op instead of a second refund.
     """
-    if not cost:
+    if not reserved:
         return load(db, grant_id)
     for _ in range(CAS_ATTEMPTS):
         loaded = load(db, grant_id)
         payload = dict(loaded.row.payload or {})
         grant = dict(loaded.grant)
+        settlements = dict(grant.get("settlements") or {})
+        if step_key and step_key in settlements:
+            return loaded
         usage = grant_contract.usage_of(grant)
         changed = False
-        for key, actual in cost.items():
+        for key, reserved_amount in reserved.items():
             if key not in usage:
                 continue
-            value = max(0, int(actual))
-            if value < usage[key]:
-                usage[key] = value
+            declared = max(0, int(reserved_amount))
+            real = max(0, int((actual or {}).get(key, declared)))
+            refund = max(0, declared - real)
+            if refund and usage[key] >= refund:
+                usage[key] -= refund
                 changed = True
-        if not changed:
+        if step_key:
+            settlements[step_key] = {"reserved": dict(reserved), "actual": dict(actual or {})}
+            grant["settlements"] = dict(list(settlements.items())[-200:])
+        if not changed and not step_key:
             return loaded
         grant["usage"] = usage
         payload["grant"] = grant
@@ -571,3 +593,113 @@ def sub_action_public(grant: dict[str, Any]) -> list[dict[str, Any]]:
         }
         for item in (grant.get("sub_actions") or [])
     ]
+
+
+# ---------------------------------------------------------------------------
+# The autonomous loop's durable driver state (V3.1 closeout).
+#
+# The transcript, the step ledger and the pending original task live in
+# ``payload.grant["loop"]`` — the SAME row as the authorization, never a second
+# task table.  One driver at a time holds a short lease; a closed page, an API
+# restart or a repeated click reconnects to this state instead of starting a
+# second execution.  The lease is a claim on the *driver*, not on the original
+# executor tasks: those keep their own Worker claims and safe-stop rules.
+# ---------------------------------------------------------------------------
+
+LOOP_LEASE_SECONDS = 120
+
+
+def loop_state(grant: dict[str, Any]) -> dict[str, Any]:
+    state = grant.get("loop")
+    return dict(state) if isinstance(state, dict) else {}
+
+
+def claim_loop(
+    db, grant_id: str, *, owner: str, lease_seconds: int = LOOP_LEASE_SECONDS
+) -> bool:
+    """Atomically claim the loop driver.  False = another live owner holds it."""
+    for _ in range(CAS_ATTEMPTS):
+        loaded = load(db, grant_id)
+        grant = dict(loaded.grant)
+        state = loop_state(grant)
+        now = utcnow()
+        holder = str(state.get("owner") or "")
+        if holder and holder != owner:
+            try:
+                deadline = grant_contract.parse_iso(str(state.get("lease_expires_at") or ""))
+            except (ValueError, TypeError):
+                deadline = None
+            if deadline is not None and now < deadline:
+                return False
+        state["owner"] = owner
+        state["lease_expires_at"] = (
+            (now + timedelta(seconds=lease_seconds)).replace(microsecond=0).isoformat()
+        )
+        grant["loop"] = state
+        payload = dict(loaded.row.payload or {})
+        payload["grant"] = grant
+        if _write_payload(db, loaded.row, payload,
+                          expected_version=int(loaded.row.budget_version or 0)):
+            return True
+    raise grant_contract.GrantError(
+        "GRANT_BUSY", "本次授权的执行权正在被另一个请求更新，请稍后重试。"
+    )
+
+
+def save_loop(
+    db, grant_id: str, state: dict[str, Any], *, lease_seconds: int = LOOP_LEASE_SECONDS
+) -> GrantRow:
+    """Persist the driver state and renew its lease (CAS)."""
+    for _ in range(CAS_ATTEMPTS):
+        loaded = load(db, grant_id)
+        grant = dict(loaded.grant)
+        merged = {**loop_state(grant), **state}
+        if merged.get("owner"):
+            merged["lease_expires_at"] = (
+                (utcnow() + timedelta(seconds=lease_seconds)).replace(microsecond=0).isoformat()
+            )
+        grant["loop"] = merged
+        payload = dict(loaded.row.payload or {})
+        payload["grant"] = grant
+        if _write_payload(db, loaded.row, payload,
+                          expected_version=int(loaded.row.budget_version or 0)):
+            return GrantRow(row=loaded.row, grant=grant)
+    raise grant_contract.GrantError(
+        "GRANT_BUSY", "本次授权的执行状态正在被另一个请求更新，请稍后重试。"
+    )
+
+
+def release_loop(db, grant_id: str) -> None:
+    """A finished driver leaves the transcript for audit but holds no lease."""
+    for _ in range(CAS_ATTEMPTS):
+        loaded = load(db, grant_id)
+        grant = dict(loaded.grant)
+        state = loop_state(grant)
+        if not state.get("owner"):
+            return
+        state["owner"] = None
+        state["lease_expires_at"] = None
+        grant["loop"] = state
+        payload = dict(loaded.row.payload or {})
+        payload["grant"] = grant
+        if _write_payload(db, loaded.row, payload,
+                          expected_version=int(loaded.row.budget_version or 0)):
+            return
+    # A lost race here is harmless: the lease expires on its own.
+
+
+def save_objective_verification(db, grant_id: str, verification: dict[str, Any]) -> None:
+    """Persist the goal-level conclusion beside the grant (one fact, one write).
+
+    This is the loop's read of the ORIGINAL authorities at finish time; the UI
+    and the report read it back instead of re-deriving a second conclusion.
+    """
+    for _ in range(CAS_ATTEMPTS):
+        loaded = load(db, grant_id)
+        payload = dict(loaded.row.payload or {})
+        payload["objective_verification"] = verification
+        if _write_payload(db, loaded.row, payload,
+                          expected_version=int(loaded.row.budget_version or 0)):
+            return
+    # A concurrent revoke wins; the conclusion is still readable from the loop
+    # result that produced it.

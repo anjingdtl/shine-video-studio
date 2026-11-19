@@ -676,6 +676,9 @@ function App() {
               </span>
               {system?.data_dir && <span className="service-status-data"
                 title={`当前数据目录：${system.data_dir}`}>{system.data_dir}</span>}
+              {system?.source_identity?.display && <span className="service-status-data"
+                title={`运行代码身份：${system.source_identity.display}（${system.source_identity.kind || 'unknown'}）`}>
+                {system.source_identity.display}</span>}
               {systemChecked && (!apiOnline || reconnecting || !!projectsLoadError) && <button type="button" className="btn-secondary"
                 disabled={reconnecting}
                 title="后端未启动时，请先启动本机工作台"

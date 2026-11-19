@@ -54,6 +54,15 @@ class SessionCreate(BaseModel):
 class MessageCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     content: str = Field(min_length=1, max_length=4000)
+    #: Optional rebind to a NEW fault context. A session created for one
+    #: failure must not swallow the next one: when the page reports a new
+    #: job/attempt/error, the bindings travel with the message and the next
+    #: snapshot reads the new facts. An explicit null clears that binding.
+    page_id: str | None = Field(default=None, max_length=48)
+    job_id: str | None = Field(default=None, max_length=36)
+    attempt_id: str | None = Field(default=None, max_length=36)
+    task_id: str | None = Field(default=None, max_length=80)
+    error_code: str | None = Field(default=None, max_length=80)
 
 
 class ActionPreviewRequest(BaseModel):
@@ -614,6 +623,23 @@ def support_session_message(
     gateway: GatewayDep,
 ):
     session = _require_session(db, session_id)
+    if any(
+        value is not None
+        for value in (body.page_id, body.job_id, body.attempt_id, body.task_id, body.error_code)
+    ):
+        from shine.support.context import normalise_page_id
+
+        if body.page_id is not None:
+            session.page_id = normalise_page_id(body.page_id)
+        if body.job_id is not None:
+            session.job_id = body.job_id or None
+        if body.attempt_id is not None:
+            session.attempt_id = body.attempt_id or None
+        if body.task_id is not None:
+            session.task_id = (body.task_id or None) and body.task_id[:80]
+        if body.error_code is not None:
+            session.error_code = (body.error_code or None) and body.error_code[:80]
+        session.updated_at = utcnow()
     result = agent_service.handle_message(
         db, settings, session, body.content, actor=actor, gateway=gateway
     )
@@ -891,30 +917,46 @@ def _store_grant_draft(db, session, draft: dict) -> None:
 
 
 def _resolve_installation(db, settings, installation_id: str | None) -> dict:
-    """The original installation resolution; never a guess from a port."""
+    """The original installation resolution; never a guess from a port.
+
+    When several installations exist the candidates travel with the preview so
+    the person selects ONE before the grant freezes its target — the choice is
+    made once, at preview time, not silently by the model mid-task.
+    """
     from shine.comfyops.setup_summary import resolve_installation
 
     try:
         resolved = resolve_installation(db, settings, path=None, discovered=[])
     except Exception:  # noqa: BLE001 - an unreadable registry is reported, not fatal
-        return {"selected": None, "choice_required": False, "error": "INSTALLATION_UNREADABLE"}
+        return {"selected": None, "choice_required": False, "candidates": [],
+                "error": "INSTALLATION_UNREADABLE"}
     selected = resolved.get("selected") or {}
-    candidates = list(resolved.get("candidates") or [])
+    candidates = [
+        {
+            key: row.get(key)
+            for key in ("instance_id", "root", "port", "managed", "adopted", "status", "source")
+        }
+        for row in (resolved.get("candidates") or [])[:12]
+    ]
     if installation_id:
         for row in candidates:
             if str(row.get("instance_id") or "") == installation_id:
-                return {"selected": row, "choice_required": False, "pinned": True}
+                return {"selected": row, "choice_required": False, "pinned": True,
+                        "candidates": candidates}
         if str(selected.get("instance_id") or "") == installation_id:
-            return {"selected": selected, "choice_required": False, "pinned": True}
+            return {"selected": selected, "choice_required": False, "pinned": True,
+                    "candidates": candidates}
         return {
             "selected": None,
             "choice_required": False,
+            "candidates": candidates,
             "error": "INSTALLATION_NOT_FOUND",
             "requested": installation_id,
         }
     return {
         "selected": selected or None,
         "choice_required": bool(resolved.get("choice_required")),
+        "candidates": candidates,
     }
 
 
@@ -1026,16 +1068,23 @@ def support_task_grant_preview(
         "project_ids": proposed["scope"]["project_ids"],
         "installation_ids": proposed["scope"]["installation_ids"],
         "allowed_resource_roots": proposed["scope"]["allowed_resource_roots"],
+        "installation_choice_required": bool(
+            installation.get("choice_required") and not installation.get("selected")
+        ),
         "created_at": now.replace(microsecond=0).isoformat(),
     }
     _store_grant_draft(db, session, draft)
 
+    selection_pending = bool(draft["installation_choice_required"])
     return {
         "preview_id": draft_id,
         "schema": grant_contract.SCHEMA,
         "grant_digest": proposed["grant_digest"],
         "purpose": proposed["objective"],
-        "can_authorize": bool(not blocked and not model_info.get("error")),
+        "can_authorize": bool(not blocked and not model_info.get("error") and not selection_pending),
+        "selection_required": (
+            ["INSTALLATION_SELECTION_REQUIRED"] if selection_pending else []
+        ),
         "summary": "将在本次授权范围内自动检查资源、冻结/执行安装计划、注册并验证用户级工作流。",
         "capability_groups": groups,
         "capabilities": capabilities,
@@ -1077,6 +1126,12 @@ def support_task_grant_authorize(
         raise _http("GRANT_PREVIEW_REQUIRED", "请先生成授权预览，再确认本次授权。", status=409)
     if draft.get("preview_id") != body.preview_id:
         raise _http("GRANT_PREVIEW_CHANGED", "授权预览已更新，请重新确认。", status=409)
+    if draft.get("installation_choice_required") and not draft.get("installation_ids"):
+        raise _http(
+            "INSTALLATION_SELECTION_REQUIRED",
+            "检索发现多套 ComfyUI 安装；请先在预览里选定一套，再授权本次任务。",
+            status=409,
+        )
     try:
         preview_deadline = grant_contract.parse_iso(draft["preview_expires_at"])
     except (KeyError, ValueError):
@@ -1155,6 +1210,7 @@ def support_task_grant_get(grant_id: str, db: DBSession):
         **grant_contract.grant_public(loaded.grant, now=utcnow()),
         "sub_actions": grant_service.sub_action_public(loaded.grant),
         "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
+        "objective_verification": (loaded.row.payload or {}).get("objective_verification"),
         "not_allowed": [
             "修改源码",
             "执行任意命令",
@@ -1211,7 +1267,7 @@ def support_task_grant_run(
 
     session = _require_session(db, body.session_id)
     try:
-        loaded = grant_service.load(db, grant_id)
+        grant_service.load(db, grant_id)
     except grant_contract.GrantError as exc:
         raise _http(exc.code, exc.message, status=404) from exc
     return _run_grant(
@@ -1233,21 +1289,45 @@ def support_session_task_grant(session_id: str, db: DBSession):
             **grant_contract.grant_public(loaded.grant, now=utcnow()),
             "sub_actions": grant_service.sub_action_public(loaded.grant),
             "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
+            "objective_verification": (loaded.row.payload or {}).get("objective_verification"),
         },
         "preview": None,
     }
 
 
 def _run_grant(db, settings, gateway, *, session, grant_id: str, max_steps: int) -> dict:
-    """Run the bounded loop and translate its outcome into grant state."""
+    """Advance the durable loop and translate its outcome into grant state.
+
+    The driver lease makes a repeated click reconnect to the SAME execution:
+    while the Worker (or another request) holds it, this call reports the
+    current state instead of starting a second one.  A step-budget yield or a
+    delegated original task is NOT a pause — the persistent chain continues.
+    """
+    import os
+
     from shine.copilot import task_grant as grant_contract
     from shine.copilot import tool_loop, tool_registry
     from shine.support import grants as grant_service
 
     loaded = grant_service.load(db, grant_id)
+    live = grant_contract.grant_status(loaded.grant, now=utcnow())
+    if live == "PAUSED_USER_DECISION":
+        # An explicit click on "继续推进" IS the user's decision the pause asked
+        # for. Only this pause is resumable by a click; scope/contract/unknown/
+        # budget pauses need their own reconciliation and stay refused.
+        grant_service.set_status(db, grant_id, "RUNNING", reason="用户点击继续推进")
+        from shine.services import add_audit
+
+        add_audit(
+            db, session.actor, "SUPPORT_TASK_GRANT_RESUMED", "support_delegation",
+            loaded.row.id, {"grant_id": grant_id, "from": "PAUSED_USER_DECISION"},
+            project_id=session.project_id,
+        )
+        db.commit()
+        loaded = grant_service.load(db, grant_id)
     tools = tool_registry.grant_tool_specs(loaded.grant)
     try:
-        outcome = tool_loop.run(
+        outcome = tool_loop.advance(
             db,
             settings,
             grant_id=grant_id,
@@ -1256,19 +1336,31 @@ def _run_grant(db, settings, gateway, *, session, grant_id: str, max_steps: int)
             actor=session.actor,
             session_id=session.id,
             gateway=gateway,
-            limits=tool_loop.LoopLimits(max_steps=max_steps),
+            max_steps=max_steps,
+            owner=f"api:{os.getpid()}",
         )
     except grant_contract.GrantError as exc:
         return {"status": "PAUSED_USER_DECISION", "stop_reason": exc.code,
                 "final": exc.message, "steps": []}
 
-    try:
-        grant_service.set_status(
-            db, grant_id, outcome.status, reason=outcome.stop_reason
-        )
-    except grant_contract.GrantError:
-        # A concurrent revoke/expiry wins over this write; report the real state.
+    if outcome.stop_reason in {"STEP_BUDGET_EXHAUSTED", "WALL_CLOCK_EXHAUSTED",
+                               "LOOP_ALREADY_RUNNING"}:
+        # The task is still live and the persistent driver continues it; a
+        # bounded burst ending is not a user-facing pause.
         pass
+    elif outcome.status == "WAITING_EXECUTOR":
+        try:
+            grant_service.set_status(db, grant_id, "WAITING_EXECUTOR")
+        except grant_contract.GrantError:
+            pass
+    else:
+        try:
+            grant_service.set_status(
+                db, grant_id, outcome.status, reason=outcome.stop_reason
+            )
+        except grant_contract.GrantError:
+            # A concurrent revoke/expiry wins over this write; report the real state.
+            pass
     from shine.services import add_audit
 
     add_audit(

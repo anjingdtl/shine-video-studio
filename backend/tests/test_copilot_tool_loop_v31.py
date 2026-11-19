@@ -16,7 +16,6 @@ from shine.copilot import tool_loop, tool_registry
 from shine.llm.tool_calls import (
     FALLBACK_SCHEMA,
     ToolCall,
-    ToolSpec,
     ToolTurn,
     parse_anthropic_turn,
     parse_fallback_reply,

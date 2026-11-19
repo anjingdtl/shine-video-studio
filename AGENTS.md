@@ -2152,3 +2152,44 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 12. **测试**：`backend/tests/test_copilot_task_grant_v31.py`（授权合同）、`test_copilot_grant_execution_v31.py`（执行链）、
     `test_copilot_tool_loop_v31.py`（循环与有界）、`test_copilot_llm_tools_v31.py`（继承与工具协议）
     与 `frontend/src/test/taskGrantCard.test.tsx` 是本轮回归基线，不得删除或弱化断言。
+
+## 2026-11-19 收尾建设：用户入口正确工作栈 + 一次授权整备（本轮新增）
+
+- **运行身份是一份事实**：`backend/shine/source_identity.py`（纯 stdlib）是唯一实现。
+  Git 检出 = HEAD + 运行根（backend/frontend/scripts）的 tracked diff 与 untracked 内容摘要；
+  分发包 = BUILD_INFO.json；皆无 = 显式 unknown。启动器经 `scripts/shine_source_identity.py`
+  计算并写入 `processes.json.source_identity`；API `/health`、`/api/v1/system/status`、
+  supervisor health/记录、顶栏与 BLOCKER 报告都读它。**「本次 Git 是否快进」
+  （update_checkout.ps1，ff-only）与「运行栈是否需换代」（start_shine.ps1，启动锁内）是两个判定**；
+  后者比较身份 digest + data_dir + render_provider + Worker 形态（-NoWorker 双向），
+  不符则经唯一停止执行者换代；停止失败且旧 API 仍活 → 具名失败、归档、绝不交付旧页面。
+  旧清单缺身份 ≠ 当前；supervisor 同规则（legacy 记录经 health 证明归属后 verified stop 重建）。
+- **最小修复范围单一裁决**：`support/diagnostics.minimal_repair_scope`——缺件→精确缺件能力；
+  运行合同码（ACTIVE_RUNTIME_CONFIGURATION_CHANGED 等）→ 只修被失效的视频运行时 h3；
+  无证据→只读 setup_reconcile。planner 复用同一函数；**禁止无依据 ["h3","image"] 双整备**。
+  整备回读地址是 `GET /api/v1/setup/summary`（preparation 段），不存在 GET /setup/prepare/{task_id}。
+- **授权循环是持久驱动**：转录/步骤/无进展/started_at/pending 落 grant 行 `payload.grant.loop`；
+  `grants.claim_loop/save_loop/release_loop` 短租约 CAS；Worker tick 每拍一个有界模型回合，
+  API `/run` 同租约（重复点击接回 LOOP_ALREADY_RUNNING）。委托原任务 → WAITING_EXECUTOR 读回驱动；
+  **终态读回必须消费 pending**（否则 NEEDS_REVIEW 读回死锁）；回执含 targets/next_step 留痕。
+  模型叙述式 finish（正文代替工具调用）在有成功读取时给有界纠正续行；scope 真实 ID 进入状态摘要。
+  PAUSED_USER_DECISION 仅由用户显式「继续推进」恢复（审计 SUPPORT_TASK_GRANT_RESUMED）；
+  Worker 不自动恢复任何暂停；预算/范围/合同/未知暂停点击不可恢复。
+- **settle 是累计账本**：`grants.settle(reserved=, actual=, step_key=)` 只退还本步预留未用部分，
+  绝不以单步实际覆盖累计；step_key 幂等防重放双退；actual>reserved 不扩边界；委托未报账保留预留。
+- **成功按目标核验**：`copilot/objective_verify.py` 分项读原权威（plan_frozen/files_verified/
+  nodes_loadable/graph_registered/production_selected=jobs.workflow_profile_id 真实选用/
+  sample_completed=非 mock PASSED job+artifact 链/setup_verdict）；完成 = 有原回执 ∧ 必需里程碑全 VERIFIED，
+  否则 OBJECTIVE_NOT_VERIFIED 具名暂停；结论落 `payload.objective_verification`。
+- **只读调查工具**（copilot/read_tools.py）不建 SupportAction、计入工具预算、越界具名拒绝；
+  read_node_inventory 读真实 live object_info，渲染器不在不为读取而启动。
+  production_start 经 test 组接入授权菜单（唯一生产入口，原门禁不变）。
+- **前端 JSON POST 必须带 Content-Type: application/json**（api() 不自动加；真实服务器会把
+  无类型 body 当 form 解析 → 422 model_type；stub 测试发现不了，回归断言已钉住）。
+- 本轮改了 `worker.py`（client_review_identity 钉住），旧 VLM revision 按设计失效；
+  真实正负校准仍未完成，不得声称已校准。真实小样与自定义图装配在开发机模型会话中未走到
+  （PARTIAL）；复用判据（零下载/零安装/零额外 Profile）已台账直查证明。
+  证据：`docs/ACCEPTANCE_20261119_USER_ENTRY_AND_GRANT_CLOSEOUT.md`；回归
+  `test_launcher_source_identity.py`（16）、`test_copilot_first_diagnosis_v31.py`（8）、
+  `test_copilot_grant_durable_v31.py`（12）、`test_copilot_objective_budget_v31.py`（9）、
+  前端 `copilotFirstGoal.test.tsx`（2）、`taskGrantDurable.test.tsx`（2）。

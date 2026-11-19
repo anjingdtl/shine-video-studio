@@ -572,8 +572,9 @@ def create_app(
         return await call_next(request)
 
     @app.get("/health")
-    def health(db: DBSession) -> dict[str, str | bool | None]:
+    def health(db: DBSession) -> dict[str, Any]:
         from shine.comfyops.runtime_configuration import runtime_report
+        from shine.source_identity import source_identity
         runtime = runtime_report(db, settings)
         return {
             "status": "ok",
@@ -583,8 +584,20 @@ def create_app(
             # /api/v1/system/status so health stays answerable without I/O.
             "h3_connected": False,
             "connection_probe": "not_run_use_system_status",
+            # Which code this process actually runs (cached per process): the
+            # launcher records the same fact at start and compares it before
+            # reusing a live stack.
+            "source_identity": source_identity(),
             **_schema_identity(db),
         }
+
+    def _source_identity() -> dict[str, Any] | None:
+        try:
+            from shine.source_identity import source_identity
+
+            return source_identity()
+        except Exception:  # noqa: BLE001 - an unreadable identity stays unknown
+            return None
 
     def _schema_identity(db) -> dict[str, str | bool | None]:
         """Which schema revision this database is at versus what this code expects.
@@ -664,6 +677,7 @@ def create_app(
         return SystemStatus(
             data_dir=str(settings.data_dir),
             supervisor_port=supervisor_port,
+            source_identity=_source_identity(),
             worker_online=worker_online,
             mock_provider_available=True,
             h3_connected=h3_connected,

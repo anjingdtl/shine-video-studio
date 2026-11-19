@@ -620,6 +620,7 @@ export type ProductionModeStatus = {
 
 export type SystemStatus = {
   api_online: boolean; data_dir: string; supervisor_port: number | null;
+  source_identity?: { kind?: string; display?: string; digest?: string; dirty?: boolean | null } | null;
   worker_online: boolean; mock_provider_available: boolean;
   h3_connected: boolean; render_mode: string; pending_jobs: number; running_jobs: number;
   failed_jobs: number; blocked_jobs: number; workers: WorkerStatus[]; last_error: string | null;

@@ -26,18 +26,14 @@ if ($Update) {
     # update_checkout.ps1 is the only authority on "this checkout is current".
     # It never touches uncommitted work, and every failure path still returns a
     # code that lets the local code start.
+    #
+    # Whether the *running* stack must be replaced is a separate decision that
+    # start_shine.ps1 makes from the recorded source identity — it also covers
+    # a manual pull, a local commit or an uncommitted runtime edit that happened
+    # before this double-click, which a fast-forward exit code alone cannot see.
     $updateScript = Join-Path $PSScriptRoot 'update_checkout.ps1'
     if (Test-Path -LiteralPath $updateScript) {
         & $runner -NoProfile -ExecutionPolicy Bypass -File $updateScript
-        $updateCode = $LASTEXITCODE
-        # 10 means HEAD really moved this run, so whatever is still running is
-        # the old code. start_shine would only reopen the browser for it.
-        if ($updateCode -eq 10) {
-            $stopArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
-                (Join-Path $PSScriptRoot 'stop_shine.ps1'))
-            if ($DataDir) { $stopArgs += @('-DataDir', $DataDir) }
-            & $runner @stopArgs
-        }
     }
 }
 
