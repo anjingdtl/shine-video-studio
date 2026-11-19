@@ -20,15 +20,16 @@ if (-not (Test-Path -LiteralPath $startScript)) { throw "Missing launcher: $star
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut($ShortcutPath)
 $link.TargetPath = $PwshPath
-$link.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`""
+$link.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$startScript`" -Update"
 $link.WorkingDirectory = $repoRoot
-$link.Description = 'Shine 视频工作台 · 本机开发版一键启动'
+$link.Description = 'Shine 视频工作台 · 本机开发版一键启动（含快进更新）'
 $link.Save()
 
 # Read it back: a shortcut that silently keeps an old target is worse than none.
 $check = $shell.CreateShortcut($ShortcutPath)
 if ($check.TargetPath -ne $PwshPath) { throw "Shortcut target was not updated: $($check.TargetPath)" }
 if ($check.Arguments -notlike '*start_dev.ps1*') { throw "Shortcut arguments were not updated: $($check.Arguments)" }
+if ($check.Arguments -notlike '*-Update*') { throw "Shortcut lost the update step: $($check.Arguments)" }
 if ($check.WorkingDirectory -ne $repoRoot) { throw "Shortcut working directory was not updated: $($check.WorkingDirectory)" }
 
 Write-Host "Shortcut:  $ShortcutPath"

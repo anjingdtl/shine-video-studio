@@ -2,7 +2,11 @@
     [ValidateRange(1, 65535)][int]$ApiPort = 8000,
     [ValidateRange(1, 65535)][int]$WebPort = 5173,
     [ValidateRange(0, 600)][int]$CloseAfterSeconds = 12,
-    [switch]$KeepOpen
+    [switch]$KeepOpen,
+    # The desktop double-click passes -Update: fast-forward this checkout
+    # before starting, and stop the running stack first when the code moved.
+    [switch]$Update,
+    [string]$DataDir = ''
 )
 
 # This is the desktop entry. The same launcher as START_APP owns dependency
@@ -17,7 +21,30 @@ try {
 $runner = (Get-Command pwsh -ErrorAction SilentlyContinue).Source
 if (-not $runner) { $runner = (Get-Process -Id $PID).Path }
 $entry = Join-Path $PSScriptRoot 'start_shine.ps1'
-& $runner -NoProfile -ExecutionPolicy Bypass -File $entry -ApiPort $ApiPort -WebPort $WebPort -AutoPorts -OpenBrowser
+
+if ($Update) {
+    # update_checkout.ps1 is the only authority on "this checkout is current".
+    # It never touches uncommitted work, and every failure path still returns a
+    # code that lets the local code start.
+    $updateScript = Join-Path $PSScriptRoot 'update_checkout.ps1'
+    if (Test-Path -LiteralPath $updateScript) {
+        & $runner -NoProfile -ExecutionPolicy Bypass -File $updateScript
+        $updateCode = $LASTEXITCODE
+        # 10 means HEAD really moved this run, so whatever is still running is
+        # the old code. start_shine would only reopen the browser for it.
+        if ($updateCode -eq 10) {
+            $stopArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+                (Join-Path $PSScriptRoot 'stop_shine.ps1'))
+            if ($DataDir) { $stopArgs += @('-DataDir', $DataDir) }
+            & $runner @stopArgs
+        }
+    }
+}
+
+$startArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $entry,
+    '-ApiPort', $ApiPort, '-WebPort', $WebPort, '-AutoPorts', '-OpenBrowser')
+if ($DataDir) { $startArgs += @('-DataDir', $DataDir) }
+& $runner @startArgs
 $code = $LASTEXITCODE
 if ($code -eq 0) {
     if (-not $KeepOpen -and $CloseAfterSeconds) { Start-Sleep -Seconds $CloseAfterSeconds }

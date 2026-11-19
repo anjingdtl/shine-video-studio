@@ -474,9 +474,10 @@ CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
 
 | 入口 | 作用 | 何时更新 |
 | --- | --- | --- |
-| `一键启动 Shine 视频工作台.lnk` | 日常双击 | 仓库路径、PowerShell 7 路径、脚本名/参数、图标变化时 |
-| `启动 Shine 工作台.cmd` | 快捷方式失效时的便携入口 | 脚本名/参数变化时 |
-| `scripts/start_dev.ps1` | 调用 start_shine，处理桌面启动窗口 | 入口参数变化时 |
+| `一键启动 Shine 视频工作台.lnk` | 日常双击，参数含 `-Update` | 仓库路径、PowerShell 7 路径、脚本名/参数、图标变化时 |
+| `启动 Shine 工作台.cmd` | 快捷方式失效时的便携入口，参数含 `-Update` | 脚本名/参数变化时 |
+| `scripts/start_dev.ps1` | 按 `-Update` 先快进代码、需要时停旧栈，再调用 start_shine | 入口参数变化时 |
+| `scripts/update_checkout.ps1` | 代码更新的唯一裁决与执行者：只做 ff，脏/分叉/离线一律拒绝但不阻断启动 | 更新策略变化时 |
 | `scripts/start_shine.ps1` | 选择端口、收尾旧栈、迁移数据库、启动 API/Worker/Web、写进程记录 | 服务启动逻辑变化时 |
 
 **更新快捷方式**：运行 `scripts\update_dev_shortcut.ps1`（重建 lnk 的
@@ -495,9 +496,15 @@ Target/Arguments/WorkingDirectory，保留原图标）。不要手写一个指�
    一个已死的 5173。
 4. **停止**：`stop_shine.py --data-dir <数据目录>` 退出码 0，`processes.json` 消失，
    端口不再监听；无法核对身份的进程只归档、不盲杀，归档最多保留 5 份。
+5. **代码更新（改更新链路时必验）**：在临时克隆里回退一个提交后双击，必须先快进、
+   再停旧栈、再启动，启动后 HEAD 为新提交；已跟踪文件有改动时双击，必须保留改动并照常
+   启动本地代码。离线/分叉不得阻断启动。
 
 **启动器硬规则**：
 
+- 更新只允许 `merge --ff-only`：绝不 merge 分叉、绝不 reset/stash。已跟踪文件有改动、
+  分叉、离线（15 秒 fetch 预算）时跳过更新，但必须继续启动本地代码；只有真的快进了
+  （退出码 10）才允许先停旧栈，避免“没有更新却把正在跑的工作台停掉”。
 - PowerShell 变量名大小写不敏感：不要写 `$apiPort` 和 `$ApiPort` 两个“不同”变量；
   参数默认值必须先存到 `$defaultApiPort` 再解析。
 - 判断“端口空闲”必须先查 `Get-NetTCPConnection -State Listen`，再尝试

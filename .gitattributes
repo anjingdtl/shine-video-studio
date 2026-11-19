@@ -22,3 +22,9 @@
 *.pth binary
 *.onnx binary
 *.gguf binary
+
+# Batch files must reach a fresh clone with CRLF. cmd.exe parses LF-only
+# `if (...)` blocks and `goto` labels unreliably, and the repository root
+# entry is the first thing a new user double-clicks.
+*.cmd text eol=crlf
+*.bat text eol=crlf
