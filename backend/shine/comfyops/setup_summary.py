@@ -495,6 +495,30 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
     return str(Path(root) / "models") if root else None
 
 
+_RELAYVSR_INSTALLATION_UNSET = object()
+
+
+def relayvsr_machine_readiness(db, settings=None, *, installation=_RELAYVSR_INSTALLATION_UNSET) -> dict:
+    """The one RelayVSR readiness verdict every surface reads.
+
+    The capability card, the strategy option matrix and the production gates
+    all hang off this single reader: a machine whose weights are verified and
+    placed must not be told "not ready" by one surface and "ready" by another.
+    ``settings`` only sharpens the installation ordering (active runtime first);
+    the resolution itself is the same single function with or without it.
+    An explicit ``installation=None`` means "no installation known" and stays
+    unproven; only an omitted argument resolves the machine's installation.
+    """
+    from shine.comfyops import relayvsr
+
+    if installation is _RELAYVSR_INSTALLATION_UNSET:
+        installation = resolve_installation(db, settings)["selected"]
+    models_root = _effective_models_root(settings, "relayvsr", installation)
+    return relayvsr.relayvsr_readiness(
+        model_root=Path(models_root) / "diffusion_models" if models_root else None,
+        vae_root=Path(models_root) / "vae" if models_root else None)
+
+
 def capability_report(db, settings, capability: str, *, installation: dict | None,
                       project_id: str | None, variant_id: str | None = None,
                       runtime_verified: bool = False, preparing: bool = False) -> dict[str, Any]:
@@ -664,12 +688,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                                              and facts["WORKFLOW_VALIDATED"])
             advisories.extend(report.get("blockers") or [])
         elif capability == "relayvsr":
-            from shine.comfyops import relayvsr
-
-            models_root = _effective_models_root(settings, capability, installation)
-            report = relayvsr.relayvsr_readiness(
-                model_root=Path(models_root) / "diffusion_models" if models_root else None,
-                vae_root=Path(models_root) / "vae" if models_root else None)
+            report = relayvsr_machine_readiness(db, settings, installation=installation)
             available = bool(report.get("available", False))
             facts["RELAYVSR_AVAILABLE"] = available
             facts["INSTANCE_BOUND"] = available

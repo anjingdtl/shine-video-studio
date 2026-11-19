@@ -202,4 +202,36 @@ def approve_subtitle_revision(project_id: str, revision: int, db: DBSession) -> 
     return _subtitle_data(row)
 
 
+class SubtitleStyleBody(BaseModel):
+    """The single presentation fact for burned subtitles."""
+
+    font_size: int = Field(ge=12, le=96)
+
+
+@router.get("/projects/{project_id}/subtitle-style")
+def get_subtitle_style(project_id: str, db: DBSession) -> dict[str, Any]:
+    require_project(db, project_id)
+    from shine.media.subtitles import subtitle_font_size
+
+    return {"font_size": subtitle_font_size(db, project_id)}
+
+
+@router.put("/projects/{project_id}/subtitle-style")
+def put_subtitle_style(project_id: str, body: SubtitleStyleBody, db: DBSession) -> dict[str, Any]:
+    """Store the one font-size fact; the burn reads it on the next apply."""
+    require_project(db, project_id)
+    from shine.models import AppSetting
+
+    key = f"subtitle-style:{project_id}"
+    row = db.get(AppSetting, key)
+    if row is None:
+        row = AppSetting(key=key, value={})
+        db.add(row)
+    row.value = {**(row.value or {}), "font_size": body.font_size}
+    add_audit(db, "local-user", "SUBTITLE_STYLE_UPDATED", "project", project_id,
+              {"font_size": body.font_size}, project_id=project_id)
+    db.commit()
+    return {"font_size": body.font_size}
+
+
 __all__ = ["router"]

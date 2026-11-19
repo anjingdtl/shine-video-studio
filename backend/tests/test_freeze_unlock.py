@@ -57,6 +57,36 @@ def test_current_freeze_can_be_applied_to_shots_without_another_version(api):
     assert rows[0]["spec"]["style_version_id"] == second["id"]
 
 
+def test_book_style_freeze_applies_to_old_shots_including_identical_reconfirm(api):
+    """分镜书确认与冻结控件共用同一执行者：冻结后镜头不得停在旧风格。"""
+    from shine.director import streamline
+    from shine.models import Project, Shot
+
+    client, factory, _ = api
+    project_id = create_project(client, "分镜书冻结收敛")
+    first = freeze_style(client, project_id)
+    shot = create_shot(client, project_id, first["id"])
+    style = {"profile_id": "wong-kar-wai", "film_type": "animation"}
+    with factory.begin() as db:
+        project = db.get(Project, project_id)
+        result = streamline._apply_and_freeze_style(db, project, style, actor="local-user")
+        assert shot["id"] in result["revised_shot_ids"]
+        assert db.get(Shot, shot["id"]).spec["style_version_id"] == result["style_version_id"]
+        frozen_id = result["style_version_id"]
+
+    # 旧镜头重新出现（落在旧冻结下）：同风格再确认走 identical no-op，仍修复镜头。
+    with factory.begin() as db:
+        row = db.get(Shot, shot["id"])
+        row.spec = {**row.spec, "style_version_id": first["id"]}
+    with factory.begin() as db:
+        project = db.get(Project, project_id)
+        again = streamline._apply_and_freeze_style(db, project, style, actor="local-user")
+        assert again["style_version_id"] == frozen_id
+        assert again["impact"].get("noop") is True
+        assert shot["id"] in again["revised_shot_ids"]
+        assert db.get(Shot, shot["id"]).spec["style_version_id"] == frozen_id
+
+
 def test_an_approved_asset_can_be_unlocked_and_reconfirmed(api):
     client, factory, _ = api
     project_id = create_project(client, "素材解锁")

@@ -1,14 +1,21 @@
 import { useState } from 'react';
 import { Scissors } from 'lucide-react';
-import { ApiError, setEpisodePostContract, type RunEpisode } from '../api';
+import {
+  ApiError, approveSubtitleRevision, listSubtitleTracks, setEpisodePostContract,
+  type RunEpisode, type SubtitleTrack,
+} from '../api';
+import { label, subtitleStatusLabels } from '../constants';
 
 /**
  * 一集的后期修订：入出点与字幕版本。
  *
  * 只改变已经拍好的片段怎样装配——服务端据此生成新的交付版本，旧版保留，
  * 不重新渲染 H3。留空的入出点表示整条使用；音量混音尚未实现，这里不提供。
+ * 字幕版本在这里选择；草稿版在提交时经你的明确动作先批准再烧录，
+ * 批准与装配都走既有唯一执行者。
  */
-export function EpisodePostEditor({ runId, episode, onDone }: {
+export function EpisodePostEditor({ projectId, runId, episode, onDone }: {
+  projectId: string;
   runId: string;
   episode: RunEpisode;
   onDone: (message: string, kind: 'success' | 'error') => void;
@@ -22,8 +29,16 @@ export function EpisodePostEditor({ runId, episode, onDone }: {
     }]),
   ));
   const [subtitle, setSubtitle] = useState(current?.subtitle_revision ? String(current.subtitle_revision) : '');
+  const [tracks, setTracks] = useState<SubtitleTrack[]>([]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
+
+  const loadTracks = () => {
+    listSubtitleTracks(projectId).then(setTracks).catch(() => setTracks([]));
+  };
+
+  const selectedTrack = tracks.find((row) => String(row.revision) === subtitle) ?? null;
+  const needsApproval = Boolean(selectedTrack && selectedTrack.status !== 'APPROVED');
 
   async function submit() {
     setBusy(true);
@@ -35,10 +50,14 @@ export function EpisodePostEditor({ runId, episode, onDone }: {
       if (chosen.some((cut) => !Number.isFinite(cut.out_s) || cut.out_s <= cut.in_s)) {
         throw new Error('每个填写了的镜头都需要出点，且出点必须大于入点。');
       }
+      if (subtitle.trim() && needsApproval) {
+        await approveSubtitleRevision(projectId, Number(subtitle));
+      }
       const result = await setEpisodePostContract(runId, episode.episode_id, {
         cuts: chosen,
         subtitle_revision: subtitle.trim() ? Number(subtitle) : null,
       });
+      loadTracks();
       onDone(result.delivery_order_id
         ? '已按新的剪辑/字幕合同排队重新装配；旧版成片保留，不会重拍。'
         : '剪辑/字幕合同已保存；这一集的镜头齐了之后按它装配。', 'success');
@@ -51,7 +70,9 @@ export function EpisodePostEditor({ runId, episode, onDone }: {
     }
   }
 
-  return <details className="episode-post-editor">
+  return <details className="episode-post-editor" onToggle={(event) => {
+    if (event.currentTarget.open) loadTracks();
+  }}>
     <summary><Scissors size={12} /> 修订剪辑 / 字幕（只重装配，不重拍）</summary>
     <div className="episode-post-body">
       <table className="episode-post-cuts">
@@ -68,13 +89,21 @@ export function EpisodePostEditor({ runId, episode, onDone }: {
           </tr>)}
         </tbody>
       </table>
-      <label className="run-inline-field">已批准的字幕版本
-        <input type="number" min={1} value={subtitle} placeholder="不烧录字幕"
-          onChange={(event) => setSubtitle(event.target.value)} />
+      <label className="run-inline-field">烧录字幕版本
+        <select value={subtitle} onChange={(event) => setSubtitle(event.target.value)}>
+          <option value="">不烧录字幕</option>
+          {tracks.map((row) => <option key={row.id} value={String(row.revision)}>
+            第 {row.revision} 版 · {label(subtitleStatusLabels, row.status)} · {row.cues.length} 行
+          </option>)}
+        </select>
       </label>
-      <p className="run-hint">字幕的时间轴必须对应这一集剪辑后的长度；超出时服务端会拒绝装配，而不是把字幕压到错误的画面上。音量混音尚未实现。</p>
+      <p className="run-hint">
+        {needsApproval
+          ? '所选字幕还是草稿：提交会先经你这一次点击批准，再烧录装配。'
+          : '字幕的时间轴必须对应这一集剪辑后的长度；超出时服务端会拒绝装配，而不是把字幕压到错误的画面上。音量混音尚未实现。'}
+      </p>
       <button type="button" className="btn-secondary" disabled={busy} onClick={() => { void submit(); }}>
-        {busy ? '提交中…' : '按新合同重新装配'}
+        {busy ? '提交中…' : needsApproval ? '批准该版字幕并按新合同重新装配' : '按新合同重新装配'}
       </button>
       {problem && <p className="form-error">{problem}</p>}
     </div>

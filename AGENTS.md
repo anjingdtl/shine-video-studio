@@ -2193,3 +2193,186 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   `test_launcher_source_identity.py`（16）、`test_copilot_first_diagnosis_v31.py`（8）、
   `test_copilot_grant_durable_v31.py`（12）、`test_copilot_objective_budget_v31.py`（9）、
   前端 `copilotFirstGoal.test.tsx`（2）、`taskGrantDurable.test.tsx`（2）。
+
+## 2026-11-19 逐镜素材注入与取消采用收敛轮（用户报障：晋升被拒/不能取消/每镜塞全量）
+
+- **三个报障同根**：派生/采纳把全部场景底图塞进每一镜，单镜图像参考撞 H3 九图上限
+  （`services._validate_binding_inputs`），新候选晋升被 422 `H3 input limit exceeded` 拒；
+  且已晋升素材没有取消出口。修复全部收敛到既有采纳执行者
+  `materialprep.service.bind_adopted_masters_to_shots`，不新增平行链路。
+- **每镜至多一张场景底图**：bind 合成目标集合时，场景 picture 超过一张只留最新采纳的一张，
+  其余解绑并同步 `required_asset_ids`；人物主体仍按 `spec.characters` 逐镜注入。历史「全塞」
+  绑定在下次确认/晋升时被同一执行者自动收敛清理。实测每镜 required 1–3、场景恒 1。
+- **取消采用是显式释放，不是 generate 的副作用**：`confirm` 在「reuse_master→非 reuse」转变时
+  记录 `release_asset_id`，bind 据此解绑；从未采纳过的 generate **不**删除镜头已有参考
+  （避免误删 storyboard 自带绑定）。释放意图一次性消费。界面已采用素材/候选加「取消采用」，
+  走同一 commit 执行者（`queue_generation:false`，不触发新批次）。实测解绑 5→0、恢复 0→5。
+- **场景需求不再 blanket 引用全场所有镜**：`director/requirements.py` 目录场景只作建议列入清单；
+  已采纳场景经 bindings/required 反馈环保持其真正绑定的镜头；无参考镜由 lacking 环补一张本场场景。
+  聚合 `ScriptPreparation`（单 scene_key 带全量需求）按 scene_key×场次偏移映射，不得把别场场景塞进本场。
+- **重派生不复活取消**：`_confirmed_material_bindings` 按身份取最新决定；已确认行的 strategy 胜过
+  推导建议，取消（改回生成）不会被旧修订绑定或「有主素材即复用」的建议翻回。
+- 回归：`test_material_shot_scene_gap.py`（逐镜注入反例）、`test_material_adoption_one_write.py`
+  （取消采用反例）、`test_director_material_commit.py`、`test_four_stage_reacceptance.py`、
+  `test_material_derive.py`、`test_material_image_jobs.py` 共 80 例；前端
+  `materialToPackage.test.tsx`（取消采用两反例）+`materialPreparation.test.tsx` 34 例；tsc/Ruff 干净。
+  真机验证：新动画候选晋升 200（原 422）、取消/恢复解绑回绑、逐镜单场景。全量回归留待穿测结束。
+
+## 2026-11-19 ④页单一选定面与阶段推进收敛轮（用户报障：选图面重复/一行一张/卡在备料）
+
+- **唯一选定面**：`MaterialGenerationProgress` 顶部一个「选定并采用」网格，待选候选与已采用
+  主素材同列、**每行四张**（`.mgp-candidate-grid` grid 4 列）；下方批次只报进度/在途/待核对，
+  不再重复一套选图/晋升/取消入口。晋升仍走 `/candidate-assets/{id}/promote`、取消仍走 commit
+  （`queue_generation:false`），一个执行者。
+- **阶段推进读 journey 单一裁决**：`ShotMaterialsPanel` 新增 `assetsDone`/`onAdvance`（App 传
+  `stageDone.assets` 与 `goToDirectorPage(next_stage)`）。素材阶段已完成→主操作「确认并进入下一步」
+  （commit 成功后导航），次操作「重新生成素材」（regenerate-all）；未完成→「确认决策并开始准备素材」。
+  不在前端另算就绪。实测点击后进入 `#d/package`。
+- 回归：前端 `materialToPackage`（单一选定面/取消/推进两反例）+`materialPreparation`/`simpleAssets`/
+  `directorEntries`/`directorRequiredAction` 共 52 例；tsc 干净。本轮仅前端，HMR 生效不重启。
+
+## 2026-11-19 导演包阶段收敛轮（用户报障：预检风格阻滞/画幅唯一节点/RelayVSR 分裂裁决）
+
+- **风格应用只有一个执行者**：`api_freezes.apply_frozen_style_to_shots`（含活生产守卫与
+  STYLE_APPLIED_TO_SHOTS 审计）。`freeze/shots/style`、`freeze/style/refresh` 与分镜书确认
+  （`_apply_and_freeze_style`，含 identical no-op 路径）全部委托它——冻结新风格后镜头不得
+  停在旧风格。此前分镜书确认只冻不改镜，⑤ 预检以 SHOT_STYLE_MISMATCH 拒整包。
+- **⑤ 页就地恢复**：预检报 SHOT_STYLE_MISMATCH 时显示「让镜头执行当前冻结风格」
+  （复用 freeze/shots/style，不另起链路）。实测女巫1119：38 镜 v2→v3，草稿包预检
+  ready=True、0 blocker；开拍点击留给用户。
+- **画幅/分辨率在七阶段里只有⑤一个控制节点**：`outputFrame.ts` 与 `h3/output_frame.py`
+  同源（横屏 1344×768 / 竖屏 768×1344 基准 × 0.3/0.5/0.7/1.0，32 网格取整、256–2048 夹取）。
+  选择产出 OutputSpec 宽高，随 `startDirectorProduction.output` 冻结进包 `binding.output`，
+  series 派发读同一份（runner 既有链路）；`_package_for_selection` 把 output 纳入重放判定，
+  换画幅建新包不重放旧画幅。旧 `DirectorProductionRunPanel` package 分支的画幅控件删除。
+- **RelayVSR 就绪单一裁决**：`setup_summary.relayvsr_machine_readiness(db, settings=None)`
+  是唯一读取口（installation 解析同一函数，显式 None=无安装保持未证明）；能力卡、
+  `strategy_options/upscale_options/strategy_blockers`、`resource_resolver` 全读它。
+  此前 strategy 无参调 `relayvsr_readiness()` 永远 BLOCKED，与基础配置 READY 分裂。
+  实测已下载就位 → AVAILABLE、⑤ 超分勾选可用。
+- **变体标签不再同名**：`describeVariantName` 先匹配 nvfp4 再 lowend（NVFP4 的 id 含
+  lowend，曾被显示成第二个 W6A8）。
+- **制片准备面板模式挂单一裁决**：标题读 `/setup/verdict`（与顶栏同一 machine_verdict）；
+  本地 select 降级为「本次维护请求的执行器」，默认值由裁决派生（READY/RUNNING→local）。
+- **吸顶栏闭包同步**：`useStageRail` deps 补 orientation/resolutionScale（否则栏内 primary
+  用旧闭包，画幅选择不生效——真实 UI 缺陷，测试抓出）。
+- **⑥ 显性生产进度条**（用户要求，任务在跑时前端-only 建设、不重启）：顶部醒目
+  「正在生成第 N / M 镜 · P%」，100% = 本阶段生产完成。事实只读两份既有台账：
+  run 的 `progress.passed_shot_count / scope.shot_count` 与 job 台账正在渲染的任务
+  （App 透传 activeJob，「第几镜」按 run 分集镜头顺序定位）；前端不累计自己的进度，
+  跟读节奏与集卡/运行卡同一份（productionMoving 5s）。工作中条纹动画、宽度平滑过渡。
+  实测真实运行：第 3/9 镜 · 22%，渲染镜名与任务明细一致。回归
+  `frontend/src/test/runProgressBar.test.tsx`（3→4→9 镜动态前进至 100%）。
+- **测试隔离修复（环境污染，非产品回归）**：`make_studio` 默认 ComfyUI 端点改为刚释放的
+  环回端口。此前默认 8188 会被操作者正在跑的生产渲染器占用，登记方案的「尽力而为活体
+  校验」把真机节点表（无测试节点 H3BaseSampler）写进测试台账，致 offline e2e /
+  worker integration / setup_workflow_profiles 在**生产运行期间**假失败
+  （COMFY_NODE_UNAVAILABLE）。需要渲染器的测试显式传 fake/monkeypatch，不受影响。
+- `test_duration_target_chain` 过期前提更新：目标秒数驱动分组后 60s 场各自成集（偏差 0），
+  偏差裁决改用单场 120s 超长场景验证，门禁不放宽。
+- 回归：前端 `packageStyleGap`（恢复入口/画幅唯一赋值/变体标签/面板裁决 6 例）+
+  `directorRun`/`outputFrame`/`directorPackageGuide`/`materialToPackage` 共 34 例、tsc 干净；
+  后端 16 模块定向（freeze_unlock/duration/streamline/relayvsr×2/output_spec/one_click/
+  setup_chain/dynamic_strategy/director_shoot/production_series/offline_e2e/graph_compiler/
+  variant_binding/worker_integration/capability_gates）；Ruff 干净。空闲时经监督进程
+  `/restart-stack` 重启生效。本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-19 ⑦ 字幕唯一生成入口收敛轮（用户报障：后期成片生成字幕失败）
+
+- **失败根因是两处断链**：生成执行者 `compile_episode_subtitle_track` 只认③人工冻结
+  字幕，作品有对白却报 `EPISODE_SUBTITLE_EMPTY`；装配合同编辑器 `EpisodePostEditor`
+  是死代码（无页面挂载），⑦ 提示的「选择版本装配」没有入口。
+- **生成读唯一事实**：无手工冻结时读 `shot.spec.dialogue`（H3 真正朗读的台词与剪辑
+  时码），人工冻结按镜覆盖；不新增第二套字幕事实。来源标记 `shot_dialogue` /
+  `director_shot_config`，结果带 `manual_shots`/`dialogue_shots`。
+- **范围跟随所选成片版本**：真实剪辑表在时，字幕范围就是该版 EDL 的镜头（③ 实时镜表
+  可能已应用不属于这一版的新镜头——实障 15 镜 vs 交付 9 镜，旧逻辑回落计划时长排到
+  77.5s/51s 成片之外）；无交付才回落实时镜表计划时长并如实警告。时码换算与装配同源
+  （`_selected_cut_timing`，in_s/out_s 裁头/clamp 不变）。
+- **入口唯一在⑦**：每集卡片「按真实成片时长生成 / 更新字幕轨」→「字幕与台词核对」
+  批准（SubtitlePanel 随 dataEpoch 重读）→ 同卡挂载既有 `EpisodePostEditor` 选批准版
+  重新装配（复用既有 `PUT /production-runs/{id}/episodes/{eid}/post-contract`，不新建
+  执行者）。③ 仍只撰写，不新增生成入口。
+- 回归：后端 `test_episode_subtitle_cut`（6，含「实时镜表新镜头不得进入成片字幕」反例）
+  + `test_shot_subtitles`（5）；前端新增 `postSubtitleFlow`（生成→批准→装配同页走通）
+  + `p3EmptyStatesAudit`/`deliveryRefresh`/`directorRun`/`productionProjectionRefresh`/
+  `shotSubtitle` 共 23 例；tsc/Ruff 干净。
+- 真机复测（女巫1119 ep-01）：生成第 4 版 10 行，时码跟随 51s 真实成片（第 2 镜对白
+  8.583s 起、末行 49.987s 止）；旧计划时码草稿保留为历史。批准与烧录装配留给用户。
+  本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-19 第 4 镜外语人声核查与修订后重拍收敛（用户报障+裁定）
+
+- **核查结论**：入拍提示词合规（1.3.0 禁声合同、闭口、非人声、无音频参考；动态图
+  离线重编译哈希与入拍一致 `979b9a54…`，文本节点全技术参数）。分镜链无丢台词：
+  原文该节是内心独白（无出口台词），冻结风格 `narration_level=none` 合同禁止独白
+  入声音链，故拆解/导演/摄影/落镜对白皆空。外语人声是 H3 概率性违反禁声合同。
+- **用户裁定**：加中文独白并重拍此镜。经既有唯一修订执行者 `POST /shots/{id}/revise`
+  加第一人称独白（说话方列入 characters，时码 fit 4s），修订 16；编译预览出现
+  「Every voice in this shot speaks Chinese」与 `<d>[Chinese]` 台词锚点。
+- **重拍闸门收敛（⑦ 既有入口，不新增入口）**：修订把旧 job 标 stale+NEEDS_REVIEW
+  后，`_blocker` 原报 SHOT_REVISION_REPLACED 禁用重拍；单镜入口自动选窄方案、Run
+  链路要求整集重拍——修订后的镜头无处可拍。现 `_blocker` 承认「最近退休的通过版
+  （stale+SHOT_REVISION_REPLACED+有 artifact）可作为修订后重拍的源」；绑定比对在
+  修订重拍时豁免 `shot_spec`（用户修订正是改它），风格/规则/方案/主素材仍须同一。
+- **strategy 继承**：Run 派发的 job 无静态 profile、带动态 strategy；重拍路由原先
+  只传空 profile 被 409「require a registered workflow profile」。现 CreateJob 继承
+  `source.request.strategy`，与 Run 派发同一条动态编译路（strategy 门禁照跑）。
+- 回归：`test_generation_segments.py` +1（修订后重拍：新 job 带新对白、渲染绑定
+  不变、旧通过版保留）共 6 例绿；Ruff 干净。真机：⑦ 点击重拍排入 job `97989652…`
+  （rev 16），Worker 受管启动渲染。通过后由用户「选为当前装配版本」，字幕重新
+  生成→批准→装配。未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-19 重拍进度/选用/字幕烧录三阻滞收敛（用户报障）
+
+- **重拍进度条**：⑥ 无整片运行在跑时显示单镜重拍进度条（读同一份 job/attempt
+  台账，`retakePct`）；⑦ 分段卡对进行中的重拍显示进度条（`replacement_progress`
+  读 attempt.progress），轮询覆盖 SUBMITTING/REPAIR_PENDING。不另建状态。
+- **选用闸门收敛**：`accepted_job` 原要求 final 门真过，与自动装配（PASSED 即可）
+  分裂，导致无 VLM 校准的机器上重拍永远不能选用。现与交付同口径：真实、技术通过
+  的当前版（PASSED+非stale+artifact 身份链+字节核验）；艺术验收在独立台账，不挡装配。
+- **整集当前事实收敛**：新增 `episode_current_jobs`＝run 自有通过版叠加显式装配
+  选择（选定重拍）。整集 EDL/`episode_input_digest`/交付门禁同读它，选定重拍进入
+  整集装配与字幕烧录，不再"run 自有"单一口径漏掉重拍。
+- **字幕烧录根因**：`assemble(subtitle_ass=…)` 收到的是 ASS **文本**却直接拼进
+  `ass=` 滤镜；且 Windows 绝对路径（盘符冒号+反斜杠）被滤镜二次解析炸掉。现把
+  ASS 文本写入工作目录、以 cwd=工作目录+裸相对文件名 `ass=subtitles.ass` 烧录。
+- **烧录入口**：⑦ 每集「修订剪辑/字幕」改为版本下拉（含状态），草稿版提交时就地
+  批准（复用既有 approve/post-contract 执行者），不再要求先去折叠 dock 批准。
+- 回归：`test_generation_segments`（+选择叠加单元）7 例、`test_delivery_assembly`
+  （+Windows 真实烧录）15 例、delivery_orders/episode_subtitle_cut/director_long_form
+  共 73+ 例绿；前端 `postSubtitleFlow`/`runProgressBar`（+重拍条）4 例、tsc 干净。
+- 真机：女巫1119 第 4 镜重拍选用→整集 v3 烧录第 9 版字幕 DELIVERED；抽帧 1s
+  「殿下，醒醒……」、17.5s 中文独白均确认烧录，第 4 镜为重拍新画面。旧版保留。
+  未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-20 ⑦ 后期成片界面重构（用户裁定：单一选集链路）
+
+- **自上而下逻辑**：选集条（手动、一次一集）→ 该集预览卡（视频+验收+折叠字幕）→
+  该集镜网格（`GenerationSegmentsPanel fixedEpisode` 锁定只展示选中集）。
+- **待审清单并入集预览卡**：每集卡内「观看并确认」（复用 `EpisodeAcceptance`），
+  看完即可确认；删除独立待审清单板块。
+- **删除重叠板块**：「成片文件与导出（历史版本）」`DeliveryPanel` 与「剪辑方案/
+  剪辑数据」整体下线（组件与页级测试一并移除，文件夹/下载由成片库与集卡提供）。
+- **字幕与台词核对上移**：新增 `EpisodeSubtitleFold` 折叠进集预览卡，只服务选中集；
+  生成/批准/应用仍走既有唯一执行者（compile/approve/post-contract），应用后立即
+  刷新预览（overview 跟随 `delivery_order_id`，预览 video 以 artifact 为 key 重载）。
+- 回归：前端全量 452 例绿、tsc 干净；`postSubtitleFlow`/`directorRun`/
+  `deliveryAcceptance` 改断言到新布局。真机⑦：选集→预览烧录版→折叠字幕→镜网格，
+  重叠板块消失。未改后端执行者，不触发 VLM 重校准。
+
+## 2026-11-20 字幕字号单一设置（用户报障：烧录字体过大）
+
+- **根因**：`render_ass` 未设 PlayRes，libass 按 288p 把 48 号字放大到成片分辨率。
+  现固定 `PlayResX/Y=1280/720`，Fontsize 以 720p 像素计并随成片缩放。
+- **三原则**：字号是唯一事实，存 `subtitle-style:{project_id}`（`GET/PUT
+  /projects/{id}/subtitle-style`，12–96，越界 422）；唯一裁决 `render_ass`；
+  烧录执行者经 `burn_ass_for_track` 在烧录时读当前字号（改字号下次应用即生效，
+  不需重新批准文本）。compile 存预览 ASS 同读该事实。
+- **字号参与版本判定**：`episode_input_digest` 加入 `subtitle_font_size`，改字号
+  产生新交付版本重烧，不复用旧文件。
+- **入口唯一**：字号控件在⑦集预览卡的「字幕与台词核对」折叠内（保存字号），
+  保存后点「按新合同重新装配」即按新字号烧进预览。
+- 回归：`test_shot_subtitles` +字号单一事实用例、delivery_assembly/episode_subtitle_cut
+  绿；Ruff/tsc 干净。真机：字号 28 重烧 v4，抽帧字幕小而清晰（原 48 过大）。
+  未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。

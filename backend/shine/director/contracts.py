@@ -105,6 +105,9 @@ class EpisodePlanPayload(APIModel):
     tolerance_seconds: int = Field(default=DEFAULT_TOLERANCE_SECONDS, ge=0, le=900)
     episodes: list[PlannedEpisode] = Field(min_length=1, max_length=MAX_EPISODES)
     allowed_repeats: list[str] = Field(default_factory=list, max_length=200)
+    out_of_scope_section_ids: list[str] = Field(default_factory=list, max_length=2000)
+    """Sections the person's episode-count cap deliberately leaves unproduced.
+    Declared scope, not an omission: the coverage gate reads the same fact."""
     source: dict[str, Any] = Field(default_factory=dict)
     """For a section plan: the outline artifact id/hash the sections came from."""
 
@@ -286,6 +289,7 @@ def derive_episode_plan_from_sections(
     tolerance_seconds: int = DEFAULT_TOLERANCE_SECONDS,
     source: dict[str, Any] | None = None,
     title_prefix: str = "第{n}集",
+    max_episodes: int | None = None,
 ) -> EpisodePlanPayload:
     """Plan episodes from the confirmed script *before* any shot exists.
 
@@ -332,6 +336,13 @@ def derive_episode_plan_from_sections(
         if total >= target_seconds:
             close("section_boundary_at_target")
     close("final_episode")
+    out_of_scope: list[str] = []
+    if max_episodes is not None and len(episodes) > max_episodes:
+        # The person's count is a cap, not a quota: episodes beyond it are not
+        # produced, and their sections are declared out of scope instead of
+        # being silently dumped into the last episode.
+        out_of_scope = [sid for ep in episodes[max_episodes:] for sid in ep.section_ids]
+        episodes = episodes[:max_episodes]
     if len(episodes) > MAX_EPISODES:
         raise ValueError("EPISODE_PLAN_EXCEEDS_MAX_EPISODES")
     for episode in episodes:
@@ -346,6 +357,7 @@ def derive_episode_plan_from_sections(
         tolerance_seconds=tolerance_seconds,
         episodes=episodes,
         allowed_repeats=[],
+        out_of_scope_section_ids=out_of_scope,
         source=source or {},
     )
 
@@ -359,17 +371,17 @@ def derive_episode_plan_by_count(
     source: dict[str, Any] | None = None,
     title_prefix: str = "第{n}集",
 ) -> EpisodePlanPayload:
-    """Plan a fixed number of episodes from the confirmed script sections.
+    """Plan up to ``episode_count`` episodes, each governed by the target length.
 
-    The streamline entry: the person names the episode count and a per-episode
-    target length.  The count is the priority — the sections are partitioned
-    into exactly ``episode_count`` contiguous groups on whole-section boundaries
-    (a scene and its dialogue are never severed), balanced so each episode's
-    estimated length stays as close to the total/count ideal as the natural
-    boundaries allow.  ``target_seconds`` is reported as the goal and any
-    deviation is written into ``boundary_note``; nothing is truncated or invented
-    to make a number.  When there are fewer sections than episodes the request is
-    refused rather than fabricating an empty episode.
+    The streamline entry: the person names a per-episode target and an episode
+    count.  The TARGET governs scope — sections are packed whole into episodes
+    around ``target_seconds`` (the same single packing verdict as the
+    sections entry), and the count is a cap on how many of those episodes are
+    produced from the front of the script.  Sections beyond the cap are
+    declared in ``out_of_scope_section_ids`` and shown in the book preview, so
+    a 60s/1-episode decision can never silently become a whole-script run.
+    Nothing is truncated inside a scene; a single over-long scene keeps its own
+    episode and says so in ``boundary_note``.
     """
     ordered = sorted(sections, key=lambda row: int(row.get("order") or 0))
     if not ordered:
@@ -380,70 +392,13 @@ def derive_episode_plan_by_count(
         raise ValueError("EPISODE_COUNT_EXCEEDS_SECTIONS")
     if episode_count > MAX_EPISODES:
         raise ValueError("EPISODE_PLAN_EXCEEDS_MAX_EPISODES")
-    seconds = [float(row.get("estimated_duration_s") or 0.0) for row in ordered]
-    total = sum(seconds)
-    ideal = total / episode_count if episode_count else total
-    # Cumulative prefix sums let a boundary cost be read in O(1).
-    prefix = [0.0]
-    for value in seconds:
-        prefix.append(prefix[-1] + value)
-    # Dynamic programming: split the first i sections into k episodes minimising
-    # the summed squared deviation from the ideal length.  Squared deviation
-    # spreads the length evenly instead of dumping the remainder on the last
-    # episode.  Whole sections only — a boundary never falls inside a scene.
-    import math
-
-    inf = math.inf
-    cost = [[inf] * (episode_count + 1) for _ in range(len(ordered) + 1)]
-    back = [[0] * (episode_count + 1) for _ in range(len(ordered) + 1)]
-    cost[0][0] = 0.0
-    for k in range(1, episode_count + 1):
-        for i in range(k, len(ordered) + 1):
-            for j in range(k - 1, i):
-                if cost[j][k - 1] == inf:
-                    continue
-                length = prefix[i] - prefix[j]
-                candidate = cost[j][k - 1] + (length - ideal) ** 2
-                if candidate < cost[i][k]:
-                    cost[i][k] = candidate
-                    back[i][k] = j
-    if cost[len(ordered)][episode_count] == inf:
-        raise ValueError("EPISODE_COUNT_NOT_PARTITIONABLE")
-    bounds: list[int] = []
-    i, k = len(ordered), episode_count
-    while k > 0:
-        j = back[i][k]
-        bounds.append(j)
-        i, k = j, k - 1
-    bounds.reverse()
-    bounds.append(len(ordered))
-    high = target_seconds + tolerance_seconds
-    episodes: list[PlannedEpisode] = []
-    for index in range(episode_count):
-        left, right = bounds[index], bounds[index + 1]
-        group = ordered[left:right]
-        length = round(max(prefix[right] - prefix[left], 1.0), 3)
-        note = "balanced_by_episode_count"
-        if length > high:
-            note += f"; planned {length:.1f}s exceeds {high}s target window"
-        elif length < max(1, target_seconds - tolerance_seconds):
-            note += f"; planned {length:.1f}s below {target_seconds - tolerance_seconds}s target window"
-        episodes.append(PlannedEpisode(
-            episode_id=f"ep-{index + 1:02d}",
-            order=index + 1,
-            title=title_prefix.format(n=index + 1),
-            shot_ids=[],
-            section_ids=[str(row["production_section_id"]) for row in group],
-            planned_seconds=length,
-            boundary_note=note,
-        ))
-    return EpisodePlanPayload(
-        mode="sections",
+    return derive_episode_plan_from_sections(
+        ordered,
         target_seconds=target_seconds,
         tolerance_seconds=tolerance_seconds,
-        episodes=episodes,
-        allowed_repeats=[],
         source={**(source or {}), "episode_count": episode_count},
+        title_prefix=title_prefix,
+        max_episodes=episode_count,
     )
 
 
@@ -451,9 +406,14 @@ def validate_section_coverage(payload: EpisodePlanPayload, section_ids: Iterable
     """Coverage problems of a section plan against the confirmed outline sections."""
     confirmed = list(section_ids)
     planned = payload.section_order()
+    declared_out = set(payload.out_of_scope_section_ids)
     problems: list[str] = []
-    missing = [sid for sid in confirmed if sid not in set(planned)]
-    unknown = sorted(set(planned) - set(confirmed))
+    # Declared out-of-scope sections are the person's explicit cap decision,
+    # not an omission; the same coverage gate reads that one fact.
+    missing = [sid for sid in confirmed if sid not in set(planned) and sid not in declared_out]
+    unknown = sorted((set(planned) | declared_out) - set(confirmed))
+    if declared_out & set(planned):
+        problems.append("SECTION_DECLARED_BOTH_IN_AND_OUT_OF_SCOPE")
     if missing:
         problems.append("SECTIONS_NOT_COVERED:" + ",".join(missing)[:400])
     if unknown:

@@ -75,15 +75,50 @@ def render_srt(cues: list[SubtitleCue]) -> str:
     return "\n".join(blocks)
 
 
-def render_ass(cues: list[SubtitleCue], *, font_size: int = 48) -> str:
+#: 字幕字号的单一默认值；实际值读自项目级 ``subtitle-style`` 设置。
+SUBTITLE_FONT_SIZE_DEFAULT = 40
+
+
+def subtitle_font_size(db, project_id: str) -> int:
+    """The one font-size fact for this project's burned subtitles (12–96)."""
+    from shine.models import AppSetting
+
+    row = db.get(AppSetting, f"subtitle-style:{project_id}")
+    raw = (row.value or {}).get("font_size") if row is not None else None
+    try:
+        size = int(raw)
+    except (TypeError, ValueError):
+        size = SUBTITLE_FONT_SIZE_DEFAULT
+    return max(12, min(96, size or SUBTITLE_FONT_SIZE_DEFAULT))
+
+
+def burn_ass_for_track(db, track) -> str:
+    """Render the burn ASS from the track's cues at the current font size.
+
+    The single burn verdict: font is a presentation fact read at burn time, so
+    changing it takes effect on the next apply without re-approving the text.
+    """
+    cues = [
+        SubtitleCue(index=c["index"], start_s=c["start_s"], end_s=c["end_s"], text=c["text"])
+        for c in (track.cues or [])
+    ]
+    return render_ass(cues, font_size=subtitle_font_size(db, track.project_id))
+
+
+def render_ass(cues: list[SubtitleCue], *, font_size: int = SUBTITLE_FONT_SIZE_DEFAULT) -> str:
     """The ASS text of the cues.
 
     ASS is what FFmpeg composites, so the burned-in result keeps the exact
-    timing the human approved.
+    timing the human approved.  PlayRes is pinned to 720p so Fontsize is in
+    pixels at that reference and scales with the reel; without it libass
+    assumes 288p and blows the font up to the video resolution.
     """
     head = [
         "[Script Info]",
         "ScriptType: v4.00+",
+        "PlayResX: 1280",
+        "PlayResY: 720",
+        "ScaledBorderAndShadow: yes",
         "[V4+ Styles]",
         "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, "
         "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "

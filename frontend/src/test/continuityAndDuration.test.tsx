@@ -76,7 +76,7 @@ describe('落镜总时长超差：显式核对', () => {
       return jsonResponse({ plan_version: 2, episode_id: 'ep-01', shot_ids: ['s1'] });
     });
     render(<EpisodeStoryboardPanel projectId={PROJECT} />);
-    const confirm = await screen.findByRole('button', { name: /确认本集镜头/ });
+    const confirm = await screen.findByRole('button', { name: /确认全部落镜/ });
     await userEvent.setup().click(confirm);
     const accept = await screen.findByRole('button', { name: '接受偏差并确认本集' });
     await userEvent.setup().click(accept);

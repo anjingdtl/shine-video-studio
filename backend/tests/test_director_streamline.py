@@ -108,11 +108,11 @@ def _prepare_project(client, *, sections: int = 4, section_seconds: float = 30.0
 
 
 def _storyboard_book(client, project: str, *, episode_count: int = 2,
-                     target_seconds: int = 60) -> dict:
+                     target_seconds: int = 60, tolerance_seconds: int = 30) -> dict:
     response = client.post(
         f"/api/v1/projects/{project}/director/storyboard-book",
         json={"episode_count": episode_count, "target_seconds": target_seconds,
-              "tolerance_seconds": 30},
+              "tolerance_seconds": tolerance_seconds},
         headers=LOCAL)
     assert response.status_code == 201, response.text
     return response.json()
@@ -376,13 +376,25 @@ def test_outline_version_chain_tracks_draft_and_confirmed(api):
 # ---------------------------------------------------------------------------
 
 
-def test_episode_plan_by_count_prefers_count_and_keeps_whole_sections():
+def test_episode_plan_by_count_target_governs_and_count_caps_scope():
+    # 2026-11-19 用户裁定：每集秒数决定范围，集数是上限；超范围显式声明，
+    # 不得把整剧塞进第一集再报一个偏差数字。
+    from shine.director.contracts import validate_section_coverage
+
     payload = derive_episode_plan_by_count(
-        _sections(5, seconds=30), episode_count=2, target_seconds=75, tolerance_seconds=15)
-    assert len(payload.episodes) == 2
-    covered = [sid for episode in payload.episodes for sid in episode.section_ids]
-    assert covered == [f"sec-{index:02d}" for index in range(1, 6)]
-    assert all(episode.planned_seconds for episode in payload.episodes)
+        _sections(5, seconds=30), episode_count=1, target_seconds=60, tolerance_seconds=15)
+    assert len(payload.episodes) == 1
+    assert payload.episodes[0].section_ids == ["sec-01", "sec-02"]
+    assert payload.out_of_scope_section_ids == ["sec-03", "sec-04", "sec-05"]
+    two = derive_episode_plan_by_count(
+        _sections(5, seconds=30), episode_count=2, target_seconds=60, tolerance_seconds=15)
+    assert [e.section_ids for e in two.episodes] == [["sec-01", "sec-02"], ["sec-03", "sec-04"]]
+    assert two.out_of_scope_section_ids == ["sec-05"]
+    # 覆盖门读同一份声明：declared out 不是遗漏。
+    all_ids = [f"sec-{index:02d}" for index in range(1, 6)]
+    assert validate_section_coverage(payload, all_ids) == []
+    undeclared = payload.model_copy(update={"out_of_scope_section_ids": []})
+    assert any(p.startswith("SECTIONS_NOT_COVERED") for p in validate_section_coverage(undeclared, all_ids))
 
 
 def test_episode_plan_by_count_refuses_more_episodes_than_sections():

@@ -10,7 +10,8 @@ type Segment = {
   status: string; artifact_id: string | null; blocker: string | null; can_regenerate: boolean;
   editorial_cuts: { beat_id?: string; start_s?: number }[];
   dependent_job_ids: string[]; replacement_job_id: string | null;
-  replacement_status: string | null; can_select_replacement: boolean;
+  replacement_status: string | null; replacement_progress: number | null;
+  can_select_replacement: boolean;
   upscale?: { status: string; output_artifact_id: string | null; error_code: string | null } | null;
 };
 type SegmentState = { series_id: string | null; run_id?: string | null; segments: Segment[] };
@@ -73,13 +74,20 @@ export function LazyVideo({ src, label }: { src: string; label: string }) {
     : <button type="button" onClick={() => setLoaded(true)}>预览 {label}</button>;
 }
 
-export default function GenerationSegmentsPanel({ projectId, fingerprint }: { projectId: string; fingerprint: string }) {
+export default function GenerationSegmentsPanel({ projectId, fingerprint, fixedEpisode = null, onChanged }: {
+  projectId: string; fingerprint: string;
+  /** ⑦ 单一选集链路：锁定只展示这一集的镜，选集由父级控制。 */
+  fixedEpisode?: string | null;
+  /** 重拍/选用后通知父级刷新整集投影（预览/验收随之更新）。 */
+  onChanged?: () => void;
+}) {
   const [state, setState] = useState<SegmentState>({ series_id: null, run_id: null, segments: [] });
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const [page, setPage] = useState(0);
   /** 多集拍摄后分段会很长：先按集筛选，再分页。 */
   const [episodeFilter, setEpisodeFilter] = useState<string>('');
+  const activeFilter = fixedEpisode ?? episodeFilter;
   /** 单镜分项审片：导演层也能做人工验收，不必切去专家层。 */
   const [reviewJobId, setReviewJobId] = useState<string | null>(null);
   const reload = useCallback(async () => {
@@ -87,7 +95,7 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
     setState(result);
   }, [projectId]);
   useEffect(() => { void reload().catch((e) => setMessage(String(e))); }, [reload, fingerprint]);
-  useEffect(() => { setPage(0); }, [projectId, fingerprint, state.run_id]);
+  useEffect(() => { setPage(0); }, [projectId, fingerprint, state.run_id, fixedEpisode]);
   const episodeOptions = useMemo(() => {
     const seen = new Map<string, { value: string; label: string }>();
     for (const segment of state.segments) {
@@ -100,15 +108,16 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
     }
     return [...seen.values()].sort((a, b) => Number(a.value) - Number(b.value));
   }, [state.segments]);
-  const filteredSegments = episodeFilter
-    ? state.segments.filter((segment) => String(segment.episode_position ?? '') === episodeFilter)
+  const filteredSegments = activeFilter
+    ? state.segments.filter((segment) => String(segment.episode_position ?? '') === activeFilter)
     : state.segments;
   const pageCount = Math.max(1, Math.ceil(filteredSegments.length / PAGE_SIZE));
   const currentPage = Math.min(page, pageCount - 1);
   const visibleSegments = filteredSegments.slice(currentPage * PAGE_SIZE, (currentPage + 1) * PAGE_SIZE);
   const firstVisible = filteredSegments.length ? currentPage * PAGE_SIZE + 1 : 0;
   const lastVisible = Math.min((currentPage + 1) * PAGE_SIZE, filteredSegments.length);
-  const pending = state.segments.some((s) => s.replacement_status && ['QUEUED', 'RUNNING', 'QC_PENDING'].includes(s.replacement_status));
+  const pending = state.segments.some((s) => s.replacement_status
+    && ['QUEUED', 'SUBMITTING', 'RUNNING', 'QC_PENDING', 'REPAIR_PENDING'].includes(s.replacement_status));
   useEffect(() => {
     if (!pending) return;
     const timer = window.setInterval(() => { void reload().catch(() => undefined); }, 5000);
@@ -131,12 +140,13 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
         setMessage('此生成分段已排入新的制作系列。旧通过版本保留，新版本须通过检查并由你选为装配版本。');
       }
       await reload();
+      onChanged?.();
     } catch (e) { setMessage(String(e)); }
     finally { setBusy(false); }
   }
   return <section aria-label="H3 生成分段">
     <h3>生成分段</h3>
-    {episodeOptions.length > 1 && <label className="segment-filter">按集筛选
+    {fixedEpisode == null && episodeOptions.length > 1 && <label className="segment-filter">按集筛选
       <select value={episodeFilter} onChange={(event) => { setEpisodeFilter(event.target.value); setPage(0); }}>
         <option value="">全部（{state.segments.length} 镜）</option>
         {episodeOptions.map((option) => <option key={option.value} value={option.value}>
@@ -144,7 +154,7 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
         </option>)}
       </select>
     </label>}
-    <p>每张卡片是一次 H3 输出。当前{episodeFilter ? `第 ${episodeFilter} 集` : '作品'}共 {filteredSegments.length} 镜，每页最多显示 {PAGE_SIZE} 镜。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。</p>
+    <p>每张卡片是一次 H3 输出。当前{activeFilter ? `第 ${activeFilter} 集` : '作品'}共 {filteredSegments.length} 镜，每页最多显示 {PAGE_SIZE} 镜。点缩略图播放；段内剪辑切点共同生成，不能分别重拍。</p>
     <p>已通过镜头发现画面或声音问题，可点「重新生成此段」排入新的串行制作；旧版本保留。新版本通过质检后，再点「选为当前装配版本」。失败、待核对或租约未对账的镜头，先到「生成进度与检查」查看原任务和错误原因；UNKNOWN 任务只能核对，不能直接重发。</p>
     {!state.segments.length && <p className="material-hint">尚无制作系列。选定生产范围并开拍后，这里显示每个生成分段。</p>}
     {state.segments.length > 0 && !filteredSegments.length && <p className="material-hint">这一集还没有生成分段。</p>}
@@ -183,6 +193,17 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
           <p>{segment.story_beat}</p>
           {segment.editorial_cuts?.length > 0 && <small>段内剪辑范围：{segment.editorial_cuts.map((cut) => `${cut.beat_id ?? '剪辑点'} @ ${cut.start_s ?? 0}s`).join('、')}（整体重拍）</small>}
         </details>
+        {segment.replacement_job_id && segment.replacement_status
+          && ['QUEUED', 'SUBMITTING', 'RUNNING', 'QC_PENDING', 'REPAIR_PENDING'].includes(segment.replacement_status) && (
+          <div className="segment-progress" role="progressbar" aria-valuenow={segment.replacement_progress ?? 0}
+            aria-valuemin={0} aria-valuemax={100} aria-label={`重拍第 ${segment.position} 镜进度`}>
+            <div className="segment-progress-head">
+              <span>重拍 · {SEGMENT_STATUS[segment.replacement_status] ?? segment.replacement_status}</span>
+              <b>{segment.replacement_progress ?? 0}%</b>
+            </div>
+            <div className="run-progress-bar"><i style={{ width: `${segment.replacement_progress ?? 0}%` }} className="is-working" /></div>
+          </div>
+        )}
         <div className="segment-card-actions">
           <button type="button" disabled={busy || !segment.can_regenerate} onClick={() => act(segment, false)}>重新生成此段</button>
           {segment.replacement_job_id && <button type="button" disabled={busy || !segment.can_select_replacement} onClick={() => act(segment, true)}>选为当前装配版本</button>}
@@ -190,7 +211,10 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint }: { pr
             title="逐项人工审片：身份、服装、场景、运镜、风格、对白、声音、口型、连续性"
             onClick={() => setReviewJobId(segment.job_id)}>分项审片</button>}
         </div>
-        {segment.replacement_job_id && <small className="segment-note">新版本 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}</small>}
+        {segment.replacement_job_id && <small className="segment-note">
+          新版本 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}
+          {segment.replacement_status === 'PASSED' && segment.can_select_replacement && ' · 点「选为当前装配版本」生效'}
+        </small>}
         {segment.blocker && <small className="segment-note">当前不能重复排拍：{segment.replacement_job_id ? '新版本等待完成或选用' : '当前版本未通过、仍在执行或需要核对，请先查看制作进度'}（{segment.blocker}）</small>}
         {segment.dependent_job_ids.length > 0 && <details className="segment-detail"><summary>影响 {segment.dependent_job_ids.length} 个真实依赖任务</summary>
           <p>选用新版本会使这些后继失效并要求复核，不会自动无限重拍。</p>

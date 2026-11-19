@@ -56,6 +56,52 @@ def _catalog(db: Session, project_id: str) -> dict[str, Any]:
     return dict(row.payload_json or {}) if row is not None else {}
 
 
+def _preparation_catalog(
+    db: Session, project_id: str, section_ids: list[str],
+    section_keys: dict[str, list[str]],
+) -> dict[str, Any]:
+    """The entity source for projects without a four-stage catalogue.
+
+    The streamline path already established the core cast / locations / props in
+    per-scene ``ScriptPreparation`` artifacts (the same ledger the expert material
+    page reads).  Each artifact carries its own ``scene_key``, so an entity is
+    cited only by the sections whose document scene matches that key — a scene
+    plate belongs to its own scene's shots, never to every shot of the film.
+    """
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == "ScriptPreparation",
+        AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at)).all()
+    merged: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        payload = dict(row.payload_json or {})
+        row_key = str(payload.get("scene_key") or "")
+        matched = [sid for sid in section_ids if row_key and row_key in section_keys.get(sid, [])]
+        for req in payload.get("requirements") or []:
+            family = str(req.get("family") or "")
+            name = str(req.get("name") or req.get("entity_id") or "").strip()
+            if family not in {"character", "scene", "prop"} or not name:
+                continue
+            entry = merged.setdefault((family, name), {
+                "name": name,
+                "description": str(req.get("description") or ""),
+                "section_ids": [],
+                "carrier": req.get("carrier"),
+                "core_prop_reason": req.get("core_prop_reason"),
+            })
+            for sid in matched:
+                if sid not in entry["section_ids"]:
+                    entry["section_ids"].append(sid)
+            if not entry["description"] and req.get("description"):
+                entry["description"] = str(req.get("description"))
+    characters = [{**e, "aliases": [], "identity": e["description"]}
+                  for (f, _), e in merged.items() if f == "character"]
+    scenes = [e for (f, _), e in merged.items() if f == "scene"]
+    props = [e for (f, _), e in merged.items() if f == "prop"]
+    return {"characters": characters, "scenes": scenes, "props": props}
+
+
 def _alias_index(catalog: dict[str, Any]) -> dict[str, str]:
     index: dict[str, str] = {}
     for character in catalog.get("characters") or []:
@@ -221,7 +267,20 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
     document = db.get(ProjectDocument, outline_payload.get("document_id"))
     document_scenes = segment_document(document.text or "") if document is not None else []
 
+    scoped_sections = [str(sid) for ep in episodes for sid in ep.section_ids]
+    section_keys: dict[str, list[str]] = {}
+    for sid in scoped_sections:
+        section = sections_by_id.get(sid)
+        if section is None:
+            continue
+        start = int(section.get("start_offset") or 0)
+        end = int(section.get("end_offset") or 0)
+        section_keys[sid] = [row.key for row in document_scenes
+                             if row.spans and row.spans[0].start_offset < end
+                             and row.spans[-1].end_offset > start]
     catalog = _catalog(db, project_id)
+    if not catalog:
+        catalog = _preparation_catalog(db, project_id, scoped_sections, section_keys)
     aliases = _alias_index(catalog)
     capacity = reference_capacity(bound_profile(db, project_id))
     masters = list(db.scalars(select(Asset).where(
@@ -251,9 +310,9 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
             "user_specified": False,
         })
         entry["user_specified"] = entry.get("user_specified", False) or user_specified
-        if shot_id not in entry["shot_ids"]:
+        if shot_id and shot_id not in entry["shot_ids"]:
             entry["shot_ids"].append(shot_id)
-        if episode_id not in entry["episode_ids"]:
+        if episode_id and episode_id not in entry["episode_ids"]:
             entry["episode_ids"].append(episode_id)
         if description and len(description) > len(entry["description"]):
             entry["description"] = description
@@ -350,19 +409,19 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                             note("prop", str(asset.entity_id), shot_id=shot.id,
                                  episode_id=episode.episode_id, cited_by_shot=True)
 
-            # 场景需求只认真实地点：catalog 的关键地点（跨场共享、可复用主素材），
-            # 不为凑 Ref2VA 最低参考在每场强造一张互不相同、与剧情无关的填充图。
+            # 场景底图列入清单供复用/选用，但不 blanket 塞进本场所有镜头：已采纳
+            # 的场景经 bindings/required 反馈环保持它真正绑定的镜头；未采纳的只作
+            # 建议；无参考的镜头由 lacking 环补一张本场场景。历史「全塞」绑定由
+            # bind 执行者按「每镜至多一张场景」收敛清理。
             for loc in (catalog.get("scenes") or []):
                 if str(section_id) not in [str(item) for item in loc.get("section_ids") or []]:
                     continue
                 name = str(loc.get("name") or "").strip()
                 if not name:
                     continue
-                _note_local(local, "scene", name, cited=True)
-                for shot_id in shot_ids:
-                    referenced.add(str(shot_id))
-                    note("scene", name, shot_id=str(shot_id), episode_id=episode.episode_id,
-                         description=str(loc.get("description") or "")[:300], cited_by_shot=True)
+                _note_local(local, "scene", name, cited=False)
+                note("scene", name, shot_id="", episode_id=episode.episode_id,
+                     description=str(loc.get("description") or "")[:300], cited_by_shot=False)
             # Ref2VA 每镜至少一个参考，但「这一场有没有素材」不是判据：同一场里
             # 一镜有人物、另一镜只有旁白时，整场判定会把旁白镜漏掉（这正是 23 镜
             # 项目 1d14b472 报 SHOT_REFERENCE_MISSING 却不在清单里的原因）。这里
@@ -384,11 +443,12 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 name = str(prop.get("name") or "").strip()
                 if not name:
                     continue
-                _note_local(local, "prop", name, cited=bool(prop.get("carrier")))
+                core_prop = bool(prop.get("carrier") or prop.get("core_prop_reason"))
+                _note_local(local, "prop", name, cited=core_prop)
                 for shot_id in shot_ids:
                     note("prop", name, shot_id=str(shot_id), episode_id=episode.episode_id,
                          description=str(prop.get("description") or "")[:300],
-                         cited_by_shot=bool(prop.get("carrier")))
+                         cited_by_shot=core_prop)
 
             if not local:
                 continue

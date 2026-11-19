@@ -287,6 +287,22 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
             "section_count": len(episode.section_ids),
             "sections": section_views,
         })
+    out_ids = list(payload.out_of_scope_section_ids)
+    out_rows = [sections_by_id[sid] for sid in out_ids if sid in sections_by_id]
+    out_of_scope = None
+    if out_ids:
+        orders = [int(row.get("order") or 0) for row in out_rows]
+        first = out_rows[0].get("title") if out_rows else None
+        last = out_rows[-1].get("title") if out_rows else None
+        out_of_scope = {
+            "count": len(out_ids),
+            "from_order": min(orders) if orders else None,
+            "to_order": max(orders) if orders else None,
+            "note": (f"另有 {len(out_ids)} 场不在本次 {len(episodes)} 集范围内"
+                     + (f"（第 {min(orders)} 场「{first}」至第 {max(orders)} 场「{last}」）"
+                        if orders else "")
+                     + "；每集范围由你确认的秒数决定，如需整剧请增加集数。"),
+        }
     return {
         "mode": payload.mode,
         "target_seconds": payload.target_seconds,
@@ -294,6 +310,7 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
         "episode_count": len(episodes),
         "total_planned_seconds": round(total, 3),
         "episodes": episodes,
+        "out_of_scope": out_of_scope,
     }
 
 
@@ -442,9 +459,16 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
             impact = {"affected_shots": [], "noop": True}
         else:
             raise
+    # One executor for "shots execute the frozen style": a book confirmation
+    # must never leave shots pointing at a superseded style, including the
+    # identical-style path (the recovery for shots landed under an old freeze).
+    from shine.api_freezes import apply_frozen_style_to_shots
+
+    revised = apply_frozen_style_to_shots(
+        db, project, actor=actor, reason="streamline storyboard book")
     return {"style_version_id": frozen.id, "sha256": frozen.sha256,
             "film_type": (frozen.snapshot or {}).get("film_type"),
-            "impact": impact}
+            "impact": impact, "revised_shot_ids": revised}
 
 
 # ---------------------------------------------------------------------------
@@ -604,10 +628,12 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
         trace={"document_id": document.id, "document_sha256": document.sha256,
                "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                "plan_version": plan.version, "plan_sha256": plan.sha256,
+               "target_seconds": payload.target_seconds,
+               "tolerance_seconds": payload.tolerance_seconds,
                "style_version_id": project.frozen_style_version_id, "asset_manifest_hash": asset_hash,
                "locked_facts": outline.payload_json.get("locked_facts", []),
                "stage": "STORYBOARD", "units": units, "cursor": 0, "results": [],
-               "blocked_episodes": {}, "automatic_replay": False},
+               "blocked_episodes": {}, "fit_closed_episodes": {}, "automatic_replay": False},
     )
     db.add(row)
     db.flush()
@@ -742,13 +768,41 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
     units = state["units"]
     cursor = state.get("cursor", 0)
     blocked = state.get("blocked_episodes", {})
-    # Skip units whose episode already failed: an independent episode continues.
-    while cursor < len(units) and units[cursor]["episode_id"] in blocked:
+    fit_closed = dict(state.get("fit_closed_episodes") or {})
+    target = state.get("target_seconds")
+    if target is not None:
+        # The confirmed per-episode seconds are the cause: once an episode's
+        # landed shots reach the goal, its remaining units are out of scope and
+        # must not buy more model calls.
+        from shine.director.contracts import planned_seconds
+        from shine.models import Shot
+
+        with factory() as db:
+            for ep_id in {u["episode_id"] for u in units}:
+                if ep_id in fit_closed or ep_id in blocked:
+                    continue
+                landed = 0.0
+                for result in state.get("results", []):
+                    if (result.get("unit") or {}).get("episode_id") != ep_id:
+                        continue
+                    for sid in (result.get("apply") or {}).get("shot_ids", []):
+                        shot = db.get(Shot, sid)
+                        if shot is not None and shot.project_id == project_id:
+                            landed += planned_seconds(shot)
+                if landed >= float(target):
+                    fit_closed[ep_id] = {"landed_seconds": round(landed, 1)}
+    state = {**state, "fit_closed_episodes": fit_closed}
+    # Skip units whose episode already failed or reached its confirmed target:
+    # an independent episode continues.
+    while cursor < len(units) and (units[cursor]["episode_id"] in blocked
+                                   or units[cursor]["episode_id"] in fit_closed):
         cursor += 1
     if cursor >= len(units):
         status = "NEEDS_REVIEW" if blocked else "SUCCEEDED"
         _finish_step(factory, task_id, version, worker_id, {**state, "cursor": cursor}, status,
                      "DIRECTOR_STORYBOARD_EPISODE_BLOCKED" if blocked else None)
+        for ep_id in fit_closed:
+            _auto_confirm_completed_episode(factory, project_id, state, ep_id)
         return
     unit = units[cursor]
     request_like = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
@@ -953,7 +1007,8 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
         return
     applied_offsets = {(r.get("unit") or {}).get("start_offset")
                        for r in state.get("results", [])}
-    if not all(u.get("start_offset") in applied_offsets for u in episode_units):
+    fit_closed = episode_id in (state.get("fit_closed_episodes") or {})
+    if not fit_closed and not all(u.get("start_offset") in applied_offsets for u in episode_units):
         return
     try:
         with factory.begin() as db:
@@ -966,12 +1021,11 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
                 # Already materialised (or absent): nothing to confirm again.
                 return
             # Auto-confirm is the authorised continuation of a plan the person
-            # already confirmed (target + deviation checked at book confirm), not
-            # a new creative checkpoint: it proceeds and records the landed
-            # deviation in the audit. The duration verdict is enforced on the
-            # person's explicit manual confirmation, where they can adjust or accept.
+            # already confirmed: the confirmed seconds govern, so an overrun is
+            # trimmed to the fitting prefix (fit_target) and the rest declared
+            # out of scope, never forced into the episode.
             confirm_episode_shots(db, project_id, episode_id, actor="local-user",
-                                  acknowledge_duration_deviation=True)
+                                  acknowledge_duration_deviation=True, fit_target=True)
     except HTTPException as exc:
         logger.warning("director_auto_confirm_blocked project=%s episode=%s detail=%s",
                        project_id, episode_id, exc.detail)
@@ -997,6 +1051,127 @@ def _prior_section_id(state, cursor) -> str | None:
     return prior["production_section_id"] if prior else None
 
 
+CREW_ROLE_LABELS = {
+    "scriptwriter": "编剧", "director": "导演", "cinematographer": "摄影",
+    "continuity_supervisor": "场记", "editor": "剪辑", "editor_edit_intent": "剪辑",
+    "director_arbitration": "导演裁定", "landing": "落镜",
+}
+RECONCILIATION_CODES = {
+    "AGENT_REQUEST_RECONCILIATION_REQUIRED",
+    "AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION",
+    "STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION",
+}
+_REFUSAL_LABELS = {
+    "UNAPPROVED_ASSET_OR_UNKNOWN_BEAT": "镜头引用了未批准的主素材，或剧本里不存在的情节拍",
+    "CHARACTER_MASTER_BINDING_REQUIRED": "人物还没有绑定已确认的主素材",
+    "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE": "画面描述里混入了中文，需要按提示词语言重写",
+    "DIALOGUE_NOT_IN_USER_SCRIPT": "对白不是剧本原文，需要按原文重写",
+}
+
+
+def _rejection_reason_label(rejection: dict) -> str:
+    code = rejection.get("rejection_reason_code") or rejection.get("code") or ""
+    if code == "LLM_FORMAT":
+        return ("模型输出被截断，格式解析失败（LLM_FORMAT）"
+                if rejection.get("provider_finish_reason") == "length"
+                else "模型返回的格式无法解析（LLM_FORMAT）")
+    if (code in {"LLM_TIMEOUT", "LLM_CONNECTION", "LLM_SERVER"}
+            and rejection.get("external_outcome") == "UNKNOWN"):
+        timeout = rejection.get("network_timeout_s")
+        if isinstance(timeout, int | float) and not isinstance(timeout, bool) and timeout > 0:
+            return f"模型超过 {round(timeout)} 秒无回应，结果未知（{code}）"
+    if code in RECONCILIATION_CODES:
+        return "上一次同输入请求中断，结果未知，需要先核对"
+    label = _REFUSAL_LABELS.get(code)
+    return f"{label}（{code}）" if label else (code or "分镜被拒绝")
+
+
+def episode_scene_facts(db, project_id: str, episode: dict, section_index: dict) -> list[dict]:
+    """The one 集→场→镜 join: scene membership/order from the confirmed plan,
+    scene identity from the outline, shots from the section apply ledger.
+
+    The shot table, the journey and the run-state projection all read this same
+    join; run units only overlay execution progress, never define membership.
+    """
+    from shine.materialprep.story import section_storyboard_shot_ids
+
+    scenes = []
+    for section_id in episode.get("section_ids") or []:
+        section = section_index.get(section_id) or {}
+        resolved = section_storyboard_shot_ids(db, project_id, section_id)
+        base = {"production_section_id": section_id,
+                "section_order": section.get("order"),
+                "section_title": section.get("title")}
+        if resolved.get("merged_into"):
+            scenes.append({**base, "state": "MERGED", "shot_count": 0, "shot_ids": [],
+                           "merged_into": resolved["merged_into"]})
+            continue
+        shot_ids = list(resolved["shot_ids"])
+        scenes.append({**base, "state": "APPLIED" if shot_ids else "PENDING",
+                       "shot_count": len(shot_ids), "shot_ids": shot_ids})
+    return scenes
+
+
+def _episode_blocker_view(db, project_id: str, episode: dict, entry: dict) -> dict:
+    """One server-side sentence + reconcile target for a blocked episode.
+
+    The panel callout and the journey rail both display this same projection;
+    neither derives its own scene/role/reason text any more.
+    """
+    rejection = (entry.get("rejections") or [{}])[0]
+    code = rejection.get("rejection_reason_code") or rejection.get("code") or ""
+    role = rejection.get("role") or entry.get("failed_role") or ""
+    units = episode.get("units") or []
+    blocked_unit = next((u for u in units if u["index"] == entry.get("unit_index")), None)
+    if blocked_unit is None:
+        blocked_unit = next((u for u in units if u["state"] == "BLOCKED"), None)
+    order = (blocked_unit or {}).get("section_order")
+    if order is None and blocked_unit is not None:
+        order = blocked_unit["index"] + 1
+    raw_title = ((blocked_unit or {}).get("section_title") or "").strip()
+    title = (raw_title if order is None else
+             re.sub(rf"^第\s*{order}\s*场[：:·,，、]?", "", raw_title))
+    # 粒度是镜：按同一份 集→场→镜 join 的顺序，被挡场次之后的下一镜位；
+    # 场次只作括号里的上下文。没有 join（legacy）时退回已落镜数+1。
+    blocked_sid = (blocked_unit or {}).get("production_section_id")
+    scenes = episode.get("sections") or []
+    next_shot = 0
+    for sec in scenes:
+        next_shot += sec.get("shot_count") or 0
+        if sec.get("production_section_id") == blocked_sid:
+            break
+    next_shot = next_shot + 1 if scenes else len(episode.get("shot_ids") or []) + 1
+    where = f"第 {next_shot} 镜"
+    if order is not None:
+        where += f"（第 {order} 场" + (f"：{title}" if title else "") + "）"
+    role_label = CREW_ROLE_LABELS.get(role, role or "分镜工种")
+    uncertain = code in RECONCILIATION_CODES or rejection.get("external_outcome") == "UNKNOWN"
+    landing = role == "landing"
+    tail = (" 这次请求的结果不确定，不会自动重发；点「核对这次请求并重试」先核对，"
+            "仍未知时由你的点击授权一次新请求。" if uncertain else
+            " 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。" if landing else
+            " 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。")
+    holder_id = (rejection.get("blocking_task") or {}).get("task_id")
+    if not holder_id and code in RECONCILIATION_CODES:
+        # The pre-check rejection names the holder directly; older traces may
+        # only carry the role.  Name the open record so the reconcile click
+        # targets it; the reconcile endpoint re-verdicts before any release.
+        holder_id = rejection.get("task_id")
+        if not holder_id:
+            holder = db.scalars(select(AgentTaskRecord).where(
+                AgentTaskRecord.project_id == project_id,
+                AgentTaskRecord.role_id == role,
+                AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW", "RECONCILING"]),
+            ).order_by(AgentTaskRecord.created_at.desc())).first()
+            holder_id = holder.id if holder else None
+    holder = db.get(AgentTaskRecord, holder_id) if holder_id else None
+    return {**entry,
+            "summary": f"卡在{where}：{role_label} · {_rejection_reason_label(rejection)}。{tail}",
+            "uncertain": uncertain,
+            "reconcile_task_id": holder.id if holder else None,
+            "reconcile_state_version": holder.state_version if holder else 0}
+
+
 def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
     """Per-episode progress of the newest director storyboard run."""
     row = db.scalars(select(AgentTaskRecord).where(
@@ -1019,38 +1194,88 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
         if outline is not None:
             section_index = {str(s["production_section_id"]): s
                              for s in (outline.payload_json or {}).get("production_sections", [])}
-    episodes: dict[str, dict] = {}
+    # Unit views: execution progress only.  Which 场/镜 belong to an episode is
+    # NOT decided here — the plan + section apply ledger own that join.
+    unit_views: dict[str, list[dict]] = {}
     for index, unit in enumerate(units):
-        ep = episodes.setdefault(unit["episode_id"], {
-            "episode_id": unit["episode_id"], "order": len(episodes) + 1,
-            "units": [], "shot_ids": [],
-            "status": "BLOCKED" if unit["episode_id"] in blocked else "PENDING",
-            "blocker": blocked.get(unit["episode_id"]),
-        })
         result = results.get(unit["start_offset"])
         applied = (result or {}).get("apply") or {}
-        shot_ids = applied.get("shot_ids", [])
         section = section_index.get(unit["production_section_id"])
-        ep["shot_ids"].extend(shot_ids)
-        ep["units"].append({
+        unit_views.setdefault(unit["episode_id"], []).append({
             "index": index, "production_section_id": unit["production_section_id"],
             "start_offset": unit["start_offset"],
-            "state": "APPLIED" if result else ("BLOCKED" if unit["episode_id"] in blocked else "PENDING"),
-            "shot_count": len(shot_ids),
+            # Only the unit that actually failed is BLOCKED; the episode's other
+            # unattempted units are queued behind it, not failed themselves.
+            "state": "APPLIED" if result else (
+                "BLOCKED" if blocked.get(unit["episode_id"], {}).get("unit_index") == index
+                else "PENDING"),
+            "shot_count": len(applied.get("shot_ids", [])),
             "material_notices": applied.get("material_notices", []),
             **({"section_order": section["order"], "section_title": section["title"]}
                if section is not None else {}),
         })
-    for ep in episodes.values():
-        if ep["status"] == "BLOCKED":
-            continue
-        if ep["units"] and all(u["state"] == "APPLIED" for u in ep["units"]):
+    episodes: list[dict] = []
+    plan = _latest_plan(db, project_id)
+    plan_payload = (plan.payload or {}) if plan is not None else {}
+    if plan is not None and plan_payload.get("mode") == "sections":
+        for order, episode in enumerate(plan_payload.get("episodes", []), start=1):
+            episode_id = episode.get("episode_id")
+            scenes = episode_scene_facts(db, project_id, episode, section_index)
+            ep_units = unit_views.get(episode_id, [])
+            marker = blocked.get(episode_id)
+            for sec in scenes:
+                if sec["state"] == "MERGED":
+                    continue
+                sec_units = [u for u in ep_units
+                             if u["production_section_id"] == sec["production_section_id"]]
+                if marker is not None and any(
+                        u["index"] == marker.get("unit_index") for u in sec_units):
+                    sec["state"] = "BLOCKED"
+                elif sec["shot_count"] and sec_units and all(
+                        u["state"] == "APPLIED" for u in sec_units):
+                    sec["state"] = "APPLIED"
+                elif sec["shot_count"] or any(u["state"] == "APPLIED" for u in sec_units):
+                    sec["state"] = "IN_PROGRESS"
+                elif row.status in {"QUEUED", "RUNNING"} and sec_units and any(
+                        u["index"] == trace.get("cursor") for u in sec_units):
+                    sec["state"] = "IN_PROGRESS"
+            shot_ids = [sid for sec in scenes for sid in sec["shot_ids"]]
+            active = [sec for sec in scenes if sec["state"] != "MERGED"]
+            if marker is not None:
+                status = "BLOCKED"
+            elif active and all(sec["shot_count"] for sec in active):
+                status = "APPLIED"
+            elif shot_ids:
+                status = "IN_PROGRESS"
+            else:
+                status = "PENDING"
+            episodes.append({
+                "episode_id": episode_id, "order": order,
+                "units": ep_units, "shot_ids": shot_ids, "status": status,
+                "blocker": marker, "sections": scenes,
+                "landed_shot_count": len(shot_ids),
+                "pending_section_count": sum(1 for sec in active if not sec["shot_count"]),
+            })
+    else:
+        # Legacy shots-mode runs: the trace is the only membership evidence.
+        for episode_id, ep_units in unit_views.items():
+            episodes.append({
+                "episode_id": episode_id, "order": len(episodes) + 1,
+                "units": ep_units,
+                "shot_ids": [sid for u in ep_units for sid in
+                             ((results.get(u["start_offset"]) or {}).get("apply") or {}).get("shot_ids", [])],
+                "status": "BLOCKED" if episode_id in blocked else "PENDING",
+                "blocker": blocked.get(episode_id), "sections": [],
+            })
+    for ep in episodes:
+        if ep["status"] == "BLOCKED" and ep.get("blocker"):
+            ep["blocker"] = _episode_blocker_view(db, project_id, ep, ep["blocker"])
+        elif ep["status"] == "PENDING" and ep["units"] and all(
+                u["state"] == "APPLIED" for u in ep["units"]):
             ep["status"] = "APPLIED"
-        elif any(u["state"] == "APPLIED" for u in ep["units"]):
-            ep["status"] = "IN_PROGRESS"
     return {"task_id": row.id, "status": row.status, "state_version": row.state_version,
             "error_code": row.error_code, "cursor": trace.get("cursor", 0),
-            "total_units": len(units), "episodes": list(episodes.values())}
+            "total_units": len(units), "episodes": episodes}
 
 
 def retry_director_episode(db, project_id: str, episode_id: str, *, expected_state_version: int,
@@ -1126,7 +1351,8 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
 
 
 def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
-                          acknowledge_duration_deviation: bool = False) -> dict[str, Any]:
+                          acknowledge_duration_deviation: bool = False,
+                          fit_target: bool = False) -> dict[str, Any]:
     """Land one episode's storyboarded sections into the confirmed plan.
 
     Only the target episode's sections must be applied; other episodes keep
@@ -1135,8 +1361,15 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     episode can move to materials/package while another episode stays pending.
     Re-confirming an already-landed episode reuses its shots — it never adds
     duplicates.
+
+    ``fit_target`` honours the person's confirmed per-episode seconds as the
+    cause: when the landed shots overrun the target window, the confirmation
+    selects the prefix that fits (the same single episode-splitter verdict,
+    cutting only between shots at continuity-safe boundaries) and declares the
+    remaining sections out of scope.  The overrun stays landed history; it is
+    never forced into the episode nor silently dropped.
     """
-    from shine.director.contracts import EpisodePlanPayload
+    from shine.director.contracts import EpisodePlanPayload, derive_episode_plan
     from shine.director.models import DirectorEpisodePlan
     from shine.materialprep.story import section_storyboard_shot_ids
 
@@ -1151,19 +1384,24 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     if target is None:
         raise HTTPException(404, "EPISODE_NOT_IN_PLAN")
     pending = []
+    merged_sections: list[str] = []
     shot_ids: list[str] = []
+    section_of_shot: dict[str, str] = {}
     for section_id in target.section_ids:
         resolved = section_storyboard_shot_ids(db, project_id, section_id)
         if resolved.get("merged_into"):
             # A bare title merged into a narrative neighbour is satisfied by the
             # merge; it owns no shots and must not block the episode or duplicate
             # the owner's shots.
+            merged_sections.append(section_id)
             continue
         if resolved["missing"] or not resolved["shot_ids"]:
             pending.append({"section_id": section_id,
                             "missing": resolved["missing"] or [{"reason": "SECTION_HAS_NO_SHOTS"}]})
+        for sid in resolved["shot_ids"]:
+            section_of_shot[sid] = section_id
         shot_ids.extend(resolved["shot_ids"])
-    if pending:
+    if pending and not fit_target:
         raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                   "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
                                   "pending": pending[:50]})
@@ -1173,13 +1411,35 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     from shine.director.contracts import duration_target_verdict, planned_seconds
     from shine.models import Shot
 
-    actual_total = 0.0
-    for shot_id in shot_ids:
-        shot = db.get(Shot, shot_id)
-        if shot is not None and shot.project_id == project_id:
-            actual_total += planned_seconds(shot)
+    ordered_shots = [db.get(Shot, sid) for sid in shot_ids]
+    ordered_shots = [s for s in ordered_shots if s is not None and s.project_id == project_id]
+    actual_total = sum(planned_seconds(s) for s in ordered_shots)
     duration_verdict = duration_target_verdict(
         actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
+    out_of_scope = list(payload.out_of_scope_section_ids)
+    kept_sections = list(target.section_ids)
+    if fit_target:
+        if not shot_ids:
+            raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
+                                      "message": "本集还没有落镜，没有可按目标确认的内容",
+                                      "episode_id": episode_id})
+        if duration_verdict and ordered_shots:
+            fit = derive_episode_plan(
+                ordered_shots, target_seconds=payload.target_seconds,
+                tolerance_seconds=payload.tolerance_seconds)
+            shot_ids = list(fit.episodes[0].shot_ids)
+            ordered_shots = [s for s in ordered_shots if s.id in set(shot_ids)]
+            actual_total = sum(planned_seconds(s) for s in ordered_shots)
+            duration_verdict = duration_target_verdict(
+                actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
+        selected_sections = {section_of_shot[sid] for sid in shot_ids}
+        out_of_scope += [sid for sid in target.section_ids
+                         if sid not in selected_sections and sid not in merged_sections
+                         and sid not in out_of_scope]
+        kept_sections = [sid for sid in target.section_ids
+                         if sid in selected_sections or sid in merged_sections]
+        out_of_scope += [row["section_id"] for row in pending
+                         if row["section_id"] not in out_of_scope]
     if duration_verdict and not acknowledge_duration_deviation:
         raise HTTPException(409, {**duration_verdict,
                                   "code": "EPISODE_DURATION_OUT_OF_TARGET",
@@ -1188,10 +1448,13 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     episodes = []
     for episode in payload.episodes:
         if episode.episode_id == episode_id:
-            episodes.append({**episode.model_dump(mode="json"), "shot_ids": shot_ids})
+            episodes.append({**episode.model_dump(mode="json"), "shot_ids": shot_ids,
+                             "section_ids": kept_sections})
         else:
             episodes.append(episode.model_dump(mode="json"))
-    materialized = EpisodePlanPayload.model_validate({**payload.model_dump(mode="json"), "episodes": episodes})
+    materialized = EpisodePlanPayload.model_validate({
+        **payload.model_dump(mode="json"), "episodes": episodes,
+        "out_of_scope_section_ids": out_of_scope})
     from shine.api_director import _section_plan_problems
 
     problems = _section_plan_problems(db, project_id, materialized)
@@ -1222,6 +1485,8 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
               {"episode_id": episode_id, "version": new_row.version,
                "shots": len(shot_ids), "streamline": True,
                "actual_seconds": round(actual_total, 1),
+               "fit_target": bool(fit_target),
+               "out_of_scope_sections": len(out_of_scope),
                "duration_acknowledged": bool(duration_verdict and acknowledge_duration_deviation)},
               project_id=project_id)
     return {"plan_version": new_row.version, "plan_sha256": new_row.sha256,
@@ -1318,11 +1583,13 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
             ShotSubtitle.shot_id.in_(shot_ids))).all()
     } if shot_ids else {}
     rows = []
+    ordered_shots = []
     total = 0.0
     for position, shot_id in enumerate(shot_ids):
         shot = db.get(Shot, shot_id)
         if shot is None or shot.project_id != project_id:
             continue
+        ordered_shots.append(shot)
         spec = shot.spec or {}
         prompt_row = frozen_prompts.get(shot.id)
         # A frozen prompt is only "in effect" while it still describes this
@@ -1374,13 +1641,46 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
             },
         })
     live_ids = [row["shot_id"] for row in rows]
+    # ③ inherits ②'s confirmed duration goal: the same verdict function the
+    # confirmation gate uses, so the table can never show a bare total that
+    # silently disagrees with the storyboard book.
+    from shine.director.contracts import derive_episode_plan, duration_target_verdict, planned_seconds
+
+    target = float(plan.target_seconds) if plan is not None else None
+    tolerance = float(plan.tolerance_seconds) if plan is not None else None
+    verdict = (duration_target_verdict(total, target, tolerance)
+               if target is not None and rows else None)
+    # The same single splitter verdict previews the target-fitting prefix, so
+    # the panel's "confirm per target" button shows exactly what the server
+    # will confirm — never a client-side guess.
+    target_fit = None
+    if verdict and ordered_shots:
+        fit = derive_episode_plan(ordered_shots, target_seconds=int(target),
+                                  tolerance_seconds=int(tolerance))
+        first = fit.episodes[0]
+        target_fit = {"shot_count": len(first.shot_ids),
+                      "seconds": round(first.planned_seconds, 1),
+                      "shot_ids": list(first.shot_ids)}
+    confirmed_seconds = None
+    if confirmed_shot_ids:
+        confirmed_seconds = round(sum(
+            planned_seconds(s) for s in
+            (db.get(Shot, sid) for sid in confirmed_shot_ids)
+            if s is not None and s.project_id == project_id), 1)
+    # A fit-trimmed confirmation is a prefix of the live landed shots: that is
+    # the person's deliberate scope, not a stale re-run.  A retake that replaces
+    # shots breaks the prefix and is stale.
+    stale = bool(confirmed_version is not None and confirmed_shot_ids
+                 and live_ids != confirmed_shot_ids
+                 and live_ids[:len(confirmed_shot_ids)] != confirmed_shot_ids)
     return {"episode_id": episode_id, "shots": rows,
             "total_editorial_seconds": round(total, 3), "shot_count": len(rows),
+            "target_seconds": target, "tolerance_seconds": tolerance,
+            "duration_verdict": verdict, "target_fit": target_fit,
             "confirmed_shot_ids": confirmed_shot_ids,
             "confirmed_version": confirmed_version,
-            "confirmation_stale": bool(confirmed_version is not None
-                                       and confirmed_shot_ids
-                                       and live_ids != confirmed_shot_ids)}
+            "confirmed_seconds": confirmed_seconds,
+            "confirmation_stale": stale}
 
 
 # ---------------------------------------------------------------------------
@@ -1422,19 +1722,24 @@ def _confirmed_material_bindings(db, project_id: str) -> dict[tuple[str, str], d
     from shine.comfyops.models import AssetRequirement
 
     carried: dict[tuple[str, str], dict[str, Any]] = {}
+    decided: set[tuple[str, str]] = set()
     for row in db.scalars(select(AssetRequirement).where(
             AssetRequirement.project_id == project_id,
             AssetRequirement.status == "CONFIRMED",
     ).order_by(AssetRequirement.created_at.desc())).all():
         payload = dict(row.payload or {})
-        asset_id = payload.get("bound_asset_id")
-        if not asset_id:
-            continue
         key = (str(payload.get("family") or ""), str(payload.get("entity_id") or ""))
-        carried.setdefault(key, {
-            "bound_asset_id": asset_id,
+        # 最新一次决定为准：取消采用（改回生成/上传）后，旧修订里的绑定
+        # 不得复活——否则取消永远生效不了。
+        if key in decided:
+            continue
+        decided.add(key)
+        carried[key] = {
+            "strategy": payload.get("strategy"),
+            "confirmed_by": payload.get("confirmed_by"),
+            "bound_asset_id": payload.get("bound_asset_id"),
             "bound_asset_sha256": payload.get("bound_asset_sha256"),
-        })
+        }
     return carried
 
 
@@ -1491,8 +1796,12 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
         if carried and not payload.get("manual_prompt"):
             payload["manual_prompt"] = carried
         adopted = carried_bindings.get(identity)
-        if adopted and not payload.get("bound_asset_id"):
-            payload.update(adopted)
+        if adopted:
+            if adopted.get("bound_asset_id") and not payload.get("bound_asset_id"):
+                payload.update({k: adopted[k] for k in ("bound_asset_id", "bound_asset_sha256")})
+            if adopted.get("confirmed_by"):
+                payload["strategy"] = adopted.get("strategy") or payload.get("strategy")
+                payload["confirmed_by"] = adopted["confirmed_by"]
         if payload != dict(row.payload or {}):
             row.payload = payload
             row.sha256 = graph_hash(payload)
@@ -1500,7 +1809,10 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
         shot_ids = sorted(set(evidence.get("shot_ids") or []))
         episodes_used = sorted(evidence.get("used_episodes") or [])
         critical = bool(evidence.get("critical", payload.get("critical", True)))
-        strategy = evidence.get("strategy") or payload.get("strategy")
+        # 已确认的决定是用户的事实；推导的 strategy 只是未决定行的建议，
+        # 不得把「取消采用改回生成」翻回「复用」。
+        strategy = (payload.get("strategy") if payload.get("confirmed_by")
+                    else (evidence.get("strategy") or payload.get("strategy")))
         matched_id = evidence.get("matched_master_id")
         user_specified = bool(evidence.get("user_specified") or payload.get("user_specified"))
         shot_ids_seen.update(shot_ids)
@@ -1571,6 +1883,7 @@ def derive_shot_materials(db, project_id: str, *, episode_ids: list[str] | None 
 def start_director_production(
     db, project, *, settings, episode_ids: list[str], workflow_profile_id: str | None = None,
     strategy: dict | None = None,
+    output: dict | None = None,
     actor: str = "local-user",
 ) -> dict[str, Any]:
     """The single main operation of the director page: shoot the chosen episodes.
@@ -1627,6 +1940,17 @@ def start_director_production(
         })
 
     ensure_project_rulepack(db, project_id)
+    # 画幅/分辨率的唯一赋值口：⑤ 的控制节点产出 OutputSpec，冻结进导演包，
+    # 派发时 series 读同一份 binding.output；这里不另存第二份事实。
+    output_payload = None
+    if output is not None:
+        from shine.schemas import OutputSpec
+
+        try:
+            output_payload = OutputSpec.model_validate(output).model_dump(mode="json")
+        except ValueError as exc:
+            raise HTTPException(422, {"code": "OUTPUT_SPEC_INVALID",
+                                      "message": str(exc)[:400]}) from exc
     strategy_sha = None
     if strategy is not None:
         from shine.strategy import GenerationStrategy
@@ -1642,7 +1966,8 @@ def start_director_production(
         if workflow_profile_id:
             raise HTTPException(422, {"code": "STRATEGY_PROFILE_EXCLUSIVE",
                                       "message": "生产策略与静态生成方案不能同时指定。"})
-    package = _package_for_selection(db, project_id, requested, strategy_sha=strategy_sha)
+    package = _package_for_selection(db, project_id, requested, strategy_sha=strategy_sha,
+                                     output=output_payload)
     built = False
     if package is None:
         if strategy is not None:
@@ -1651,6 +1976,7 @@ def start_director_production(
                 strategy=strategy,
                 episode_ids=requested,
                 generation_mode="Ref2VA",
+                output=output_payload,
                 policy=None,
                 created_by=actor,
                 settings=settings,
@@ -1676,6 +2002,7 @@ def start_director_production(
                 workflow_profile_id=profile.id,
                 episode_ids=requested,
                 generation_mode=profile.mode,
+                output=output_payload,
                 policy=None,
                 created_by=actor,
                 settings=settings,
@@ -1724,17 +2051,28 @@ def start_director_production(
     }
 
 
-def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strategy_sha: str | None = None):
-    """A confirmed, non-stale package whose scope - and strategy - match.
+def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strategy_sha: str | None = None,
+                           output: dict | None = None):
+    """A confirmed, non-stale package whose scope - strategy - and frame match.
 
     A package only replays when it was frozen for the same production
     strategy: reusing a profile package for a strategy shoot (or the
     reverse) would silently render under a different execution contract the
-    user never confirmed.
+    user never confirmed.  The output frame is part of that contract: a
+    changed orientation/resolution must build a new package, never replay
+    the old frame.
     """
     from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
+    from shine.schemas import OutputSpec
+
+    def norm(value) -> dict | None:
+        try:
+            return OutputSpec.model_validate(value or {}).model_dump(mode="json")
+        except ValueError:
+            return None
 
     wanted = set(episode_ids)
+    wanted_output = norm(output)
     rows = db.scalars(select(DirectorPackageVersion).where(
         DirectorPackageVersion.project_id == project_id,
         DirectorPackageVersion.status == "CONFIRMED",
@@ -1745,8 +2083,10 @@ def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strat
             DirectorPackageEpisode.package_id == package.id)).all())
         if covered != wanted:
             continue
-        frozen_sha = ((package.manifest or {}).get("binding") or {}).get("strategy_sha256")
-        if frozen_sha != strategy_sha:
+        binding = (package.manifest or {}).get("binding") or {}
+        if binding.get("strategy_sha256") != strategy_sha:
+            continue
+        if norm(binding.get("output")) != wanted_output:
             continue
         return package
     return None

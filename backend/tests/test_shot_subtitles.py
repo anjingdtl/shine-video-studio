@@ -106,6 +106,24 @@ def test_a_revision_compiled_for_one_episode_is_not_used_for_another():
     assert track_matches_episode(SimpleNamespace(episode_id=None), "e1") is True
 
 
+def test_subtitle_font_size_is_one_fact_and_reaches_the_burn_ass(studio):
+    """字号单一事实：默认40、可配置、越界拒绝；ASS 带 PlayRes 且用该字号。"""
+    from shine.media.subtitles import SubtitleCue, render_ass, subtitle_font_size
+
+    client, factory, _tmp, _settings = studio
+    project_id = create_project(client, "字幕字号")
+    assert client.get(f"/api/v1/projects/{project_id}/subtitle-style").json()["font_size"] == 40
+    assert client.put(f"/api/v1/projects/{project_id}/subtitle-style",
+                      json={"font_size": 28}, headers=LOCAL).json()["font_size"] == 28
+    assert client.put(f"/api/v1/projects/{project_id}/subtitle-style",
+                      json={"font_size": 200}, headers=LOCAL).status_code == 422
+    with factory() as db:
+        assert subtitle_font_size(db, project_id) == 28
+    ass = render_ass([SubtitleCue(index=1, start_s=0, end_s=1, text="x")], font_size=28)
+    assert "PlayResY: 720" in ass and "PlayResX: 1280" in ass
+    assert ",28," in ass  # Fontsize 字段
+
+
 def test_overlapping_lines_are_refused(studio):
     client, factory, _tmp, _settings = studio
     project_id, first, _second = _setup(client, factory)

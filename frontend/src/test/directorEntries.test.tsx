@@ -213,7 +213,7 @@ describe('② 剧本统筹先分集', () => {
     await waitFor(() => expect(generate).toBeEnabled());
     await user.click(generate);
     await waitFor(() => expect(posted).not.toBeNull());
-    // 集数优先、按场次自然切分：不需要先有镜头，也不再有第二套分集入口。
+    // 秒数驱动装箱、集数为上限：不需要先有镜头，也不再有第二套分集入口。
     expect(posted?.['episode_count']).toBe(2);
     expect(posted?.['target_seconds']).toBe(60);
   });

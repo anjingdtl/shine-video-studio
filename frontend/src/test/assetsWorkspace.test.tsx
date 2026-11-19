@@ -21,6 +21,10 @@ const apiMock = vi.hoisted(() => ({
     id: 'assignment-1', project_id: 'project-a', title: 'Portrait', role: 'character',
     entity_id: '林岚', usage_scope: 'project', project_asset_id: 'project-asset-1',
   })),
+  getVisualFacts: vi.fn(async (_id: string) => ({
+    project_id: 'p1', project_title: '雾港', film_style: 'cel-shaded', film_type: 'animation',
+    world: '中世纪欧洲，人物着长袍皮甲。', style_version: 1,
+  })),
 }));
 
 vi.mock('../asset-center/api', () => ({
@@ -33,6 +37,7 @@ vi.mock('../asset-center/api', () => ({
   grantVersionPromotion: apiMock.grantVersionPromotion,
   promoteLibraryVersion: apiMock.promoteLibraryVersion,
   assignLibraryVersion: apiMock.assignLibraryVersion,
+  getVisualFacts: apiMock.getVisualFacts,
   getCapabilities: vi.fn(async () => ({
     workspaces: ['director', 'assets'],
     image_capabilities: Object.fromEntries(['T2I', 'I2I', 'INPAINT', 'MULTIREF', 'WARDROBE', 'RGBA'].map((mode) => [
@@ -313,6 +318,30 @@ it('选择人物穿戴时自动把首张底图映射为人物槽位', async () =
   const firstRole = await screen.findByLabelText('第 1 张图片用途');
   await waitFor(() => expect(firstRole).toHaveValue('subject'));
   expect(firstRole).toHaveDisplayValue('人物主体');
+});
+
+it('选中作品时文生图继承导演风格/类型/时代并随请求发送 project_id', async () => {
+  apiMock.createImageJobs.mockClear();
+  const user = userEvent.setup();
+  render(<AssetsWorkspace page="images" onNavigate={vi.fn()} onWorkspace={vi.fn()}
+    projects={[]} projectId="p1" projectAssets={[]} />);
+
+  expect(await screen.findByText(/继承当前作品《雾港》的导演风格与类型/)).toBeInTheDocument();
+  expect(screen.getByText(/动画/)).toBeInTheDocument();
+  expect(screen.getByText(/中世纪欧洲/)).toBeInTheDocument();
+  await user.type(screen.getByLabelText('画面描述'), '罗兰，青年男性，短发');
+  await user.click(screen.getByRole('button', { name: '运行一次本机验证样例' }));
+  await waitFor(() => expect(apiMock.createImageJobs).toHaveBeenCalledTimes(1));
+  expect(apiMock.createImageJobs.mock.calls[0][0]).toMatchObject({ project_id: 'p1', mode: 'T2I' });
+});
+
+it('未选中作品时不读取也不注入项目风格', async () => {
+  apiMock.getVisualFacts.mockClear();
+  render(<AssetsWorkspace page="images" onNavigate={vi.fn()} onWorkspace={vi.fn()}
+    projects={[]} projectId="" projectAssets={[]} />);
+  await screen.findByLabelText('画面描述');
+  expect(apiMock.getVisualFacts).not.toHaveBeenCalled();
+  expect(screen.queryByText(/继承当前作品/)).not.toBeInTheDocument();
 });
 
 it('本机验证按钮提交单个 validation_only 样例', async () => {

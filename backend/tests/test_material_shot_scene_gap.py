@@ -153,6 +153,115 @@ def test_a_narrator_only_shot_in_a_reference_scene_gets_its_own_requirement(stud
     assert ("character", "沈砚") in by_key
 
 
+def test_each_scene_plate_is_injected_only_into_its_own_shots(studio):
+    """逐镜注入：两场两镜，各场底图只进本场镜头，不互相塞、不全塞。"""
+    client, factory, _tmp, _settings = studio
+    project_id, style, _document_unused = _prepare(client, factory, "逐镜注入")
+    from shine.materialprep.source_spans import segment_document
+    from shine.models import AgentArtifact, AgentTaskRecord, AppSetting, ProjectDocument, utcnow
+
+    # 第一场足够长，使默认分块把两场切成不同的 scene_key。
+    body1 = "夜。铺子里只亮着一盏工作灯。他掀开表盖，看见钟背刻着的名字。" * 150
+    script = f"第1场：旧物修复铺\n{body1}\n第2场：码头\n晨。雾里的栈桥很长，望不到头，汽笛声从水面传过来。\n"
+    internal = segment_document(script)
+    assert len(internal) >= 2
+    split = script.index("第2场")
+    with factory.begin() as db:
+        doc = ProjectDocument(
+            project_id=project_id, filename="母本.txt", content_type="text/plain",
+            sha256=hashlib.sha256(script.encode("utf-8")).hexdigest(),
+            source_format="txt", text=script)
+        db.add(doc)
+        db.flush()
+        document = {"id": doc.id, "sha256": doc.sha256}
+    rows = [{"production_section_id": "sec-1", "order": 1, "title": SECTION_TITLE,
+             "estimated_duration_s": 12, "start_offset": 0, "end_offset": split},
+            {"production_section_id": "sec-2", "order": 2, "title": "第2场：码头",
+             "estimated_duration_s": 12, "start_offset": split, "end_offset": len(script)}]
+    payload = {"production_sections": rows, "document_id": document["id"],
+               "document_sha256": document["sha256"]}
+    with factory.begin() as db:
+        source = AgentTaskRecord(
+            project_id=project_id, role_id="story_outline_run",
+            request_identity=f"outline2-{project_id}", input_hash="0" * 64,
+            asset_manifest_hash="0" * 64, rulepack_id="test", rulepack_hash="0" * 64,
+            model_profile_id="test", model_id="test", status="SUCCEEDED", trace={})
+        db.add(source)
+        db.flush()
+        outline_artifact = AgentArtifact(
+            project_id=project_id, kind="StoryOutline", schema_version="1.0",
+            payload_json=payload, sha256=digest_of(payload), producer_role="scriptwriter",
+            source_task_id=source.id, approved_by="local-user", approved_at=utcnow())
+        db.add(outline_artifact)
+        db.flush()
+        outline_id = outline_artifact.id
+        for key, title in ((internal[0].key, SECTION_TITLE), (internal[-1].key, "第2场：码头")):
+            prep = {"schema_version": "1.0", "scene_key": key, "summary": title,
+                    "locked_facts": [], "questions": [],
+                    "requirements": [{"family": "scene", "name": title,
+                                      "description": title, "critical": True}]}
+            db.add(AgentArtifact(
+                project_id=project_id, kind="ScriptPreparation", schema_version="1.0",
+                payload_json=prep, sha256=digest_of(prep), producer_role="producer",
+                source_task_id=source.id))
+    shot_a = create_shot(client, project_id, style["id"], title="场一旁白镜", duration=6,
+                         characters=["旁白"], dialogue=[{"speaker_id": "旁白", "text": "他抬起手。",
+                                                        "start_s": 0.5, "end_s": 3.0}])
+    shot_b = create_shot(client, project_id, style["id"], title="场二旁白镜", duration=6,
+                         characters=["旁白"], dialogue=[{"speaker_id": "旁白", "text": "雾散了。",
+                                                        "start_s": 0.5, "end_s": 3.0}])
+    cam1, cam2 = f"camera-a-{outline_id}", f"camera-b-{outline_id}"
+    with factory.begin() as db:
+        db.add(AgentTaskRecord(
+            project_id=project_id, role_id="story_section_run",
+            request_identity=f"section2-{outline_id}", input_hash="0" * 64,
+            asset_manifest_hash="0" * 64, rulepack_id="test", rulepack_hash="0" * 64,
+            model_profile_id="test", model_id="test", status="SUCCEEDED",
+            trace={"outline_artifact_id": outline_id,
+                   "units": [{"production_section_id": "sec-1", "start_offset": 0},
+                             {"production_section_id": "sec-2", "start_offset": split}],
+                   "results": [{"unit": {"start_offset": 0},
+                                "storyboard": {"steps": {"cinematographer": {"artifact_id": cam1}}}},
+                               {"unit": {"start_offset": split},
+                                "storyboard": {"steps": {"cinematographer": {"artifact_id": cam2}}}}]}))
+        db.add(AppSetting(key=f"film-apply:{cam1}", value={"shot_ids": [shot_a["id"]]}))
+        db.add(AppSetting(key=f"film-apply:{cam2}", value={"shot_ids": [shot_b["id"]]}))
+    plan = EpisodePlanPayload.model_validate({
+        "mode": "shots", "target_seconds": 60, "tolerance_seconds": 15,
+        "episodes": [{"episode_id": "ep-01", "order": 1, "title": "第 1 集",
+                      "section_ids": ["sec-1", "sec-2"], "shot_ids": [shot_a["id"], shot_b["id"]],
+                      "planned_seconds": 24}],
+    })
+    with factory.begin() as db:
+        db.add(DirectorEpisodePlan(
+            project_id=project_id, version=1, status="CONFIRMED",
+            target_seconds=60, tolerance_seconds=15,
+            payload=plan.model_dump(mode="json"),
+            sha256=digest_of(plan.model_dump(mode="json")), source="supplied"))
+    plate1 = upload_asset(client, project_id, content=b"\x89PNG\r\n\x1a\n-plate-1",
+                          filename="铺子.png", role="scene", entity_id=SECTION_TITLE)
+    _approve_lock_keeping_operator(client, plate1["id"])
+    plate2 = upload_asset(client, project_id, content=b"\x89PNG\r\n\x1a\n-plate-2",
+                          filename="码头.png", role="scene", entity_id="第2场：码头")
+    _approve_lock_keeping_operator(client, plate2["id"])
+
+    body = _derive(client, project_id)
+    by_key = {(row["family"], row["entity_id"]): row for row in body["requirements"]}
+    assert by_key[("scene", SECTION_TITLE)]["used_shot_ids"] == [shot_a["id"]]
+    assert by_key[("scene", "第2场：码头")]["used_shot_ids"] == [shot_b["id"]]
+
+    from tests.test_material_adoption_one_write import _bindings, _confirm
+    _confirm(client, project_id, [
+        {"requirement_id": by_key[("scene", SECTION_TITLE)]["requirement_id"],
+         "strategy": "reuse_master", "entity_id": SECTION_TITLE, "asset_id": plate1["id"]},
+        {"requirement_id": by_key[("scene", "第2场：码头")]["requirement_id"],
+         "strategy": "reuse_master", "entity_id": "第2场：码头", "asset_id": plate2["id"]},
+    ])
+    assert _bindings(factory, shot_a["id"]) == [(plate1["id"], "picture", None)]
+    assert _bindings(factory, shot_b["id"]) == [(plate2["id"], "picture", None)], \
+        "每镜只注入本场场景，不塞别场、不全塞"
+
+
 def test_the_existing_scene_master_of_that_section_is_reused(studio):
     client, factory, _tmp, _settings = studio
     project_id, style, document = _prepare(client, factory, "旁白镜复用场景")

@@ -182,15 +182,13 @@ describe('任务提交与模式一致', () => {
     });
   });
 
-  it('演示状态下任务只能是 mock，真实选项被锁', async () => {
+  it('演示状态下任务只能是 mock，高级设置不再有平行生成方式开关', async () => {
     realReadyProject();
     window.location.hash = '#d/advanced';
     const user = userEvent.setup();
     render(<App />);
-    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
-    const card = document.querySelector('.queue-provider-card') as HTMLElement;
-    const provider = await within(card).findByLabelText(/生成方式/);
-    expect((provider as HTMLSelectElement).disabled).toBe(true);
+    await screen.findByText(/显示偏好、制片规范与/);
+    expect(screen.queryByLabelText(/生成方式/)).toBeNull();
     // 单镜提交入口在镜头拆解页,演示状态下同样只能提交 mock。
     window.location.hash = '#d/produce';
     window.dispatchEvent(new HashChangeEvent('hashchange'));

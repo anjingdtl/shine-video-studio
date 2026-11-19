@@ -211,6 +211,41 @@ def test_delivery_assembles_a_playable_reel(studio):
     assert any(event["event_type"] == "DELIVERY_ASSEMBLED" for event in events)
 
 
+def test_delivery_burns_subtitles_with_a_windows_safe_filter_path(studio):
+    """字幕烧录：ASS 文本落盘+filtergraph 转义，Windows 盘符/反斜杠不再炸滤镜。"""
+    client, factory, tmp_path, settings = studio
+    project = create_project(client, "字幕烧录")
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    job_id, attempt_id, artifact_id, relative, digest = _seed_passed_job(
+        factory, settings, project, shot["id"], style["id"]
+    )
+    saved = client.post(f"/api/v1/projects/{project}/subtitles", headers={"X-Shine-Local-Action": "1"},
+                        json={"cues": [{"index": 1, "start_s": 0.2, "end_s": 1.2, "text": "殿下，醒醒……"}]})
+    assert saved.status_code == 201, saved.text
+    rev = saved.json()["revision"]
+    assert client.post(f"/api/v1/projects/{project}/subtitles/{rev}/approve",
+                       headers={"X-Shine-Local-Action": "1"}).status_code == 200
+
+    response = client.post(f"/api/v1/projects/{project}/deliveries", json={
+        "schema_version": "1.1",
+        "clips": [{"job_id": job_id, "attempt_id": attempt_id, "artifact_id": artifact_id,
+                   "in_s": 0.0, "out_s": 1.5, "transition": "CUT", "reason": "burn"}],
+        "fps": 24.0, "subtitle_revision": rev,
+    })
+    assert response.status_code == 201, response.text
+    body = response.json()
+    reel = settings.data_dir / body["storage_path"]
+    assert reel.is_file()
+    kinds = [s["codec_type"] for s in _ffprobe(reel, settings).get("streams", [])]
+    assert kinds.count("video") == 1 and kinds.count("audio") == 1
+    with factory() as db:
+        from shine.models import MediaArtifact
+        artifact = db.get(MediaArtifact, body["artifact_id"])
+        assert artifact.provenance.get("subtitles_composited") is True
+        assert artifact.provenance.get("subtitles_sha256") == saved.json()["sha256"]
+
+
 def test_delivery_refuses_a_source_without_a_passed_technical_gate(studio):
     client, factory, tmp_path, settings = studio
     project = create_project(client, "交付门禁")

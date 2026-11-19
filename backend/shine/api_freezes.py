@@ -86,6 +86,35 @@ def _revision_payload(shot: Shot, style_id: str) -> ShotSpec:
     return spec.model_copy(update={"style_version_id": style_id, "prompt_style": None})
 
 
+def apply_frozen_style_to_shots(db, project, *, actor: str, reason: str = "") -> list[str]:
+    """The one executor that makes old shots execute the current frozen style.
+
+    The freeze controls and the storyboard-book confirmation all hang off this
+    single function, so freezing a new style never leaves shots pointing at a
+    superseded version (which the package precheck would then refuse by name).
+    """
+    if not project.frozen_style_version_id:
+        raise HTTPException(409, "FREEZE_STYLE_NOT_FROZEN")
+    _refuse_active(_active_shot_ids(db, project.id), "有镜头正在制作，先等它收尾再应用新风格")
+    target = db.get(StyleVersion, project.frozen_style_version_id)
+    if target is None:
+        raise HTTPException(409, "FREEZE_STYLE_NOT_FROZEN")
+    revised: list[str] = []
+    for shot in db.scalars(select(Shot).where(Shot.project_id == project.id)).all():
+        spec = ShotSpec.model_validate(shot.spec)
+        if spec.style_version_id == target.id:
+            continue
+        revise_shot_record(
+            db, project, shot, spec=_revision_payload(shot, target.id), actor=actor
+        )
+        revised.append(shot.id)
+    add_audit(
+        db, actor, "STYLE_APPLIED_TO_SHOTS", "style_version", target.id,
+        {"revised_shot_ids": sorted(revised), "reason": reason}, project_id=project.id,
+    )
+    return sorted(revised)
+
+
 @router.post("/projects/{project_id}/freeze/style/refresh")
 def refresh_frozen_style(
     project_id: str,
@@ -99,7 +128,6 @@ def refresh_frozen_style(
         raise HTTPException(409, "FREEZE_STYLE_NOT_FROZEN")
     if project.frozen_style_version_id != body.expected_style_version_id:
         raise HTTPException(409, "FREEZE_STYLE_CHANGED")
-    _refuse_active(_active_shot_ids(db, project_id), "有镜头正在制作，先等它收尾再解锁风格")
     if not project.style_draft:
         raise HTTPException(409, "FREEZE_STYLE_DRAFT_MISSING")
 
@@ -113,15 +141,9 @@ def refresh_frozen_style(
             db, project, approval_note=body.approval_note, actor=actor
         )
 
-    revised: list[str] = []
-    for shot in db.scalars(select(Shot).where(Shot.project_id == project_id)).all():
-        spec = ShotSpec.model_validate(shot.spec)
-        if spec.style_version_id == target.id:
-            continue
-        revise_shot_record(
-            db, project, shot, spec=_revision_payload(shot, target.id), actor=actor
-        )
-        revised.append(shot.id)
+    # The shared executor guards active production; a refusal rolls the whole
+    # refresh (freeze included) back in this one transaction.
+    revised = apply_frozen_style_to_shots(db, project, actor=actor, reason=body.reason)
 
     add_audit(
         db,
@@ -158,33 +180,9 @@ def apply_current_style_to_shots(
 ) -> dict:
     """Revise every shot that still points at an older frozen style."""
     project = require_project(db, project_id)
-    if not project.frozen_style_version_id:
-        raise HTTPException(409, "FREEZE_STYLE_NOT_FROZEN")
-    _refuse_active(_active_shot_ids(db, project_id), "有镜头正在制作，先等它收尾再应用新风格")
-    target = db.get(StyleVersion, project.frozen_style_version_id)
-    if target is None:
-        raise HTTPException(409, "FREEZE_STYLE_NOT_FROZEN")
-
-    revised: list[str] = []
-    for shot in db.scalars(select(Shot).where(Shot.project_id == project_id)).all():
-        spec = ShotSpec.model_validate(shot.spec)
-        if spec.style_version_id == target.id:
-            continue
-        revise_shot_record(
-            db, project, shot, spec=_revision_payload(shot, target.id), actor=actor
-        )
-        revised.append(shot.id)
-    add_audit(
-        db,
-        actor,
-        "STYLE_APPLIED_TO_SHOTS",
-        "style_version",
-        target.id,
-        {"revised_shot_ids": sorted(revised), "reason": body.reason},
-        project_id=project_id,
-    )
+    revised = apply_frozen_style_to_shots(db, project, actor=actor, reason=body.reason)
     db.commit()
-    return {"style_version_id": target.id, "revised_shot_ids": sorted(revised)}
+    return {"style_version_id": project.frozen_style_version_id, "revised_shot_ids": revised}
 
 
 @router.post("/projects/{project_id}/freeze/assets/{asset_id}/unlock")

@@ -38,6 +38,25 @@ SAFE_REJECTIONS = {
 }
 
 
+class AgentRequestBlocked(ValueError):
+    """A prior request still owns this input.
+
+    The blocking row travels with the refusal so the display layer can name
+    (and reconcile) the exact record that holds the identity, instead of
+    showing a retry button the gate will refuse again.
+    """
+
+    def __init__(self, code: str, blocking: dict):
+        super().__init__(code)
+        self.blocking = blocking
+
+
+def _blocking_facts(row: AgentTaskRecord) -> dict:
+    return {"task_id": row.id, "status": row.status,
+            "external_outcome": row.trace.get("external_outcome"),
+            "phase": row.trace.get("phase")}
+
+
 def rejection_reason(exc):
     """Never store exception text or a provider's rejected output."""
     if isinstance(exc, ValidationError):
@@ -65,9 +84,11 @@ def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, 
                 continue
             external_outcome = row.trace.get("external_outcome")
             if external_outcome == "UNKNOWN":
-                raise ValueError("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION")
+                raise AgentRequestBlocked("AGENT_UNKNOWN_OUTCOME_REQUIRES_RECONCILIATION",
+                                          _blocking_facts(row))
             if external_outcome == "NOT_SENT":
-                raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
+                raise AgentRequestBlocked("AGENT_REQUEST_RECONCILIATION_REQUIRED",
+                                          _blocking_facts(row))
             if external_outcome == "RESPONSE_RECEIVED":
                 # The provider answered and the answer was refused; nothing is
                 # still in flight, so no answer is being bought twice.  One new
@@ -77,11 +98,14 @@ def guard_request(db, project_id, role, input_hash, profile, *, text_hash=None, 
                 # would pay for the same unusable answer again.
                 if authorize_replay_task_id == row.id:
                     continue
-                raise ValueError("AGENT_RESPONSE_RECEIVED_NO_REPLAY")
-            raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
+                raise AgentRequestBlocked("AGENT_RESPONSE_RECEIVED_NO_REPLAY",
+                                          _blocking_facts(row))
+            raise AgentRequestBlocked("AGENT_REQUEST_RECONCILIATION_REQUIRED",
+                                      _blocking_facts(row))
         old_contract = row.trace.get("review_contract_sha256")
         if row.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}:
-            raise ValueError("AGENT_REQUEST_RECONCILIATION_REQUIRED")
+            raise AgentRequestBlocked("AGENT_REQUEST_RECONCILIATION_REQUIRED",
+                                      _blocking_facts(row))
         binding = row.trace.get("review_provider") or {}
         same_provider = (
             {key: binding.get(key) for key in ("kind", "model", "base_url_sha256")} == {

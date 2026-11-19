@@ -77,6 +77,91 @@ it('单镜秒数上限随分镜书确认进入冻结风格（同一控制链路�
   stub.restore();
 });
 
+it('切页回来读回已持久化的决定，而不是硬编码默认值（三原则）', async () => {
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
+      { id: 'wong-kar-wai', name_zh: '王家卫参考风格', summary_zh: '城市情绪', version: '1.0.0' },
+      { id: 'mamoru-oshii', name_zh: '押井守动画电影参考风格', summary_zh: '建筑空间', version: '1.0.0' },
+    ]) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([
+      { version: 1, status: 'CONFIRMED', target_seconds: 60,
+        payload: { target_seconds: 60, episodes: [{ episode_id: 'e1' }] } },
+    ]) },
+    { method: 'GET', pattern: /\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({
+      style_draft: { film_type: 'animation', dialogue_ratio_percent: 20,
+        narration_level: 'low', max_shot_seconds: 10 },
+      draft_source: { profile_id: 'mamoru-oshii' },
+      frozen_source: { profile_id: 'mamoru-oshii' },
+    }) },
+  ]);
+  const { unmount } = render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  await screen.findByRole('option', { name: /押井守/ });
+  await waitFor(() => {
+    expect((screen.getByLabelText('导演风格') as HTMLSelectElement).value).toBe('mamoru-oshii');
+    expect((screen.getByLabelText('影片类型') as HTMLSelectElement).value).toBe('animation');
+    expect((screen.getByLabelText('集数') as HTMLInputElement).value).toBe('1');
+    expect((screen.getByLabelText('每集目标秒数') as HTMLInputElement).value).toBe('60');
+    expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
+  });
+  expect(screen.getByRole('button', { name: '少对白' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('button', { name: '少旁白' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText(/第 1 版已确认/)).toBeInTheDocument();
+  // 模拟切走再回来：重新挂载仍读同一份服务端事实。
+  unmount();
+  render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  await waitFor(() => {
+    expect((screen.getByLabelText('导演风格') as HTMLSelectElement).value).toBe('mamoru-oshii');
+    expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
+  });
+  stub.restore();
+});
+
+it('确认后改影片类型：经原确认入口重新冻结，而不是选了不生效', async () => {
+  const confirms: Array<Record<string, unknown>> = [];
+  const generates: unknown[] = [];
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
+      { id: 'noir', name_zh: '黑色电影', summary_zh: '低照度、硬光', version: '1.0' },
+    ]) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([
+      { version: 1, status: 'CONFIRMED', sha256: 'e'.repeat(64), target_seconds: 60,
+        payload: { target_seconds: 60, episodes: [{ episode_id: 'e1' }] } },
+    ]) },
+    { method: 'GET', pattern: /\/projects\/proj-1\/director-style$/, respond: () => jsonResponse({
+      style_draft: { film_type: 'live_action', dialogue_ratio_percent: 45,
+        narration_level: 'none', max_shot_seconds: 15 },
+      draft_source: { profile_id: 'noir' },
+      frozen_source: { profile_id: 'noir' },
+    }) },
+    { method: 'POST', pattern: /\/director\/storyboard-book$/, respond: (_url, init) => {
+      generates.push(init); return jsonResponse(BOOK);
+    } },
+    { method: 'POST', pattern: /\/director\/storyboard-book\/confirm$/, respond: (_url, init) => {
+      confirms.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return jsonResponse({ plan_version: 1, style: { style_version_id: 'style-2', film_type: 'animation' } });
+    } },
+  ]);
+  const user = userEvent.setup();
+  render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  await screen.findByText(/第 1 版已确认/);
+  await waitFor(() => {
+    expect((screen.getByLabelText('影片类型') as HTMLSelectElement).value).toBe('live_action');
+  });
+  // 未改选择时不出现重新确认入口。
+  expect(screen.queryByRole('button', { name: /重新确认分镜书/ })).toBeNull();
+  fireEvent.change(screen.getByLabelText('影片类型'), { target: { value: 'animation' } });
+  await screen.findByText(/风格选择已修改/);
+  await user.click(screen.getByRole('button', { name: /重新确认分镜书（冻结新风格）/ }));
+  await waitFor(() => expect(confirms).toHaveLength(1));
+  expect(confirms[0]).toMatchObject({
+    plan_version: 1,
+    expected_sha256: 'e'.repeat(64),
+    style: { profile_id: 'noir', film_type: 'animation' },
+  });
+  expect(generates).toHaveLength(0);
+  stub.restore();
+});
+
 it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注册时的旧值', async () => {
   const bodies: Array<Record<string, unknown>> = [];
   const stub = new StudioStub([

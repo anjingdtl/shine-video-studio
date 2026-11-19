@@ -340,7 +340,7 @@ def create_series(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
-        blockers = strategy_blockers(strategy)
+        blockers = strategy_blockers(strategy, db, settings)
         if blockers:
             raise HTTPException(409, detail={
                 "code": "STRATEGY_BLOCKED",

@@ -495,12 +495,21 @@ def make_studio(tmp_path: Path, *, max_upload_bytes: int = 25 * 1024 * 1024):
     engine = make_engine(database_url)
     Base.metadata.create_all(engine)
     factory = make_session_factory(engine)
+    # 测试不得读真机渲染器：默认 8188 可能被操作者正在跑的生产占用（真实节点表
+    # 与测试节点不同），登记时的尽力而为活体校验会把真机事实写进测试台账。
+    # 取一个刚释放的环回端口（几乎必然无人监听），需要渲染器的测试显式传 fake。
+    import socket
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
     settings = Settings(
         data_dir=data_dir,
         database_url=database_url,
         max_upload_bytes=max_upload_bytes,
         secret_store_dir=data_dir / "secrets",
         worker_offline_after_seconds=30,
+        comfyui_base_url=f"http://127.0.0.1:{closed_port}",
         # A synthetic ComfyUI root has no real node packs on disk.  The fixture
         # says so explicitly, so the gate reports the missing packs instead of
         # refusing every configuration contract test.
@@ -787,3 +796,18 @@ def create_comfy_job(
         workflow_profile_id=profile["id"],
         **kwargs,
     )
+
+
+def stamp_brief_basis(factory, item_id: str) -> None:
+    """Bind a preset brief to the current visual facts so reuse is provable.
+
+    A brief without a basis is stale history by contract (the frozen style or
+    world may have changed since it was written); tests that preset a brief to
+    exercise the render path must stamp the basis the producer would write.
+    """
+    from shine.materialprep import brief as brief_module
+    from shine.materialprep.models import MaterialItem
+    with factory.begin() as db:
+        row = db.get(MaterialItem, item_id)
+        row.payload = {**row.payload,
+                       "brief_basis": brief_module._load_context(factory, item_id)["brief_basis"]}

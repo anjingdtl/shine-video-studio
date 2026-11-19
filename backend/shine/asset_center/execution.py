@@ -790,10 +790,13 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
             mask_content = _read_mask(factory, settings, payload["mask"]) if mode == "INPAINT" else None
             _verify_parent_snapshot(factory, settings, payload)
             if mode == "T2I" or (mode == "RGBA" and not reference_rows):
+                # The prompt was composed at creation (project film medium + world
+                # note + negatives).  Submit exactly that text and its negative;
+                # an empty negative here would drop the medium exclusions.
                 prompt = image_execution.image_prompts.ImagePrompt(
                     prompt=str(payload.get("prompt") or ""),
-                    negative_prompt="",
-                    template_version="shine-assets-user-prompt-v1",
+                    negative_prompt=str(payload.get("negative_prompt") or ""),
+                    template_version=str(payload.get("prompt_template_version") or "shine-assets-user-prompt-v1"),
                     sha256=hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
                 )
                 graph = image_execution._build_graph(config, prompt, seed=int(seed), width=width, height=height)

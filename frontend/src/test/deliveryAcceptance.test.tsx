@@ -203,7 +203,8 @@ describe('导演模式待审清单', () => {
     render(<App />);
     await gotoDirectorPage(user, /第 7 阶段/);
 
-    expect(await screen.findByText('技术完成 ≠ 你已经认可')).toBeInTheDocument();
+    // 验收已并入集预览卡：选集后该集显示「待你确认」与「观看并确认」。
+    expect(await screen.findByText('每一集都能单独播放与确认')).toBeInTheDocument();
     expect(screen.getByText('待你确认')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '观看并确认' })).toBeInTheDocument();
   });

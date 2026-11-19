@@ -333,15 +333,18 @@ describe('⑦ 逐集成片', () => {
     render(<App />);
     await gotoDirectorPage(user, /第 7 阶段/);
 
-    // 两集同时出现：第一集是成片，第二集是"拍摄中"。
-    expect(await screen.findByText('每一集都能单独播放')).toBeInTheDocument();
-    expect(await screen.findByText('第1集')).toBeInTheDocument();
-    expect(screen.getByText('第2集')).toBeInTheDocument();
-    expect(screen.getAllByText('已交付').length).toBeGreaterThan(0);
-    expect(screen.getAllByText('拍摄中').length).toBeGreaterThan(0);
+    // 单一选集：两集都在选集条里；默认选中第一集，其成片可播放。
+    expect(await screen.findByText('每一集都能单独播放与确认')).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /第1集/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /第2集/ })).toBeInTheDocument();
+    expect(screen.getAllByText(/已交付/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/拍摄中/).length).toBeGreaterThan(0);
     const player = document.querySelector(
       'video[src*="/api/v1/deliveries/artifact-1/media"]');
     expect(player).not.toBeNull();
+    // 切换选集后只展示该集的镜网格（第二集拍摄中，无成片预览）。
+    await user.click(screen.getByRole('tab', { name: /第2集/ }));
+    expect(document.querySelector('video[src*="/api/v1/deliveries/artifact-1/media"]')).toBeNull();
   });
 });
 
@@ -383,5 +386,47 @@ describe('⑤ 模型版本选择与资源准备解耦', () => {
     // 开拍闸门仍然关闭：候选未通过真实生产验收。
     const [start] = await screen.findAllByRole('button', { name: /确认拍摄方案并开始真实制作/ });
     await waitFor(() => expect(start).toBeDisabled());
+  });
+
+  it('显式选中的已就绪候选带着同一个身份开拍，不被换回 INT8 基线', async () => {
+    stubOverview(overviewBody([episode({})]));
+    stubRef2vaProfile();
+    stubStrategyOptions();
+    // 候选已在本机验收就绪：可选择、可开拍。
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/variant-availability/,
+      respond: () => jsonResponse({ project_id: 'proj-1', variants: [
+        { variant_id: 'h3-ref2va-int8-convrot', label: '标准', title: '标准', acceptance_status: 'SUPPORTED',
+          available: true, reason: '本机已就绪' },
+        { variant_id: 'ref2va-lowend-candidate', label: '低显存候选', title: '低显存候选', acceptance_status: 'CANDIDATE',
+          available: true, reason: '本机已验收就绪' },
+      ] }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/system\/status$/, respond: () => jsonResponse({
+      ...SYSTEM_STATUS, render_mode: 'comfyui', h3_connected: true, production_mode: PRODUCTION_MODE_READY }) });
+    let posted: Record<string, unknown> | null = null;
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/director\/production\/start$/,
+      respond: (_url, init) => {
+        posted = JSON.parse(String(init?.body));
+        return jsonResponse({
+          package_id: 'package-1', package_revision: 1, package_built: true,
+          run_id: 'run-1', run_status: 'QUEUED', created: true,
+          episode_ids: ['ep-01'],
+          episodes: [{ episode_id: 'ep-01', position: 1, shot_count: 4 }],
+        }, 201);
+      } });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
+    expect(await screen.findByText('这次要拍哪几集')).toBeInTheDocument();
+
+    const w6a8 = await screen.findByRole('radio', { name: /低显存候选 · W6A8/ });
+    await user.click(w6a8);
+    const [start] = await screen.findAllByRole('button', { name: /确认拍摄方案并开始真实制作/ });
+    await waitFor(() => expect(start).toBeEnabled());
+    await user.click(start);
+    await waitFor(() => expect(posted).not.toBeNull());
+    const strategy = posted?.['strategy'] as unknown as Record<string, unknown>;
+    // 用户显式选定的候选就是最终身份，服务端门禁另行裁决，前端不偷换。
+    expect(strategy?.['model_variant_id']).toBe('ref2va-lowend-candidate');
   });
 });

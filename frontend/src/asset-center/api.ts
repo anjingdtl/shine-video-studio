@@ -72,6 +72,9 @@ export function uploadLibraryMedia(file: File, purpose: 'source' | 'reference' |
 export function createImageJobs(body: Record<string, unknown>) {
   return api<{ items: LibraryTask[]; capability: any; notice: string }>('/asset-center/image-jobs', json('POST', body));
 }
+export function getVisualFacts(projectId: string) {
+  return api<{ project_id: string; project_title: string; film_style: string; film_type: string | null; world: string; style_version: number | null }>(`/asset-center/visual-facts?project_id=${encodeURIComponent(projectId)}`);
+}
 export function createVoiceJob(body: Record<string, unknown>) {
   return api<{ item: LibraryTask; capability: any; notice: string }>('/asset-center/voice-jobs', json('POST', body));
 }

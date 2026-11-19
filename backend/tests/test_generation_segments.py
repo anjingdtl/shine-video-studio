@@ -219,3 +219,90 @@ def test_generation_segments_follow_latest_run_across_batch_series(api):
     assert [row["episode_title"] for row in result["segments"]] == ["第一集", "第一集", "第二集"]
     assert [row["series_id"] for row in result["segments"]] == [first_series, first_series, second_series.id]
     assert [row["job_id"] for row in result["segments"]] == [job["id"] for job in jobs]
+
+
+def test_revision_retake_shoots_the_revised_shot_from_the_retired_take(api):
+    """③ 修订（加对白）后，⑦ 的既有重拍入口以退休的通过版为源拍新版本。
+
+    实障：修订把旧 job 标 stale+NEEDS_REVIEW 后，重拍闸门报
+    SHOT_REVISION_REPLACED 禁用按钮，单镜入口又自动选窄方案——修订后的
+    镜头无处可拍。收敛后同一入口服务「同修订重拍」与「修订后重拍」。
+    """
+    client, factory, project, shots, jobs, hashes, root = _three(api)
+    shot_id = shots[1]["id"]
+    live = next(s for s in client.get(f"/api/v1/projects/{project}/shots").json()
+                if s["id"] == shot_id)
+    spec = live["spec"]
+    speaker = (spec.get("characters") or ["CHAR_A"])[0]
+    spec["characters"] = list(dict.fromkeys([*spec.get("characters", []), speaker]))
+    spec["dialogue"] = [{"speaker_id": speaker, "text": "这不是一个梦？", "start_s": 0.5, "end_s": 2.5}]
+    revised = client.post(f"/api/v1/shots/{shot_id}/revise", json=spec, headers=LOCAL)
+    assert revised.status_code == 200, revised.text
+    assert revised.json()["revision"] == 2
+
+    segments = client.get(f"/api/v1/projects/{project}/generation-segments").json()
+    row = next(r for r in segments["segments"] if r["shot_id"] == shot_id)
+    assert row["can_regenerate"] is True, row["blocker"]
+
+    retake = client.post(f"/api/v1/projects/{project}/generation-segments/{shot_id}/regenerate",
+                         json={"source_job_id": jobs[1]["id"], "expected_shot_revision": 2},
+                         headers=LOCAL)
+    assert retake.status_code == 202, retake.text
+    child = retake.json()["job_id"]
+    with factory() as db:
+        new_job = db.get(Job, child)
+        assert new_job.shot_revision == 2
+        assert new_job.request["shot_spec"]["dialogue"][0]["text"] == "这不是一个梦？"
+        # 渲染绑定不变：同一风格/规则/方案/主素材，只有镜头规格是用户修订的。
+        old = db.get(Job, jobs[1]["id"])
+        for key in ("style_hash", "rulepack_hash", "workflow_profile_hash", "reference_manifest"):
+            assert old.request.get(key) == new_job.request.get(key)
+        assert old.stale and old.artifact_id  # 旧通过版保留为历史
+        assert db.get(MediaArtifact, old.artifact_id).sha256 == hashes[1]
+
+
+def test_episode_current_jobs_overlays_the_assembly_selection(api):
+    """选定的重拍必须进入整集 EDL/_digest/交付门禁（同一事实），而非仅run自有。"""
+    from shine.models import AppSetting
+    from shine.production.runner import episode_current_jobs, run_owned_passed_jobs
+
+    client, factory, project, shots, jobs, hashes, root = _three(api)
+    with factory.begin() as db:
+        package = DirectorPackageVersion(project_id=project, revision=1, status="CONFIRMED", manifest={},
+            scope_digest="a" * 64, manifest_sha256="b" * 64, policy_hash="c" * 64)
+        db.add(package)
+        db.flush()
+        run = ProductionRun(project_id=project, package_id=package.id, package_revision=1,
+            manifest_sha256="b" * 64, scope_digest="a" * 64, policy_hash="c" * 64,
+            status="COMPLETED", idempotency_key="sel-overlay", request_hash="d" * 64)
+        db.add(run)
+        db.flush()
+        episode = ProductionRunEpisode(run_id=run.id, project_id=project, episode_id="ep-01",
+            position=0, title="第一集", manifest_sha256="e" * 64,
+            shot_ids=[s["id"] for s in shots], status="DELIVERED")
+        db.add(episode)
+        db.flush()
+        db.add(ProductionRunBatch(run_id=run.id, episode_row_id=episode.id, episode_id="ep-01",
+            batch_key="ep-01-1", position=0, input_digest="1" * 64,
+            shot_ids=[s["id"] for s in shots], status="PASSED", series_id=root))
+        # 一个更新的重拍通过版 + 显式装配选择。
+        retake = Job(project_id=project, shot_id=shots[1]["id"], shot_revision=1, provider="comfyui",
+                     style_version_id=jobs[1]["style_version_id"], request_fingerprint="0" * 64,
+                     idempotency_key="retake-overlay",
+                     status="QUEUED", lease_owner="t", lease_expires_at=utcnow(), request={})
+        db.add(retake)
+        db.flush()
+        _passed(db, retake)
+        db.add(AppSetting(key=f"assembly-selection:{root}",
+                          value={shots[1]["id"]: retake.id}))
+        run_id, episode_id = run.id, episode.id
+
+    with factory() as db:
+        run = db.get(ProductionRun, run_id)
+        episode = db.get(ProductionRunEpisode, episode_id)
+        owned = run_owned_passed_jobs(db, run_id, [episode])
+        current = episode_current_jobs(db, run, episode)
+        assert owned[shots[1]["id"]].id == jobs[1]["id"]  # run 自有仍是旧版
+        assert current[shots[1]["id"]].id == retake.id    # 当前事实=选定重拍
+        assert current[shots[0]["id"]].id == jobs[0]["id"]
+        assert current[shots[2]["id"]].id == jobs[2]["id"]

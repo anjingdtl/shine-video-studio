@@ -52,6 +52,46 @@ def test_relayvsr_capability_report_names_missing_weights():
     assert missing_ids == {"relayvsr-x2-diffusion", "relayvsr-x2-flash-vae"}
 
 
+def test_strategy_and_setup_read_one_relayvsr_verdict(api, tmp_path):
+    """已下载就位的权重不得被策略矩阵报成「本机未就绪」（三原则反例）。"""
+    from shine.comfyops.setup_summary import (
+        record_installation_choice,
+        relayvsr_machine_readiness,
+    )
+    from shine.strategy import (
+        GenerationStrategy,
+        UpscaleConfig,
+        strategy_blockers,
+        strategy_options,
+    )
+
+    client, factory, settings = api
+    with factory.begin() as db:
+        record_installation_choice(db, root=str(tmp_path), port=None, actor="local-user")
+    strategy = GenerationStrategy(upscale=UpscaleConfig(enabled=True))
+
+    with factory() as db:
+        machine = relayvsr_machine_readiness(db, settings)
+        assert machine["available"] is False
+        options = strategy_options(db, settings)
+        assert options["upscale"][0]["enabled"] is False
+        codes = {b["code"] for b in strategy_blockers(strategy, db, settings)}
+        assert "UPSCALE_BACKEND_UNAVAILABLE" in codes
+
+    models = tmp_path / "models"
+    (models / "diffusion_models").mkdir(parents=True)
+    (models / "vae").mkdir(parents=True)
+    (models / "diffusion_models" / relayvsr.RELAYVSR_X2_MODEL).write_bytes(b"x")
+    (models / "vae" / relayvsr.RELAYVSR_X2_FLASH_VAE).write_bytes(b"x")
+
+    with factory() as db:
+        machine = relayvsr_machine_readiness(db, settings)
+        assert machine["available"] is True
+        options = strategy_options(db, settings)
+        assert options["upscale"][0]["enabled"] is True
+        assert strategy_blockers(strategy, db, settings) == []
+
+
 def test_relayvsr_preparation_only_reconciles_and_downloads():
     steps = _steps_for(["relayvsr"], verify_runtime=True)
     assert steps == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]

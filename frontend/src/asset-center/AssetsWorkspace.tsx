@@ -9,7 +9,7 @@ import type { Asset, Project } from '../api';
 import {
   archiveLibraryAsset, assignLibraryVersion, createImageJobs, createLibraryAsset,
   createVoiceFreezeGrant, createVoiceJob, freezeLibraryVoice, getCapabilities, getLibraryAsset,
-  getLibraryTask, grantVersionPromotion, listAssignments, listLibraryAssets, listLibraryVoices,
+  getLibraryTask, getVisualFacts, grantVersionPromotion, listAssignments, listLibraryAssets, listLibraryVoices,
   newLibraryImageAttempt,
   patchLibraryAsset, promoteLibraryVersion, qcLibraryVersion, reconcileLibraryImageTask,
   saveProjectAssetToLibrary,
@@ -220,7 +220,7 @@ export function AssetsWorkspace({
         <div className="asset-center-page">
           {page === 'home' && <HomePage capabilities={capabilities} onNavigate={navigate} projectId={projectId} />}
           {page === 'images' && <ImageWorkshop capabilities={capabilities} onNavigate={navigate}
-            onValidated={refreshCapabilities} onOpenImageSetup={onOpenImageSetup} />}
+            onValidated={refreshCapabilities} onOpenImageSetup={onOpenImageSetup} projectId={projectId} />}
           {page === 'voices' && <VoiceWorkshop capabilities={capabilities} onNavigate={navigate} />}
           {page === 'library' && <LibraryPage />}
           {page === 'assignments' && <AssignmentsPage projects={projects} projectId={projectId} projectAssets={projectAssets} />}
@@ -293,11 +293,12 @@ function CapabilityRows({ capabilities }: { capabilities: CapabilityReport | nul
   </div>)}</div>;
 }
 
-function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup }: {
+function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup, projectId }: {
   capabilities: CapabilityReport | null;
   onNavigate: (page: AssetCenterPage) => void;
   onValidated: () => void;
   onOpenImageSetup?: () => void;
+  projectId: string;
 }) {
   const draftStorageKey = 'shine-assets-image-draft-v1';
   const restoredDraft = storedObject(draftStorageKey);
@@ -329,6 +330,14 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     }).catch(() => { if (alive) setReusableAssets([]); });
     return () => { alive = false; };
   }, []);
+  const [visualFacts, setVisualFacts] = useState<null | { film_type: string | null; world: string; project_title: string }>(null);
+  const inheritsProject = Boolean(projectId) && (mode === 'T2I' || (mode === 'RGBA' && references.length === 0));
+  useEffect(() => {
+    if (!projectId || !inheritsProject) { setVisualFacts(null); return; }
+    let alive = true;
+    getVisualFacts(projectId).then((facts) => { if (alive) setVisualFacts(facts); }).catch(() => { if (alive) setVisualFacts(null); });
+    return () => { alive = false; };
+  }, [projectId, inheritsProject]);
   const t2iCapability = capabilities?.image_capabilities.QWEN_IMAGE_T2I;
   const selectedCapability = mode === 'T2I'
     ? (transparent ? capabilities?.image_capabilities.QWEN_IMAGE_RGBA : t2iCapability)
@@ -467,6 +476,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       if (mode === 'RGBA' && !manualCutout && !prompt.trim()) throw new Error('请输入透明图片生成或编辑指令，或导入一张 PNG 并绘制去背景遮罩。');
       const body = {
         title: title.trim(), mode, prompt, category,
+        project_id: inheritsProject ? projectId : null,
         references: references.map(({ id, media_id, version_id, order, role }) => ({ media_id: media_id ?? (version_id ? undefined : id), version_id, order, role })),
         mask_media_id: mode === 'INPAINT' || manualCutout ? maskMedia?.id : null,
         output: { width, height }, seed: null, candidate_count: validationOnly ? 1 : candidateCount, validation_only: validationOnly,
@@ -530,6 +540,12 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       <label className="asset-field"><span>{mode === 'T2I' ? '画面描述' : '修改指令'}</span>
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder={mode === 'T2I' ? '例如：雨后的老街，暖黄色窗光，电影静帧构图……' : '说明要改变的内容，以及希望保持不变的部分……'} />
       </label>
+      {inheritsProject && visualFacts && <div className="asset-capability-notice ready" role="status">
+        <span><i />继承当前作品《{visualFacts.project_title}》的导演风格与类型</span>
+        <p>{visualFacts.film_type === 'animation' ? '动画' : visualFacts.film_type === 'live_action' ? '实拍' : '影片类型未冻结'}
+          {visualFacts.world ? ` · 世界设定/时代已注入：${visualFacts.world.slice(0, 60)}${visualFacts.world.length > 60 ? '…' : ''}` : ' · 尚无全局故事圣经，时代以你的描述为准'}
+          。生成时服务端会把影片媒介与时代事实写入提示词，不会另拍一部片。</p>
+      </div>}
       <label className="asset-field"><span>素材名称（可选）</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="留空时按分类命名" /></label>
       <label className="asset-field"><span>从已有素材继续并保留版本历史（可选）</span>
         <select value={targetAssetId} onChange={(event) => selectTargetAsset(event.target.value)}>

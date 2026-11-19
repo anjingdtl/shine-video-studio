@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   api, json, noteSupervisorPort, timeoutSignal, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
   type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion,
-  type Shot, type Style, type StyleVersion, type SystemHealth, type SystemStatus, type WorkflowProfile,
+  type Shot, type Style, type StyleVersion, type SystemStatus, type WorkflowProfile,
 } from './api';
 import { emptyStyle } from './constants';
 
@@ -52,31 +52,17 @@ export function useStudio() {
   /** Bumped by the global refresh button; panels that keep their own data
    *  (delivery) listen to it so the topbar refresh covers their data too. */
   const [dataEpoch, setDataEpoch] = useState(0);
-  const [queueProfile, setQueueProfile] = useState('');
-  const [reviewScope, setReviewScope] = useState<'basic' | 'full'>('full');
-  const [reviewWidth, setReviewWidth] = useState('768');
-  const [reviewHeight, setReviewHeight] = useState('1344');
 
   const project = projects.find((item) => item.id === projectId);
   const currentStyle = styles.find((item) => item.id === project?.frozen_style_version_id);
   const approvedAssets = useMemo(() => assets.filter((asset) => asset.approved && asset.locked), [assets]);
   const production = system?.production_mode ?? null;
-  /** 后端环境决定能否提交真实任务；用户演示选择独立、持久保存。 */
+  /** 后端环境决定能否提交真实任务。演示只在真实制作未启用（DEMO）时可用，
+   *  不再提供手动切演示的平行开关；能力丢失也不会把真实提交变成演示。 */
   const realSubmissionAllowed = production !== null
     && ['READY', 'RUNNING'].includes(production.mode);
-  const [demoOverride, updateDemoOverride] = useState(() => localStorage.getItem('shine.productionIntent') === 'mock');
-  function setDemoOverride(demo: boolean) {
-    localStorage.setItem('shine.productionIntent', demo ? 'mock' : 'comfyui');
-    updateDemoOverride(demo);
-  }
-  const hasSeenReal = useRef(false);
-  if (realSubmissionAllowed) hasSeenReal.current = true;
-  useEffect(() => {
-    if (realSubmissionAllowed && !demoOverride) localStorage.setItem('shine.productionIntent', 'comfyui');
-  }, [realSubmissionAllowed, demoOverride]);
-  // Capability loss must never turn a real submission into a successful demo.
-  const queueProvider: 'mock' | 'comfyui' = demoOverride || (!hasSeenReal.current && !realSubmissionAllowed && production?.mode === 'DEMO'
-    && localStorage.getItem('shine.productionIntent') !== 'comfyui') ? 'mock' : 'comfyui';
+  const queueProvider: 'mock' | 'comfyui' = !realSubmissionAllowed && production?.mode === 'DEMO'
+    ? 'mock' : 'comfyui';
 
   /** toast 队列：最多 3 条堆叠；同一动作重复错误合并计数；success 4s 自动消失，
    *  error 常驻直到手动关闭。结果性反馈走这里，上下文性状态走内联 .notice。 */
@@ -266,7 +252,7 @@ export function useStudio() {
 
   useEffect(() => {
     setAssets([]); setStyles([]); setShots([]); setJobs([]); setAudit(null);
-    setWorkflowProfiles([]); setQueueProfile(''); setPreview(null); setStyle(emptyStyle);
+    setWorkflowProfiles([]); setPreview(null); setStyle(emptyStyle);
     if (projectId) loadProject(projectId).catch((error: Error) => report(error.message, 'error'));
   }, [projectId, loadProject]);
 
@@ -499,28 +485,20 @@ export function useStudio() {
       report('真实制作尚未就绪，请先在顶部完成「启用真实制作」。', 'error');
       return;
     }
-    // 用户没手选方案时自动适配一个：单镜头开拍不应该因为「没选模板」而死路。
-    // 规则与「一键开拍」一致——优先带画面宽高的 Ref2VA 方案。
+    // 单镜头开拍自动适配方案，不应该因为「没选模板」而死路。
+    // 规则与整片开拍一致——优先带画面宽高的 Ref2VA 方案；档位选择在导演包页。
     const autoProfile = (() => {
       const ref2va = workflowProfiles.filter((item) => item.mode.toLowerCase() === 'ref2va');
       const sized = ref2va.filter((item) => 'width' in (item.parameter_map ?? {}) && 'height' in (item.parameter_map ?? {}));
       return (sized.length ? sized : ref2va)[0];
     })();
-    const profile = queueProvider === 'comfyui'
-      ? workflowProfiles.find(p => p.id === queueProfile) ?? autoProfile
-      : undefined;
-    const autoPicked = queueProvider === 'comfyui' && !workflowProfiles.some(p => p.id === queueProfile) && !!autoProfile;
-    const basic = queueProvider === 'comfyui' && reviewScope === 'basic';
-    const width = Number(reviewWidth), height = Number(reviewHeight);
+    const profile = queueProvider === 'comfyui' ? autoProfile : undefined;
     if (queueProvider === 'comfyui') {
       if (!profile) {
         report('本机还没有可用的生成方案：先到「制片准备」一键登记，再去基础配置完成安装。', 'error');
         return;
       }
-      if (autoPicked) report(`已自动选用「${profile.name}」方案：想换档位可在下方「高级设置」里改。`);
-      if (basic && (!Number.isInteger(width) || !Number.isInteger(height) || width < 2 || height < 2 || width > 8192 || height > 8192)) {
-        report('基础自审需要填写预期画面宽高（2 到 8192 的整数，如 1280×720）。', 'error'); return;
-      }
+      report(`已自动选用「${profile.name}」方案：整片拍摄的档位可在导演包页调整。`);
       // 真实生成是花钱花时间的动作：确认放在按钮上（点一次展开、再点一次提交），
       // 不用系统对话框打断页面，也不会因为浏览器自动关闭对话框而误提交。
     }
@@ -528,8 +506,7 @@ export function useStudio() {
       project: projectId, shot: shot.id, shot_revision: shot.revision,
       provider: queueProvider, profile: profile?.id ?? null,
       mode: profile?.mode ?? null, mock: mockScenario,
-      scope: basic ? 'basic' : 'full',
-      resolution: basic ? [width, height] : null,
+      scope: 'full', resolution: null,
     });
     let requestKey = pendingJobKeys.current.get(requestSignature);
     if (!requestKey) {
@@ -542,8 +519,8 @@ export function useStudio() {
           shot_id: shot.id, mock_scenario: mockScenario, provider: queueProvider,
           workflow_profile_id: profile?.id ?? null,
           generation_mode: profile?.mode ?? null,
-          self_review_scope: basic ? 'basic' : 'full',
-          basic_review_resolution: basic ? { width, height } : null,
+          self_review_scope: 'full',
+          basic_review_resolution: null,
           // A retried click reuses this key; a genuinely new take after a shot
           // revision gets a new signature and therefore a new identity.
           request_key: requestKey,
@@ -634,14 +611,6 @@ export function useStudio() {
     });
   }
 
-  async function testComfy(baseUrl: string): Promise<SystemHealth> {
-    return withBusyReturn(async () => {
-      const result = await api<SystemHealth>('/comfy/test', json('POST', { base_url: baseUrl, timeout_s: 10 }));
-      if (result.ok) await loadSystem();
-      return result;
-    });
-  }
-
   async function registerWorkflow(payload: Record<string, unknown>) {
     await withBusy(async () => {
       await api<WorkflowProfile>('/workflow-profiles', json('POST', payload));
@@ -698,9 +667,7 @@ export function useStudio() {
     system, systemChecked, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, notice, report, dismissNotice, busy, dataEpoch, apiOnline,
     // generation settings
-    queueProvider, queueProfile, setQueueProfile, reviewScope, setReviewScope,
-    reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
-    realSubmissionAllowed, demoOverride, setDemoOverride,
+    queueProvider, realSubmissionAllowed,
     // loaders
     loadAudit, refreshAll,
     // actions
@@ -708,7 +675,7 @@ export function useStudio() {
     createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze, unlockAsset,
     setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
-    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
+    setProfileKey, deleteProfile, routeProfile, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters,
     abandonJob,
   };

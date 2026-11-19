@@ -2,7 +2,7 @@
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import Field
-from sqlalchemy import literal_column, select, text
+from sqlalchemy import select, text
 
 from shine.api_common import DBSession
 from shine.api_operator import Operator
@@ -21,7 +21,6 @@ from shine.models import (
     MediaArtifact,
     ProductionSeries,
     ProductionSeriesItem,
-    QualityGate,
     Shot,
     utcnow,
 )
@@ -61,21 +60,22 @@ def _selection(db, root):
 
 
 def accepted_job(db, job, data_dir=None):
-    """The one acceptance definition: latest final gate really passed.
+    """The one verdict for "this take may enter the assembly".
 
-    Shared by the assembly selection and the long-script section continuity
-    state, so "the previous section really ended like this" is never a weaker
-    claim than "this media may be assembled".
+    Same definition the run delivery uses: a real, technically passed take
+    (PASSED already implies the deterministic gates passed under policy).
+    Artistic acceptance is a separate ledger (delivery acceptances) and never
+    gates assembly — requiring the final gate here would lock every retake on
+    machines whose human review is still pending, while auto-delivery assembles
+    the very same takes.  Shared by the assembly selection and the long-script
+    section continuity state, so both read the same fact.
     """
     if not job or job.status != "PASSED" or job.stale or job.provider != "comfyui" or not job.artifact_id:
         return False
-    final = db.scalar(select(QualityGate).where(QualityGate.job_id == job.id, QualityGate.gate_name == "final")
-                      .order_by(QualityGate.created_at.desc(), literal_column("quality_gates.rowid").desc()).limit(1))
     artifact = db.get(MediaArtifact, job.artifact_id)
     latest = max(job.attempts, key=lambda a: a.attempt_no, default=None)
-    valid = bool(final and final.status == "passed" and not final.is_mock and latest
-                and final.attempt_id == latest.id and artifact and not artifact.is_mock
-                and final.artifact_id == artifact.id and artifact.job_id == job.id
+    valid = bool(latest and artifact and not artifact.is_mock
+                and artifact.job_id == job.id
                 and artifact.project_id == job.project_id and artifact.attempt_id == latest.id
                 and artifact.sha256 == latest.output_sha256)
     if valid and data_dir:
@@ -136,9 +136,16 @@ def _proven_pre_submit_mapping_failure(db, job):
 def _blocker(db, job, shot):
     if not job:
         return "GENERATION_NOT_STARTED"
-    if not shot or job.shot_revision != shot.revision or job.stale:
+    # A user revision retires the previous take (stale + NEEDS_REVIEW) but its
+    # produced artifact stays the source for retaking the revised shot — the
+    # same entry serves "passed but unsatisfactory" and "revised, shoot again".
+    revision_retired = bool(
+        shot and job.stale and job.shot_revision < shot.revision
+        and job.failure_code == "SHOT_REVISION_REPLACED" and job.artifact_id
+    )
+    if not shot or ((job.shot_revision != shot.revision or job.stale) and not revision_retired):
         return "SHOT_REVISION_REPLACED"
-    if job.status != "PASSED":
+    if job.status != "PASSED" and not revision_retired:
         return "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
     unresolved = db.scalars(select(Job).where(
         Job.shot_id == job.shot_id,
@@ -231,6 +238,9 @@ def _segment_row(db, project_id, shot_id, position, *, root=None, episode_positi
         "dependent_job_ids": _impact(db, job.id) if job else [],
         "replacement_job_id": pending.id if pending else None,
         "replacement_status": pending.status if pending else None,
+        # 重拍进度读既有 attempt 台账，不另建状态；页面据此画进度条。
+        "replacement_progress": (max(pending.attempts, key=lambda a: a.attempt_no).progress
+                                 if pending and pending.attempts else None),
         "can_select_replacement": accepted_job(db, pending),
     }
 
@@ -359,11 +369,19 @@ def regenerate(project_id: str, shot_id: str, body: SegmentAction, actor: Operat
         shot_id=shot.id, provider="comfyui", workflow_profile_id=source.workflow_profile_id,
         generation_mode=source.generation_mode, self_review_scope=spec.self_review_scope,
         basic_review_resolution=spec.basic_review_resolution, output=output,
+        # Run-dispatched jobs carry a dynamic strategy instead of a static
+        # profile; the retake must inherit the same execution identity.
+        strategy=source.request.get("strategy"),
     ), settings=resolve_runtime(db, request.app.state.settings), offline=request.app.state.settings.offline_simulation)
     binding_keys = ("style_version_id", "style_hash", "rulepack_id", "rulepack_hash", "prompt_skill_hash",
                     "workflow_profile_hash", "model_checkpoint_id", "reference_manifest", "shot_spec")
     if job is not None:
-        if any(source.request.get(k) != job.request.get(k) for k in binding_keys):
+        # A revision retake intentionally changes the shot spec (the user's
+        # edit); the render bindings (style/rulepack/workflow/masters) must
+        # still be identical.  Same-revision retakes keep the full comparison.
+        retired = source.shot_revision < shot.revision
+        keys = [k for k in binding_keys if not (retired and k == "shot_spec")]
+        if any(source.request.get(k) != job.request.get(k) for k in keys):
             raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
         job.request_revision = source.request_revision + 1
     else:

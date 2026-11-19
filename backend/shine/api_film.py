@@ -1260,7 +1260,10 @@ def generate_storyboard(
                 # exact record, and without the version it could not ask.
                 "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id,
                                 "state_version": prior.state_version,
-                                "external_outcome": prior.trace.get("external_outcome")}],
+                                "external_outcome": prior.trace.get("external_outcome"),
+                                "blocking_task": {"task_id": prior.id, "status": prior.status,
+                                                  "external_outcome": prior.trace.get("external_outcome"),
+                                                  "phase": prior.trace.get("phase")}}],
                 "failed_role": prior.role_id,
                 # Keep the validated resume selection so reconciliation can
                 # inspect the original task without changing its identity.
@@ -1552,6 +1555,9 @@ def generate_storyboard(
             phase = task.trace.get("phase")
             if isinstance(phase, str) and phase:
                 rejection["phase"] = phase
+            blocking = task.trace.get("blocking_task")
+            if isinstance(blocking, dict) and blocking.get("task_id"):
+                rejection["blocking_task"] = blocking
         return rejection
 
     try:

@@ -122,11 +122,15 @@ def accelerator_options() -> list[dict]:
     ]
 
 
-def upscale_options() -> list[dict]:
-    """Available upscale backends; RelayVSR readiness is evidence-derived."""
-    from shine.comfyops.relayvsr import relayvsr_readiness
+def upscale_options(db, settings=None) -> list[dict]:
+    """Available upscale backends; RelayVSR readiness is evidence-derived.
 
-    readiness = relayvsr_readiness()
+    Reads the same machine verdict as the setup capability card — never a
+    bare no-evidence call, which would report BLOCKED on a prepared machine.
+    """
+    from shine.comfyops.setup_summary import relayvsr_machine_readiness
+
+    readiness = relayvsr_machine_readiness(db, settings)
     return [{
         "engine": "relayvsr",
         "variant": "x2",
@@ -136,17 +140,17 @@ def upscale_options() -> list[dict]:
     }]
 
 
-def strategy_options() -> dict:
+def strategy_options(db, settings=None) -> dict:
     """The full option matrix the director UI renders."""
     return {
         "model_variants": model_variant_options(),
         "accelerators": accelerator_options(),
         "second_pass": {"supported": True, "recipes": ["h3-tail-refine-v1"]},
-        "upscale": upscale_options(),
+        "upscale": upscale_options(db, settings),
     }
 
 
-def strategy_blockers(strategy: GenerationStrategy) -> list[dict]:
+def strategy_blockers(strategy: GenerationStrategy, db, settings=None) -> list[dict]:
     """Named blockers that make this strategy not shootable as-is.
 
     A blocked strategy is refused at package build and job creation; it never
@@ -179,9 +183,9 @@ def strategy_blockers(strategy: GenerationStrategy) -> list[dict]:
             "accelerator_id": strategy.accelerator_id,
         })
     if strategy.upscale.enabled:
-        from shine.comfyops.relayvsr import relayvsr_readiness
+        from shine.comfyops.setup_summary import relayvsr_machine_readiness
 
-        readiness = relayvsr_readiness()
+        readiness = relayvsr_machine_readiness(db, settings)
         if readiness.get("available") is not True:
             blockers.append({
                 "code": "UPSCALE_BACKEND_UNAVAILABLE",

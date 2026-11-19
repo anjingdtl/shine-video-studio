@@ -424,6 +424,36 @@ it('验证批次不能混入正式候选选择，来源策略从服务器恢复'
   expect(screen.getByText(/③ 选择素材/, { selector: 'summary' })).toHaveTextContent('0 项候选');
 });
 
+it('上传的主素材与生成候选同进候选栏，勾选后统一确认且不走候选晋升', async () => {
+  const master = { id: 'asset-up', filename: '我的林知远.png', sha256: 'e'.repeat(64),
+    approved: true, locked: true, role: 'character', entity_id: '林知远', kind: 'image' };
+  stub.add({ method: 'GET', pattern: /projects\/p1\/assets$/, respond: () => jsonResponse([master]) });
+  stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation$/,
+    respond: () => jsonResponse({ ...STATE, stage: 'select_materials',
+      requirements: [{ ...STATE.requirements[0], bound_asset_id: 'asset-up' }] }) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  const uploadCheckbox = await screen.findByRole('checkbox', { name: /我上传的/ });
+  await user.click(uploadCheckbox);
+  await user.click(screen.getByRole('button', { name: '确认使用所选素材' }));
+  await waitFor(() => expect(stub.callsOf('POST', /material-preparation\/confirm$/).length).toBeGreaterThan(0));
+  const confirm = stub.callsOf('POST', /material-preparation\/confirm$/)[0];
+  expect(confirm.body).toMatchObject({ decisions: [{ requirement_id: 'req-1', strategy: 'reuse_master', asset_id: 'asset-up' }] });
+  expect(stub.callsOf('POST', /candidate-assets\/cand-1\/promote$/)).toHaveLength(0);
+});
+
+it('勾选后统一重新生成只作用于勾选集，复用同一 regenerate-all 执行者', async () => {
+  stub.add({ method: 'POST', pattern: /material-preparation\/regenerate-all$/,
+    respond: () => jsonResponse({ items: ['item-2'], run_id: 'run-2' }) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  await screen.findAllByText(/林知远/);
+  await user.click(screen.getByRole('checkbox', { name: /选择 林知远 生成v1 cand-1/ }));
+  await user.click(screen.getByRole('button', { name: /重新生成所选需求（1）/ }));
+  await waitFor(() => expect(stub.callsOf('POST', /regenerate-all$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /regenerate-all$/)[0].body).toMatchObject({ requirement_ids: ['req-1'] });
+});
+
 it('澄清问题可见，重新生成把回答并入描述并消费问题', async () => {
   const state = {
     ...STATE,

@@ -53,6 +53,7 @@ def compose_requirement_prompt(
     film_style: str = "",
     description: str = "",
     manual: dict[str, Any] | None = None,
+    world_note: str = "",
 ) -> image_prompts.ImagePrompt:
     """The prompt pair for one requirement.
 
@@ -91,6 +92,7 @@ def compose_requirement_prompt(
             requirement_name=requirement_name,
             carrier=carrier,
             film_style=film_style,
+            world_note=world_note,
         )
     except image_prompts.ImagePromptError as exc:
         raise PromptSourceError(exc.code, **exc.details) from exc
@@ -109,10 +111,94 @@ def film_style_for(snapshot: dict[str, Any] | None) -> str:
         return ""
 
 
+def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
+    """The single read of the facts that govern every material image.
+
+    The frozen Style Bible supplies the film medium; the confirmed global story
+    bible supplies the world / era.  A streamline work has no global bible: its
+    confirmed outline synopsis is then the user-confirmed world fact, so a
+    period script cannot render as modern people in either path.  Both the
+    brief producer and the asset centre compose from this one reader.
+    """
+    from sqlalchemy import select
+
+    from shine.models import AgentArtifact, StyleVersion
+
+    style = db.scalar(
+        select(StyleVersion)
+        .where(StyleVersion.project_id == project_id, StyleVersion.frozen_at.is_not(None))
+        .order_by(StyleVersion.version.desc())
+    )
+    snapshot = dict((style.snapshot or {}) if style else {})
+    bible = db.scalar(
+        select(AgentArtifact)
+        .where(AgentArtifact.project_id == project_id,
+               AgentArtifact.kind == "FourStageGlobalStoryBible")
+        .order_by(AgentArtifact.created_at.desc())
+    )
+    world_raw = (bible.payload_json or {}).get("world") if bible else None
+    if isinstance(world_raw, list):
+        world = " ".join(str(item).strip() for item in world_raw if str(item).strip())
+    else:
+        world = str(world_raw or "").strip()
+    if not world:
+        outline = db.scalar(
+            select(AgentArtifact)
+            .where(AgentArtifact.project_id == project_id,
+                   AgentArtifact.kind == "StoryOutline",
+                   AgentArtifact.stale.is_(False),
+                   AgentArtifact.approved_at.is_not(None))
+            .order_by(AgentArtifact.created_at.desc())
+        )
+        if outline is not None:
+            world = str((outline.payload_json or {}).get("summary") or "").strip()
+    return {
+        "project_id": project_id,
+        "film_style": film_style_for(snapshot),
+        "film_type": snapshot.get("film_type"),
+        "style_version_id": style.id if style else None,
+        "style_version": style.version if style else None,
+        "snapshot": snapshot,
+        "world": world,
+    }
+
+
+def compose_user_image_prompt(
+    *,
+    user_prompt: str,
+    family: str,
+    facts: dict[str, Any],
+    carrier: str | None = None,
+) -> image_prompts.ImagePrompt:
+    """Compose an asset-centre prompt from the user's own text plus project facts.
+
+    The user's words are boundary input carried verbatim (any script language);
+    the server still applies the film medium, the world / era note, the family
+    framing and the medium negatives through the one composer.
+    """
+    brief = MaterialImageBrief.model_construct(
+        appearance=user_prompt, must_keep=[], avoid=[], questions=[])
+    try:
+        return image_prompts.compose(
+            family,
+            brief,
+            visual_direction=None,
+            requirement_name="",
+            carrier=carrier,
+            film_style=str(facts.get("film_style") or ""),
+            user_text=True,
+            world_note=str(facts.get("world") or ""),
+        )
+    except image_prompts.ImagePromptError as exc:
+        raise PromptSourceError(exc.code, **exc.details) from exc
+
+
 __all__ = [
     "MANUAL_TEMPLATE_VERSION",
     "PromptSourceError",
     "compose_requirement_prompt",
+    "compose_user_image_prompt",
     "film_style_for",
     "frozen_prompt",
+    "project_visual_facts",
 ]

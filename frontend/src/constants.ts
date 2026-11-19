@@ -260,6 +260,7 @@ export const auditEventLabels: Record<string, string> = {
   SHOT_PROMPT_UNFROZEN: '解冻分镜提示词',
   SHOT_SUBTITLE_SAVED: '保存分镜字幕', SHOT_SUBTITLE_FROZEN: '冻结分镜字幕',
   SUBTITLE_REVISION_SAVED: '保存字幕修订', SUBTITLE_REVISION_APPROVED: '批准字幕修订',
+  SUBTITLE_STYLE_UPDATED: '更新字幕字号',
   JOB_PAUSED: '任务暂停', JOB_RESUMED: '任务继续',
   OPERATOR_REVIEW_RECORDED: '记录人工复核',
   PRODUCTION_SERIES_CREATED: '创建生产系列', PRODUCTION_SERIES_PAUSED: '暂停生产系列',
@@ -398,7 +399,7 @@ export function auditEventLabel(code: string, entityType?: string | null): strin
 }
 
 export const subtitleStatusLabels: Record<string, string> = {
-  PENDING: '草稿', APPROVED: '已定稿',
+  PENDING: '草稿', DRAFT: '草稿', APPROVED: '已定稿',
 };
 
 export const qcResultLabels: Record<string, string> = {

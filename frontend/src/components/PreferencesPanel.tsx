@@ -1,11 +1,9 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, Check, Film, MonitorCog, Mountain, Moon, ShieldCheck, Sparkles, Sun, Type, Zap } from 'lucide-react';
+import { Check, Film, MonitorCog, Mountain, Moon, ShieldCheck, Sparkles, Sun, Type, Zap } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { useTheme } from '../theme/useTheme';
 import { setTheme } from '../theme/themeStore';
 import { THEMES, type ThemeId } from '../theme/themes';
-
-type Props = { onNavigate: (id: string) => void };
 
 const FONT_STEPS = [
   { key: 'small', text: '小', zoom: '0.92' },
@@ -22,15 +20,7 @@ const THEME_ICONS: Record<ThemeId, LucideIcon> = {
   comic: Sparkles,
 };
 
-const CONFIG_GUIDES: Array<{ id: string; title: string; desc: string }> = [
-  { id: 'settings', title: 'AI 模型（LLM）配置', desc: '添加/更换写作、审片用的模型，填密钥，测试连接' },
-  { id: 'settings', title: 'ComfyUI 生成引擎连接', desc: '填本机 ComfyUI 地址并测试连通' },
-  { id: 'settings', title: '生成工作流模板', desc: '「模型与系统」底部「工作流 Profile 注册」' },
-  { id: 'setup', title: '模型与节点安装', desc: '在「制作环境」一次确认，后台整备任务自动复用已有资源并补齐缺项' },
-  { id: 'setup', title: '新机环境自检', desc: '显卡、磁盘、上游可达性、就绪分层检查' },
-];
-
-export default function PreferencesPanel({ onNavigate }: Props) {
+export default function PreferencesPanel() {
   const theme = useTheme();
   const [fontKey, setFontKey] = useState(() => {
     try {
@@ -111,17 +101,6 @@ export default function PreferencesPanel({ onNavigate }: Props) {
               </button>
             ))}
           </div>
-        </div>
-      </div>
-      <div className="pref-block config-guide">
-        <h3>各类配置去哪儿找</h3>
-        <div className="guide-list">
-          {CONFIG_GUIDES.map((guide) => (
-            <button className="guide-row" key={guide.title} onClick={() => onNavigate(guide.id)}>
-              <div><b>{guide.title}</b><span>{guide.desc}</span></div>
-              <ArrowRight size={14} />
-            </button>
-          ))}
         </div>
       </div>
     </section>

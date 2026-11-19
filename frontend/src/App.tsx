@@ -16,13 +16,10 @@ import { SchemaNotice } from './components/SchemaNotice';
 import StylePanel from './components/StylePanel';
 import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
-import ProductionSeriesPanel from './components/ProductionSeriesPanel';
-import SettingsPanel from './components/SettingsPanel';
 import AuditPanel from './components/AuditPanel';
 import FilmCrewPanel from './components/FilmCrewPanel';
-import DeliveryPanel from './components/DeliveryPanel';
 import VideoLibraryPanel from './components/VideoLibraryPanel';
-import TerminologyPanel, { SubtitlePanel } from './components/TerminologyPanel';
+import TerminologyPanel from './components/TerminologyPanel';
 import PreferencesPanel from './components/PreferencesPanel';
 import { DirectorProductionRunPanel } from './components/DirectorProductionRunPanel';
 import { DirectorShootPanel } from './components/DirectorShootPanel';
@@ -154,14 +151,13 @@ function App() {
     projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
-    notices, report, dismissNotice, busy, dataEpoch, queueProvider, queueProfile, setQueueProfile, reviewScope,
-    setReviewScope, reviewWidth, setReviewWidth, reviewHeight, setReviewHeight,
-    realSubmissionAllowed, demoOverride, setDemoOverride, loadAudit, refreshAll,
+    notices, report, dismissNotice, busy, dataEpoch,
+    loadAudit, refreshAll,
     createProject, saveStyle, freezeStyle,
     createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze,
-    setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
+    previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
-    setProfileKey, deleteProfile, routeProfile, testComfy, registerWorkflow, validateWorkflow, deleteWorkflow,
+    setProfileKey, deleteProfile, routeProfile, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters, abandonJob,
   } = studio;
 
@@ -263,19 +259,6 @@ function App() {
     loadAudit(projectId, 0).catch((error: Error) => report(error.message, 'error'));
   }, [directorPage, projectId, loadAudit]);
 
-  /**
-   * 生成方案没手动选过时自动挑一个：单镜头开拍与一键开拍用同一套默认，
-   * 用户不必先去「请选择…」里做一次技术选择。优先带画面宽高的 Ref2VA 方案。
-   */
-  useEffect(() => {
-    if (queueProfile && workflowProfiles.some((profile) => profile.id === queueProfile)) return;
-    const ref2va = workflowProfiles.filter((profile) => profile.mode.toLowerCase() === 'ref2va');
-    if (ref2va.length === 0) return;
-    const sized = ref2va.filter((profile) => 'width' in (profile.parameter_map ?? {})
-      && 'height' in (profile.parameter_map ?? {}));
-    const chosen = (sized.length ? sized : ref2va)[0];
-    if (chosen) setQueueProfile(chosen.id);
-  }, [queueProfile, workflowProfiles, setQueueProfile]);
 
   /** 七阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
   const [journey, setJourney] = useState<Journey | null>(null);
@@ -421,6 +404,10 @@ function App() {
   const productionStage = journey?.stages.find((stage) => stage.id === 'production');
   const projectShotCount = journeyCount(storyboardStage, 'shot_count') ?? shots.length;
   const plannedShotCount = journeyCount(storyboardStage, 'planned_shot_count') ?? projectShotCount;
+  // 分集未物化时「在册」是 0，但逐场落镜已有真实镜头：页头与折叠行读同一份
+  // journey 事实，不得一个说 0 一个说 13。
+  const landedShotCount = ((storyboardStage?.facts?.episodes ?? []) as Array<{
+    landed_shot_count?: number }>).reduce((sum, ep) => sum + (ep.landed_shot_count ?? 0), 0);
   const scopeShotCount = journeyCount(productionStage, 'scope_shot_count');
   const passedScopeCount = journeyCount(productionStage, 'passed_shot_count');
   const hasProductionScope = scopeShotCount !== null && scopeShotCount > 0;
@@ -715,7 +702,6 @@ function App() {
             onSetKey={setProfileKey}
             onDeleteProfile={deleteProfile}
             onRoute={routeProfile}
-            onTestComfy={testComfy}
             onRegisterWorkflow={registerWorkflow}
             onValidateWorkflow={validateWorkflow}
             onDeleteWorkflow={deleteWorkflow}
@@ -725,95 +711,13 @@ function App() {
           {directorPage === 'advanced' && <div className="director-page" id="advanced">
             {directorPageIntro(
               '高级设置',
-              <>细调模型、工作流与<em>后台行为。</em></>,
-              '环境整备请回「基础配置」一键完成;这里只做细调与诊断,不改整备入口。',
+              <>显示偏好、制片规范与<em>审计追踪。</em></>,
+              '环境整备、工作流映射与项目策略都在「基础配置」;排产与进度在各制作阶段,这里不再重复一份。',
               <button type="button" className="btn-secondary" onClick={() => goToDirectorSetup('env')}>
                 <Settings2 size={13} /> 回到基础配置
               </button>,
             )}
-            <SettingsPanel
-              includeLlm={false}
-              compact
-              onRefresh={refreshAll}
-              project={project}
-              profiles={profiles}
-              routes={routes}
-              workflowProfiles={workflowProfiles}
-              system={system}
-              busy={busy}
-              onProjectSettings={updateProjectSettings}
-              onCreateProfile={createProfile}
-              onTestProfile={testProfile}
-              onSetKey={setProfileKey}
-              onDeleteProfile={deleteProfile}
-              onRoute={routeProfile}
-              onTestComfy={testComfy}
-              onRegisterWorkflow={registerWorkflow}
-              onValidateWorkflow={validateWorkflow}
-              onDeleteWorkflow={deleteWorkflow}
-              onBindStandardParameters={bindStandardParameters}
-            />
-            <PreferencesPanel onNavigate={goTo} />
-            <div className="notice">
-              <Settings2 size={13} />
-              <div>
-                <p><b>环境整备不在这里。</b>检测、下载、登记、绑定与核验都在「基础配置」一键完成；本页只保留模型路由、工作流映射、项目策略与后台诊断，避免两处配置互相冲突。</p>
-                <button type="button" className="btn-text" onClick={() => goToDirectorSetup('env')}>去基础配置整备环境</button>
-              </div>
-            </div>
-            {project && <StageDock id="production-series" title="多镜头连续生产与单镜排产(高级)">
-              <div className="queue-provider-card card">
-                <div className="section-kicker">生成方式</div>
-                <p className="queue-provider-hint">
-                  {realSubmissionAllowed
-                    ? '默认真实生成（本机显卡 + H3），可临时切回演示。'
-                    : '演示模式用于熟悉流程，不消耗显卡、不出真视频。真实生成先在基础配置完成整备。'}
-                </p>
-                {realSubmissionAllowed
-                  ? <label>生成方式<select value={demoOverride ? 'mock' : 'comfyui'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
-                      <option value="comfyui">真实生成（默认）</option>
-                      <option value="mock">演示（不出真视频）</option>
-                    </select></label>
-                  : <label>生成方式<select value={queueProvider} disabled={queueProvider === 'mock'} onChange={(event) => setDemoOverride(event.target.value === 'mock')}>
-                      <option value="comfyui" disabled>真实制作受阻，请检查环境</option>
-                      <option value="mock">演示体验（真实制作未启用）</option>
-                    </select></label>}
-                {queueProvider === 'comfyui' && <label>生成模板<select value={queueProfile} onChange={(event) => setQueueProfile(event.target.value)}>
-                  <option value="">请选择…</option>{workflowProfiles.map((p) => <option key={p.id} value={p.id}>{p.name} · {p.mode}</option>)}
-                </select></label>}
-                {queueProvider === 'comfyui' && <>
-                  <label>审片建议（可选）<select value={reviewScope} onChange={(event) => setReviewScope(event.target.value as 'basic' | 'full')}>
-                    <option value="full">完整建议：画面、对白与风格（只记录，不阻断）</option>
-                    <option value="basic">基础建议：人物与对白（只记录，不阻断）</option>
-                  </select></label>
-                  {reviewScope === 'basic' && <>
-                    <label>预期画面宽度<input type="number" min="2" max="8192" step="1" value={reviewWidth} onChange={(event) => setReviewWidth(event.target.value)} /></label>
-                    <label>预期画面高度<input type="number" min="2" max="8192" step="1" value={reviewHeight} onChange={(event) => setReviewHeight(event.target.value)} /></label>
-                    <p>宽高只做视频技术校验，不会改动生成设置；小模型人物和对白建议未覆盖时也能继续生产。</p>
-                  </>}
-                </>}
-              </div>
-              <ProductionSeriesPanel
-                key={`series-${projectId}`}
-                projectId={projectId}
-                shots={shots}
-                assets={assets}
-                jobs={jobs}
-                workflowProfiles={workflowProfiles}
-                system={system}
-                demoSelected={demoOverride || queueProvider === 'mock'}
-                onSelectReal={() => setDemoOverride(false)}
-                busy={busy}
-                reviewWidth={reviewWidth}
-                reviewHeight={reviewHeight}
-                onStarted={() => refreshAll().catch(() => undefined)}
-                onMessage={report}
-                onSaveBindings={saveBindings}
-                onSetContinuity={setShotContinuity}
-                onModeAction={handleModeAction}
-                onGoSetup={() => goToDirectorPage('setup')}
-              />
-            </StageDock>}
+            <PreferencesPanel />
             {project && <>
               <StageDock id="film-crew" title="影视制片团队与 H3 官方规范(高级)">
                 <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
@@ -962,15 +866,17 @@ function App() {
                   <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
                 </>,
               )}
-              {directorPage === 'assets' && <StoryboardBookPanel
+              {/* ② 页保持挂载（同 2026-11-06 裁定）：未确认的表单编辑切页不丢；
+                  刷新/重启后由面板从服务端已持久化决定读回。 */}
+              <StoryboardBookPanel
                 key={`book-${projectId}`}
                 projectId={projectId}
                 currentStyle={currentStyle}
                 onGoStage={(target) => { resolveBlockerTarget(target)(); }}
                 onMessage={report}
                 onConfirmed={() => refreshAll().catch(() => undefined)}
-              />}
-              {directorPage === 'assets' && <>
+              />
+              <>
                 <StageDock id="style-detail" title="逐项微调七个风格维度(高级)">
                   <StylePanel
                     key={`style-${projectId}`}
@@ -998,7 +904,7 @@ function App() {
                     onMessage={report}
                   />
                 </StageDock>
-              </>}
+              </>
               </StageRailProvider>
             </div>
 
@@ -1008,7 +914,10 @@ function App() {
                 <>把故事拆成<em>能拍的镜头。</em></>,
                 '后台逐场调用五个分镜工种并自动落镜；每一集独立推进，一集没拆完不影响其他集。',
                 <>
-                  <span className={`head-chip ${shots.length ? 'ok' : ''}`}>{shots.length ? `${plannedShotCount} 镜在册` : '还没有分镜'}</span>
+                  <span className={`head-chip ${plannedShotCount || landedShotCount ? 'ok' : ''}`}>
+                    {plannedShotCount ? `${plannedShotCount} 镜在册`
+                      : landedShotCount ? `${landedShotCount} 镜已落 · 待整集确认` : '还没有分镜'}
+                  </span>
                   <span className={`head-chip ${currentStyle ? 'ok' : ''}`}>{currentStyle ? `风格第 ${currentStyle.version} 版` : '风格待冻结'}</span>
                 </>,
               )}
@@ -1060,6 +969,8 @@ function App() {
                 </div>}
                 <ShotMaterialsPanel key={`shot-materials-${projectId}`} projectId={projectId}
                   onMessage={report}
+                  assetsDone={stageDone.assets}
+                  onAdvance={() => { if (nextStage) goToDirectorPage(nextStage.page, nextStage.id); }}
                   onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
 
                 {nextStage && nextStage.page !== 'materials' && <div className="stage-next-step">
@@ -1092,7 +1003,7 @@ function App() {
                 onGoSetup={() => goToDirectorSetup('models')}
               />}
               {directorPage === 'package' && <StageDock id="preproduction" title="制片准备与语义审片校准(高级)">
-                <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} reviewScope={reviewScope} />
+                <PreproductionPanel key={`prep-${projectId}`} projectId={projectId} onRefresh={refreshAll} />
               </StageDock>}
               </StageRailProvider>
             </div>
@@ -1110,6 +1021,8 @@ function App() {
                 mode="run"
                 overview={overview}
                 refreshEpoch={dataEpoch + projectionEpoch}
+                activeJob={jobs.find((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING']
+                  .includes(job.status)) ?? null}
                 demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}
@@ -1166,15 +1079,6 @@ function App() {
                 onRefresh={() => refreshAll().catch(() => undefined)}
                 onOpenLibrary={() => goToDirectorPage('library')}
               />}
-              <DeliveryPanel key={`delivery-${projectId}`} projectId={projectId} jobs={jobs} active={directorPage === 'deliver'} refreshEpoch={dataEpoch} />
-              {directorPage === 'deliver' && <StageDock id="subtitles" title="字幕与台词核对">
-                <SubtitlePanel
-                  key={`subtitles-${projectId}`}
-                  projectId={projectId}
-                  busy={busy}
-                  onMessage={report}
-                />
-              </StageDock>}
               </StageRailProvider>
             </div>
 
@@ -1248,7 +1152,7 @@ function App() {
             <ul className="help-glossary">
               <li>页面数据不对 → 点右上角「刷新」。</li>
               <li>任务不动了 → 顶部状态入口会显示原因，点它直达基础配置或实际进度。</li>
-              <li>需要细调模型、工作流或查看审计 → 左栏「高级设置」。</li>
+              <li>需要细调模型、工作流映射或项目策略 → 「基础配置」;查看审计与显示偏好 → 左栏「高级设置」。</li>
             </ul>
           </div>
         </div>

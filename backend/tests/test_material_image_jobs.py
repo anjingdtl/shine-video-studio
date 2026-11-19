@@ -656,6 +656,10 @@ def test_an_image_item_waits_for_a_running_video_lease(api, monkeypatch):
         db.flush()
         item_id = item.id
         db.commit()
+    # brief 绑定事实身份：预置 brief 必须带当前事实的 basis，否则按过期重问。
+    from tests.conftest import stamp_brief_basis
+    stamp_brief_basis(factory, item_id)
+    with factory.begin() as db:
         lease = ResourceLease(
             owner="h3:series-1",
             gpu="gpu-0",

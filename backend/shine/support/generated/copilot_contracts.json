@@ -270,6 +270,9 @@
             "minItems": 1,
             "type": "array"
           },
+          "output": {
+            "type": "object"
+          },
           "strategy": {
             "type": "object"
           },
@@ -291,6 +294,17 @@
               "maxItems": 200,
               "minItems": 1,
               "type": "array"
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "strategy": {
               "anyOf": [
@@ -320,7 +334,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "1a03e4a57a68aa88248e6c4a1ae6bfa2f993c6ad33d42eb086ec360e2f1b8be2"
+        "schema_digest": "136fbc6ee2871917377262eca5778b75bfa3973a75e6f43eade764639aef2c88"
       },
       "operation": "POST /api/v1/projects/{}/director/production/start",
       "parameters": [
@@ -3055,7 +3069,7 @@
     },
     {
       "action_id": "production_start",
-      "api_contract_digest": "4121bd3fa57b9f2a55b327108710e4e7c4c32c7d800c27f909c054157bece5b2",
+      "api_contract_digest": "2eb141d1778a56acf84b84080bbc405543e350a1f939125c550540a29f3929e9",
       "api_operations": [
         "POST /api/v1/projects/{}/director/production/start",
         "GET /api/v1/production-runs/{}"
@@ -3401,8 +3415,8 @@
     }
   ],
   "digests": {
-    "api_contract": "e7fae921a7ab4caa893be36bce4ac7ac9475b6bc7ffbd9e610aee0f5a0757fd3",
-    "api_schema": "387fb78e5560ecc16b28ed2b64ec08c0ffba045e87fa6607ec4625a47e41365c",
+    "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
+    "api_schema": "28bb552248fce13589cb26e754e58d17c0244f767cda8ec41e0f7d1b9e461b94",
     "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [
@@ -3506,6 +3520,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/asset-center/versions/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/asset-center/visual-facts",
       "status": "DISCOVERED"
     },
     {
@@ -4106,6 +4126,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/projects/{}/styles",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/projects/{}/subtitle-style",
       "status": "DISCOVERED"
     },
     {
@@ -5930,6 +5956,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "PUT /api/v1/projects/{}/style/draft",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/projects/{}/subtitle-style",
       "status": "DISCOVERED"
     },
     {

@@ -230,6 +230,8 @@ def test_the_image_path_submits_harvests_and_registers_a_candidate(api, tmp_path
             db.flush()
             item_id = item.id
             db.commit()
+        from tests.conftest import stamp_brief_basis
+        stamp_brief_basis(factory, item_id)
 
         # The live node check runs against the stand-in's declared nodes.
         with factory() as db:

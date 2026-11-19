@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle, Check, Clock3, Film, Loader2, LockKeyhole, Pause, Play, RefreshCw,
-  ShieldAlert, Sparkles, Square, Video,
+  ShieldAlert, Sparkles, Square,
 } from 'lucide-react';
 import {
-  API, ApiError, api, compileEpisodeSubtitles, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
+  API, ApiError, api, confirmDirectorPackage, confirmEpisodePlan, controlProductionRun, createDirectorPackage,
   createEpisodePlan, createProductionRun, getJourney, getPackageReadiness, getProductionRun, getRunEvents,
   json, listDirectorPackages, listEpisodePlans, materializeEpisodePlan,
-  type DeliveryAcceptance, type DirectorPackage, type EpisodePlan, type Journey, type PackageReadiness,
-  type ProductionRun, type RunEvent, type WorkflowProfile,
+  type DeliveryAcceptance, type DirectorEpisodeOverview, type DirectorPackage, type EpisodePlan, type Journey,
+  type PackageReadiness, type ProductionRun, type RunEpisode, type RunEvent, type WorkflowProfile,
 } from '../api';
 import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
-import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { EpisodeAcceptance } from './EpisodeAcceptance';
+import { EpisodeSubtitleFold } from './EpisodeSubtitleFold';
 import GenerationSegmentsPanel from './GenerationSegmentsPanel';
 import { OpenVideoFolderButton } from './OpenVideoFolderButton';
 import { fetchProfileGates, gateReason, type ProfileGate } from './variantGate';
@@ -114,9 +114,6 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [toleranceSeconds, setToleranceSeconds] = useState(15);
   const [profileId, setProfileId] = useState('');
-  /** 画幅与分辨率档位：只产出 OutputSpec 宽高，走既有导演包→渲染器链路。 */
-  const [orientation, setOrientation] = useState<Orientation>('landscape');
-  const [resolutionScale, setResolutionScale] = useState(1.0);
   /** 每个方案在本机能不能用于生产：服务端判定，浏览器只显示结论和原因。 */
   const [gates, setGates] = useState<Record<string, ProfileGate>>({});
   const ref2vaProfiles = useMemo(
@@ -137,6 +134,8 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   // A deep link names one exact package; the selection follows it.
   useEffect(() => { setSelectedPackageId(packageId ?? ''); }, [packageId]);
   const [episodePage, setEpisodePage] = useState(0);
+  /** ⑦ 单一选集：预览/验收/字幕/镜网格都只作用于手动选中的这一集。 */
+  const [selectedEp, setSelectedEp] = useState('');
   /** 包范围：null 表示跟随默认（全部已确认分镜的集）；手动勾选后按勾选集合。 */
   const [scopeIds, setScopeIds] = useState<string[] | null>(null);
   /** 进展日志只渲染最近几条：记录可以一直增长，页面高度不能跟着长。 */
@@ -299,11 +298,10 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       onMessage(`这个生成方案现在不能用于生产：${gateReason(gate)}`, 'error');
       return;
     }
-    const frame = frameSize(orientation, resolutionScale);
+    // 画幅/分辨率的唯一控制节点在⑤导演包页（DirectorShootPanel），这里不再赋值。
     return act('package', () => createDirectorPackage(projectId, {
       workflow_profile_id: profileId,
       generation_mode: profileMode,
-      output: { width: frame.width, height: frame.height, fps: 24 },
       policy: { batch_shot_limit: 6, max_repairs_per_shot: 2 },
       episode_ids: effectiveScope.length ? effectiveScope : null,
     }), '导演包已生成，请查看就绪检查后确认');
@@ -390,74 +388,118 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     ?? journey?.stages.find((stage) => stage.id === 'package')?.blockers
     ?? []).filter((blocker) => blocker.code !== 'PACKAGE_NOT_CONFIRMED');
 
-  // 字幕轨在后期按真实成片时长生成/装配（③只撰写），不在出片前提前装配。
-  const [compilingEp, setCompilingEp] = useState('');
-  async function compileTrack(episodeId: string) {
-    if (compilingEp) return;
-    setCompilingEp(episodeId);
-    try {
-      const body = await compileEpisodeSubtitles(projectId, episodeId);
-      onMessage?.(`本集字幕轨第 ${body.revision} 版已按${body.basis === 'actual' ? '真实成片' : '计划'}时长生成；在下方选择该版本重新装配。`, 'success');
-      onRefresh?.();
-    } catch (exc) {
-      onMessage?.(exc instanceof ApiError ? exc.message : String(exc), 'error');
-    } finally {
-      setCompilingEp('');
-    }
+  /** 装配合同编辑器读运行分集行；跨运行的历史集用总览投影兜底，入口仍只有⑦这一处。 */
+  function postEditorEpisode(episode: DirectorEpisodeOverview): RunEpisode {
+    const scoped = (run?.episodes ?? []).find((row) => row.episode_id === episode.episode_id);
+    if (scoped) return scoped;
+    return {
+      id: episode.episode_id, episode_id: episode.episode_id, position: episode.order ?? 0,
+      title: episode.title, status: episode.state, shot_count: episode.shots.landed_count,
+      passed_shot_count: episode.production?.passed_shot_count ?? 0,
+      planned_seconds: episode.planned_seconds, shot_ids: [],
+      post_contract: (episode.delivery?.post_contract as RunEpisode['post_contract']) ?? null,
+      actual_seconds: episode.delivery?.actual_seconds ?? null, delivery_order_id: null,
+      delivered_artifact_id: episode.delivery?.artifact_id ?? null,
+      delivered_sha256: episode.delivery?.sha256 ?? null,
+      blocker_code: null, delivered_at: episode.delivery?.delivered_at ?? null, batches: [],
+    };
   }
-
-  // 逐集成片：跨运行按集读取，不跟随"当前这一次运行"。
-  const postCards = mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
-    ? <ol className="run-episodes post-episode-cards">
-      {overviewEpisodes.map((episode) => <li key={episode.episode_id}>
-        <div className="run-ep-head">
-          <span className="run-ep-no">{episode.order ?? '—'}</span>
-          <div>
-            <b>{episode.title || episode.episode_id}</b>
-            <span>{episode.shots.confirmed_count || episode.shots.landed_count} 镜
-              {' '}· 成片 {episode.delivery?.actual_seconds ? `${Math.round(episode.delivery.actual_seconds)} 秒` : '—'}
-              {' '}· {episode.state_label}</span>
-            <em className="run-ep-sub">
-              {episode.delivery?.sha256
-                ? `文件 ${episode.delivery.sha256.slice(0, 10)}…（SHA-256）`
-                : '尚无成片文件'}
-              {' · '}
-              {episode.delivery?.post_contract?.subtitle_revision
-                ? `字幕第 ${Number(episode.delivery.post_contract.subtitle_revision)} 版`
-                : '无字幕轨（按默认剪辑）'}
-              {' · 历史版本见成片库'}
-            </em>
-          </div>
-          <span className={`run-badge ${episode.state === 'DELIVERED' ? 'ok' : episode.state === 'SHOOTING' ? 'run' : 'warn'}`}>
-            {episode.state_label}
-          </span>
-        </div>
-        {episode.delivery?.artifact_id && <div className="run-ep-media">
-          <video src={`${API}/deliveries/${episode.delivery.artifact_id}/media`} controls preload="none" />
-          <OpenVideoFolderButton artifactId={episode.delivery.artifact_id} />
-        </div>}
-        {!episode.delivery?.artifact_id && episode.production && <p className="run-hint">
-          已通过 {episode.production.passed_shot_count}/{episode.production.shot_count} 镜
-          {episode.production.in_current_run ? '' : '（最近一次运行）'}；全部通过后会自动装配成片。
-        </p>}
-        {!episode.delivery?.artifact_id && !episode.production && <p className="run-hint">
-          这一集还没有开拍：到「导演包」勾选它并开始真实制作。
-        </p>}
-        <div className="episode-subtitle-bar">
-          <button type="button" className="btn-secondary" disabled={!!compilingEp}
-            onClick={() => { void compileTrack(episode.episode_id); }}>
-            {compilingEp === episode.episode_id ? '生成中…' : '按真实成片时长生成 / 更新字幕轨'}
-          </button>
-          <span className="run-hint">字幕轨在这里按真实成片时长生成；再到下方「修订剪辑 / 字幕」选择版本装配。</span>
-        </div>
-      </li>)}
-    </ol>
-    : null;
 
   if (error && !journey) {
     return <section className="card section-card run-panel">
       <div className="blocked-callout"><ShieldAlert size={14} />{error}</div>
     </section>;
+  }
+
+  // ⑦ 后期成片：自上而下「集预览（含验收+折叠字幕）→ 该集镜预览」，单一选集。
+  if (mode === 'post') {
+    const eps = overviewEpisodes ?? [];
+    const selected = eps.find((row) => row.episode_id === selectedEp) ?? eps[0] ?? null;
+    const selRunId = selected
+      ? (selected.delivery?.run_id ?? selected.production?.run_id ?? run?.id ?? '') : '';
+    return <div className="run-panel post-panel">
+      <section className="card section-card run-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">逐集成片</div>
+            <h2>每一集都能单独播放与确认</h2>
+            <p>选一集观看；确认接受、字幕烧录都只作用于当前选中的这一集。</p>
+          </div>
+          <button className="btn-secondary" disabled={busy !== ''} onClick={load}>
+            <RefreshCw size={13} /> 刷新
+          </button>
+        </div>
+        {eps.length === 0 && <p className="empty-inline">还没有可预览的集。先在「视频生产」完成拍摄与装配。</p>}
+        {eps.length > 0 && <div className="post-ep-selector" role="tablist" aria-label="选择集">
+          {eps.map((row) => <button key={row.episode_id} type="button" role="tab"
+            aria-selected={selected?.episode_id === row.episode_id}
+            className={`head-chip ${selected?.episode_id === row.episode_id ? 'active' : ''}`}
+            onClick={() => setSelectedEp(row.episode_id)}>
+            {row.title || row.episode_id} · {row.state_label}
+          </button>)}
+        </div>}
+        {selected && <div className="post-ep-preview">
+          <div className="run-ep-head">
+            <span className="run-ep-no">{selected.order ?? '—'}</span>
+            <div>
+              <b>{selected.title || selected.episode_id}</b>
+              <span>{selected.shots.confirmed_count || selected.shots.landed_count} 镜
+                {' '}· 成片 {selected.delivery?.actual_seconds ? `${Math.round(selected.delivery.actual_seconds)} 秒` : '—'}</span>
+              <em className="run-ep-sub">
+                {selected.delivery?.sha256 ? `文件 ${selected.delivery.sha256.slice(0, 10)}…（SHA-256）` : '尚无成片文件'}
+                {' · '}
+                {selected.delivery?.post_contract?.subtitle_revision
+                  ? `字幕第 ${Number(selected.delivery.post_contract.subtitle_revision)} 版` : '无字幕轨'}
+              </em>
+            </div>
+            <span className={`run-badge ${acceptanceLabel(selected.delivery?.acceptance).tone}`}>
+              {acceptanceLabel(selected.delivery?.acceptance).text}
+            </span>
+          </div>
+          {selected.delivery?.artifact_id
+            ? <div className="run-ep-media">
+              <video key={selected.delivery.artifact_id} controls preload="metadata"
+                src={`${API}/deliveries/${selected.delivery.artifact_id}/media`} />
+              <div className="row run-ep-acceptance">
+                <OpenVideoFolderButton artifactId={selected.delivery.artifact_id} />
+                <button type="button" className="btn-secondary" onClick={() => setAcceptTarget({
+                  artifactId: selected.delivery!.artifact_id,
+                  sha256: selected.delivery!.sha256 ?? '',
+                  title: selected.title || selected.episode_id,
+                  acceptance: selected.delivery?.acceptance ?? null,
+                })}>观看并确认</button>
+              </div>
+            </div>
+            : <p className="run-hint">这一集还没有装配成片；全部镜头通过后会自动装配。</p>}
+          {selRunId && <EpisodeSubtitleFold projectId={projectId} episode={selected} runId={selRunId}
+            runEpisode={postEditorEpisode(selected)} onMessage={onMessage}
+            onApplied={() => { void load(); onRefresh?.(); }} />}
+        </div>}
+      </section>
+      {selected && <section className="card section-card run-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">第 {selected.order ?? '—'} 集 · 每一镜</div>
+            <h2>该集的成片文件</h2>
+            <p>只展示当前选中集的镜；切换上方选集查看其它集。单镜返修在这里。</p>
+          </div>
+          <Film size={16} />
+        </div>
+        <GenerationSegmentsPanel projectId={projectId} fixedEpisode={String(selected.order ?? '')}
+          fingerprint={`post-${selected.episode_id}-${selected.delivery?.artifact_id ?? ''}`}
+          onChanged={() => { void load(); onRefresh?.(); }} />
+      </section>}
+      {acceptTarget && <EpisodeAcceptance
+        artifactId={acceptTarget.artifactId} sha256={acceptTarget.sha256}
+        title={acceptTarget.title} acceptance={acceptTarget.acceptance}
+        onClose={() => setAcceptTarget(null)}
+        onDecided={() => {
+          setAcceptTarget(null);
+          void load();
+          onRefresh?.();
+        }}
+      />}
+    </div>;
   }
 
   return <div className="run-panel">
@@ -584,21 +626,6 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
               })}
             </select>
           </label>
-          <label>画幅
-            <select value={orientation} onChange={(event) => setOrientation(event.target.value as Orientation)}>
-              {(Object.keys(ORIENTATION_LABELS) as Orientation[]).map((key) => (
-                <option key={key} value={key}>{ORIENTATION_LABELS[key]}</option>
-              ))}
-            </select>
-          </label>
-          <label>分辨率档位
-            <select value={resolutionScale} onChange={(event) => setResolutionScale(Number(event.target.value))}>
-              {RESOLUTION_SCALES.map((scale) => {
-                const frame = frameSize(orientation, scale);
-                return <option key={scale} value={scale}>{scaleLabel(scale)} · {frame.width}×{frame.height}</option>;
-              })}
-            </select>
-          </label>
           {selectedGate && !selectedGate.selectable && <span className="run-hint">
             <AlertTriangle size={13} /> 「{selectedGate.profile_name ?? profileId}」现在不能用于生产：{gateReason(selectedGate)}
           </span>}
@@ -692,39 +719,20 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
       </section>
     </>}
 
-    {(mode === 'run' || mode === 'post') && <section className="card section-card run-card">
+    {mode === 'run' && <section className="card section-card run-card">
       <div className="section-heading">
         <div>
-          <div className="section-kicker">{mode === 'post' ? '逐集成片' : '整部作品运行'}</div>
-          <h2>{mode === 'post' ? '每一集都能单独播放' : '后台会一直推进，关了浏览器也一样'}</h2>
-          <p>{mode === 'post'
-            ? '这里只展示真实装配完成的分集；缺片段的一集不会出现在成片里。'
-            : '运行状态来自服务端记录：心跳只代表后台还活着，最近进展才代表真的拍出了东西。'}</p>
+          <div className="section-kicker">整部作品运行</div>
+          <h2>后台会一直推进，关了浏览器也一样</h2>
+          <p>运行状态来自服务端记录：心跳只代表后台还活着，最近进展才代表真的拍出了东西。</p>
         </div>
         <button className="btn-secondary" disabled={busy !== ''} onClick={load}>
           <RefreshCw size={13} /> 刷新
         </button>
       </div>
 
-      {/* 逐集成片与"当前这次运行"无关：第 1 集交付后开始拍第 2 集，第 1 集仍然在这里。 */}
-      {postCards}
-      {mode === 'post' && <section className="card section-card run-card">
-        <div className="section-heading">
-          <div>
-            <div className="section-kicker">剪辑方案 · 按镜网格</div>
-            <h2>每一镜的成片文件</h2>
-            <p>按集出一版成片；这里按镜网格展示各镜文件，供核对与单镜返修。</p>
-          </div>
-          <Film size={16} />
-        </div>
-        <GenerationSegmentsPanel projectId={projectId}
-          fingerprint={`post-${overviewEpisodes?.map((row) => row.delivery?.artifact_id ?? row.episode_id).join(',') ?? ''}`} />
-      </section>}
-
       {!activeRun
-        ? (mode === 'post' && overviewEpisodes && overviewEpisodes.length > 0
-          ? null
-          : <p className="empty-inline">还没有整部作品的运行记录。先在「导演包」阶段确认并启动。</p>)
+        ? <p className="empty-inline">还没有整部作品的运行记录。先在「导演包」阶段确认并启动。</p>
         : <>
         <div className="run-summary-row">
           <span className={`run-badge ${tone(activeRun.status)}`}>{statusText(activeRun.status)}</span>
@@ -830,36 +838,6 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         </details>
       </>}
     </section>}
-
-    {mode === 'post' && overviewEpisodes && overviewEpisodes.some((row) => row.delivery?.artifact_id)
-      && <section className="card section-card run-card">
-        <div className="section-heading">
-          <div>
-            <div className="section-kicker">待审清单</div>
-            <h2>技术完成 ≠ 你已经认可</h2>
-            <p>自动交付只代表文件可播放、技术检查通过。艺术效果需要你自己看过之后决定。</p>
-          </div>
-          <Film size={16} />
-        </div>
-        <ul className="run-review-list">
-          {overviewEpisodes.filter((row) => row.delivery?.artifact_id).map((episode) => <li key={episode.episode_id}
-            title={episode.delivery?.sha256 ?? undefined}>
-            <Video size={12} />
-            <span>{episode.title || episode.episode_id} · {seconds(episode.delivery?.actual_seconds)}</span>
-            <span className={`run-badge ${acceptanceLabel(episode.delivery?.acceptance).tone}`}>
-              {acceptanceLabel(episode.delivery?.acceptance).text}
-            </span>
-            {episode.delivery?.artifact_id && episode.delivery.sha256 && <button type="button" className="btn-secondary"
-              onClick={() => setAcceptTarget({
-                artifactId: episode.delivery!.artifact_id,
-                sha256: episode.delivery!.sha256!,
-                title: episode.title || episode.episode_id,
-                acceptance: episode.delivery?.acceptance ?? null,
-              })}>观看并确认</button>}
-            <em className="run-ep-sub">剪辑/字幕修订在下方「成片文件与导出」；单镜返修在「生成分段」。</em>
-          </li>)}
-        </ul>
-      </section>}
 
     {busy && <div className="run-busy"><Loader2 size={12} className="spin" /> 正在处理…</div>}
     {error && <div className="blocked-callout"><AlertTriangle size={13} />{error}</div>}

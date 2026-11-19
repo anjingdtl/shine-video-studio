@@ -669,7 +669,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
                 : '本机权重已齐，点一次自动登记方案并激活'}
         </GuideTip>
         {envBlocked && <span className="setup-warn"><AlertTriangle size={12} /> 先处理硬件或工具阻断项</span>}
-        {storage?.requires_selection && <span className="setup-warn"><AlertTriangle size={12} /> 先在「作品输出目录」选择非系统盘</span>}
+        {storage?.requires_selection && <span className="setup-warn"><AlertTriangle size={12} /> 先在本页「下载与安装目录」选择非系统盘</span>}
       </div>
 
       {capabilityRows.length > 0 && <ul className="setup-breakdown" aria-label="分项下载量">

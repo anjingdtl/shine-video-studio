@@ -148,6 +148,8 @@ def _prepare(factory, settings, project_id, base_url, models, *, idempotency_key
         db.flush()
         item_id = item.id
         db.commit()
+    from tests.conftest import stamp_brief_basis
+    stamp_brief_basis(factory, item_id)
     return item_id
 
 

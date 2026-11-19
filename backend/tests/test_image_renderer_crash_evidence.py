@@ -439,7 +439,9 @@ def _seed_material_item(factory, project_id):
         db.flush()
         item_id = item.id
         db.commit()
-        return item_id
+    from tests.conftest import stamp_brief_basis
+    stamp_brief_basis(factory, item_id)
+    return item_id
 
 
 def test_the_attempt_reaches_a_terminal_state_when_the_renderer_dies(api, tmp_path, monkeypatch):

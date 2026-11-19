@@ -98,8 +98,8 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
                                      for f in component["files"]],
                            "license_id": component["license_id"], "license_url": component["license_url"]})
     if strategy.upscale.enabled:
-        from shine.comfyops.relayvsr import relayvsr_readiness
-        blockers.extend(relayvsr_readiness()["blockers"])
+        from shine.comfyops.setup_summary import relayvsr_machine_readiness
+        blockers.extend(relayvsr_machine_readiness(db, settings)["blockers"])
     from sqlalchemy import select
 
     from shine.comfyops.models import ComfyInstance
@@ -118,7 +118,7 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
         "missing_download_bytes": sum(row["missing_download_bytes"] for row in components),
         "required_nodes": compiled.required_nodes, "node_abi": "LIVE_CHECK_PENDING",
         "managed_installations": sorted(installations, key=lambda item: item["id"]),
-        "blockers": blockers, "production_blockers": strategy_blockers(strategy),
+        "blockers": blockers, "production_blockers": strategy_blockers(strategy, db, settings),
         "download_eligible": not blockers and len(components) == len(names),
         "trial_ready": False, "production_ready": False,
     }

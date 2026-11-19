@@ -1247,7 +1247,7 @@ class FilmAgentDispatcher:
             db.commit()
             return artifact
         except (ValueError, ValidationError, LLMError) as exc:
-            from shine.agents.execution import UNKNOWN_CODES, rejection_reason
+            from shine.agents.execution import UNKNOWN_CODES, AgentRequestBlocked, rejection_reason
 
             db.rollback()
             task = db.get(AgentTaskRecord, task.id)
@@ -1325,6 +1325,11 @@ class FilmAgentDispatcher:
                              if isinstance(exc, LLMError)
                              and isinstance(exc.details.get("provider_text"), str) else {}),
                           "external_outcome": external_outcome,
+                          # The gate names the record that holds the identity;
+                          # without it the panel could only offer a retry the
+                          # gate would refuse again.
+                          **({"blocking_task": exc.blocking}
+                             if isinstance(exc, AgentRequestBlocked) else {}),
                           "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
             db.commit()
             raise ValueError(task.error_code) from None

@@ -91,6 +91,7 @@ def build_context(
     style_bible: dict[str, Any] | None = None,
     style_version: int | None = None,
     film_style: str = "",
+    story_world: str = "",
 ) -> dict[str, Any]:
     """The server envelope the model receives.
 
@@ -110,6 +111,7 @@ def build_context(
         "frozen_style_bible": style_bible or {},
         "frozen_style_version": style_version,
         "film_style_instruction": film_style,
+        "story_world": story_world,
         "locked_story_facts": list(locked_facts),
         "script_language": project_language,
         "output_contract": BRIEF_CONTRACT.__name__,
@@ -127,6 +129,10 @@ def build_context(
             "The picture's medium is fixed by film_style_instruction: apply it to every surface "
             "(cel-shaded flat fills and clean line art for animation; real skin and lens texture for "
             "live-action). A photoreal portrait for an animation film is a refused brief, not a style choice.",
+            "The subject belongs to the era and setting in story_world (and the locked story facts). "
+            "Carry the period costume, hair, architecture and materials into the English prose; a "
+            "period or fantasy script must not render as modern people in modern dress. Translate the "
+            "world's intent into English, never paste the Chinese.",
             "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
             "subject first, then its dress and build, then the surface materials and their textures. Use "
             "concrete nouns ('brushed brass', 'deep navy wool'), not bare colours or bare materials.",
@@ -150,10 +156,7 @@ class BriefError(RuntimeError):
 
 def _load_context(factory, item_id: str) -> dict[str, Any]:
     """Everything the brief envelope is built from, read once."""
-    from sqlalchemy import select
-
     from shine.comfyops.models import AssetRequirement, PreProductionPlan
-    from shine.models import StyleVersion
 
     with factory() as db:
         item = db.get(MaterialItem, item_id)
@@ -175,23 +178,21 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         # The frozen style bible is the director's look. A material brief that
         # never sees it can only invent a different film, which is exactly how a
         # reference still ends up not matching the production it belongs to.
-        style = db.scalar(
-            select(StyleVersion)
-            .where(StyleVersion.project_id == item.project_id, StyleVersion.frozen_at.is_not(None))
-            .order_by(StyleVersion.version.desc())
-        )
-        film_style = ""
-        if style is not None:
-            from shine.h3.film_type import film_type_sentence
-            from shine.schemas import FilmType
-            try:
-                film_style = film_type_sentence(FilmType((style.snapshot or {}).get("film_type")))
-            except ValueError:
-                film_style = ""
+        # One reader supplies the medium, the world and the style identity.
+        from shine.materialprep.prompt_source import project_visual_facts
+        facts = project_visual_facts(db, item.project_id)
+        brief_basis = digest({
+            "style_version_id": facts["style_version_id"],
+            "world": facts["world"],
+            "rulepack": rulepack_digest(),
+        })
         return {
-            "style_bible": dict((style.snapshot or {}) if style else {}),
-            "style_version": style.version if style else None,
-            "film_style": film_style,
+            "style_bible": facts["snapshot"],
+            "style_version": facts["style_version"],
+            "film_style": facts["film_style"],
+            "story_world": facts["world"],
+            "brief_basis": brief_basis,
+            "existing_brief_basis": (item.payload or {}).get("brief_basis"),
             "document_id": (plan.payload or {}).get("document_id") if plan else None,
             "document_sha256": (plan.payload or {}).get("script_hash") if plan else None,
             "item_id": item.id,
@@ -220,12 +221,13 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
     """Make sure the item carries a producer brief, producing it if needed.
 
     Returns the new item state version so the caller can keep writing against
-    the version it owns.  A brief that already exists is never re-asked: the
-    producer answered once, and a second answer would be a second opinion the
-    user never requested.
+    the version it owns.  A brief bound to the current visual facts is never
+    re-asked: the producer answered once, and a second answer would be a second
+    opinion the user never requested.  When the frozen style or the world fact
+    changes, the old brief is stale history and a new one is produced.
     """
     data = _load_context(factory, item_id)
-    if data["existing_brief"]:
+    if data["existing_brief"] and data["existing_brief_basis"] == data["brief_basis"]:
         return {"status": data["item_status"], "brief": data["existing_brief"],
                 "state_version": version, "reused": True, "ready": True}
 
@@ -237,6 +239,7 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         style_bible=data.get("style_bible"),
         style_version=data.get("style_version"),
         film_style=data.get("film_style") or "",
+        story_world=data.get("story_world") or "",
     )
     system_prompt = material_image_brief_prompt()
     schema = BRIEF_CONTRACT.model_json_schema()
@@ -372,7 +375,8 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
                   {"artifact_id": artifact_id, "correction_used": correction_used,
                    "budget": budget}, project_id=data["project_id"])
 
-    item_payload = {**data["item_payload"], "brief": payload, "brief_artifact_id": artifact_id}
+    item_payload = {**data["item_payload"], "brief": payload, "brief_artifact_id": artifact_id,
+                    "brief_basis": data["brief_basis"]}
     new_version = touch_item(factory, item_id, version, status=ITEM_BRIEF_READY, error_code=None,
                              brief_artifact_id=artifact_id, payload=item_payload)
     return {"status": ITEM_BRIEF_READY, "code": None, "state_version": new_version,

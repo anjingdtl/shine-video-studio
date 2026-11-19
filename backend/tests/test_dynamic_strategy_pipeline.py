@@ -143,6 +143,53 @@ def test_strategy_shoot_via_director_start_builds_strategy_package(studio):
         assert len(revisions) == 1
 
 
+def test_director_start_freezes_the_frame_and_changed_frame_builds_new_package(studio):
+    """⑤ 画幅/分辨率唯一赋值：包冻结 binding.output，series 读同一份；换画幅不重放旧包。"""
+    from tests.test_director_shoot import _ready_first_episode
+    from tests.test_director_streamline import LOCAL
+
+    client, factory, settings = studio
+    project_id, _pending = _ready_first_episode(client, settings)
+    strategy = DEFAULT_STRATEGY.model_dump(mode="json")
+
+    first = client.post(f"/api/v1/projects/{project_id}/director/production/start", json={
+        "episode_ids": ["ep-01"], "strategy": strategy,
+        "output": {"width": 1344, "height": 768, "fps": 24},
+    }, headers=LOCAL)
+    assert first.status_code == 201, first.text
+    from shine.director.models import DirectorPackageVersion
+
+    with factory() as db:
+        package = db.get(DirectorPackageVersion, first.json()["package_id"])
+        assert package.manifest["binding"]["output"]["width"] == 1344
+        assert package.manifest["binding"]["output"]["height"] == 768
+        # series 由 Worker 派发时读同一份 binding.output（既有链路，
+        # test_output_spec_and_identity 钉住）；start 只负责冻结进包。
+
+    # 同画幅重放同一包；取消运行后换竖屏必须建新包，不得重放旧画幅。
+    replay = client.post(f"/api/v1/projects/{project_id}/director/production/start", json={
+        "episode_ids": ["ep-01"], "strategy": strategy,
+        "output": {"width": 1344, "height": 768, "fps": 24},
+    }, headers=LOCAL)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["package_built"] is False
+
+    cancelled = client.post(f"/api/v1/production-runs/{first.json()['run_id']}/cancel",
+                            json={}, headers=LOCAL)
+    assert cancelled.status_code in (200, 201, 202), cancelled.text
+    portrait = client.post(f"/api/v1/projects/{project_id}/director/production/start", json={
+        "episode_ids": ["ep-01"], "strategy": strategy,
+        "output": {"width": 768, "height": 1344, "fps": 24},
+    }, headers=LOCAL)
+    assert portrait.status_code == 201, portrait.text
+    assert portrait.json()["package_built"] is True
+    assert portrait.json()["package_id"] != first.json()["package_id"]
+    with factory() as db:
+        package = db.get(DirectorPackageVersion, portrait.json()["package_id"])
+        assert package.manifest["binding"]["output"]["width"] == 768
+        assert package.manifest["binding"]["output"]["height"] == 1344
+
+
 def test_candidate_variant_strategy_is_refused_not_substituted(studio):
     """T05: W6A8 candidate strategy is a named refusal at series creation."""
     client, _factory, _settings = studio

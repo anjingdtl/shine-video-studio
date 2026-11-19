@@ -912,7 +912,7 @@ def make_render_request(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
-        blockers = strategy_blockers(strategy)
+        blockers = strategy_blockers(strategy, db)
         if blockers:
             raise HTTPException(409, detail={
                 "code": "STRATEGY_BLOCKED",

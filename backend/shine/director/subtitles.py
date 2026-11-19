@@ -192,29 +192,64 @@ def _selected_cut_timing(db, project_id: str, episode_id: str) -> dict[str, Any]
 
 
 def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str = "user") -> dict[str, Any]:
-    """Build one subtitle revision for this episode's reel from frozen shot lines."""
-    from shine.media.subtitles import SubtitleCue, render_ass, render_srt, sha256_text
+    """Build one subtitle revision for this episode's reel.
 
-    require = episode_shot_subtitles(db, project, episode_id)
-    shots = require["shots"]
-    if not shots:
-        raise HTTPException(404, "EPISODE_NOT_IN_PLAN")
-    frozen = [row for row in shots if row["status"] == "FROZEN" and row["lines"]]
-    if not frozen:
+    The lines come from the same fact the renderer spoke: the shot spec's
+    dialogue, with its editorial times.  A shot whose lines a human froze in ③
+    overrides the dialogue for that shot only.  Timing follows the selected
+    delivered cut, exactly like the assembly does.
+    """
+    from shine.media.subtitles import SubtitleCue, render_ass, render_srt, sha256_text, subtitle_font_size
+
+    # 字幕与装配读同一张剪辑表：真实成片在，范围就是这一版成片的镜头
+    # （③ 实时镜表可能已应用了不属于这一版的新镜头）；只有还没有真实
+    # 交付时才回落到实时镜表的计划时长，并在结果里如实说明。
+    cut = _selected_cut_timing(db, project.id, episode_id)
+    if cut:
+        scope_ids = list(cut["clips"])
+        basis = "actual"
+    else:
+        table = episode_shot_subtitles(db, project, episode_id)
+        if not table["shots"]:
+            raise HTTPException(404, "EPISODE_NOT_IN_PLAN")
+        scope_ids = [row["shot_id"] for row in table["shots"]]
+        basis = "planned"
+    specs = {
+        shot_row.id: (shot_row.spec or {})
+        for shot_row in db.scalars(select(Shot).where(Shot.id.in_(scope_ids))).all()
+    }
+    stored = {
+        sub.shot_id: sub for sub in db.scalars(select(ShotSubtitle).where(
+            ShotSubtitle.shot_id.in_(scope_ids))).all()
+    } if scope_ids else {}
+    ordered: list[dict[str, Any]] = []
+    manual_shots = 0
+    dialogue_shots = 0
+    for position, shot_id in enumerate(scope_ids, start=1):
+        sub = stored.get(shot_id)
+        if sub is not None and sub.status == "FROZEN" and sub.lines:
+            lines = list(sub.lines)
+            manual_shots += 1
+        else:
+            lines = [
+                {"start_s": float(line.get("start_s") or 0),
+                 "end_s": float(line.get("end_s") or 0),
+                 "text": str(line.get("text") or "").strip()}
+                for line in (specs.get(shot_id, {}).get("dialogue") or [])
+                if str(line.get("text") or "").strip()
+            ]
+            if lines:
+                dialogue_shots += 1
+        if lines:
+            ordered.append({"shot_id": shot_id, "position": position, "lines": lines})
+    if not ordered:
         raise HTTPException(409, {
             "code": "EPISODE_SUBTITLE_EMPTY",
-            "message": "这一集还没有冻结的镜头字幕；先给至少一镜配置并冻结字幕",
+            "message": "这一集没有可生成的字幕：镜头既没有对白，也没有人工冻结的字幕",
         })
-    # 字幕与装配读同一张剪辑表：真实成片在，时码就按它的顺序和 in_s/out_s 排；
-    # 只有还没有真实交付时才回落到计划时长（并在结果里如实说明）。
-    cut = _selected_cut_timing(db, project.id, episode_id)
-    actual = bool(cut) and all(row["shot_id"] in cut["clips"] for row in shots)
-    basis = "actual" if actual else "planned"
     warnings: list[str] = []
     if basis == "planned":
         warnings.append("还没用真实成片时长：字幕时间按每镜计划时长排布，出片后建议重新生成一次")
-    ordered = (sorted(shots, key=lambda row: cut["clips"][row["shot_id"]]["start_s"])
-               if basis == "actual" else shots)
 
     cues: list[SubtitleCue] = []
     offset = 0.0
@@ -226,9 +261,9 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
             duration = float(clip["duration_s"])
         else:
             base, source_in = offset, 0.0
-            duration = float(shot["duration_target_s"] or 0)
+            duration = float(specs.get(shot["shot_id"], {}).get("duration_target_s") or 0)
             offset += duration
-        for line in shot["lines"] if shot["status"] == "FROZEN" else []:
+        for line in shot["lines"]:
             # 每镜字幕是相对这一镜自己的时间写的；被裁掉的片头不再出现在成片里，
             # 所以整行落在 in_s 之前就丢掉，跨过切点的行从片段起点开始。
             start = base + float(line["start_s"]) - source_in
@@ -246,7 +281,7 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
                                     end_s=round(end, 3), text=str(line["text"])))
     if not cues:
         raise HTTPException(409, {"code": "EPISODE_SUBTITLE_EMPTY",
-                                  "message": "冻结的字幕没有落在这一镜的时长内"})
+                                  "message": "字幕没有落在成片镜头的时长内"})
 
     previous = db.scalars(select(SubtitleTrack).where(
         SubtitleTrack.project_id == project.id)).all()
@@ -260,9 +295,9 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
         cues=[{"index": cue.index, "start_s": cue.start_s, "end_s": cue.end_s, "text": cue.text}
               for cue in cues],
         srt=srt,
-        ass=render_ass(cues),
+        ass=render_ass(cues, font_size=subtitle_font_size(db, project.id)),
         sha256=sha256_text(srt),
-        source="director_shot_config",
+        source="director_shot_config" if manual_shots else "shot_dialogue",
         created_by=actor,
     )
     db.add(row)
@@ -272,7 +307,8 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
     add_audit(
         db, actor, "EPISODE_SUBTITLE_COMPILED", "subtitle_track", row.id,
         {"revision": revision, "episode_id": episode_id, "cues": len(cues),
-         "basis": basis, "sha256": row.sha256},
+         "basis": basis, "sha256": row.sha256,
+         "manual_shots": manual_shots, "dialogue_shots": dialogue_shots},
         project_id=project.id,
     )
     return {
@@ -281,6 +317,8 @@ def compile_episode_subtitle_track(db, project, episode_id: str, *, actor: str =
         "status": row.status,
         "cue_count": len(cues),
         "basis": basis,
+        "manual_shots": manual_shots,
+        "dialogue_shots": dialogue_shots,
         # 字幕跟随的是哪一版成片：与装配读同一张剪辑表，页面不必再猜。
         "cut_order_id": cut.get("order_id") if basis == "actual" else None,
         "cut_version": cut.get("version") if basis == "actual" else None,

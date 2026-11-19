@@ -208,6 +208,8 @@ def compose(
     requirement_name: str = "",
     carrier: MaterialCarrier | None = None,
     film_style: str = "",
+    user_text: bool = False,
+    world_note: str = "",
 ) -> ImagePrompt:
     """Build the deterministic prompt pair for one confirmed requirement.
 
@@ -222,6 +224,12 @@ def compose(
     is shown face-on with its content legible, so the blanket text ban is
     replaced by a watermark-only ban — the written or on-screen content IS the
     material the script asks for.
+
+    ``user_text`` marks the appearance as the user's own boundary input (asset
+    centre): it is carried verbatim in the script language instead of being
+    refused for CJK, while the server layers (film medium, world note, framing,
+    negatives) still apply.  ``world_note`` is the confirmed story world / era
+    fact, appended verbatim so a period script cannot render as modern people.
     """
     if family not in COMPOSITION_RULES:
         raise ImagePromptError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
@@ -235,14 +243,19 @@ def compose(
             # material, so only the watermark and collage bans still apply.
             text_sentences = [_NO_COLLAGE_SENTENCE]
 
+    # Producer-authored prose is a server contract and must be English; a
+    # user's own prompt (asset centre) is boundary input in the script language
+    # and is carried verbatim, with the server layers still applied around it.
     appearance = standard.strip_quality_slogans(
-        _require_prompt_language(brief.appearance, field="appearance"))
+        brief.appearance if user_text else _require_prompt_language(brief.appearance, field="appearance"))
     if not appearance:
         raise ImagePromptError("MATERIAL_BRIEF_EMPTY", field="appearance")
-    must_keep = [standard.strip_quality_slogans(_require_prompt_language(item, field="must_keep"))
-                 for item in brief.must_keep]
-    avoid = [standard.strip_quality_slogans(_require_prompt_language(item, field="avoid"))
-             for item in brief.avoid]
+    must_keep = [standard.strip_quality_slogans(
+        item if user_text else _require_prompt_language(item, field="must_keep"))
+        for item in brief.must_keep]
+    avoid = [standard.strip_quality_slogans(
+        item if user_text else _require_prompt_language(item, field="avoid"))
+        for item in brief.avoid]
 
     direction = visual_direction or MaterialVisualDirection()
     for label, value in (
@@ -282,6 +295,7 @@ def compose(
     layers = [
         standard.anchor_sentence(family, carrier, direction),
         film_style.strip(),
+        world_note.strip(),
         f"{subject + ', ' if subject else ''}{appearance}",
         standard.environment_sentence(family, direction),
         standard.lighting_sentence(direction),
@@ -303,9 +317,10 @@ def compose(
         negative_exclusions.append("illustration, cel shading, cartoon, anime rendering")
     negative = _join([*avoid, *negative_exclusions])
 
-    if len(positive) > MAX_COMPOSED_PROMPT_CHARS:
+    if len(positive) > MAX_COMPOSED_PROMPT_CHARS and not user_text:
         # Never truncate: a cut composition rule or must-keep fact would render
-        # something the user did not confirm.
+        # something the user did not confirm.  A user's own prompt is carried
+        # verbatim (the asset centre never imposed this cap), so it is exempt.
         raise ImagePromptError(
             "MATERIAL_PROMPT_TOO_LONG",
             chars=len(positive),

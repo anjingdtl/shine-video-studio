@@ -4,6 +4,8 @@ import { api, json, type AgentRoute, type Project, type ProviderProfile, type Sy
 import { SetupCenter } from './SetupCenter';
 import { MachineProgressBanner } from './MachineProgressBanner';
 import OutputDirectoryPanel from './OutputDirectoryPanel';
+import StorageSettings from './StorageSettings';
+import WorkflowProfileManager from './WorkflowProfileManager';
 import { LLMSetupPanel } from './LLMSetupPanel';
 import { GuideTip } from './GuideTip';
 
@@ -57,7 +59,6 @@ type Props = {
   onSetKey: (profileId: string, key: string) => void;
   onDeleteProfile: (profileId: string) => void;
   onRoute: (role: string, profileId: string) => void;
-  onTestComfy: (baseUrl: string) => Promise<{ ok: boolean; message: string; node_count?: number }>;
   onRegisterWorkflow: (payload: Record<string, unknown>) => void;
   onValidateWorkflow: (profileId: string) => void;
   onDeleteWorkflow: (profileId: string) => void;
@@ -79,11 +80,13 @@ function gib(bytes?: number | null): string {
  * 工作流登记、运行配置、服务核验与激活都是自动的：这一页不再要求人选。
  */
 export default function DirectorSetupPanel({
-  focusTab = 'env', projectId, projectTitle, setProjectTitle, createProject,
-  system, refreshEpoch, onRefresh,
+  focusTab = 'env', projectId, project, projectTitle, setProjectTitle, createProject,
+  system, refreshEpoch, onRefresh, workflowProfiles, busy, onProjectSettings,
+  onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow, onBindStandardParameters,
 }: Props) {
   const [tab, setTab] = useState<Tab>(focusTab);
   const [prepTick, setPrepTick] = useState(0);
+  const [storageTick, setStorageTick] = useState(0);
   const [llm, setLlm] = useState<LlmReadiness | null>(null);
   const [voice, setVoice] = useState<VoiceReadiness | null>(null);
   const [advisory, setAdvisory] = useState<{ VLM?: Advisory; ASR?: Advisory }>({});
@@ -108,6 +111,13 @@ export default function DirectorSetupPanel({
   }, []);
 
   useEffect(() => { void load(); }, [load, refreshEpoch]);
+
+  // 安装目录保存后，制作环境卡读同一份 /setup/storage 事实立即刷新。
+  useEffect(() => {
+    const bump = () => setStorageTick((n) => n + 1);
+    window.addEventListener('shine-storage-changed', bump);
+    return () => window.removeEventListener('shine-storage-changed', bump);
+  }, []);
 
   // 后台整备在跑时跟读（每 5s），结束后停：进度来自安装记录，不是页面自己的状态。
   useEffect(() => {
@@ -235,10 +245,39 @@ export default function DirectorSetupPanel({
         下载、实例创建、登记、核验与激活，与专家层共用同一服务端事实，
         不建第二套安装器，也不重复渲染状态区。
       */}
-      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch}
+      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch + storageTick}
         onPrepSubmitted={() => setPrepTick((n) => n + 1)}
         onNeedProject={createProject} />
       <OutputDirectoryPanel />
+      <StorageSettings />
+      <details className="setup-details">
+        <summary><ShieldCheck size={12} /> 专业细调：工作流映射 · 项目策略</summary>
+        <div className="setup-detail-body">
+          <WorkflowProfileManager
+            project={project}
+            workflowProfiles={workflowProfiles}
+            busy={busy}
+            onRegisterWorkflow={onRegisterWorkflow}
+            onValidateWorkflow={onValidateWorkflow}
+            onDeleteWorkflow={onDeleteWorkflow}
+            onBindStandardParameters={onBindStandardParameters}
+          />
+          <div className="settings-block">
+            <h3><ShieldCheck size={14} /> 项目策略</h3>
+            {project ? <>
+              <label className="switch-row">
+                <span><b>允许远端语义审片</b><small>开启后才允许把派生证据帧发送到用户配置的 VLM。</small></span>
+                <input type="checkbox" checked={project.allow_remote_review} onChange={(event) => onProjectSettings({ allow_remote_review: event.target.checked })} />
+              </label>
+              <label className="switch-row">
+                <span><b>允许有界自动返工</b><small>只对临时/提示词/工作流类问题自动重试，硬错误仍转人工。</small></span>
+                <input type="checkbox" checked={project.auto_repair_enabled} onChange={(event) => onProjectSettings({ auto_repair_enabled: event.target.checked })} />
+              </label>
+              <p className="guardrail-note">叙事语言在「③ 镜头拆解」的对白语言里设置，全工作台共用同一份项目设置。</p>
+            </> : <div className="empty-inline">创建项目后可配置。</div>}
+          </div>
+        </div>
+      </details>
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">

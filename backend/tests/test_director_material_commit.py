@@ -244,6 +244,43 @@ def test_derive_reuses_real_masters_and_does_not_force_fill_scenes(api):
     assert character["matched_master"] is not None, "已批准人物主素材应被复用而非重生成"
 
 
+def test_streamline_project_surfaces_core_scenes_and_props_from_script_preparation(api):
+    """2026-11-19 用户报障：④清单只有人物、漏核心场景/道具。根因是导演推导只读
+    四阶段目录；老链路项目没有目录，但已有 ScriptPreparation 台账。收敛后同一推导
+    循环把该台账的场景/道具 surfaced，不再只剩人物。"""
+    from shine.h3.rulebook import digest
+    from shine.models import AgentArtifact, AgentTaskRecord
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    assert "scene" not in {r["family"] for r in derived["requirements"]}
+    payload = {"schema_version": "1.0", "scene_key": "S1", "summary": "", "locked_facts": [],
+               "requirements": [
+                   {"family": "scene", "name": "边陲镇中央圆形广场", "description": "低矮砖石房屋环绕。",
+                    "carrier": None, "source_span_ids": [], "questions": []},
+                   {"family": "prop", "name": "处死女巫手令", "description": "领主签发的手令。",
+                    "carrier": "paper", "core_prop_reason": "触发首个公开行动转折。",
+                    "source_span_ids": [], "questions": []},
+               ], "questions": []}
+    with factory.begin() as db:
+        task = AgentTaskRecord(project_id=project, role_id="producer", input_hash=digest(payload),
+                               asset_manifest_hash=digest(payload), rulepack_id="t", rulepack_hash=digest("t"),
+                               model_profile_id="t", model_id="t", schema_version="1.0",
+                               status="SUCCEEDED", trace={})
+        db.add(task)
+        db.flush()
+        db.add(AgentArtifact(project_id=project, kind="ScriptPreparation", schema_version="1.0",
+                             payload_json=payload, sha256=digest(payload), producer_role="producer",
+                             source_task_id=task.id, input_revision_ids=[]))
+    again = client.post(f"/api/v1/projects/{project}/director/materials/derive", json={}, headers=LOCAL)
+    assert again.status_code == 200, again.text
+    rows = again.json()["requirements"]
+    families = {r["family"] for r in rows}
+    assert {"character", "scene", "prop"} <= families
+    assert next(r for r in rows if r["family"] == "scene")["entity_id"] == "边陲镇中央圆形广场"
+    assert next(r for r in rows if r["family"] == "prop")["critical"] is True
+
+
 def test_material_preparation_confirm_binds_shots_like_director_commit(api):
     """晋升走的 /material-preparation/confirm 必须与 director commit 一样回绑镜头。
 

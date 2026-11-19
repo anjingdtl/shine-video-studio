@@ -50,12 +50,12 @@ export default function StorageSettings() {
     {storage && <>
       <div className="guardrail-note">当前目录：{storage.root} · 可用 {storage.free_gb} GB
         {storage.requires_selection && ' · 请先选择其他磁盘，自动安装已阻止。'}</div>
-      {storage.drives.length > 0 && <label className="field-line">选择磁盘
+      {(storage.drives ?? []).length > 0 && <label className="field-line">选择磁盘
         <select aria-label="下载安装磁盘" value="" onChange={event => {
           if (event.target.value) { setPath(`${event.target.value}ShineVideoStudio\\Runtime`); setAllowSystem(false); }
         }}>
           <option value="">选择磁盘后可编辑完整目录</option>
-          {storage.drives.map(drive => <option key={drive.path} value={drive.path}>
+          {(storage.drives ?? []).map(drive => <option key={drive.path} value={drive.path}>
             {drive.path} · {drive.free_gb} GB 可用{drive.system_drive ? '（系统盘）' : '（推荐）'}
           </option>)}
         </select>

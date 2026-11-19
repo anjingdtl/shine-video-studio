@@ -292,7 +292,7 @@ def build_package(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
-        blockers = strategy_blockers(strategy_contract)
+        blockers = strategy_blockers(strategy_contract, db, settings)
         if blockers:
             raise HTTPException(409, {
                 "code": "STRATEGY_BLOCKED",
@@ -865,7 +865,7 @@ def package_readiness(db: Session, package: DirectorPackageVersion) -> dict[str,
         else:
             if strategy_contract.strategy_sha256() != binding.get("strategy_sha256"):
                 blockers.append(_blocker("STRATEGY_CHANGED", "冻结的生产策略已被改动，请重新生成导演包"))
-            strategy_gates = strategy_blockers(strategy_contract)
+            strategy_gates = strategy_blockers(strategy_contract, db)
             if strategy_gates:
                 first = strategy_gates[0]
                 blockers.append(_blocker(first["code"], "所选生产策略在本机不可用", blockers=strategy_gates))

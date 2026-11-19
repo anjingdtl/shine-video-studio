@@ -439,6 +439,8 @@ class EpisodeConfirmBody(APIModel):
     expected_state_version: int | None = None
     #: Explicit acceptance of a landed episode total outside the target window.
     acknowledge_duration_deviation: bool = False
+    #: Confirm the target-fitting prefix of landed shots; the rest stays history.
+    fit_target: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard/episodes/{episode_id}/confirm")
@@ -447,7 +449,8 @@ def confirm_episode(project_id: str, episode_id: str, actor: Operator, db: DBSes
     require_project(db, project_id)
     result = streamline.confirm_episode_shots(
         db, project_id, episode_id, actor=actor,
-        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False))
+        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False),
+        fit_target=(body.fit_target if body else False))
     db.commit()
     return result
 
@@ -508,6 +511,8 @@ class ShootBody(APIModel):
     #: accelerator, optional second pass / RelayVSR X2).  Mutually exclusive
     #: with ``workflow_profile_id``.
     strategy: dict | None = None
+    #: ⑤ 唯一画幅/分辨率控制节点产出的 OutputSpec（宽高/fps/片段长度）。
+    output: dict | None = None
 
 
 @router.post("/projects/{project_id}/director/production/start", status_code=201)
@@ -527,6 +532,7 @@ def start_director_production(project_id: str, body: ShootBody, request: Request
         episode_ids=body.episode_ids,
         workflow_profile_id=body.workflow_profile_id,
         strategy=body.strategy,
+        output=body.output,
         actor=actor,
     )
     db.commit()
@@ -748,10 +754,9 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
     from shine.materialprep.prompt_source import (
         PromptSourceError,
         compose_requirement_prompt,
-        film_style_for,
         frozen_prompt,
+        project_visual_facts,
     )
-    from shine.models import StyleVersion
 
     payload = dict(requirement.payload or {})
     item = db.scalars(select(MaterialItem).where(
@@ -762,10 +767,7 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
     plan = db.get(PreProductionPlan, requirement.plan_id) if requirement.plan_id else None
     direction = MaterialVisualDirection.model_validate(
         (plan.payload or {}).get("visual_direction") or {} if plan is not None else {})
-    style = db.scalars(select(StyleVersion).where(
-        StyleVersion.project_id == requirement.project_id,
-        StyleVersion.frozen_at.is_not(None),
-    ).order_by(StyleVersion.version.desc())).first()
+    facts = project_visual_facts(db, requirement.project_id)
     try:
         composed = compose_requirement_prompt(
             family=str(payload.get("family") or ""),
@@ -773,9 +775,10 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
             visual_direction=direction,
             requirement_name=str(payload.get("entity_id") or ""),
             carrier=payload.get("carrier"),
-            film_style=film_style_for((style.snapshot if style is not None else {}) or {}),
+            film_style=facts["film_style"],
             description=str(payload.get("description") or ""),
             manual=frozen_prompt(payload),
+            world_note=facts["world"],
         )
     except PromptSourceError as exc:
         code = "MATERIAL_BRIEF_NOT_GENERATED" if exc.code == "MATERIAL_BRIEF_MISSING" else exc.code
@@ -959,7 +962,7 @@ def director_material_requirements(project_id: str, db: DBSession,
 
 
 @router.get("/projects/{project_id}/director/strategy-options")
-def director_strategy_options(project_id: str, db: DBSession) -> dict:
+def director_strategy_options(project_id: str, request: Request, db: DBSession) -> dict:
     """The strategy matrix the director page renders: variants, accelerators,
     second pass, upscale - each with evidence-derived availability.
 
@@ -970,4 +973,4 @@ def director_strategy_options(project_id: str, db: DBSession) -> dict:
     require_project(db, project_id)
     from shine.strategy import strategy_options
 
-    return strategy_options()
+    return strategy_options(db, request.app.state.settings)

@@ -555,7 +555,8 @@ def run_delivery_order(
                 )
                 if track is None or track.status != "APPROVED":
                     raise DeliveryBlock("DELIVERY_SUBTITLE_NOT_APPROVED")
-                subtitle_ass = track.ass
+                from shine.media.subtitles import burn_ass_for_track
+                subtitle_ass = burn_ass_for_track(db, track)
                 subtitle_sha256 = track.sha256
             clips = [
                 DeliveryClip(

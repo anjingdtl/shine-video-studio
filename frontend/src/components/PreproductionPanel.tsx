@@ -1,16 +1,31 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, json, API } from '../api';
+import { api, json, API, type SetupVerdict } from '../api';
 import { label, prepRowLabels } from '../constants';
 
 type Row = { id: string; status: string; sha256: string; payload: Record<string, unknown>; project_id?: string; formal_asset_id?: string; trace?: Record<string, unknown> };
 type Registry = { categories: string[]; revisions: Row[]; legacy_profiles: unknown[] };
 const views = ['环境中心', '模型与节点', '工作流能力', '全资产工厂', 'Voice Studio', '开机前预检'];
 
-export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
-  projectId: string; onRefresh: () => Promise<void>; reviewScope: 'basic' | 'full';
+export function PreproductionPanel({ projectId, onRefresh }: {
+  projectId: string; onRefresh: () => Promise<void>;
 }) {
   const [view, setView] = useState(0);
   const [mode, setMode] = useState('fake');
+  // 机器模式只读 /setup/verdict（与顶栏同一裁决）；本地 select 只是
+  // 「本次维护请求的执行器」，默认值由同一裁决派生，不再自报一套模式。
+  const [verdict, setVerdict] = useState<SetupVerdict | null>(null);
+  const modeTouched = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    api<SetupVerdict>('/setup/verdict').then((row) => {
+      if (cancelled) return;
+      setVerdict(row);
+      if (!modeTouched.current) {
+        setMode(row.mode === 'READY' || row.mode === 'RUNNING' ? 'local' : 'fake');
+      }
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, []);
   const [confirmed, setConfirmed] = useState(false);
   const [diskBudget, setDiskBudget] = useState('');
   const [localEvidence, setLocalEvidence] = useState('{}');
@@ -96,14 +111,14 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
     return post(path, { grant_id: grant.grant_id, snapshot: grant.snapshot, offline, listened: action === 'voice_freeze' || (action === 'promote' && dialogueListened), evidence: decisionEvidence }, true);
   }
   return <section className="card" id="preproduction">
-    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>当前模式：{offline ? '模拟演练（不落真数据）' : '本地真跑'} · 结果真伪以后端返回为准</strong></div>
+    <div className="section-heading"><h2>制片准备 · V1.3</h2><strong>当前模式：{verdict ? verdict.label : '读取本机裁决…'} · 结果真伪以后端返回为准</strong></div>
     <p className="prep-intro">普通素材在上方上传并确认即可。首次装机请到「新机设置」点击检测；候选素材、音色制作与故障维护在下方按需展开。</p>
     <details><summary>展开高级准备（候选素材、音色与维护）</summary>
     <nav className="button-row">{views.map((name, i) => <button key={name} onClick={() => setView(i)}
       disabled={busy} aria-pressed={view === i}>{name}</button>)}</nav>
     <p>本机操作无需密码。候选晋升、音色冻结与安装仍由你点击确认。</p>
     {view < 3 && <label>核验证据<input value={evidence} onChange={e => setEvidence(e.target.value)} /></label>}
-    <label>操作模式<select value={mode} onChange={e => { setMode(e.target.value); setConfirmed(false); }}>
+    <label>本次维护请求的执行器<select value={mode} onChange={e => { modeTouched.current = true; setMode(e.target.value); setConfirmed(false); }}>
       <option value="fake">模拟 / 离线</option><option value="local">本地 / 生产证据</option></select></label>
     {view < 3 && !offline && <label><input type="checkbox" checked={confirmed} onChange={e => setConfirmed(e.target.checked)} />
       我已核对本机维护的路径范围和操作内容</label>}
@@ -254,10 +269,10 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
       }} /></label>
       <p>支持结构化 scenes / shots / beats、服装、道具、逐句对白与依赖；文本注释也可提取。关键需求保持阻断。</p>
       <label>补充关键需求 JSON<textarea value={requirementsJson} onChange={e => setRequirementsJson(e.target.value)} /></label>
-      <p>预检使用当前选择的{reviewScope === 'basic' ? '基础自审' : '完整质量门禁'}范围。</p>
-      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, requirements: JSON.parse(requirementsJson), review_scope: reviewScope }))}>分析资产与任务依赖</button>
+      <p>预检使用完整质量门禁范围；审片建议只记录、不阻断出片。</p>
+      <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, requirements: JSON.parse(requirementsJson), review_scope: 'full' }))}>分析资产与任务依赖</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/analyze`, {
-        document_id: documentId, create_revision: true, review_scope: reviewScope,
+        document_id: documentId, create_revision: true, review_scope: 'full',
       }))}>建立新的预检版本（保留历史冻结清单）</button>
       <button disabled={busy} onClick={() => act(() => post(`/projects/${projectId}/preproduction/readiness`, { offline }))}>运行开机预检</button>
       <label>已验证图像工作流 ID<input value={workflowId} onChange={e => setWorkflowId(e.target.value)} /></label>
@@ -265,7 +280,7 @@ export function PreproductionPanel({ projectId, onRefresh, reviewScope }: {
         workflow_id: workflowId, execution_mode: mode,
       }))}>按依赖自动制作缺失候选（等待人工晋升）</button>
       <button disabled={busy} onClick={() => act(async () => {
-        const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, review_scope: reviewScope });
+        const r = await post<Row>(`/projects/${projectId}/preproduction/analyze`, { document_id: documentId, review_scope: 'full' });
         return approve(r, 'manifest_freeze', `/projects/${projectId}/preproduction/freeze`);
       })}>操作员冻结选定模式清单</button>
     </>}

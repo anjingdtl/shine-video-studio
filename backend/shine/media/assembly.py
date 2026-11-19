@@ -152,8 +152,8 @@ class DeliveryAssembler:
         return artifact, job.status, info.duration_s
 
     # -- rendering ------------------------------------------------------
-    def _run(self, command: list[str]) -> None:
-        completed = subprocess.run(command, capture_output=True, timeout=1800, check=False)
+    def _run(self, command: list[str], cwd: Path | None = None) -> None:
+        completed = subprocess.run(command, capture_output=True, timeout=1800, check=False, cwd=cwd)
         if completed.returncode != 0:
             tail = completed.stderr.decode("utf-8", errors="replace")[-800:]
             raise DeliveryError(500, f"DELIVERY_FFMPEG_FAILED: {tail}")
@@ -317,7 +317,13 @@ class DeliveryAssembler:
                 # The subtitles are composited here, at the very end.  The
                 # picture and the audio are untouched by them, and the reel
                 # without subtitles stays available as its own artifact.
+                # ``subtitle_ass`` is the ASS *text*; the filter needs a real
+                # file.  Write it into the work dir and reference it by a bare
+                # relative name with cwd=work: an absolute Windows path (drive
+                # colon + backslashes) is re-parsed as filtergraph syntax by the
+                # ass filter and breaks the burn-in.
                 final = work / "delivery-subtitled.mp4"
+                (work / "subtitles.ass").write_text(subtitle_ass, encoding="utf-8")
                 self._run(
                     [
                         self.ffmpeg_path,
@@ -326,7 +332,7 @@ class DeliveryAssembler:
                         "-i",
                         str(reel),
                         "-vf",
-                        f"ass={subtitle_ass}",
+                        "ass=subtitles.ass",
                         "-c:v",
                         "libx264",
                         "-crf",
@@ -340,7 +346,8 @@ class DeliveryAssembler:
                         "-movflags",
                         "+faststart",
                         str(final),
-                    ]
+                    ],
+                    cwd=work,
                 )
             content = final.read_bytes()
             # Probe while the temporary directory still exists.

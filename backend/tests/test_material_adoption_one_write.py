@@ -223,6 +223,39 @@ def test_a_replayed_confirmation_does_not_write_a_second_time(studio):
 
         assert db.get(Shot, pair["id"]).revision == revision_before
 
+def test_cancelling_an_adoption_unbinds_the_master_from_the_shots(studio):
+    """取消采用：改回 AI 制作后，旧主素材由同一执行者解绑，其他引用保留。"""
+    client, factory, _tmp, _settings = studio
+    built = _project_with_shots(client, factory, "取消采用")
+    project_id, pair = built["project_id"], built["pair"]
+    person = _master(client, project_id, role="character", entity="沈砚", tag="shenyan")
+    client_master = _master(client, project_id, role="character", entity="委托人", tag="client")
+    requirements = _requirements(client, project_id)
+    _confirm(client, project_id, [
+        {"requirement_id": requirements[("character", "沈砚")]["requirement_id"],
+         "strategy": "reuse_master", "entity_id": "沈砚", "asset_id": person["id"]},
+        {"requirement_id": requirements[("character", "委托人")]["requirement_id"],
+         "strategy": "reuse_master", "entity_id": "委托人", "asset_id": client_master["id"]},
+    ])
+    assert len(_bindings(factory, pair["id"])) == 2
+
+    requirements = _requirements(client, project_id)
+    body = _confirm(client, project_id, [
+        {"requirement_id": requirements[("character", "沈砚")]["requirement_id"],
+         "strategy": "generate", "entity_id": "沈砚"},
+    ])
+    assert body["bound_shots"] >= 1
+    bound = _bindings(factory, pair["id"])
+    assert person["id"] not in {row[0] for row in bound}, "取消采用后旧主素材解绑"
+    assert (client_master["id"], "subject", "委托人") in bound, "其他有效引用保留"
+    assert person["id"] not in _declared(factory, pair["id"])
+
+    # 重新派生不得复活取消：最新决定（生成）胜过旧修订的绑定与推导建议。
+    again = _requirements(client, project_id)
+    assert again[("character", "沈砚")]["strategy"] == "generate"
+    assert person["id"] not in {row[0] for row in _bindings(factory, pair["id"])}
+
+
 def test_replacing_a_scene_plate_keeps_only_the_new_one(studio):
     """同一场景确认了第二张主素材：只留新的那张，不给一镜塞两张环境图。"""
     client, factory, _tmp, _settings = studio

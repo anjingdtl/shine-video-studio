@@ -82,7 +82,7 @@ function describeError(error: unknown): string {
 
 export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConfirmed, onGoStage }: {
   projectId: string;
-  currentStyle?: { version: number } | null;
+  currentStyle?: { version: number; id?: string; snapshot?: Record<string, unknown> | null } | null;
   onMessage?: (message: string) => void;
   onConfirmed?: () => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
@@ -102,26 +102,47 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   /** 最近一次失败：必做块据此给出原因与可点的下一步。 */
   const [failure, setFailure] = useState<unknown>(null);
   const [confirmedPlan, setConfirmedPlan] = useState<{ version: number } | null>(null);
+  /** 已确认计划的版本与哈希：确认后改风格时经原确认入口重新冻结，无需重新生成。 */
+  const [basisPlan, setBasisPlan] = useState<{ version: number; sha256: string } | null>(null);
+  /** 服务端已持久化的风格决定：表单与之不同即「改了但还没冻结」。 */
+  const [persistedStyle, setPersistedStyle] = useState<Record<string, unknown> | null>(null);
+  const [styleLoaded, setStyleLoaded] = useState(false);
   /** 比已确认版本更新的一版草稿：需要重新生成预览并确认。 */
   const [pendingDraft, setPendingDraft] = useState<number | null>(null);
   /** 计划时长超出目标容差窗：服务端具名拒绝后，由用户显式接受或调整目标/分集。 */
   const [planDeviation, setPlanDeviation] = useState<string | null>(null);
 
+  // 表单的唯一事实是服务端已持久化的决定：最新计划（草稿优先于旧确认）的
+  // 集数/秒数 + director-style 草稿（无草稿时回退冻结快照）的风格参数。
+  // 挂载/换作品/冻结版本变化时读回，切页回来不再掉回硬编码默认值。
   useEffect(() => {
+    let cancelled = false;
     api<StyleCatalogEntry[]>('/director-styles')
       .then((rows) => {
+        if (cancelled) return;
         setCatalog(rows);
-        if (rows.length && !profileId) setProfileId(rows[0].id);
+        setProfileId((current) => current || (rows[0]?.id ?? ''));
       })
       .catch(() => setCatalog([]));
-    api<Array<{ version: number; status: string }>>(`/projects/${projectId}/episode-plans`)
+    api<Array<{ version: number; status: string; sha256?: string; target_seconds?: number;
+      payload?: { episodes?: unknown[]; target_seconds?: number } }>>(`/projects/${projectId}/episode-plans`)
       .then((rows) => {
+        if (cancelled) return;
         const confirmed = rows.find((row) => row.status === 'CONFIRMED');
+        if (confirmed?.sha256) setBasisPlan({ version: confirmed.version, sha256: confirmed.sha256 });
         // 重新生成过分镜书时，最新一版是 DRAFT：它必须重新确认，
         // 不能让旧的「已确认」挡住新版本的确认入口。
         const latestDraft = rows
           .filter((row) => row.status === 'DRAFT')
           .sort((a, b) => b.version - a.version)[0];
+        const basis = latestDraft && (!confirmed || latestDraft.version > confirmed.version)
+          ? latestDraft : confirmed;
+        if (basis) {
+          const count = basis.payload?.episodes?.length;
+          if (count) setEpisodeCount(count);
+          const seconds = basis.payload?.target_seconds ?? basis.target_seconds;
+          if (seconds) setTargetSeconds(seconds);
+        }
         if (latestDraft && (!confirmed || latestDraft.version > confirmed.version)) {
           setConfirmedPlan(null);
           setPendingDraft(latestDraft.version);
@@ -130,8 +151,36 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         if (confirmed) setConfirmedPlan({ version: confirmed.version });
       })
       .catch(() => undefined);
+    api<{ style_draft?: Record<string, unknown> | null;
+      draft_source?: { profile_id?: string } | null;
+      frozen_source?: { profile_id?: string } | null }>(`/projects/${projectId}/director-style`)
+      .then((view) => {
+        if (cancelled) return;
+        const source = view.draft_source ?? view.frozen_source;
+        if (source?.profile_id) setProfileId(source.profile_id);
+        const facts = view.style_draft ?? currentStyle?.snapshot ?? null;
+        setPersistedStyle(facts ? { ...facts, profile_id: source?.profile_id ?? '' } : null);
+        setStyleLoaded(true);
+        if (!facts) return;
+        const filmTypeValue = facts.film_type;
+        if (filmTypeValue === 'live_action' || filmTypeValue === 'animation') setFilmType(filmTypeValue);
+        const ratio = Number(facts.dialogue_ratio_percent);
+        if (Number.isFinite(ratio)) {
+          setDialogueLevel(DIALOGUE_LEVELS.reduce((best, row) => (
+            Math.abs(row.ratio - ratio) < Math.abs(best.ratio - ratio) ? row : best
+          )).id);
+        }
+        const narration = facts.narration_level;
+        if (narration === 'none' || narration === 'low' || narration === 'high') setNarrationLevel(narration);
+        const maxSeconds = Number(facts.max_shot_seconds);
+        if (Number.isFinite(maxSeconds) && maxSeconds > 0) {
+          setMaxShotSeconds(Math.min(15, Math.max(4, maxSeconds)));
+        }
+      })
+      .catch(() => setStyleLoaded(true));
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId]);
+  }, [projectId, currentStyle?.id]);
 
   async function generate() {
     setBusy(true); setProblem(''); setFailure(null);
@@ -149,12 +198,16 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   }
 
   async function confirm(acknowledge = false) {
-    if (!book) return;
+    // 确认后改风格：复用同一确认入口与已确认计划，不另开链路。
+    const plan = book
+      ? { version: book.plan_version, sha256: book.plan_sha256 }
+      : basisPlan;
+    if (!plan || !styleLoaded) return;
     setBusy(true); setProblem('');
     try {
       await confirmStoryboardBook(projectId, {
-        plan_version: book.plan_version,
-        expected_sha256: book.plan_sha256,
+        plan_version: plan.version,
+        expected_sha256: plan.sha256,
         style: {
           profile_id: profileId,
           film_type: filmType,
@@ -164,7 +217,8 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
         },
         acknowledge_deviation: acknowledge,
       });
-      setConfirmedPlan({ version: book.plan_version });
+      setConfirmedPlan({ version: plan.version });
+      setBasisPlan(plan);
       setPendingDraft(null);
       setPlanDeviation(null);
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
@@ -178,6 +232,23 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     finally { setBusy(false); }
   }
 
+  // 表单与已持久化决定的差异：只有服务端写过的字段才参与比较，
+  // 旧快照缺某个设置时不把默认值当成「用户改了」。
+  const styleDirty = Boolean(confirmedPlan && persistedStyle && (
+    (typeof persistedStyle.profile_id === 'string' && persistedStyle.profile_id !== ''
+      && profileId !== persistedStyle.profile_id)
+    || (persistedStyle.film_type === 'live_action' || persistedStyle.film_type === 'animation'
+      ? filmType !== persistedStyle.film_type : false)
+    || (typeof persistedStyle.dialogue_ratio_percent === 'number'
+      && (DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45)
+        !== persistedStyle.dialogue_ratio_percent)
+    || (persistedStyle.narration_level === 'none' || persistedStyle.narration_level === 'low'
+      || persistedStyle.narration_level === 'high'
+      ? narrationLevel !== persistedStyle.narration_level : false)
+    || (typeof persistedStyle.max_shot_seconds === 'number'
+      && maxShotSeconds !== persistedStyle.max_shot_seconds)
+  ));
+
   const railPresent = useRailPresent();
   const primary: RailAction | null = !confirmedPlan
     ? (book
@@ -185,18 +256,22 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
             ? { label: '接受偏差并确认分镜书', onClick: () => void confirm(true), loading: busy, icon: <Check size={14} /> }
             : { label: '确认分镜书（分集 + 风格）', onClick: () => void confirm(), loading: busy, icon: <Check size={14} /> })
         : { label: '生成分镜书', onClick: () => void generate(), loading: busy, icon: <Sparkles size={14} /> })
-    : null;
+    : (styleDirty && basisPlan
+        ? { label: planDeviation ? '接受偏差并重新确认（冻结新风格）' : '重新确认分镜书（冻结新风格）',
+            onClick: () => void confirm(Boolean(planDeviation)), loading: busy, icon: <Check size={14} /> }
+        : null);
   useStageRail('storyboard-book', { priority: 1, primary },
     [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
-      episodeCount, targetSeconds, maxShotSeconds, planDeviation]);
+      episodeCount, targetSeconds, maxShotSeconds, planDeviation, styleDirty, basisPlan, styleLoaded]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
       <div>
         <div className="section-kicker">第 2 阶段 · 分镜书</div>
         <h2>四个决定，一次确认</h2>
-        <p>导演风格、影片类型、集数和每集目标秒数。集数优先：场次只按自然边界切分，
-          每集预计时长与目标的差值会如实写在预览里，不会为了凑数删场或编集。</p>
+        <p>导演风格、影片类型、集数和每集目标秒数。每集秒数决定每集范围：场次按自然边界
+          整场装入；集数是上限，超出上限的场次在预览里显式声明不在本次范围，
+          不会把整剧塞进第一集。单场超长的偏差会如实写在预览里。</p>
       </div>
       {confirmedPlan && <span className="head-chip ok">
         <Check size={11} /> 第 {confirmedPlan.version} 版已确认
@@ -257,9 +332,16 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       </p>
     </div>
 
+    {styleDirty && <div className="notice" role="status">
+      <p>风格选择已修改。素材出图与下游只读<b>已冻结</b>的风格：点「重新确认分镜书」后新风格才会冻结生效。</p>
+      {!railPresent && <button type="button" className="btn-secondary" disabled={busy || !styleLoaded}
+        onClick={() => void confirm(Boolean(planDeviation))}>
+        <Check size={13} /> 重新确认分镜书（冻结新风格）
+      </button>}
+    </div>}
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
-    {planDeviation && !confirmedPlan && <div className="notice" role="alert">
+    {planDeviation && (!confirmedPlan || styleDirty) && <div className="notice" role="alert">
       <p>{planDeviation} 可调整目标时长/分集后重新生成，或显式接受当前偏差继续。</p>
       {!railPresent && <button type="button" className="btn-secondary" disabled={busy}
         onClick={() => void confirm(true)}>接受偏差并确认分镜书</button>}
@@ -272,6 +354,9 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           <Check size={13} /> 确认分镜书（分集 + 风格）
         </button>}
       </div>
+      {book.preview.out_of_scope && <p className="run-hint">
+        <TriangleAlert size={12} /> {book.preview.out_of_scope.note}
+      </p>}
       <ol className="run-episode-plan">
         {book.preview.episodes.map((episode) => (
           <li key={episode.episode_id}>
@@ -363,6 +448,10 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   const [state, setState] = useState<EpisodeStoryboardState | null>(null);
   const [tables, setTables] = useState<Record<string, {
     shots: EpisodeShotRow[]; total: number;
+    target?: number | null; tolerance?: number | null;
+    verdict?: { deviation_seconds: number } | null;
+    targetFit?: { shot_count: number; seconds: number } | null;
+    confirmedSeconds?: number | null;
     stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number;
   }>>({});
   const [editing, setEditing] = useState<{ shotId: string; duration: string } | null>(null);
@@ -386,12 +475,19 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     setState(rows);
     if (rows.episodes.length) {
       const next: Record<string, { shots: EpisodeShotRow[]; total: number;
+        target?: number | null; tolerance?: number | null;
+        verdict?: { deviation_seconds: number } | null;
+        targetFit?: { shot_count: number; seconds: number } | null;
+        confirmedSeconds?: number | null;
         stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number }> = {};
       await Promise.all(rows.episodes.map(async (episode) => {
         try {
           const table = await fetchEpisodeShots(projectId, episode.episode_id);
           next[episode.episode_id] = {
             shots: table.shots, total: table.total_editorial_seconds,
+            target: table.target_seconds, tolerance: table.tolerance_seconds,
+            verdict: table.duration_verdict, targetFit: table.target_fit,
+            confirmedSeconds: table.confirmed_seconds,
             stale: table.confirmation_stale, confirmedVersion: table.confirmed_version,
             confirmedCount: table.confirmed_shot_ids?.length,
           };
@@ -416,9 +512,15 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
 
   useEffect(() => { void load().catch(() => undefined); }, [load]);
   const running = state?.status === 'QUEUED' || state?.status === 'RUNNING';
+  // 右轨读 journey：任务推进时跟读同一刷新执行者，投影不留在旧事实上。
+  // 回调用 ref 持有：App 每次渲染都新建回调，进依赖会不断重置定时器。
+  const journeyRefreshRef = useRef(onJourneyRefresh);
+  journeyRefreshRef.current = onJourneyRefresh;
   useEffect(() => {
     if (!running) return;
-    const timer = window.setInterval(() => { void load().catch(() => undefined); }, 4000);
+    const timer = window.setInterval(() => {
+      void load().then(() => journeyRefreshRef.current?.()).catch(() => undefined);
+    }, 4000);
     return () => window.clearInterval(timer);
   }, [load, running]);
 
@@ -429,11 +531,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     try {
       await call();
       await load();
+      onJourneyRefresh?.();
       if (success) onMessage?.(success);
     } catch (error) {
       setFailure(error);
       setProblem(describeError(error));
       await load().catch(() => undefined);
+      onJourneyRefresh?.();
     } finally {
       submitting.current = false;
       setBusy('');
@@ -444,18 +548,20 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     await queueDirectorStoryboard(projectId);
     onMessage?.('分镜任务已排队；关掉页面也会由常驻 Worker 继续逐场拆镜。');
   });
-  const confirmEpisode = (episodeId: string, acknowledge = false) => act(`confirm-${episodeId}`, async () => {
-    try {
-      await confirmEpisodeShots(projectId, episodeId, acknowledge);
-      setDurationDeviation(null);
-      onJourneyRefresh?.();
-    } catch (error) {
-      if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
-        setDurationDeviation({ episodeId, text: error.message });
+  const confirmEpisode = (episodeId: string, acknowledge = false, fitTarget = false) =>
+    act(`confirm-${episodeId}`, async () => {
+      try {
+        await confirmEpisodeShots(projectId, episodeId, acknowledge, fitTarget);
+        setDurationDeviation(null);
+        onJourneyRefresh?.();
+      } catch (error) {
+        if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
+          setDurationDeviation({ episodeId, text: error.message });
+        }
+        throw error;
       }
-      throw error;
-    }
-  }, `第 ${episodeId} 集镜头已落定。`);
+    }, fitTarget ? `已按②确认的秒数取最接近的镜头落定第 ${episodeId} 集；超出部分保留为历史。`
+      : `第 ${episodeId} 集镜头已落定。`);
   const retryEpisode = (episodeId: string) => {
     if (!state?.state_version) return;
     const version = state.state_version;
@@ -514,12 +620,38 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   // 的再跑按钮，也不能跳过素材准备直接去导演包。
   const allConfirmed = episodes.length > 0 && readyCount === episodes.length
     && !episodes.some((row) => tables[row.episode_id]?.stale);
+  // 提示必须名实一致：只有真的存在可确认的集，才承诺「先处理已完成的集」；
+  // 否则给出真实出口（范围由②决定），不挂虚假选择。
+  const confirmableCount = episodes.filter((row) =>
+    (row.status === 'APPLIED' && !confirmedEpisodes[row.episode_id])
+    || tables[row.episode_id]?.stale).length;
+  const landedTotal = episodes.reduce((sum, row) =>
+    sum + (tables[row.episode_id]?.shots.length ?? row.shot_ids.length), 0);
+  const resumeRun = () => {
+    const id = state?.task_id; const version = state?.state_version ?? 0;
+    if (!id) return;
+    act('resume', async () => {
+      await controlDirectorStoryboardTask(projectId, id, 'resume', version);
+    }, '后台分镜已继续。');
+  };
+  const blockedEpisode = episodes.find((row) => row.status === 'BLOCKED' && row.blocker);
+  // 主按钮与页内按钮共用同一执行者：暂停→继续；被阻塞且未知→核对+授权重发+重试；
+  // 不挂名实不符的空跑按钮。
   const primary: RailAction | null = running
     ? null
-    : allConfirmed
-      ? { label: '去素材准备', onClick: () => onGoStage?.('assets-stage'), icon: <Film size={14} /> }
-      : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
-          loading: busy === 'generate', icon: <Sparkles size={14} /> };
+    : state?.status === 'PAUSED'
+      ? { label: '继续后台分镜', onClick: resumeRun, loading: busy === 'resume', icon: <Play size={14} /> }
+      : allConfirmed
+        ? { label: '去素材准备', onClick: () => onGoStage?.('assets-stage'), icon: <Film size={14} /> }
+        : blockedEpisode?.blocker?.uncertain
+          ? { label: '核对并重试被阻塞的集',
+              onClick: () => reconcileAndRetryEpisode(
+                blockedEpisode.episode_id,
+                blockedEpisode.blocker?.reconcile_task_id ?? blockedEpisode.blocker?.failed_task_id ?? null,
+                blockedEpisode.blocker?.reconcile_state_version ?? 0),
+              loading: busy === `reconcile-${blockedEpisode.episode_id}`, icon: <ShieldCheck size={14} /> }
+          : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
+              loading: busy === 'generate', icon: <Sparkles size={14} /> };
   useStageRail('episode-storyboard', {
     priority: 1,
     primary,
@@ -546,9 +678,9 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     </div>
 
     <div className="episode-actions">
-      {!railPresent && <button type="button" className="btn-primary" disabled={busy !== '' || running}
-        onClick={allConfirmed ? () => onGoStage?.('assets-stage') : generate}>
-        <Play size={13} /> {running ? '分镜生成中…' : allConfirmed ? '去素材准备' : (state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜')}
+      {!railPresent && <button type="button" className="btn-primary" disabled={busy !== '' || running || !primary}
+        onClick={primary?.onClick}>
+        <Play size={13} /> {running ? '分镜生成中…' : primary?.label}
       </button>}
       {state?.status === 'NEEDS_REVIEW' && <span className="run-hint">
         <TriangleAlert size={12} /> 有集被阻塞；每一集可单独重试，其余集不受影响。
@@ -565,19 +697,21 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
           暂停后台分镜
         </button>)}
       {state?.task_id && state.status === 'PAUSED' && (
-        <button type="button" className="btn-secondary" disabled={busy !== ''}
-          onClick={() => {
-            const id = state.task_id; const version = state.state_version ?? 0;
-            if (!id) return;
-            void act('resume', async () => {
-              await controlDirectorStoryboardTask(projectId, id, 'resume', version);
-            }, '后台分镜已继续。');
-          }}>
+        <button type="button" className="btn-secondary" disabled={busy !== ''} onClick={resumeRun}>
           继续后台分镜
         </button>)}
       {state?.status === 'PAUSED' && <span className="run-hint">
-        后台分镜已暂停；可以继续，或先处理已完成的集。
+        后台分镜已暂停；{confirmableCount > 0
+          ? '可以继续，或先确认已完成的集。'
+          : allConfirmed
+            ? '已确认的集不受暂停影响；范围外场次已声明超范围，继续不会把它们纳入。'
+            : '可以继续。本集还没拆完，拆完才出现确认入口；分集范围与每集秒数由②的分镜书决定。'}
       </span>}
+      {state?.status === 'PAUSED' && !allConfirmed && confirmableCount === 0 && landedTotal > 0 && (
+        <button type="button" className="btn-secondary" disabled={busy !== ''}
+          onClick={() => onGoStage?.('plan-stage')}>
+          去②调整分镜书范围
+        </button>)}
     </div>
     {problem && <p role="alert" className="form-error">{problem}</p>}
     {failure != null && <RequiredActionNotice error={failure} onGoStage={onGoStage} />}
@@ -588,22 +722,43 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
       const confirmedVersion = confirmedEpisodes[episode.episode_id];
       const applied = episode.status === 'APPLIED';
       const blocked = episode.status === 'BLOCKED';
+      // 当前推进 frontier：被挡的那一段（或正在生成的那一段）。它还没落镜，
+      // 所以在镜头表里占「下一镜」一行；镜位按同一份 集→场→镜 join 累加。
+      const frontierUnit = blocked
+        ? episode.units.find((unit) => unit.index === episode.blocker?.unit_index)
+        : running ? episode.units.find((unit) => unit.state !== 'APPLIED') : undefined;
+      let frontierPosition = table?.shots.length ?? episode.shot_ids.length;
+      if (frontierUnit && (episode.sections?.length ?? 0) > 0) {
+        frontierPosition = 0;
+        for (const sec of episode.sections ?? []) {
+          frontierPosition += sec.shot_count;
+          if (sec.production_section_id === frontierUnit.production_section_id) break;
+        }
+      }
+      frontierPosition += 1;
       return <details key={episode.episode_id} className="stage-dock episode-dock" open={!confirmedVersion || !!table?.stale}>
         <summary className="produce-focus-summary">
           <span className="focus-summary-label">
             {confirmedVersion
               ? table?.stale
                 ? <><RefreshCw size={13} /> 第 {episode.order ?? episode.episode_id} 集 · 最新拆镜 {table.shots.length} 镜 · 待重新确认</>
-                : <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.shots.length ?? 0} 镜）</>
+                : <><Check size={13} className="stage-done-mark" /> 第 {episode.order ?? episode.episode_id} 集 · 已确认（v{confirmedVersion}，{table?.stale ? table.shots.length : (table?.confirmedCount ?? table?.shots.length ?? 0)} 镜）</>
               : blocked
-                ? <><TriangleAlert size={13} /> 第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}</>
-                : <>第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}{table?.shots.length ? `（${table.shots.length} 镜）` : ''}</>}
+                ? <><TriangleAlert size={13} /> 第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}（{table?.shots.length ?? episode.shot_ids.length} 镜）</>
+                : <>第 {episode.order ?? episode.episode_id} 集 · {EPISODE_STATUS_LABELS[episode.status] ?? episode.status}（{table?.shots.length ?? episode.shot_ids.length} 镜）</>}
           </span>
         </summary>
         <div className="episode-body">
-          {blocked && (() => {
-            const rejection = episode.blocker?.rejections?.[0];
-            const blockedUnit = episode.units.find((unit) => unit.index === episode.blocker?.unit_index)
+          {blocked && episode.blocker && (() => {
+            const blocker = episode.blocker;
+            const rejection = blocker.rejections?.[0];
+            // 核对类拒绝码（占用身份的旧请求未核对）与 UNKNOWN 同路由：
+            // 核对 → 仍未知时由点击授权一次重发 → 重试；直接重试只会被门禁再拒。
+            const uncertain = blocker.uncertain ?? rejection?.external_outcome === 'UNKNOWN';
+            const reconcileId = blocker.reconcile_task_id ?? rejection?.blocking_task?.task_id
+              ?? rejection?.task_id ?? blocker.failed_task_id ?? null;
+            const reconcileVersion = blocker.reconcile_state_version ?? rejection?.state_version ?? 0;
+            const blockedUnit = episode.units.find((unit) => unit.index === blocker.unit_index)
               ?? episode.units.find((unit) => unit.state === 'BLOCKED');
             const order = blockedUnit?.section_order ?? (blockedUnit ? blockedUnit.index + 1 : null);
             const rawTitle = blockedUnit?.section_title?.trim() ?? '';
@@ -614,24 +769,21 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
               ? `第 ${order} 场${title ? `：${title}` : ''}`
               : '这一集';
             const roleName = CREW_ROLE_LABELS[rejection?.role ?? ''] ?? rejection?.role ?? '分镜工种';
-            const uncertain = rejection?.external_outcome === 'UNKNOWN';
             // 落镜拒绝不是一次模型调用：重试只复用已完成的五个工种结果重新落镜。
             const landingOnly = rejection?.role === 'landing';
-            const failedTaskId = rejection?.task_id ?? episode.blocker?.failed_task_id ?? null;
-            const failedTaskVersion = rejection?.state_version ?? 0;
+            const fallback = `卡在${blockedUnit ? `第 ${frontierPosition} 镜（${scene}）` : scene}：${roleName} · ${refusalReason(rejection ?? {})}。`
+              + (uncertain
+                ? ' 这次请求的结果不确定，不会自动重发；核对并确认后才会发起一次新请求。'
+                : landingOnly
+                  ? ' 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。'
+                  : ' 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。');
             return <div className="blocked-callout">
               <TriangleAlert size={14} />
-              <span>
-                卡在{scene}：{roleName} · {refusalReason(rejection ?? {})}。
-                {uncertain
-                  ? ' 这次请求的结果不确定，不会自动重发；核对并确认后才会发起一次新请求。'
-                  : landingOnly
-                    ? ' 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。'
-                    : ' 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。'}
-              </span>
+              <span>{blocker.summary ?? fallback}</span>
               {uncertain
                 ? <button type="button" className="btn-secondary" disabled={busy !== ''}
-                    onClick={() => reconcileAndRetryEpisode(episode.episode_id, failedTaskId, failedTaskVersion)}>
+                    title="先核对上次请求；结果仍未知时，你的点击授权一次新请求"
+                    onClick={() => reconcileAndRetryEpisode(episode.episode_id, reconcileId, reconcileVersion)}>
                     <ShieldCheck size={12} /> 核对这次请求并重试
                   </button>
                 : <button type="button" className="btn-secondary" disabled={busy !== ''}
@@ -640,7 +792,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                   </button>}
             </div>;
           })()}
-          {table && table.shots.length > 0 && <>
+          {table && (table.shots.length > 0 || (frontierUnit && (blocked || running))) && <>
             <div className="shot-table-wrap">
             <table className="shot-table shot-table-fixed">
               <colgroup>
@@ -713,22 +865,51 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                       onClick={() => setAssetTarget(shot)}>+素材</button>
                   </td>
                 </tr>)}
+                {frontierUnit && (blocked || running) && <tr className="scene-blocked-row">
+                  <td>{frontierPosition}</td>
+                  <td>{frontierUnit.production_section_id}</td>
+                  <td className="shot-beat">
+                    {blocked ? '被阻塞 · 待落镜（原因与核对按钮见上方）' : '生成中 · 待落镜'}
+                  </td>
+                  <td><span className="muted">—</span></td>
+                  <td>—</td><td>—</td><td>—</td><td>—</td><td>—</td>
+                </tr>}
               </tbody>
             </table>
             </div>
-            <p className="run-hint">
-              本集合计成片时长约 {Math.round(table.total)} 秒；每镜由 {table.shots.length} 个 4–15 秒的 H3 生成片段承载。
-              提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
-            </p>
-            <p className="run-hint">
-              字幕在这里逐镜撰写与冻结；字幕轨的生成与装配在「后期成片」按真实成片时长进行，
-              未出片不提前装配。本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
-            </p>
+            {table.shots.length > 0 && <>
+              <p className="run-hint">
+                {confirmedVersion && !table.stale
+                  ? <>本集已确认 {table.confirmedCount ?? table.shots.length} 镜 · {
+                      Math.round(table.confirmedSeconds ?? table.total)} 秒
+                      {table.target != null && <>（②目标 {table.target} 秒）</>}；
+                      范围外另落 {Math.max(0, table.shots.length - (table.confirmedCount ?? 0))} 镜，保留为历史。</>
+                  : <>本集已落 {table.shots.length} 镜 · 合计 {Math.round(table.total)} 秒
+                      {table.target != null && <>；②确认目标 {table.target} 秒（容差 ±{table.tolerance ?? 0}）</>}
+                      {table.verdict
+                        ? <>。当前{table.verdict.deviation_seconds > 0 ? '超出' : '低于'}目标窗 {
+                            Math.abs(Math.round(table.verdict.deviation_seconds))} 秒：
+                            可「按②目标确认」取最接近的镜头，或逐镜「改时长」。</>
+                        : table.target != null ? <>，在目标窗内。</> : <>。</>}</>}
+                提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
+              </p>
+              <p className="run-hint">
+                字幕在这里逐镜撰写与冻结；字幕轨的生成与装配在「后期成片」按真实成片时长进行，
+                未出片不提前装配。本项目只走 Ref2VA：没有参考素材的镜头不会被提交渲染。
+              </p>
+            </>}
           </>}
-          {applied && !confirmedVersion && <button type="button" className="btn-primary"
+          {table?.targetFit && (!confirmedVersion || table.stale) && <button type="button"
+            className="btn-primary" disabled={busy !== ''}
+            onClick={() => confirmEpisode(episode.episode_id, false, true)}>
+            <Check size={13} /> 按②目标确认（取前 {table.targetFit.shot_count} 镜 · {
+              Math.round(table.targetFit.seconds)} 秒）
+          </button>}
+          {applied && !confirmedVersion && <button type="button"
+            className={table?.targetFit ? 'btn-secondary' : 'btn-primary'}
             disabled={busy !== '' || !table?.shots.length}
             onClick={() => confirmEpisode(episode.episode_id)}>
-            <Check size={13} /> 确认本集镜头（{table?.shots.length ?? 0} 镜）
+            <Check size={13} /> 确认全部落镜（{table?.shots.length ?? 0} 镜）
           </button>}
           {confirmedVersion && table?.stale && <div className="notice" role="alert">
             <p>最新拆镜落了 {table.shots.length} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
@@ -793,11 +974,15 @@ const FAMILY_LABEL: Record<string, string> = {
   character: '人物', scene: '场景', prop: '道具',
 };
 
-export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
+export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone, onAdvance }: {
   projectId: string;
   onMessage?: (message: string) => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
   onGoStage?: (target: ErrorActionTarget) => void;
+  /** 服务端 journey 判定素材阶段已完成：主操作变为「确认并进入下一步」。 */
+  assetsDone?: boolean;
+  /** 进入 journey.next_stage 对应页面（与阶段衔接同一导航执行者）。 */
+  onAdvance?: () => void;
 }) {
   const [view, setView] = useState<DirectorMaterialsView | null>(null);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
@@ -900,12 +1085,40 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
       onMessage?.('素材决策已确认。');
       await load();
       setProgressKey((key) => key + 1);
+      return !outcome.batch_error;
     } catch (error) {
       setProblem(describeError(error));
       // 断连或超时：先读台账，确认是否其实已经生效，再让用户决定。
       await load().catch(() => undefined);
+      return false;
     } finally {
       submitting.current = false;
+      setBusy('');
+    }
+  }
+
+  /** 素材已就绪：确认决策后进入 journey 的下一阶段（导演包），不再重复备料。 */
+  async function commitThenAdvance() {
+    const ok = await commit();
+    if (ok) onAdvance?.();
+  }
+
+  /** 重新生成素材：唯一 regenerate-all 执行者；有勾选用勾选集，否则全部需求。 */
+  async function regenerateAll() {
+    if (busy !== '' || !requirements.length) return;
+    const ids = selectedIds.length ? selectedIds : requirements.map((row) => row.requirement_id);
+    setBusy('commit'); setProblem(''); setResult(null);
+    try {
+      const outcome = await api<{ items?: string[] }>(
+        `/projects/${projectId}/material-preparation/regenerate-all`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idempotency_key: `director-regen-all-${Date.now()}`, requirement_ids: ids }) });
+      setResult(`已为 ${outcome.items?.length ?? ids.length} 项重新排队出图；旧候选保留，出图后在上方选定并采用。`);
+      await load();
+      setProgressKey((key) => key + 1);
+    } catch (error) {
+      setProblem(describeError(error));
+    } finally {
       setBusy('');
     }
   }
@@ -915,17 +1128,27 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
     if (!view?.plan_revision_id || !view.expected_snapshot) return;
     setBusy(`row-${row.requirement_id}`); setProblem(''); setResult(null);
     try {
-      await commitDirectorMaterials(projectId, {
-        plan_revision_id: view.plan_revision_id,
-        expected_snapshot: view.expected_snapshot,
-        decisions: [{
-          requirement_id: row.requirement_id,
-          strategy,
-          entity_id: row.entity_id ?? row.name ?? 'unknown',
-          asset_id: assetId ?? null,
-        }],
-        queue_generation: strategy === 'generate',
-      });
+      if (strategy === 'generate') {
+        // 重生成走唯一 regenerate-all 执行者（收束在途项、建新修订）；commit 不收束
+        // 在途项，已有批次时会被 MATERIAL_NOTHING_TO_GENERATE 拒绝。
+        await api(`/projects/${projectId}/material-preparation/regenerate-all`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idempotency_key: `director-regen-one-${Date.now()}`,
+            requirement_ids: [row.requirement_id] }),
+        });
+      } else {
+        await commitDirectorMaterials(projectId, {
+          plan_revision_id: view.plan_revision_id,
+          expected_snapshot: view.expected_snapshot,
+          decisions: [{
+            requirement_id: row.requirement_id,
+            strategy,
+            entity_id: row.entity_id ?? row.name ?? 'unknown',
+            asset_id: assetId ?? null,
+          }],
+          queue_generation: false,
+        });
+      }
       setResult(strategy === 'generate'
         ? `「${row.name ?? row.entity_id}」已重新排队制作候选；出图后由你选定并采用。`
         : `「${row.name ?? row.entity_id}」已改用你上传的主素材。`);
@@ -980,18 +1203,49 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
   function toggleAll(checked: boolean) {
     setSelected(Object.fromEntries(requirements.map((row) => [row.requirement_id, checked])));
   }
+  /** 勾选后统一重新生成：复用唯一重生成执行者 regenerate-all（会收束在途项并建
+   *  新修订），只作用于勾选集。commit 是“确认决策”执行者，不收束在途项，用它重生成
+   *  会在已有批次时被 MATERIAL_NOTHING_TO_GENERATE 拒绝。 */
+  async function regenerateSelected() {
+    if (selectedIds.length === 0 || busy !== '') return;
+    setBusy('commit'); setProblem(''); setResult(null);
+    try {
+      const outcome = await api<{ items?: string[]; run_id?: string }>(
+        `/projects/${projectId}/material-preparation/regenerate-all`,
+        { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idempotency_key: `director-regen-${Date.now()}`, requirement_ids: selectedIds }) });
+      setResult(`已为所选 ${outcome.items?.length ?? selectedIds.length} 项重新排队出图；旧候选保留，出图后在同一候选栏选定并采用。`);
+      setSelected({});
+      await load();
+      setProgressKey((key) => key + 1);
+    } catch (error) {
+      setProblem(describeError(error));
+    } finally {
+      setBusy('');
+    }
+  }
   const pendingChoice = requirements.some((row) => !decisions[row.requirement_id]);
   const missingCritical = requirements.filter(
     (row) => row.critical && !row.matched_master).length;
-  const primary: RailAction | null = requirements.length
-    ? { label: busy === 'commit' ? '正在提交…' : '确认决策并开始准备素材',
-        onClick: () => void commit(), loading: busy === 'commit',
+  // 主操作跟随服务端 journey 的单一裁决：素材阶段已完成→「确认并进入下一步」；
+  // 未完成→「确认决策并开始准备素材」。不在前端另算就绪（三原则）。
+  const readyToAdvance = Boolean(assetsDone && onAdvance);
+  const primary: RailAction | null = !requirements.length
+    ? { label: '按已确认镜头生成素材清单', onClick: () => void derive(),
+        loading: busy === 'derive', icon: <Film size={14} /> }
+    : { label: busy === 'commit' ? '正在提交…'
+        : readyToAdvance ? '确认并进入下一步' : '确认决策并开始准备素材',
+        onClick: () => (readyToAdvance ? void commitThenAdvance() : void commit()),
+        loading: busy === 'commit',
         disabled: busy !== '' || pendingChoice,
         icon: <ListChecks size={14} />,
-        disabledReason: pendingChoice ? '每一项都要选一个处理方式（可选项可选「跳过」）' : undefined }
-    : { label: '按已确认镜头生成素材清单', onClick: () => void derive(),
-        loading: busy === 'derive', icon: <Film size={14} /> };
-  useStageRail('shot-materials', { priority: 1, primary }, [view, decisions, busy]);
+        disabledReason: pendingChoice ? '每一项都要选一个处理方式（可选项可选「跳过」）' : undefined };
+  const secondary: RailAction[] = requirements.length
+    ? [{ label: '重新生成素材', onClick: () => void regenerateAll(),
+        loading: busy === 'commit', disabled: busy !== '', icon: <RefreshCw size={14} /> }]
+    : [];
+  useStageRail('shot-materials', { priority: 1, primary, secondary },
+    [view, decisions, busy, assetsDone, onAdvance]);
 
   return <section className="card section-card" id="shot-materials">
     <div className="section-heading">
@@ -1019,7 +1273,25 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
     {result && <p className="run-hint ok-hint"><Check size={12} /> {result}</p>}
 
     <MaterialGenerationProgress projectId={projectId} refreshKey={progressKey}
-      onPromoted={() => { void load(); }} />
+      masters={requirements.filter((row) => row.strategy === 'reuse_master' && row.matched_master)
+        .map((row) => ({
+          requirement_id: row.requirement_id, entity_id: row.entity_id, family: row.family,
+          asset_id: row.matched_master!.asset_id,
+        }))}
+      onPromoted={() => { void load(); }}
+      onUnadopt={async (requirementId) => {
+        const row = requirements.find((r) => r.requirement_id === requirementId);
+        if (!row || !view?.plan_revision_id || !view.expected_snapshot) return;
+        // 取消采用＝改回「AI 制作」但不排队：同一决策执行者清绑定、解绑镜头。
+        await commitDirectorMaterials(projectId, {
+          plan_revision_id: view.plan_revision_id,
+          expected_snapshot: view.expected_snapshot,
+          decisions: [{ requirement_id: row.requirement_id, strategy: 'generate',
+            entity_id: row.entity_id ?? row.name ?? 'unknown', asset_id: null }],
+          queue_generation: false,
+        });
+        await load();
+      }} />
 
     {loaded && !requirements.length && <p className="empty-inline">
       还没有按镜头的素材清单。先确认至少一集的镜头，再生成清单。
@@ -1048,6 +1320,9 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage }: {
         </select>
         <button type="button" className="btn-secondary" disabled={busy !== '' || selectedIds.length === 0}
           onClick={() => applyBatch(batchTarget, selectedIds)}>应用到所选</button>
+        <button type="button" className="btn-secondary" disabled={busy !== '' || selectedIds.length === 0}
+          title="勾选后点这里：只对所选需求统一重新出图，旧候选保留"
+          onClick={() => void regenerateSelected()}>重新生成所选（{selectedIds.length}）</button>
         <button type="button" className="btn-secondary" disabled={busy !== ''}
           title="一键把全部素材设为 AI 制作"
           onClick={() => { toggleAll(true); applyBatch('generate', requirements.map((row) => row.requirement_id)); }}>

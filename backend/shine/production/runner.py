@@ -410,6 +410,42 @@ def run_owned_passed_jobs(
     return passed
 
 
+def episode_current_jobs(
+    db: Session, run: ProductionRun, episode: ProductionRunEpisode
+) -> dict[str, Job]:
+    """The current take of each shot of one episode: the run-owned passed jobs
+    overlaid with the explicit assembly selection (a chosen retake).
+
+    This is the single fact the episode EDL, its content digest and the
+    delivery gate all read, so a selected retake is assembled and burned with
+    subtitles exactly like the original take — never a second, divergent
+    verdict.  A chosen job must still be a real, current, passed take.
+    """
+    from shine.models import AppSetting
+
+    passed = run_owned_passed_jobs(db, run.id, [episode])
+    shot_rev = {
+        shot.id: shot.revision
+        for shot in db.scalars(
+            select(Shot).where(Shot.id.in_(episode.shot_ids or ["-"]))
+        ).all()
+    }
+    for batch in _batch_rows(db, run.id):
+        if batch.episode_id != episode.episode_id or not batch.series_id:
+            continue
+        setting = db.get(AppSetting, f"assembly-selection:{batch.series_id}")
+        if setting is None:
+            continue
+        for shot_id, job_id in (setting.value or {}).items():
+            job = db.get(Job, job_id)
+            if job is None or job.status != "PASSED" or job.stale or not job.artifact_id:
+                continue
+            if shot_rev.get(shot_id) != job.shot_revision:
+                continue
+            passed[shot_id] = job
+    return passed
+
+
 def _job_submission_settled(db: Session, job: Job) -> bool:
     """Whether a terminal job provably has no external request still awaiting a decision.
 
@@ -561,7 +597,7 @@ def _create_series_for_batch(
             strategy_contract = GenerationStrategy.model_validate(frozen_strategy)
         except ValueError as exc:
             raise RunBlocked("STRATEGY_CONTRACT_INVALID") from exc
-        if strategy_blockers(strategy_contract):
+        if strategy_blockers(strategy_contract, db, settings):
             raise RunBlocked("STRATEGY_BLOCKED_AT_DISPATCH") from None
     project = db.get(Project, run.project_id)
     if project is None:
@@ -752,9 +788,9 @@ def _ensure_episode_delivery(
     if (planned_keys - existing_keys) or any(batch.status != "PASSED" for batch in batches):
         return None, False
 
-    # 2. Every shot must have a passed job that this run's own series items
-    #    produced.  An unrelated passed job never completes this run.
-    passed = run_owned_passed_jobs(db, run.id, [episode])
+    # 2. Every shot must have a current passed take (run-owned, or an explicitly
+    #    selected retake).  An unrelated passed job never completes this run.
+    passed = episode_current_jobs(db, run, episode)
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
         return None, False

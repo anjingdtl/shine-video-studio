@@ -142,15 +142,19 @@ def episode_input_digest(
     run's own series items produced are part of the identity: an unrelated
     newer take never re-identifies somebody else's reel.
     """
-    from shine.production.runner import run_owned_passed_jobs
+    from shine.media.subtitles import subtitle_font_size
+    from shine.production.runner import episode_current_jobs
 
-    passed = run_owned_passed_jobs(db, run.id, [episode])
+    passed = episode_current_jobs(db, run, episode)
     payload = {
         "run_id": run.id,
         "episode_id": episode.episode_id,
         "manifest_sha256": episode.manifest_sha256,
         # A cut or subtitle revision is a new delivery identity of the same takes.
         "post_contract": post_contract_digest(episode),
+        # Font is a presentation fact of the burn; changing it re-identifies the
+        # reel so the next apply re-burns instead of reusing the old file.
+        "subtitle_font_size": subtitle_font_size(db, run.project_id),
         "batches": [
             [batch.batch_key, batch.input_digest, batch.series_id]
             for batch in sorted(batches, key=lambda row: row.batch_key)
@@ -212,9 +216,9 @@ def build_episode_edl(
     if run is None:
         raise DeliveryBlock("EPISODE_RUN_MISSING")
 
-    from shine.production.runner import run_owned_passed_jobs
+    from shine.production.runner import episode_current_jobs
 
-    passed = run_owned_passed_jobs(db, run.id, [episode])
+    passed = episode_current_jobs(db, run, episode)
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
     if missing:
         raise DeliveryBlock("EPISODE_SHOT_NOT_PASSED")
@@ -402,7 +406,8 @@ def run_episode_delivery(
                     # Cues timed for a longer cut would burn lines over the
                     # wrong pictures or past the end; refuse instead.
                     raise DeliveryBlock("EPISODE_SUBTITLE_EXCEEDS_CUT")
-                subtitle_ass = track.ass
+                from shine.media.subtitles import burn_ass_for_track
+                subtitle_ass = burn_ass_for_track(db, track)
                 subtitle_sha256 = track.sha256
             clips = [
                 DeliveryClip(

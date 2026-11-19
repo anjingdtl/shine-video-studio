@@ -1,7 +1,6 @@
-/** 登记生成方案后当前页面模板即时更新（2026-11-02 模式门禁版）：
- *  模板下拉的数据来源是共享的工作流列表；真实生成选项只在后端
- *  production_mode 为 READY 时可选——顶部模式、单镜头选择与连续生产
- *  使用同一后端状态，前端不自行推断。 */
+/** 登记生成方案后共享列表即时更新（2026-11-19 高级设置收敛轮）：
+ *  工作流映射细调收敛在基础配置「专业细调」，高级设置不再保留平行排产入口；
+ *  真实生成选项只在后端 production_mode 为 READY 时可用。 */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -28,8 +27,8 @@ const PROFILE = {
   validated_against: null, created_at: '2026-11-01T00:00:00',
 };
 
-describe('登记生成方案后当前页面模板即时更新', () => {
-  it('登记后模板下拉出现新方案；真实生成由后端 READY 状态解锁', async () => {
+describe('登记生成方案后共享列表即时更新', () => {
+  it('基础配置专业细调里登记后，管理列表立即出现新方案', async () => {
     const user = userEvent.setup();
     let registered = false;
     stub.add({
@@ -54,9 +53,10 @@ describe('登记生成方案后当前页面模板即时更新', () => {
     // 顶部模式入口显示后端的 READY 状态，而不是前端默认的演示。
     expect((await screen.findAllByText('真实制作已就绪')).length).toBeGreaterThan(0);
 
-    // 在高级设置的工作流 Profile 注册里登记生成方案。
-    window.location.hash = '#d/advanced';
+    // 在基础配置的专业细调里登记生成方案（唯一工作流映射入口）。
+    window.location.hash = '#d/setup';
     window.dispatchEvent(new HashChangeEvent('hashchange'));
+    await user.click(await screen.findByText(/专业细调：工作流映射 · 项目策略/));
     await user.click(await screen.findByText(/展开 工作流 Profile 注册/));
     await user.type(screen.getByPlaceholderText('Profile 名称'), PROFILE.name);
     await user.selectOptions(screen.getByDisplayValue('T2VA'), 'Ref2VA');
@@ -65,29 +65,19 @@ describe('登记生成方案后当前页面模板即时更新', () => {
       expect(stub.callsOf('POST', /\/api\/v1\/workflow-profiles$/).length).toBeGreaterThan(0);
     }, { timeout: 4000 });
 
-    // 登记刷新了共享的工作流列表状态。
-    const before = stub.calls.filter((call) => call.method === 'GET' && /workflow-profiles/.test(call.url)).length;
-    expect(before).toBeGreaterThan(0);
-
-    // 到高级设置的排产折叠区：真实生成已解锁，模板下拉立即出现新方案。
-    window.location.hash = '#d/advanced';
-    window.dispatchEvent(new HashChangeEvent('hashchange'));
-    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
-    const provider = await screen.findByLabelText(/生成方式/);
-    await user.selectOptions(provider, 'comfyui');
+    // 登记刷新了共享的工作流列表状态，管理列表立即出现新方案。
     await waitFor(() => {
-      expect(screen.getByLabelText(/生成模板/).textContent).toContain('local-h3-ref2va-pdd8-2img-1aud');
-    });
+      expect(screen.getByText(PROFILE.name)).toBeInTheDocument();
+    }, { timeout: 4000 });
   });
 
-  it('演示模式下真实生成不可选：选择器被锁在演示体验', async () => {
-    const user = userEvent.setup();
+  it('高级设置不再提供生成方式与排产的平行入口', async () => {
     window.location.hash = '#d/advanced';
     render(<App />);
-    await user.click(await screen.findByText('多镜头连续生产与单镜排产(高级)'));
-    const provider = await screen.findByLabelText(/生成方式/);
-    expect((provider as HTMLSelectElement).disabled).toBe(true);
-    expect((provider as HTMLSelectElement).value).toBe('mock');
-    expect(screen.getByText(/真实制作未启用/)).toBeInTheDocument();
+    await screen.findByText(/显示偏好、制片规范与/);
+    expect(screen.queryByText('多镜头连续生产与单镜排产(高级)')).toBeNull();
+    expect(screen.queryByLabelText(/生成方式/)).toBeNull();
+    expect(screen.queryByText('各类配置去哪儿找')).toBeNull();
+    expect(screen.queryByText('存储、ComfyUI 与本机状态')).toBeNull();
   });
 });

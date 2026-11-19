@@ -465,6 +465,12 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation, *,
         # quotes the id it was shown and the batch references the same id.
         # Only its owning revision and its decision move forward.
         row.plan_id = plan.id
+        previous = dict(row.payload or {})
+        # 显式取消采用：从「复用」改走生成/上传/跳过时，记录被释放的旧主素材，
+        # 由 bind 执行者解绑；从未采纳过的 generate 不释放任何已有参考。
+        release = (previous.get("bound_asset_id")
+                   if previous.get("strategy") == "reuse_master"
+                   and decision["strategy"] != "reuse_master" else None)
         row.payload = {
             **(row.payload or {}),
             "strategy": decision["strategy"],
@@ -474,6 +480,7 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation, *,
             "brief_note": decision["brief_note"],
             "source_plan_revision_id": source.id,
             "confirmed_by": actor,
+            "release_asset_id": release,
         }
         row.sha256 = graph_hash(row.payload)
         row.status = "CONFIRMED"
@@ -1197,7 +1204,7 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
     from sqlalchemy import select as sa_select
 
     from shine.comfyops.models import AssetRequirement
-    from shine.models import Asset, Job, Shot
+    from shine.models import Asset, Job, Shot, ShotAssetBinding
     from shine.schemas import ReferenceUse, ShotBindingInput
     from shine.services import (
         _binding_rows,
@@ -1212,36 +1219,69 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         AssetRequirement.plan_id == plan_id,
         AssetRequirement.project_id == project_id,
     )).all()
-    touched = sorted({
-        shot_id for row in rows
-        if (row.payload or {}).get("strategy") == "reuse_master"
-        and (row.payload or {}).get("family") in {"character", "scene"}
-        for shot_id in (row.payload or {}).get("used_shot_ids") or []
-    })
-    protected = protected_shot_ids(db, project_id, touched)
+
+    # 与需求页同一份推导裁决：引用范围按目录×场次重算，不信旧的「全塞」
+    # used_shot_ids。推导不可用（大纲未确认等）时回退台账既有引用。
+    citations: dict[tuple[str, str], dict[str, Any]] | None = None
+    try:
+        from shine.director import requirements as requirement_source
+        derived = requirement_source.derive(db, project)
+        citations = {(str(r["family"]), str(r["entity_id"])): r
+                     for r in derived["requirements"]}
+    except Exception:
+        citations = None
 
     # 1. Read every decision first.  One shot may answer to several requirements;
     #    the per-shot target set is composed before any row is written, so no
     #    write can be decided from bindings another write just replaced.
+    #    row_citations 记录每个需求「采纳到哪些镜」：改策略（取消采用）或
+    #    重新映射后，不在范围内的旧绑定由同一执行者解绑。
     decisions: dict[str, dict[tuple[str, str], str]] = {}
+    row_citations: list[tuple[str, str, set[str]]] = []
     for requirement in sorted(rows, key=lambda row: row.id):
         payload = dict(requirement.payload or {})
-        if payload.get("strategy") != "reuse_master":
-            continue
         family = payload.get("family")
         if family not in {"character", "scene"}:
             continue
-        asset_id = payload.get("bound_asset_id")
         entity = str(payload.get("entity_id") or "")
-        if not asset_id or not entity:
+        if not entity:
+            continue
+        if citations is not None:
+            evidence = citations.get((str(family), entity))
+            used = {str(s) for s in (evidence or {}).get("shot_ids") or []}
+            if evidence is not None and sorted(used) != sorted(str(s) for s in payload.get("used_shot_ids") or []):
+                requirement.payload = {
+                    **payload, "used_shot_ids": sorted(used),
+                    "used_episodes": sorted({str(e) for e in evidence.get("used_episodes") or []}),
+                }
+                requirement.sha256 = graph_hash(requirement.payload)
+                payload = dict(requirement.payload)
+        else:
+            used = {str(s) for s in payload.get("used_shot_ids") or []}
+        adopted_shots = used if payload.get("strategy") == "reuse_master" else set()
+        row_citations.append((str(family), entity, adopted_shots))
+        if payload.get("strategy") != "reuse_master":
+            continue
+        asset_id = payload.get("bound_asset_id")
+        if not asset_id:
             continue
         asset = db.get(Asset, asset_id)
         if asset is None or not asset.approved or not asset.locked:
             continue
-        for shot_id in payload.get("used_shot_ids") or []:
+        for shot_id in adopted_shots:
             # 同一需求（同一人物 / 同一场景）被确认过两次时，最后一次确认的那份胜出；
             # 场景底图就是这一镜渲染的环境图，Ref2VA 至少一个参考时由它兜底。
             decisions.setdefault(str(shot_id), {})[(str(family), entity)] = asset.id
+
+    entities = {entity for (_, entity, _) in row_citations}
+    bound_shot_ids: set[str] = set()
+    if entities:
+        bound_shot_ids = set(db.scalars(
+            sa_select(ShotAssetBinding.shot_id).where(ShotAssetBinding.asset_id.in_(
+                sa_select(Asset.id).where(Asset.project_id == project_id,
+                                          Asset.entity_id.in_(entities))))))
+    touched = sorted({sid for (_, _, used) in row_citations for sid in used} | bound_shot_ids)
+    protected = protected_shot_ids(db, project_id, touched)
 
     def matches_decision(link, family: str, entity: str) -> bool:
         """Whether this existing binding is the slot the decision replaces."""
@@ -1254,8 +1294,24 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         old = db.get(Asset, link.asset_id)
         return old is not None and str(old.entity_id or "") == entity
 
+    scene_row_by_asset: dict[str, Any] = {}
+    release_ids: set[str] = set()
+    for row in rows:
+        payload = row.payload or {}
+        if payload.get("family") == "scene" and payload.get("bound_asset_id"):
+            scene_row_by_asset[str(payload["bound_asset_id"])] = row
+        if payload.get("release_asset_id"):
+            release_ids.add(str(payload["release_asset_id"]))
+    asset_role: dict[str, str | None] = {}
+
+    def role_of(asset_id: str) -> str | None:
+        if asset_id not in asset_role:
+            asset = db.get(Asset, asset_id)
+            asset_role[asset_id] = asset.role if asset is not None else None
+        return asset_role[asset_id]
+
     bound = 0
-    for shot_id in sorted(decisions):
+    for shot_id in touched:
         if shot_id in protected:
             continue
         shot = db.get(Shot, shot_id)
@@ -1268,10 +1324,8 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         if passed is not None:
             continue
         declared_characters = list((shot.spec or {}).get("characters") or [])
-        wanted = {key: asset_id for key, asset_id in decisions[shot_id].items()
+        wanted = {key: asset_id for key, asset_id in decisions.get(shot_id, {}).items()
                   if key[0] != "character" or key[1] in declared_characters}
-        if not wanted:
-            continue
 
         # 2. The target set: keep every valid reference, drop the master a
         #    requirement is being moved off, then add the confirmed ones.
@@ -1281,6 +1335,10 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             swap = [asset_id for (family, entity), asset_id in wanted.items()
                     if matches_decision(link, family, entity) and link.asset_id != asset_id]
             if swap:
+                replaced.add(link.asset_id)
+                continue
+            # 显式取消采用：confirm 记录了被释放的旧主素材，这里解绑。
+            if link.asset_id in release_ids:
                 replaced.add(link.asset_id)
                 continue
             keep.append(link)
@@ -1300,6 +1358,23 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
                 target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.PICTURE,
                                                ordinal=len(target)))
             bound_ids.add(asset_id)
+        # 每镜至多一张场景底图：历史「全塞」或多份采纳只留最新一张，其余解绑，
+        # 保证人物主体+单场景不撞 H3 九图上限。
+        scene_entries = [t for t in target
+                         if t.use_as == ReferenceUse.PICTURE and role_of(t.asset_id) == "scene"]
+        if len(scene_entries) > 1:
+            from datetime import datetime
+
+            def scene_priority(entry: ShotBindingInput):
+                row = scene_row_by_asset.get(entry.asset_id)
+                return row.created_at if row is not None else datetime.min
+            keep_scene = max(scene_entries, key=scene_priority)
+            for entry in scene_entries:
+                if entry is not keep_scene:
+                    replaced.add(entry.asset_id)
+                    target.remove(entry)
+            for index, entry in enumerate(target):
+                entry.ordinal = index
         # 唯一"是否已经就是这个集合"的判定：复用 services 的同一个比较函数，
         # 读取前先让关系集合从台账重读，避免拿到另一笔写入之前的旧值。
         db.expire(shot, ["bindings"])
@@ -1320,6 +1395,13 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             shot.revision = (shot.revision or 1) + 1
         set_shot_bindings(db, project, shot, target, actor=actor, bump_revision=False)
         bound += 1
+    # 释放意图一次性消费：解绑完成后清掉 release_asset_id，避免后续 bind 重复解绑。
+    for row in rows:
+        payload = dict(row.payload or {})
+        if payload.get("release_asset_id"):
+            payload.pop("release_asset_id", None)
+            row.payload = payload
+            row.sha256 = graph_hash(payload)
     return bound
 
 

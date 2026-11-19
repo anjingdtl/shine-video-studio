@@ -189,6 +189,50 @@ def test_the_producer_writes_the_brief_and_the_item_carries_it(api, monkeypatch)
         assert tasks[0].trace["tool"] == "material_image_brief"
 
 
+def test_a_refrozen_style_invalidates_the_stale_brief(api, monkeypatch):
+    """brief 绑定事实身份：同事实复用（不买第二份答案），重冻后旧 brief 是历史。"""
+    from shine.models import StyleVersion, utcnow
+    client, factory, settings = api
+    project_id = _project(client)
+    _route(client)
+    calls = _responder(monkeypatch, lambda _n: copy.deepcopy(BRIEF_ANSWER))
+    with factory() as db:
+        item = _item(db, project_id)
+        item_id, version = item.id, item.state_version
+
+    first = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)
+    assert first["ready"] is True
+    assert len(calls) == 1
+    with factory() as db:
+        row = db.get(MaterialItem, item_id)
+        version = row.state_version
+        old_basis = row.payload["brief_basis"]
+
+    again = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)
+    assert again["reused"] is True
+    assert len(calls) == 1
+
+    with factory.begin() as db:
+        db.add(StyleVersion(
+            project_id=project_id, version=1, snapshot={"film_type": "animation"},
+            sha256="f" * 64, approved_by="local-user", frozen_at=utcnow(),
+        ))
+    with factory() as db:
+        version = db.get(MaterialItem, item_id).state_version
+    third = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)
+    assert third["ready"] is True
+    assert len(calls) == 2
+    # 新 brief 的上下文必须带上动画媒介句，旧 brief 保留为历史产物。
+    assert any("cel-shaded" in (m.content or "") for m in calls[1])
+    with factory() as db:
+        row = db.get(MaterialItem, item_id)
+        assert row.payload["brief_basis"] != old_basis
+        artifacts = db.scalars(
+            select(AgentArtifact).where(AgentArtifact.kind == "MaterialImageBrief")
+        ).all()
+        assert len(artifacts) == 2
+
+
 def test_requirement_upload_binds_master_and_validates_format_before_reuse(api):
     client, factory, _ = api
     project_id = _project(client)

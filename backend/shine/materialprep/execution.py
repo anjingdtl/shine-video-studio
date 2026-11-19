@@ -214,11 +214,7 @@ def claim_next_item(factory, worker_id: str, *, run_id: str | None = None) -> st
 
 
 def _load_context(factory, item_id: str) -> dict[str, Any]:
-    from sqlalchemy import select
-
-    from shine.h3.film_type import film_type_sentence
-    from shine.models import StyleVersion
-    from shine.schemas import FilmType
+    from shine.materialprep.prompt_source import project_visual_facts
 
     with factory() as db:
         item = db.get(MaterialItem, item_id)
@@ -228,17 +224,7 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
         plan = db.get(PreProductionPlan, run.plan_id) if run else None
         project = db.get(Project, item.project_id)
-        style = db.scalar(
-            select(StyleVersion)
-            .where(StyleVersion.project_id == item.project_id, StyleVersion.frozen_at.is_not(None))
-            .order_by(StyleVersion.version.desc())
-        )
-        film_style = ""
-        if style is not None:
-            try:
-                film_style = film_type_sentence(FilmType((style.snapshot or {}).get("film_type")))
-            except ValueError:
-                film_style = ""
+        facts = project_visual_facts(db, item.project_id)
         return {
             "item_id": item.id,
             "item_status": item.status,
@@ -254,7 +240,8 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
             "plan_purpose": plan.purpose if plan else None,
             "project_id": project.id if project else None,
             "project_title": project.title if project else "",
-            "film_style": film_style,
+            "film_style": facts["film_style"],
+            "world": facts["world"],
         }
 
 
@@ -446,6 +433,7 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
             film_style=str(context.get("film_style") or ""),
             description=str(requirement.get("description") or ""),
             manual=_manual_prompt(context),
+            world_note=str(context.get("world") or ""),
         )
     except PromptSourceError as exc:
         raise ImageExecutionError(

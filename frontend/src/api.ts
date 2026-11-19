@@ -790,6 +790,7 @@ export type SubtitleCue = { index: number; start_s: number; end_s: number; text:
 
 export type SubtitleTrack = {
   id: string; project_id: string; revision: number; status: string; cues: SubtitleCue[];
+  episode_id: string | null;
   sha256: string; source: string; source_artifact_sha256: string | null;
   created_by: string; created_at: string; updated_at: string;
 };
@@ -1589,6 +1590,8 @@ export type StoryboardBook = {
     episode_count: number;
     total_planned_seconds: number;
     episodes: StoryboardBookEpisode[];
+    out_of_scope?: { count: number; from_order: number | null; to_order: number | null;
+                     note: string } | null;
   };
 };
 
@@ -1603,6 +1606,12 @@ export const confirmStoryboardBook = (projectId: string, body: {
   acknowledge_deviation?: boolean,
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
+
+/** 让旧镜头执行当前冻结风格：既有唯一执行者（freeze/shots/style），
+ *  导演包预检报 SHOT_STYLE_MISMATCH 时就地恢复，不另起链路。 */
+export const applyCurrentStyleToShots = (projectId: string, reason = '') =>
+  api<{ style_version_id: string; revised_shot_ids: string[] }>(
+    `/projects/${projectId}/freeze/shots/style`, json('POST', { reason }));
 
 /** ③ 按集镜头表与一次落镜。 */
 export type EpisodeShotRow = {
@@ -1643,12 +1652,21 @@ export type EpisodeStoryboardState = {
                    section_order?: number; section_title?: string }>;
     shot_ids: string[];
     status: 'PENDING' | 'IN_PROGRESS' | 'APPLIED' | 'BLOCKED' | string;
+    sections?: Array<{ production_section_id: string; section_order?: number;
+                       section_title?: string; shot_count: number; state: string;
+                       unit_count: number; applied_count: number }>;
+    landed_shot_count?: number;
+    pending_section_count?: number;
     blocker?: {
       unit_index?: number; status: string; failed_role: string | null; failed_task_id: string | null;
+      summary?: string; uncertain?: boolean;
+      reconcile_task_id?: string | null; reconcile_state_version?: number;
       rejections: Array<{ role: string; code: string; rejection_reason_code?: string;
                           external_outcome?: string; task_id?: string | null; state_version?: number;
                           provider_finish_reason?: string | null; provider_text_chars?: number | null;
-                          network_timeout_s?: number | null; phase?: string | null }>;
+                          network_timeout_s?: number | null; phase?: string | null;
+                          blocking_task?: { task_id: string; status: string;
+                                            external_outcome?: string | null; phase?: string | null } }>;
     } | null;
   }>;
 };
@@ -1662,14 +1680,21 @@ export const queueDirectorStoryboard = (projectId: string) =>
 
 export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
   api<{ episode_id: string; shots: EpisodeShotRow[]; total_editorial_seconds: number; shot_count: number;
+        target_seconds?: number | null; tolerance_seconds?: number | null;
+        duration_verdict?: { code: string; actual_seconds: number; target_seconds: number;
+                             tolerance_seconds: number; window_low_s: number; window_high_s: number;
+                             deviation_seconds: number } | null;
+        target_fit?: { shot_count: number; seconds: number; shot_ids: string[] } | null;
+        confirmed_seconds?: number | null;
         confirmed_shot_ids?: string[]; confirmed_version?: number | null; confirmation_stale?: boolean }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
 
 export const confirmEpisodeShots = (projectId: string, episodeId: string,
-  acknowledgeDurationDeviation = false) =>
+  acknowledgeDurationDeviation = false, fitTarget = false) =>
   api<{ plan_version: number; episode_id: string; shot_ids: string[] }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/confirm`,
-    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation }));
+    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation,
+                  fit_target: fitTarget }));
 
 export const retryEpisodeStoryboard = (projectId: string, episodeId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string; episode_id: string }>(
@@ -1806,9 +1831,22 @@ export const saveShotSubtitle = (projectId: string, shotId: string,
     lines: ShotSubtitleLine[]; sha256: string; frozen_at: string | null }>(
   `/projects/${projectId}/director/storyboard/shots/${shotId}/subtitles`, json('PUT', body));
 
+export const listSubtitleTracks = (projectId: string) =>
+  api<SubtitleTrack[]>(`/projects/${projectId}/subtitles`);
+
+export const getSubtitleStyle = (projectId: string) =>
+  api<{ font_size: number }>(`/projects/${projectId}/subtitle-style`);
+
+export const putSubtitleStyle = (projectId: string, fontSize: number) =>
+  api<{ font_size: number }>(`/projects/${projectId}/subtitle-style`, json('PUT', { font_size: fontSize }));
+
+export const approveSubtitleRevision = (projectId: string, revision: number) =>
+  api<SubtitleTrack>(`/projects/${projectId}/subtitles/${revision}/approve`, json('POST', {}));
+
 export const compileEpisodeSubtitles = (projectId: string, episodeId: string) =>
   api<{ revision: number; episode_id: string; status: string; cue_count: number;
-    basis: 'planned' | 'actual'; warnings: string[]; sha256: string }>(
+    basis: 'planned' | 'actual'; warnings: string[]; sha256: string;
+    manual_shots: number; dialogue_shots: number }>(
   `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/subtitles/compile`,
   json('POST', {}));
 
@@ -2033,7 +2071,8 @@ export const getVariantAvailability = (projectId: string) =>
 
 export const startDirectorProduction = (
   projectId: string,
-  body: { episode_ids: string[]; workflow_profile_id?: string | null; strategy?: ProductionStrategy | null },
+  body: { episode_ids: string[]; workflow_profile_id?: string | null; strategy?: ProductionStrategy | null;
+    output?: { width: number; height: number; fps: 24; clip_seconds?: number | null } | null },
 ) => api<DirectorShootResult>(`/projects/${projectId}/director/production/start`, json('POST', body));
 
 /* ------------------------------------------------------------------------- *

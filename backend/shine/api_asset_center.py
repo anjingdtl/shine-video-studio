@@ -207,6 +207,7 @@ class ImageJobRequest(Strict):
     candidate_count: int = Field(default=1, ge=1, le=4)
     category: str = "other"
     requirement_context: dict[str, Any] | None = None
+    project_id: str | None = None
     transparent: bool = False
     target_asset_id: str | None = None
     parent_version_id: str | None = None
@@ -968,11 +969,52 @@ def select_library_version(
     return service.asset_data(db, asset, include_versions=True)
 
 
+@router.get("/asset-center/visual-facts")
+def asset_visual_facts(project_id: Annotated[str, Query()], db: DBSession):
+    """Read-only projection of the facts that govern a project's material images."""
+    from shine.materialprep.prompt_source import project_visual_facts
+
+    project = db.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "作品不存在"})
+    return {**project_visual_facts(db, project_id), "project_title": project.title}
+
+
 @router.post("/asset-center/image-jobs", status_code=202)
 def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSession):
     payload = body.model_dump(mode="json")
     if body.category not in service.ASSET_CATEGORIES:
         raise HTTPException(422, {"code": "LIBRARY_CATEGORY_INVALID", "message": "素材分类无效"})
+    # A project-scoped generation inherits the frozen film medium and the story
+    # world / era through the one composer, so the asset centre cannot render a
+    # different film (photoreal / modern) than the project the user selected.
+    facts_project = body.project_id or (body.requirement_context or {}).get("project_id")
+    if facts_project and body.prompt.strip() and (
+        body.mode == "T2I" or (body.mode == "RGBA" and not body.references)
+    ):
+        from shine.materialprep.prompt_source import (
+            PromptSourceError,
+            compose_user_image_prompt,
+            project_visual_facts,
+        )
+
+        facts = project_visual_facts(db, facts_project)
+        family = "scene" if body.category == "scene" else "prop" if body.category == "prop" else "character"
+        try:
+            composed = compose_user_image_prompt(
+                user_prompt=body.prompt, family=family, facts=facts)
+        except PromptSourceError as exc:
+            raise HTTPException(
+                422, {"code": exc.code, "message": "素材提示词无法合成", **exc.details}) from exc
+        payload["user_prompt"] = body.prompt
+        payload["prompt"] = composed.prompt
+        payload["negative_prompt"] = composed.negative_prompt
+        payload["prompt_template_version"] = composed.template_version
+        payload["prompt_evidence"] = composed.as_evidence()
+        payload["project_visual_facts"] = {
+            "film_style": facts["film_style"], "film_type": facts["film_type"],
+            "world": facts["world"], "style_version_id": facts["style_version_id"],
+        }
     if body.requirement_context:
         from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
 

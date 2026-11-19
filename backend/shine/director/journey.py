@@ -467,21 +467,15 @@ def compute_journey(
     # move on to materials, packaging and shooting (streamline plan §3).
     episode_storyboard = []
     if storyboard_plan is not None and plan_mode == "sections":
-        from shine.materialprep.story import section_storyboard_shot_ids
+        from shine.director import streamline as _streamline
 
         for episode in (storyboard_plan.payload or {}).get("episodes", []):
-            landed = 0
-            pending_sections = 0
-            for section_id in episode.get("section_ids") or []:
-                resolved = section_storyboard_shot_ids(db, project_id, section_id)
-                if resolved.get("merged_into"):
-                    # A title merged into a narrative neighbour is satisfied; it
-                    # is neither a landed shot nor a pending section.
-                    continue
-                if resolved["shot_ids"]:
-                    landed += len(resolved["shot_ids"])
-                else:
-                    pending_sections += 1
+            # The same 集→场→镜 join the ③ state and shot table read; merged
+            # titles are satisfied, neither landed nor pending.
+            scenes = _streamline.episode_scene_facts(db, project_id, episode, {})
+            landed = sum(sec["shot_count"] for sec in scenes)
+            pending_sections = sum(1 for sec in scenes
+                                   if sec["state"] != "MERGED" and not sec["shot_count"])
             episode_storyboard.append({
                 "episode_id": episode.get("episode_id"),
                 "confirmed": bool(episode.get("shot_ids")) and pending_sections == 0,
@@ -507,6 +501,17 @@ def compute_journey(
             message = "按剧本分好的集还没有拆成镜头"
         else:
             message = ""
+        # The rail and the ③ panel must tell the same story: when a run is
+        # blocked, name the stuck scene from the same projection the panel
+        # displays, ahead of the coverage count.
+        from shine.director import streamline as _streamline
+        summaries = [
+            (ep.get("blocker") or {}).get("summary")
+            for ep in _streamline.director_storyboard_state(db, project_id).get("episodes", [])
+        ]
+        summaries = [item for item in summaries if item]
+        if summaries:
+            message = "；".join([*summaries, message]) if message else "；".join(summaries)
         if message:
             shot_blockers.append({"code": "EPISODE_PLAN_NOT_MATERIALIZED", "message": message,
                                   "landed_shot_count": total_landed,

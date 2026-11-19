@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import {
   ApiError,
+  applyCurrentStyleToShots,
   controlProductionRun,
   getProductionRun,
   getStrategyOptions,
@@ -23,6 +24,7 @@ import {
   type StrategyOptions,
   type VariantAvailability,
 } from '../api';
+import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { GuideTip } from './GuideTip';
@@ -108,8 +110,9 @@ export function EpisodeCards({ episodes, onAction, compact }: {
 export function describeVariantName(variantId: string): string {
   const lower = (variantId || '').toLowerCase();
   if (/int8-convrot/.test(lower)) return '标准画质 · INT8';
-  if (/lowend|w6a8/.test(lower)) return '低显存候选 · W6A8';
+  // NVFP4 的 id 也含 lowend：必须先于 W6A8 匹配，否则两个不同变体显示同名。
   if (/nvfp4/.test(lower)) return '低显存候选 · NVFP4';
+  if (/lowend|w6a8/.test(lower)) return '低显存候选 · W6A8';
   if (/w4/.test(lower)) return '候选 · W4';
   return variantId;
 }
@@ -139,7 +142,7 @@ const FALLBACK_OPTIONS: StrategyOptions = {
   upscale: [],
 };
 
-export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, onMessage, onRefresh, onNavigate, onGoSetup }: {
+export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, activeJob, onMessage, onRefresh, onNavigate, onGoSetup }: {
   projectId: string;
   overview: DirectorOverview | null;
   demo: boolean;
@@ -147,6 +150,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   mode: 'package' | 'run';
   /** 与 App 的投影跟读同节奏：运行卡不能比集卡旧。 */
   refreshEpoch?: number;
+  /**  job 台账里正在渲染的任务（同一事实，App 透传）：进度条「第几镜」用它。 */
+  activeJob?: { shot_id: string; shot_name: string; status: string; attempts?: { progress: number }[] } | null;
   onMessage?: (message: string, tone?: 'success' | 'error') => void;
   onRefresh?: () => void;
   onNavigate?: (page: 'package' | 'run') => void;
@@ -158,10 +163,15 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const [options, setOptions] = useState<StrategyOptions>(FALLBACK_OPTIONS);
   const [variantId, setVariantId] = useState('h3-ref2va-int8-convrot');
   const [acceleratorId, setAcceleratorId] = useState('pdd8');
+  // 画幅/分辨率在七阶段里只有这一个控制节点：产出 OutputSpec 宽高，
+  // 随开拍冻结进导演包，派发读同一份 binding.output。
+  const [orientation, setOrientation] = useState<Orientation>('landscape');
+  const [resolutionScale, setResolutionScale] = useState(1.0);
   const [secondPass, setSecondPass] = useState(false);
   const [upscale, setUpscale] = useState(false);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
+  const [styleGap, setStyleGap] = useState(false);
   const [run, setRun] = useState<ProductionRun | null>(null);
   const [touched, setTouched] = useState(false);
   /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。但「未就绪」不等于
@@ -236,6 +246,27 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     ?? (availabilityLoaded ? '本机没有这套权重' : '正在读取本机模型状态…');
   const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
 
+  // 进度条只读两份既有事实：run 的 passed/total 与 job 台账正在渲染的任务；
+  // 前端不自己累计进度，也不另设第二套判定（三原则）。
+  const totalShots = run?.scope.shot_count ?? 0;
+  const passedShots = run?.progress.passed_shot_count ?? 0;
+  const productionDone = Boolean(run)
+    && (run?.status === 'COMPLETED' || (totalShots > 0 && passedShots >= totalShots));
+  const progressPct = productionDone ? 100
+    : totalShots > 0 ? Math.min(100, Math.round((passedShots / totalShots) * 100)) : 0;
+  const orderedShotIds = useMemo(() => (run?.episodes ?? [])
+    .slice().sort((a, b) => a.position - b.position)
+    .flatMap((episode) => episode.shot_ids ?? []), [run]);
+  const activeShotNo = activeJob ? orderedShotIds.indexOf(activeJob.shot_id) + 1 : 0;
+  const currentShotNo = activeShotNo > 0 ? activeShotNo : Math.min(passedShots + 1, Math.max(totalShots, 1));
+  const barWorking = !productionDone
+    && (Boolean(activeJob) || run?.status === 'RUNNING' || run?.status === 'QUEUED');
+  // 单镜重拍进度：读同一份 job/attempt 台账；整片运行在跑时不叠加显示。
+  const retakePct = activeJob
+    ? (activeJob.status === 'PASSED' ? 100
+      : activeJob.attempts?.[activeJob.attempts.length - 1]?.progress ?? 0)
+    : 0;
+
   const toggle = (episodeId: string) => {
     setTouched(true);
     setSelected((current) => current.includes(episodeId)
@@ -246,7 +277,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const start = useCallback(async () => {
     if (submitting.current || !selected.length || !chosenVariantAvailable) return;
     submitting.current = true;
-    setBusy('start'); setProblem('');
+    setBusy('start'); setProblem(''); setStyleGap(false);
     try {
       const strategy: ProductionStrategy = {
         schema_version: '1',
@@ -257,9 +288,11 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         upscale: upscale ? { enabled: true, engine: 'relayvsr', variant: 'x2', quality_preset: 'balanced' }
           : { enabled: false },
       };
+      const frame = frameSize(orientation, resolutionScale);
       const result = await startDirectorProduction(projectId, {
         episode_ids: selected,
         strategy,
+        output: { width: frame.width, height: frame.height, fps: 24 },
       });
       const shotCount = result.episodes.reduce((sum, row) => sum + row.shot_count, 0);
       onMessage?.(result.created
@@ -268,13 +301,36 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       onRefresh?.();
       onNavigate?.('run');
     } catch (error) {
+      // 预检报镜头执行旧冻结风格时，就地给出既有执行者的恢复动作，
+      // 而不是只留一墙错误码让人自己找入口。
+      const blockers = error instanceof ApiError
+        ? (error.detail as { blockers?: Array<{ code?: string }> } | undefined)?.blockers ?? []
+        : [];
+      setStyleGap(error instanceof ApiError && error.code === 'DIRECTOR_PACKAGE_NOT_READY'
+        && blockers.some((row) => row.code === 'SHOT_STYLE_MISMATCH'));
       setProblem(describeError(error));
       onMessage?.(describeError(error), 'error');
     } finally {
       submitting.current = false;
       setBusy('');
     }
-  }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh, projectId, secondPass, selected, upscale, variantId]);
+  }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh, orientation,
+    projectId, resolutionScale, secondPass, selected, upscale, variantId]);
+
+  const applyStyle = async () => {
+    setBusy('style'); setProblem('');
+    try {
+      const result = await applyCurrentStyleToShots(projectId, '导演包预检：镜头执行当前冻结风格');
+      setStyleGap(false);
+      onMessage?.(`已让 ${result.revised_shot_ids.length} 个镜头执行当前冻结风格，可重新确认拍摄方案。`, 'success');
+      onRefresh?.();
+    } catch (error) {
+      setProblem(describeError(error));
+      onMessage?.(describeError(error), 'error');
+    } finally {
+      setBusy('');
+    }
+  };
 
   const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!run) return;
@@ -312,7 +368,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     : [];
   useStageRail(`director-shoot-${mode}`, { priority: 1, primary, secondary },
     [mode, selected, busy, demo, running, chosenVariantAvailable,
-      variantId, acceleratorId, secondPass, upscale, run]);
+      variantId, acceleratorId, secondPass, upscale, run, orientation, resolutionScale]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -322,6 +378,16 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       {demo && <div className="blocked-callout">
         <AlertTriangle size={14} />
         <span>当前是演示模式：不会生成真视频。先在顶部「启用真实制作」完成本机 H3 校验，再回来开拍。</span>
+      </div>}
+
+      {styleGap && <div className="required-action">
+        <b><AlertTriangle size={13} /> 镜头还在执行旧一版冻结风格</b>
+        <p>冻结新风格后，旧镜头要改执行当前冻结风格才能通过预检。这一步只改镜头的风格引用，不重拍、不删产物。</p>
+        <button type="button" className="must-button" disabled={busy !== ''}
+          onClick={() => void applyStyle()}>
+          {busy === 'style' ? <Loader2 size={13} className="spin" /> : <ShieldCheck size={13} />}
+          让镜头执行当前冻结风格
+        </button>
       </div>}
 
       {running && <section className="card section-card">
@@ -346,7 +412,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
           </div>
           <span className={`head-chip ${selected.length ? 'ok' : ''}`}>{selected.length} 集已选</span>
         </div>
-        <GuideTip>三步：勾选要拍的集 → 确认模型版本 → 点{railPresent ? '右侧操作栏的' : '下方的'}「{startLabel}」
+        <GuideTip>三步：勾选要拍的集 → 确认模型与画幅/分辨率 → 点{railPresent ? '右侧操作栏的' : '下方的'}「{startLabel}」
           {startBlockedReason ? `（当前不可点：${startBlockedReason}）` : ''}</GuideTip>
 
         <div className="shoot-episode-list">
@@ -400,6 +466,31 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
               去基础配置准备模型
             </button>}
           </div>}
+          <div className="strategy-row" role="radiogroup" aria-label="画幅">
+            <span className="strategy-label">画幅</span>
+            {(Object.keys(ORIENTATION_LABELS) as Orientation[]).map((key) => (
+              <button key={key} type="button" role="radio"
+                aria-checked={orientation === key}
+                className={`strategy-option${orientation === key ? ' active' : ''}`}
+                disabled={running || busy !== ''}
+                onClick={() => setOrientation(key)}>
+                {ORIENTATION_LABELS[key]}
+              </button>
+            ))}
+          </div>
+          <div className="strategy-row">
+            <span className="strategy-label">分辨率</span>
+            <select aria-label="分辨率档位" value={resolutionScale}
+              disabled={running || busy !== ''}
+              onChange={(event) => setResolutionScale(Number(event.target.value))}>
+              {RESOLUTION_SCALES.map((scale) => {
+                const frame = frameSize(orientation, scale);
+                return <option key={scale} value={scale}>
+                  {scaleLabel(scale)} · {frame.width}×{frame.height}
+                </option>;
+              })}
+            </select>
+          </div>
           <div className="strategy-row" role="radiogroup" aria-label="画面加速">
             <span className="strategy-label">画面加速</span>
             {options.accelerators.map((row) => (
@@ -473,6 +564,36 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
 
   /* ---------------- ⑥ 视频生产：只读进度与运行控制 ---------------- */
   return <div className="shoot-panel">
+    {run && <section className="card section-card run-progress" aria-label="视频生产进度">
+      <div className="run-progress-head">
+        <b>{productionDone ? '本阶段生产完成' : `正在生成第 ${currentShotNo} / ${totalShots} 镜`}</b>
+        <span className="run-progress-pct">{progressPct}%</span>
+      </div>
+      <div className="run-progress-bar" role="progressbar" aria-valuenow={progressPct}
+        aria-valuemin={0} aria-valuemax={100} aria-label="视频生产进度">
+        <i style={{ width: `${progressPct}%` }} className={barWorking ? 'is-working' : ''} />
+      </div>
+      <p className="run-progress-note">
+        {productionDone
+          ? `${totalShots} 镜全部通过。到「后期成片」逐集播放并确认。`
+          : `已通过 ${passedShots} / ${totalShots} 镜${activeJob ? `，正在渲染「${activeJob.shot_name}」` : ''}。后台 Worker 持续推进，页面跟读同一份台账。`}
+      </p>
+    </section>}
+    {activeJob && (!run || !['QUEUED', 'RUNNING'].includes(run.status)) && <section className="card section-card run-progress" aria-label="单镜重拍进度">
+      <div className="run-progress-head">
+        <b>{activeJob.status === 'PASSED' ? '重拍已通过质检' : `正在重拍「${activeJob.shot_name}」`}</b>
+        <span className="run-progress-pct">{retakePct}%</span>
+      </div>
+      <div className="run-progress-bar" role="progressbar" aria-valuenow={retakePct}
+        aria-valuemin={0} aria-valuemax={100} aria-label="单镜重拍进度">
+        <i style={{ width: `${retakePct}%` }} className={activeJob.status !== 'PASSED' ? 'is-working' : ''} />
+      </div>
+      <p className="run-progress-note">
+        {activeJob.status === 'PASSED'
+          ? '到「后期成片」把新版本选为当前装配版本，再重新生成字幕并装配。'
+          : '单镜重拍独立于整片运行；进度读同一份任务台账，通过后由你选用。'}
+      </p>
+    </section>}
     <section className="card section-card">
       <div className="section-heading">
         <div>

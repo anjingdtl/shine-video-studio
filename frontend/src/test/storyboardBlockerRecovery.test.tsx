@@ -272,7 +272,7 @@ describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确
     const summary = await screen.findByText(/最新拆镜 6 镜 · 待重新确认/);
     // 徽章主数字与下方镜头表一致（都是最新 6 镜）；旧确认 17 镜只在重新确认说明里。
     expect(summary.textContent).not.toContain('17 镜');
-    const hint = await screen.findByText(/每镜由 6 个 4–15 秒/);
+    const hint = await screen.findByText(/本集已落 6 镜 · 合计 60 秒/);
     expect(hint.textContent).toContain('60 秒');
     expect(document.querySelectorAll('.shot-table-row').length).toBe(6);
     expect(screen.getByText(/与已确认的 v6（17 镜）不同/)).toBeTruthy();

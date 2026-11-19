@@ -4,7 +4,7 @@
  *  2. 进度条挂载与素材页同一份生成台账（public_run），不是第二套判定；
  *  3. 素材页的「下一步」由服务端 journey.next_stage 驱动，不在前端硬编码就绪。
  *  缺陷2（上传后清单塌缩）的反例在后端 test_director_material_commit.py。 */
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -107,6 +107,33 @@ describe('素材生成进度（与素材页同一台账）', () => {
     const { container } = render(<MaterialGenerationProgress projectId="p1" />);
     await waitFor(() => expect(container.querySelector('.material-generation-progress')).toBeNull());
   });
+
+  it('唯一选定面：已采用主素材与待选候选同列网格，无批次时也显示', async () => {
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [] }) });
+    render(<MaterialGenerationProgress projectId="p1" onPromoted={() => {}}
+      masters={[{ requirement_id: 'r1', entity_id: '沈砚', family: 'character', asset_id: 'asset-1' }]} />);
+    expect(await screen.findByText(/选定并采用/)).toBeInTheDocument();
+    expect(screen.getAllByText(/已采用/).length).toBeGreaterThan(0);
+  });
+});
+
+describe('勾选后统一重新生成（导演④页）', () => {
+  it('「重新生成所选」只作用于勾选集，复用唯一 regenerate-all 执行者', async () => {
+    stubMaterials();
+    stub.add({ method: 'POST', pattern: /projects\/p1\/material-preparation\/regenerate-all$/,
+      respond: () => jsonResponse({ items: ['item-9'], run_id: 'run-9' }) });
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+    await screen.findByText('沈砚');
+    const user = userEvent.setup();
+    await user.click(screen.getByRole('checkbox', { name: '选择 沈砚' }));
+    await user.click(screen.getByRole('button', { name: /重新生成所选（1）/ }));
+    await waitFor(() => expect(stub.callsOf('POST', /regenerate-all$/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /regenerate-all$/)[0].body).toMatchObject({ requirement_ids: ['r1'] });
+    expect(stub.callsOf('POST', /director\/materials\/commit$/)).toHaveLength(0);
+  });
 });
 
 describe('素材页下一步由 journey 驱动', () => {
@@ -191,5 +218,70 @@ describe('素材准备页内候选选定与晋升（不引去素材中心）', (
       .toMatchObject({ action: 'promote', target_id: 'cand-1' });
     expect(stub.callsOf('POST', /candidate-assets\/cand-1\/promote$/)[0].body)
       .toMatchObject({ grant_id: 'g1', snapshot: 's1', offline: false });
+  });
+
+  it('已采用的主素材可「取消采用」，回调同一决策执行者', async () => {
+    const unadopt = vi.fn();
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [] }) });
+    render(<MaterialGenerationProgress projectId="p1" onPromoted={() => {}} onUnadopt={unadopt}
+      masters={[{ requirement_id: 'r1', entity_id: '沈砚', family: 'character', asset_id: 'asset-1' }]} />);
+    const button = await screen.findByRole('button', { name: '取消采用' });
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(unadopt).toHaveBeenCalledWith('r1'));
+  });
+});
+
+describe('取消采用不触发新批次（导演④页）', () => {
+  it('已采用主素材点「取消采用」＝改回生成且 queue_generation:false', async () => {
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/materials\/requirements$/,
+      respond: () => jsonResponse({ ...REQUIREMENTS, requirements: [
+        { ...REQUIREMENTS.requirements[0], strategy: 'reuse_master',
+          matched_master: { asset_id: 'asset-1', sha256: 'x' }, status: 'matched' },
+      ] }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [] }) });
+    stub.add({ method: 'POST', pattern: /projects\/p1\/director\/materials\/commit$/,
+      respond: () => jsonResponse({ confirmation: {}, bound_shots: 1 }) });
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+    const button = await screen.findByRole('button', { name: '取消采用' });
+    await userEvent.setup().click(button);
+    await waitFor(() => expect(stub.callsOf('POST', /director\/materials\/commit$/)).toHaveLength(1));
+    const body = stub.callsOf('POST', /director\/materials\/commit$/)[0].body as {
+      queue_generation: boolean; decisions: Array<{ strategy: string; asset_id: null }> };
+    expect(body.queue_generation).toBe(false);
+    expect(body.decisions[0]).toMatchObject({ strategy: 'generate', asset_id: null });
+    expect(stub.callsOf('POST', /regenerate-all$/)).toHaveLength(0);
+  });
+});
+
+describe('素材就绪后主操作进入下一步（journey 单一裁决）', () => {
+  it('assetsDone 时主操作「确认并进入下一步」+ 次操作「重新生成素材」', async () => {
+    stubMaterials();
+    stub.add({ method: 'POST', pattern: /projects\/p1\/director\/materials\/commit$/,
+      respond: () => jsonResponse({ confirmation: {}, generate_count: 0, batch: null }) });
+    const advance = vi.fn();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" assetsDone onAdvance={advance} />
+    </StageRailProvider>);
+    await screen.findByText('沈砚');
+    const rail = screen.getByLabelText('本阶段操作');
+    expect(within(rail).getByRole('button', { name: '确认并进入下一步' })).toBeInTheDocument();
+    expect(within(rail).getByRole('button', { name: '重新生成素材' })).toBeInTheDocument();
+    await userEvent.setup().click(within(rail).getByRole('button', { name: '确认并进入下一步' }));
+    await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
+  });
+
+  it('未完成时主操作仍是「确认决策并开始准备素材」', async () => {
+    stubMaterials();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+    await screen.findByText('沈砚');
+    const rail = screen.getByLabelText('本阶段操作');
+    // 轨按钮经 passive effect 注册：等按钮本身出现，而不是在行渲染后同步断言。
+    expect(await within(rail).findByRole('button', { name: '确认决策并开始准备素材' })).toBeInTheDocument();
   });
 });

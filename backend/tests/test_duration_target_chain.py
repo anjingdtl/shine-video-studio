@@ -78,8 +78,9 @@ def test_director_prompt_carries_the_unit_goal_and_prefers_continuity():
 
 def test_book_confirm_refuses_duration_deviation_until_acknowledged(api):
     client, _factory, _settings = api
-    # 4 sections × 60s estimate → 2 episodes of ~120s, outside the 60±30 window.
-    prepared = _prepare_project(client, sections=4, section_seconds=60)
+    # 目标秒数驱动分组后，60s 的场会各自成集（偏差 0）；要触发偏差裁决，
+    # 用单场 120s 的超长场景：每集 120s，落在 60±30 窗之外。
+    prepared = _prepare_project(client, sections=4, section_seconds=120)
     project = prepared["project"]
     book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
     assert book["preview"]["episodes"][0]["deviation_seconds"] > 30

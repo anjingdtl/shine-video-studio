@@ -39,6 +39,13 @@ export type GenerationRun = {
   items: ProgressItem[];
 };
 
+export type AdoptedMaster = {
+  requirement_id: string;
+  entity_id: string | null;
+  family: string | null;
+  asset_id: string;
+};
+
 const ITEM_LABEL: Record<string, string> = {
   QUEUED: '排队中', BRIEF_RUNNING: '写外观描述', BRIEF_READY: '外观就绪',
   WAITING_GPU: '等待显卡', SUBMIT_INTENT: '已提交意图', RUNNING: '渲染中',
@@ -58,13 +65,17 @@ function selectable(candidate: CandidateInfo): boolean {
   return candidate.status === 'READY_FOR_REVIEW' && !candidate.formal_asset_id;
 }
 
-export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromoted, refreshKey = 0 }: {
+export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromoted, onUnadopt, refreshKey = 0, masters = [] }: {
   projectId: string;
   onOpenLibrary?: () => void;
   /** 提供时在本页展示候选并晋升；晋升后回调父组件刷新需求清单。 */
   onPromoted?: () => void;
+  /** 提供时已采用素材可取消：走同一决策执行者改回生成并解绑镜头。 */
+  onUnadopt?: (requirementId: string) => Promise<void> | void;
   /** 提交决策后由父组件 bump，立即刷新而不必等下一个轮询周期。 */
   refreshKey?: number;
+  /** 已上传/已采用的主素材，与生成候选同列展示，避免两套选图面。 */
+  masters?: AdoptedMaster[];
 }) {
   const [runs, setRuns] = useState<GenerationRun[]>([]);
   const [loaded, setLoaded] = useState(false);
@@ -108,11 +119,32 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     }
   }
 
+  async function unadopt(requirementId: string) {
+    if (!onUnadopt || promoting) return;
+    setPromoting(`unadopt:${requirementId}`); setPromoError(''); setPromoNote('');
+    try {
+      await onUnadopt(requirementId);
+      setPromoNote('已取消采用：旧主素材从镜头解绑，可重新选定或生成。');
+      await load();
+    } catch (error) {
+      setPromoError(describeError(error));
+    } finally {
+      setPromoting('');
+    }
+  }
+
   // 只显示有内容的批次：在途的，或已产出候选的。空批次不占位。
   const shown = runs.filter((row) => row.counts.total > 0
     && (row.counts.running > 0 || row.counts.queued > 0 || row.counts.candidate_ready > 0
         || row.counts.needs_review > 0 || row.counts.failed > 0)).slice(0, 3);
-  if (!loaded || shown.length === 0) return null;
+  // 唯一选定面：待选候选 + 已采用主素材同列网格（每行四张）。下方批次只报进度，
+  // 不再重复一套选图/晋升入口（三原则：一个选定面、一个晋升执行者）。
+  const pendingTiles = onPromoted
+    ? runs.flatMap((run) => run.items.flatMap((item) =>
+        (item.candidates ?? []).filter(selectable).map((candidate) => ({ candidate, item }))))
+    : [];
+  const showSelection = Boolean(onPromoted) && (masters.length > 0 || pendingTiles.length > 0);
+  if (!loaded || (shown.length === 0 && !showSelection)) return null;
 
   return <section className="material-generation-progress" aria-label="素材生成进度">
     <div className="mgp-title"><RefreshCw size={13} className={active.length ? 'spin' : ''} />
@@ -121,16 +153,34 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     </div>
     {promoNote && <p className="mgp-done"><Check size={12} /> {promoNote}</p>}
     {promoError && <p role="alert" className="form-error">{promoError}</p>}
+    {showSelection && <div className="mgp-candidates">
+      <p className="mgp-candidates-title">选定并采用（晋升为主素材后自动回绑镜头；已采用的可取消）：</p>
+      <div className="mgp-candidate-grid">
+        {pendingTiles.map(({ candidate, item }) => <figure className="mgp-candidate" key={candidate.candidate_id}>
+          <img src={`${API}/candidate-assets/${candidate.candidate_id}/thumbnail`}
+            alt={`${item.entity_id ?? '素材'} 候选 ${candidate.attempt_no}`} loading="lazy" />
+          <span className="mgp-candidate-entity">{FAMILY_LABEL[item.family ?? ''] ?? item.family} · {item.entity_id ?? '素材'}</span>
+          <button type="button" className="btn-text" disabled={!!promoting}
+            onClick={() => void promote(candidate)}>
+            {promoting === candidate.candidate_id ? '晋升中…' : '选用并晋升'}</button>
+        </figure>)}
+        {masters.map((master) => <figure className="mgp-candidate" key={master.asset_id}>
+          <img src={`${API}/assets/${master.asset_id}/thumbnail`}
+            alt={`${master.entity_id ?? '素材'} 已采用`} loading="lazy" />
+          <span className="mgp-candidate-entity">{FAMILY_LABEL[master.family ?? ''] ?? master.family} · {master.entity_id ?? '素材'}</span>
+          <figcaption className="ok"><Check size={11} /> 已采用</figcaption>
+          {onUnadopt && <button type="button" className="btn-text" disabled={!!promoting}
+            onClick={() => void unadopt(master.requirement_id)}>
+            {promoting === `unadopt:${master.requirement_id}` ? '取消中…' : '取消采用'}</button>}
+        </figure>)}
+      </div>
+    </div>}
     {shown.map((run) => {
       const settled = run.counts.candidate_ready + run.counts.failed + run.counts.needs_review;
       const pct = run.counts.total ? Math.round((settled / run.counts.total) * 100) : 0;
       const inflight = run.counts.running + run.counts.queued;
       const working = inflight > 0;
       const inflightItems = run.items.filter((item) => item.status === 'RUNNING' || item.status === 'BRIEF_RUNNING');
-      // 页内候选选定：只在本页负责晋升时展示，按需求条目归类。
-      const candidateItems = onPromoted
-        ? run.items.filter((item) => (item.candidates ?? []).some(selectable))
-        : [];
       return <div className="mgp-run" key={run.run_id}>
         <div className="mgp-head">
           <b>{working ? '后台正在生成素材…'
@@ -153,36 +203,9 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
             `${item.entity_id ?? '素材'}（${ITEM_LABEL[item.status] ?? item.status}）`).join('、')}
         </p>}
 
-        {candidateItems.length > 0 && <div className="mgp-candidates">
-          <p className="mgp-candidates-title">在本页选定候选并采用（晋升为主素材后自动回绑镜头）：</p>
-          {candidateItems.map((item) => {
-            const candidates = item.candidates ?? [];
-            return <div className="mgp-candidate-item" key={item.item_id}>
-              <span className="mgp-candidate-entity">
-                {FAMILY_LABEL[item.family ?? ''] ?? item.family} · {item.entity_id ?? '素材'}
-              </span>
-              <div className="mgp-candidate-grid">
-                {candidates.map((candidate) => {
-                  const isBusy = promoting === candidate.candidate_id;
-                  const adopted = !!candidate.formal_asset_id;
-                  const canSelect = selectable(candidate);
-                  return <figure className="mgp-candidate" key={candidate.candidate_id}>
-                    <img src={`${API}/candidate-assets/${candidate.candidate_id}/thumbnail`}
-                      alt={`${item.entity_id ?? '素材'} 候选 ${candidate.attempt_no}`} loading="lazy" />
-                    {adopted
-                      ? <figcaption className="ok"><Check size={11} /> 已采用</figcaption>
-                      : canSelect
-                        ? <button type="button" className="btn-text" disabled={!!promoting}
-                            onClick={() => void promote(candidate)}>
-                            {isBusy ? '晋升中…' : '选用并晋升'}</button>
-                        : <figcaption className="muted">{candidate.status}</figcaption>}
-                  </figure>;
-                })}
-              </div>
-            </div>;
-          })}
-        </div>}
-
+        {run.counts.candidate_ready > 0 && !working && onPromoted && <p className="mgp-done">
+          <Check size={12} /> 候选已就绪，在上方「选定并采用」网格晋升。
+        </p>}
         {run.counts.candidate_ready > 0 && !working && !onPromoted && <p className="mgp-done">
           <Check size={12} /> {run.counts.candidate_ready} 项候选已就绪。
           {onOpenLibrary && <button type="button" className="btn-text" onClick={onOpenLibrary}>

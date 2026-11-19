@@ -1,22 +1,22 @@
 import { useCallback, useEffect, useState } from 'react';
-import { BookText, Captions, Loader2, Plus, Save, X } from 'lucide-react';
+import { BookText, Loader2, Plus, Save, X } from 'lucide-react';
 import {
   api, json,
   type ProjectTerminology,
-  type SubtitleCue,
-  type SubtitleTrack,
   type TerminologyTerm,
 } from '../api';
-import { auditActorLabels, label, subtitleStatusLabels } from '../constants';
+import { auditActorLabels, label } from '../constants';
 
 const sourceLabels: Record<string, string> = {
   human: '人工填写', ai: 'AI 生成', voice_alignment: '语音对齐生成', asr: '语音识别生成',
+  director_shot_config: '人工冻结字幕汇编', shot_dialogue: '镜头对白生成',
 };
 
 type Props = {
   projectId: string;
   busy: boolean;
   onMessage: (message: string, kind?: 'success' | 'error') => void;
+  refreshEpoch?: number;
 };
 
 /** One editable line of the terminology table. */
@@ -140,135 +140,6 @@ export default function TerminologyPanel({ projectId, busy, onMessage }: Props) 
                   <b>版本 {row.revision} · {row.terms.length} 个词条</b>
                   <small>{label(sourceLabels, row.source)} · {label(auditActorLabels, row.created_by)} · 指纹 {row.sha256.slice(0, 12)}…</small>
                 </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-export function SubtitlePanel({ projectId, busy, onMessage }: Props) {
-  const [revisions, setRevisions] = useState<SubtitleTrack[]>([]);
-  const [cues, setCues] = useState<SubtitleCue[]>([]);
-  const [working, setWorking] = useState(false);
-
-  const reload = useCallback(async () => {
-    const found = await api<SubtitleTrack[]>(`/projects/${projectId}/subtitles`);
-    setRevisions(found);
-    const latest = found[0];
-    setCues(latest ? latest.cues : []);
-  }, [projectId]);
-
-  useEffect(() => { reload().catch(() => setRevisions([])); }, [reload, projectId]);
-
-  const save = useCallback(async () => {
-    setWorking(true);
-    try {
-      await api(`/projects/${projectId}/subtitles`, json('POST', {
-        cues, created_by: 'operator', source: 'human',
-      }));
-      await reload();
-      onMessage('字幕已保存为新版本；交付时再合成进成片。', 'success');
-    } catch (error) {
-      onMessage(`字幕保存失败：${(error as Error).message}`, 'error');
-    } finally {
-      setWorking(false);
-    }
-  }, [cues, projectId, reload, onMessage]);
-
-  const approve = useCallback(async (revision: number) => {
-    setWorking(true);
-    try {
-      await api(`/projects/${projectId}/subtitles/${revision}/approve`, json('POST', {}));
-      await reload();
-      onMessage(`字幕版本 ${revision} 已批准；交付时将合成这一版。`, 'success');
-    } catch (error) {
-      onMessage(`字幕批准失败：${(error as Error).message}`, 'error');
-    } finally {
-      setWorking(false);
-    }
-  }, [projectId, reload, onMessage]);
-
-  return (
-    <div className="card section-card" id="subtitles">
-      <div className="section-heading compact">
-        <div>
-          <div className="section-kicker">CAPTION / EXTERNAL TRACK</div>
-          <h2>字幕（外挂可修订）</h2>
-        </div>
-        <div className="section-icon plum"><Captions size={17} /></div>
-      </div>
-      <p className="panel-hint">
-        字幕独立于镜头保存：可以直接改字或改时间，不必重新渲染；检测完成后再合成进成片。
-        只有<b>已批准</b>的版本会被合成。
-      </p>
-
-      <div className="terminology-builder">
-        {cues.map((cue, index) => (
-          <div className="terminology-row subtitle-row" key={index}>
-            <input
-              aria-label={`字幕开始 ${index + 1}`}
-              placeholder="开始秒"
-              value={String(cue.start_s)}
-              onChange={(event) => setCues(cues.map((item, position) => (
-                position === index ? { ...item, start_s: Number(event.target.value) } : item)))}
-            />
-            <input
-              aria-label={`字幕结束 ${index + 1}`}
-              placeholder="结束秒"
-              value={String(cue.end_s)}
-              onChange={(event) => setCues(cues.map((item, position) => (
-                position === index ? { ...item, end_s: Number(event.target.value) } : item)))}
-            />
-            <input
-              aria-label={`字幕文本 ${index + 1}`}
-              placeholder="字幕文本"
-              value={cue.text}
-              onChange={(event) => setCues(cues.map((item, position) => (
-                position === index ? { ...item, text: event.target.value } : item)))}
-            />
-          </div>
-        ))}
-      </div>
-
-      <div className="terminology-actions">
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => setCues([...cues, { index: cues.length + 1, start_s: 0, end_s: 2, text: '' }])}
-        >
-          <Plus size={13} /> 添加一行字幕
-        </button>
-        <button type="button" className="btn-secondary" disabled={busy || working} onClick={save}>
-          <Save size={14} /> 保存为新版本
-        </button>
-      </div>
-
-      {revisions.length === 0 && (
-        <div className="empty-inline">还没有字幕版本。在上方添加字幕行并「保存为新版本」；只有已批准的版本会在交付时合成进成片。</div>
-      )}
-      {revisions.length > 0 && (
-        <div className="shot-list">
-          {revisions.map((row) => (
-            <div className="shot-block" key={row.id}>
-              <div className="shot-row">
-                <div className="shot-number">{String(row.revision).padStart(2, '0')}</div>
-                <div className="shot-content">
-                  <b>版本 {row.revision} · {label(subtitleStatusLabels, row.status)} · {row.cues.length} 行</b>
-                  <small>{label(sourceLabels, row.source)} · 指纹 {row.sha256.slice(0, 12)}…</small>
-                </div>
-                {row.status !== 'APPROVED' && (
-                  <button
-                    type="button"
-                    className="btn-secondary"
-                    disabled={busy || working}
-                    onClick={() => approve(row.revision)}
-                  >
-                    批准此版本
-                  </button>
-                )}
               </div>
             </div>
           ))}

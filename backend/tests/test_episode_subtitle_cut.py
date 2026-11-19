@@ -152,6 +152,83 @@ def test_a_trimmed_clip_start_moves_its_lines_and_drops_the_cut_head(api):
     assert body["cues"][1]["text"] == "切点之后"
 
 
+def test_dialogue_generates_the_track_without_manual_authoring(api):
+    """⑦ 的唯一生成入口读镜头对白这一唯一事实，不要求先回③手写冻结。"""
+    client, factory, _settings = api
+    built = _setup(client, factory, durations=[6.0, 5.0])
+    project_id, shots = built["project_id"], built["shots"]
+    _episode_with_orders(factory, project_id, [row["id"] for row in shots],
+                         cuts=[[(0.0, 6.0), (1.0, 6.0)]])
+    from shine.models import Shot
+
+    with factory.begin() as db:
+        first = db.get(Shot, shots[0]["id"])
+        first.spec = {**first.spec, "characters": ["甲"], "dialogue": [
+            {"speaker_id": "甲", "text": "殿下，醒醒……", "start_s": 0.8, "end_s": 2.1},
+        ]}
+        second = db.get(Shot, shots[1]["id"])
+        second.spec = {**second.spec, "characters": ["甲"], "dialogue": [
+            {"speaker_id": "甲", "text": "被裁掉的片头", "start_s": 0.0, "end_s": 0.8},
+            {"speaker_id": "甲", "text": "请宣布裁决吧。", "start_s": 1.5, "end_s": 3.0},
+        ]}
+
+    body = _compile(client, project_id)
+    assert body["basis"] == "actual"
+    assert body["dialogue_shots"] == 2
+    assert body["manual_shots"] == 0
+    # 对白时码与人工字幕同一套换算：裁掉的片头不出现，切点后的行从片段起点排。
+    assert [(cue["start_s"], cue["text"]) for cue in body["cues"]] == [
+        (0.8, "殿下，醒醒……"), (6.5, "请宣布裁决吧。")]
+
+
+def test_the_reel_scope_wins_over_a_live_table_with_newer_shots(api):
+    """实障复现：③ 实时镜表已应用 15 镜，交付成片只有 9 镜。
+
+    字幕范围必须跟随所选成片版本的镜头，而不是实时镜表——否则时码
+    回落到计划时长，排到成片之外。
+    """
+    client, factory, _settings = api
+    built = _setup(client, factory, durations=[6.0, 5.0, 4.0])
+    project_id, shots = built["project_id"], built["shots"]
+    # 交付只含前两镜；第三镜是交付后新应用的镜头，只存在于实时镜表。
+    _episode_with_orders(factory, project_id, [row["id"] for row in shots[:2]],
+                         cuts=[[(0.0, 6.0), (0.0, 5.0)]])
+    from shine.models import Shot
+
+    with factory.begin() as db:
+        for shot, text in ((shots[0], "第一镜对白"), (shots[2], "成片之外的对白")):
+            row = db.get(Shot, shot["id"])
+            row.spec = {**row.spec, "characters": ["甲"], "dialogue": [
+                {"speaker_id": "甲", "text": text, "start_s": 0.5, "end_s": 2.0}]}
+
+    body = _compile(client, project_id)
+    assert body["basis"] == "actual"
+    assert [cue["text"] for cue in body["cues"]] == ["第一镜对白"]
+    assert body["cues"][0]["end_s"] <= 11.0
+
+
+def test_manual_frozen_lines_override_the_dialogue_of_that_shot(api):
+    client, factory, _settings = api
+    built = _setup(client, factory, durations=[6.0, 5.0])
+    project_id, shots = built["project_id"], built["shots"]
+    _episode_with_orders(factory, project_id, [row["id"] for row in shots],
+                         cuts=[[(0.0, 6.0), (0.0, 5.0)]])
+    from shine.models import Shot
+
+    with factory.begin() as db:
+        for shot, text in ((shots[0], "对白原句"), (shots[1], "第二镜对白")):
+            row = db.get(Shot, shot["id"])
+            row.spec = {**row.spec, "characters": ["甲"], "dialogue": [
+                {"speaker_id": "甲", "text": text, "start_s": 0.5, "end_s": 2.0}]}
+    _freeze(client, project_id, shots[0]["id"],
+            [{"start_s": 0.0, "end_s": 1.0, "text": "人工改写的字"}])
+
+    body = _compile(client, project_id)
+    assert body["manual_shots"] == 1
+    assert body["dialogue_shots"] == 1
+    assert [cue["text"] for cue in body["cues"]] == ["人工改写的字", "第二镜对白"]
+
+
 def test_a_recut_keeps_subtitles_on_the_selected_version(api):
     client, factory, _settings = api
     built = _setup(client, factory)

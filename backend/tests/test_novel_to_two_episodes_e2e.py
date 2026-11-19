@@ -84,7 +84,13 @@ def test_a_novel_becomes_two_delivered_episodes_without_hand_holding(api, monkey
     # an approved+locked master, a confirmed outline.
     prepared = _prepare_project(client, sections=2)
     project = prepared["project"]
-    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    # Grouping is target-driven and the person's count is a cap: a 60s target
+    # would honestly merge both 30s-estimated sections into one episode.  A 20s
+    # target (window 10-30) splits them into two episodes, keeps each 30s
+    # estimate inside the confirm window, and keeps the two 6s shots (12s) of
+    # each episode together at landing (lower bound 10 > one shot).
+    book = _storyboard_book(client, project, episode_count=2,
+                            target_seconds=20, tolerance_seconds=10)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
     profile = register_workflow_profile(
         client, mode="Ref2VA", graph=REF2VA_GRAPH, parameter_map=REF2VA_PARAM_MAP)

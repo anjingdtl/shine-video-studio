@@ -623,6 +623,15 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (!Object.keys(selected).length) throw new Error('请先逐项选择候选图片。');
     const promoted: Record<string, string> = {};
     const outcomes: { entity: string; ok: boolean; note: string }[] = [];
+    // An uploaded master is already approved+locked; selecting it just re-confirms
+    // the decision through the same confirm executor, no candidate promote needed.
+    for (const [requirementId, chosenId] of Object.entries(selected)) {
+      const master = assets.find((a) => a.id === chosenId && a.approved && a.locked);
+      if (master) {
+        promoted[requirementId] = master.id;
+        outcomes.push({ entity: `${master.role ?? ''} · ${master.entity_id ?? ''}`, ok: true, note: '已选用我上传的主素材' });
+      }
+    }
     for (const item of targets) {
       if (!item.requirement_id) continue;
       const candidate = item.candidates.find((row) => row.candidate_id === selected[item.requirement_id!] && !row.formal_asset_id);
@@ -701,15 +710,18 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       }
     };
 
-  /** One new generation revision for every requirement, keeping old candidates. */
-  const regenerateAll = () => run(async () => {
+  /** One executor (regenerate-all) for both the checked subset and the whole list. */
+  const regenerateRequirements = (requirementIds: string[]) => run(async () => {
     const row = await jsonPost<{ items?: string[]; run_id?: string }>(
       `/projects/${projectId}/material-preparation/regenerate-all`,
-      { idempotency_key: `material-regen-all-${Date.now()}` },
+      { idempotency_key: `material-regen-${Date.now()}`, requirement_ids: requirementIds },
     );
     setOperationReport(`已为 ${row.items?.length ?? 0} 项需求排队重新出图；旧候选保留，可对比后再选用。`);
+    setSelected({});
     await load();
   });
+  const regenerateAll = () => regenerateRequirements([]);
+  const regenerateSelected = () => regenerateRequirements(Object.keys(selected));
 
   const cancelRun = (runId: string) => run(async () => {
     const target = runs.find((row) => row.run_id === runId);
@@ -852,7 +864,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const currentItems = (row: typeof runs[number]) => row.items.filter((item) =>
     !item.requirement_id || newestRunForRequirement.get(item.requirement_id) === row.run_id);
 
-  const tiles = productionRuns.flatMap((row) => currentItems(row).flatMap((item) => {
+  const generatedTiles = productionRuns.flatMap((row) => currentItems(row).flatMap((item) => {
     const base = {
       row,
       item,
@@ -865,6 +877,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       questions: item.brief?.questions ?? [],
       brief: item.allowed_actions?.includes('regenerate') ? item.brief ?? null : null,
       selectable: !!item.requirement_id && requirements.some((r) => r.requirement_id === item.requirement_id),
+      master: null as Asset | null,
       actions: (item.allowed_actions ?? [])
         .filter((a) => ['resume', 'reconcile', 'regenerate'].includes(a) && (a !== 'regenerate' || item.brief))
         .map((a) => ({
@@ -883,7 +896,34 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           : (ITEM_STATUS_LABELS[candidate.status] ?? candidate.status)}`
         : `第 ${item.generation_revision} 版 · 尚未出图`,
     }));
-  })).filter((tile) => candidateGroup === 'all' || tile.item.family === candidateGroup);
+  }));
+  // Uploaded / bound masters join the same picker, so a person compares AI
+  // candidates and their own picture in one grid and confirms either the same
+  // way.  An uploaded master is already approved; selecting it re-confirms it.
+  const masterTiles = requirements.flatMap((requirement) => {
+    const masterId = bindings[requirement.requirement_id] ?? requirement.bound_asset_id;
+    const asset = assets.find((a) => a.id === masterId && a.approved && a.locked
+      && a.role === requirement.family
+      && a.entity_id === (requirement.canonical_entity_id ?? requirement.entity_id));
+    if (!asset) return [];
+    const item: MaterialItem = {
+      item_id: `master-${asset.id}`, requirement_id: requirement.requirement_id,
+      family: requirement.family, entity_id: requirement.entity_id,
+      generation_revision: 0, status: 'CANDIDATE_READY', error_code: null,
+      candidates: [], allowed_actions: [], brief: null,
+    };
+    return [{
+      row: productionRuns[0] ?? { run_id: '', status: '', kind: 'production', state_version: 0,
+        counts: { total: 0, candidate_ready: 0, failed: 0, needs_review: 0, queued: 0, running: 0 },
+        items: [], allowed_actions: [] },
+      item, master: asset, candidate: null, first: true, selectable: true,
+      title: [FAMILY_LABELS[requirement.family] ?? requirement.family, requirement.entity_id].filter(Boolean).join(' · '),
+      error: '', questions: [], brief: null, actions: [],
+      meta: '我上传并已确认 · 可与生成候选一起选用',
+    }];
+  });
+  const tiles = [...generatedTiles, ...masterTiles]
+    .filter((tile) => candidateGroup === 'all' || tile.item.family === candidateGroup);
   const totals = productionRuns.reduce((acc, row) => ({
     total: acc.total + (row.counts?.total ?? 0),
     ready: acc.ready + (row.counts?.candidate_ready ?? 0),
@@ -1216,15 +1256,22 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               }}>全选可用候选</button>
               <button type="button" className="btn-text" disabled={busy || Object.keys(selected).length === 0}
                 onClick={() => setSelected({})}>清空选择</button>
+              <button type="button" className="btn-secondary" disabled={busy || Object.keys(selected).length === 0}
+                onClick={regenerateSelected}>重新生成所选需求（{Object.keys(selected).length}）</button>
             </div>
+            <p className="material-hint">勾选 = 选中这一项的图（生成候选或你上传的图）。勾选后既可「确认使用所选素材」统一晋升，也可「重新生成所选需求」统一再出图；两个动作都只作用于勾选集。</p>
             <div className="media-grid material-grid" aria-label="候选素材预览">
               {tiles.slice(0, visibleCandidates).map((tile) => (
                 <article className="media-card material-tile" key={tile.candidate?.candidate_id ?? tile.item.item_id}>
-                  {tile.candidate
-                    ? <ImagePreview thumbnail={`${API}/candidate-assets/${tile.candidate.candidate_id}/thumbnail`}
-                      original={`${API}/candidate-assets/${tile.candidate.candidate_id}/media`}
-                      label={`${tile.item.entity_id ?? ''} · 生成 v${tile.item.generation_revision}`} />
-                    : <div className="material-tile-empty">尚未出图</div>}
+                  {tile.master
+                    ? <ImagePreview thumbnail={`${API}/assets/${tile.master.id}/thumbnail`}
+                      original={`${API}/assets/${tile.master.id}/media`}
+                      label={`${tile.item.entity_id ?? ''} · 我上传的`} />
+                    : tile.candidate
+                      ? <ImagePreview thumbnail={`${API}/candidate-assets/${tile.candidate.candidate_id}/thumbnail`}
+                        original={`${API}/candidate-assets/${tile.candidate.candidate_id}/media`}
+                        label={`${tile.item.entity_id ?? ''} · 生成 v${tile.item.generation_revision}`} />
+                      : <div className="material-tile-empty">尚未出图</div>}
                   <b>{tile.title}</b>
                   <small>{tile.meta}</small>
                   {tile.candidate?.is_mock && <em>离线测试候选，不能用于真实生产</em>}
@@ -1233,6 +1280,17 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <b>出品人需要澄清</b>
                     <ul>{tile.questions.map((question, index) => <li key={index}>{question}</li>)}</ul>
                   </div>}
+                  {tile.master && tile.selectable && <label>
+                    <input type="checkbox"
+                      checked={selected[tile.item.requirement_id!] === tile.master.id}
+                      aria-label={`选择 ${tile.item.entity_id} 我上传的 ${tile.master.id}`}
+                      onChange={(event) => setSelected((current) => {
+                        const next = { ...current };
+                        if (event.target.checked) next[tile.item.requirement_id!] = tile.master!.id;
+                        else delete next[tile.item.requirement_id!];
+                        return next;
+                      })} />选用此版本（我上传的）
+                  </label>}
                   {tile.candidate && tile.selectable && !tile.candidate.formal_asset_id && <label>
                     <input type="checkbox" disabled={tile.candidate.status !== 'READY_FOR_REVIEW'}
                       checked={selected[tile.item.requirement_id!] === tile.candidate.candidate_id}
@@ -1283,7 +1341,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
             确认使用所选素材
           </button>}
           <button type="button" className="btn-text" disabled={busy || !runs.length} onClick={regenerateAll}>
-            重跑全部素材（保留旧候选）
+            重新生成全部需求（不看勾选，保留旧候选）
           </button>
           {evaluation && (
             <div className={evaluation.materials_ready ? 'material-ready' : 'blocker-item is-action'} role="status">
