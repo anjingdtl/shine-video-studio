@@ -179,6 +179,9 @@ def _schedule_memory_extraction(
 @router.get("/capabilities")
 def support_capabilities():
     """The callable tool list, for auditability in the UI and tests."""
+    from shine.copilot import task_grant as grant_contract
+    from shine.copilot import tool_registry
+
     return {
         "tools": read_tool_names(),
         "max_steps": 8,
@@ -192,6 +195,15 @@ def support_capabilities():
             "delete_user_data",
             "bypass_gate",
         ],
+        # V3.1: one task-level authorization, then autonomous calls inside it.
+        "task_grant": {
+            "schema": grant_contract.SCHEMA,
+            "capability_groups": list(grant_contract.GROUP_PERMISSIONS),
+            "autonomous_capabilities": list(tool_registry.AUTONOMOUS_CAPABILITIES),
+            "default_limits": dict(grant_contract.DEFAULT_LIMITS),
+            "never_granted": sorted(grant_contract.PERMANENTLY_FORBIDDEN),
+            "rule": "一次点击冻结范围；每个子动作仍走原 preview/approve/executor/回读。",
+        },
     }
 
 
@@ -829,3 +841,450 @@ def support_report_download(report_id: str, settings: SettingsDep, db: DBSession
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{data["filename"]}"'},
     )
+
+
+# ---------------------------------------------------------------------------
+# V3.1 task-level grant: one preview, one click, autonomous execution
+# ---------------------------------------------------------------------------
+
+
+class TaskGrantPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=36)
+    objective: str = Field(min_length=2, max_length=2000)
+    project_id: str | None = Field(default=None, max_length=36)
+    installation_id: str | None = Field(default=None, max_length=96)
+    capability_groups: list[str] = Field(default_factory=list, max_length=8)
+    limits: dict = Field(default_factory=dict)
+    validity_hours: int = Field(default=24, ge=1, le=168)
+
+
+class TaskGrantAuthorizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=36)
+    preview_id: str = Field(min_length=1, max_length=64)
+    grant_digest: str = Field(min_length=16, max_length=64)
+    confirm: bool = False
+    #: When true the copilot starts working immediately after the click.  The
+    #: execution itself is still bounded by the loop budgets.
+    run: bool = True
+
+
+class TaskGrantRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str = Field(min_length=1, max_length=36)
+    max_steps: int = Field(default=12, ge=1, le=40)
+
+
+def _grant_draft(session) -> dict:
+    context = session.context_json if isinstance(session.context_json, dict) else {}
+    draft = context.get("task_grant_preview")
+    return dict(draft) if isinstance(draft, dict) else {}
+
+
+def _store_grant_draft(db, session, draft: dict) -> None:
+    context = dict(session.context_json or {})
+    context["task_grant_preview"] = draft
+    session.context_json = context
+    session.updated_at = utcnow()
+    db.commit()
+
+
+def _resolve_installation(db, settings, installation_id: str | None) -> dict:
+    """The original installation resolution; never a guess from a port."""
+    from shine.comfyops.setup_summary import resolve_installation
+
+    try:
+        resolved = resolve_installation(db, settings, path=None, discovered=[])
+    except Exception:  # noqa: BLE001 - an unreadable registry is reported, not fatal
+        return {"selected": None, "choice_required": False, "error": "INSTALLATION_UNREADABLE"}
+    selected = resolved.get("selected") or {}
+    candidates = list(resolved.get("candidates") or [])
+    if installation_id:
+        for row in candidates:
+            if str(row.get("instance_id") or "") == installation_id:
+                return {"selected": row, "choice_required": False, "pinned": True}
+        if str(selected.get("instance_id") or "") == installation_id:
+            return {"selected": selected, "choice_required": False, "pinned": True}
+        return {
+            "selected": None,
+            "choice_required": False,
+            "error": "INSTALLATION_NOT_FOUND",
+            "requested": installation_id,
+        }
+    return {
+        "selected": selected or None,
+        "choice_required": bool(resolved.get("choice_required")),
+    }
+
+
+def _risk_list(groups: list[str]) -> list[str]:
+    risks: list[str] = []
+    if "resources" in groups:
+        risks.append("DISK_WRITE")
+        risks.append("LARGE_DOWNLOAD")
+    if "nodes" in groups:
+        # A reviewed, pinned node package still brings executable code.
+        risks.append("THIRD_PARTY_CODE")
+    if "workflows" in groups:
+        risks.append("USER_DATA_WRITE")
+    if "test" in groups:
+        risks.append("GPU_TEST")
+    if "runtime" in groups:
+        risks.append("MANAGED_PROCESS_CONTROL")
+    return risks
+
+
+@router.post("/task-grants/preview")
+def support_task_grant_preview(
+    body: TaskGrantPreviewRequest,
+    settings: SettingsDep,
+    gateway: GatewayDep,
+    db: DBSession,
+):
+    """Read-only: describe the one authorization the person is about to give."""
+    from shine.copilot import task_grant as grant_contract
+
+    session = _require_session(db, body.session_id)
+    project_id = body.project_id or session.project_id
+    if project_id:
+        from shine.services import require_project
+
+        require_project(db, project_id)
+    try:
+        groups = grant_contract.normalize_groups(
+            body.capability_groups or list(grant_contract.DEFAULT_GROUPS)
+        )
+        limits = grant_contract.normalize_limits({**body.limits} or None)
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message) from exc
+
+    installation = _resolve_installation(db, settings, body.installation_id)
+    capabilities = grant_contract.capabilities_for_groups(groups)
+    blocked: list[dict] = []
+    for capability_id in capabilities:
+        state = contract_registry.execution_state(capability_id)
+        if not state["executable"]:
+            blocked.append(
+                {
+                    "capability_id": capability_id,
+                    "state": state["state"],
+                    "notice": state.get("notice"),
+                }
+            )
+
+    model_info: dict = {"inherited": False}
+    try:
+        profile, source_role = gateway.profile_for_role_or_inherit(db, "support_agent")
+        model_info = {
+            "inherited": source_role != "support_agent",
+            "source_role": source_role,
+            "profile_name": profile.name,
+            "model": profile.model,
+            "kind": profile.kind,
+        }
+    except Exception as exc:  # noqa: BLE001 - no model is a named blocker, not a crash
+        model_info = {"inherited": False, "error": type(exc).__name__}
+
+    now = utcnow()
+    from datetime import timedelta as _timedelta
+
+    from shine.models import new_id as _new_id
+
+    draft_id = "grantpreview-" + _new_id().replace("-", "")[:20]
+    try:
+        proposed = grant_contract.build_proposed_grant(
+            grant_id="preview",
+            session_id=session.id,
+            actor_id=session.actor,
+            objective=body.objective,
+            project_ids=[project_id] if project_id else [],
+            installation_ids=(
+                [body.installation_id] if body.installation_id
+                else ([str((installation.get("selected") or {}).get("instance_id"))]
+                      if (installation.get("selected") or {}).get("instance_id") else [])
+            ),
+            allowed_resource_roots=[
+                str((installation.get("selected") or {}).get("root") or "")
+            ] if (installation.get("selected") or {}).get("root") else [],
+            groups=groups,
+            limits=limits,
+            created_at=now,
+            validity=_timedelta(hours=body.validity_hours),
+        )
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message) from exc
+
+    draft = {
+        "preview_id": draft_id,
+        "grant_digest": proposed["grant_digest"],
+        "expires_at": proposed["validity"]["expires_at"],
+        "objective": proposed["objective"],
+        "objective_digest": proposed["objective_digest"],
+        "groups": groups,
+        "limits": proposed["limits"],
+        "project_ids": proposed["scope"]["project_ids"],
+        "installation_ids": proposed["scope"]["installation_ids"],
+        "allowed_resource_roots": proposed["scope"]["allowed_resource_roots"],
+        "created_at": now.replace(microsecond=0).isoformat(),
+    }
+    _store_grant_draft(db, session, draft)
+
+    return {
+        "preview_id": draft_id,
+        "schema": grant_contract.SCHEMA,
+        "grant_digest": proposed["grant_digest"],
+        "purpose": proposed["objective"],
+        "can_authorize": bool(not blocked and not model_info.get("error")),
+        "summary": "将在本次授权范围内自动检查资源、冻结/执行安装计划、注册并验证用户级工作流。",
+        "capability_groups": groups,
+        "capabilities": capabilities,
+        "blocked_capabilities": blocked,
+        "permissions": proposed["permissions"],
+        "limits": proposed["limits"],
+        "risks": _risk_list(groups),
+        "installation": installation,
+        "model": model_info,
+        "expires_at": proposed["validity"]["expires_at"],
+        "preview_expires_at": (now + grant_contract.PREVIEW_VALIDITY)
+        .replace(microsecond=0)
+        .isoformat(),
+        "not_allowed": [
+            "修改 Shine 或第三方源码",
+            "执行任意 Shell / pip / git / 安装脚本",
+            "删除用户素材、模型或成片",
+            "跳过生产门禁或替用户宣布环境就绪",
+        ],
+    }
+
+
+@router.post("/task-grants/authorize")
+def support_task_grant_authorize(
+    body: TaskGrantAuthorizeRequest,
+    settings: SettingsDep,
+    gateway: GatewayDep,
+    db: DBSession,
+):
+    """The single click.  Repeating it returns the same grant, never a new one."""
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+
+    session = _require_session(db, body.session_id)
+    if not body.confirm:
+        raise _http("CONFIRM_REQUIRED", "请确认后再授权。", status=400)
+    draft = _grant_draft(session)
+    if not draft:
+        raise _http("GRANT_PREVIEW_REQUIRED", "请先生成授权预览，再确认本次授权。", status=409)
+    if draft.get("preview_id") != body.preview_id:
+        raise _http("GRANT_PREVIEW_CHANGED", "授权预览已更新，请重新确认。", status=409)
+    try:
+        preview_deadline = grant_contract.parse_iso(draft["preview_expires_at"])
+    except (KeyError, ValueError):
+        preview_deadline = grant_contract.parse_iso(draft["created_at"]) + grant_contract.PREVIEW_VALIDITY
+    if utcnow() > preview_deadline:
+        raise _http("GRANT_PREVIEW_EXPIRED", "授权预览已过期，请重新预览。", status=409)
+
+    try:
+        loaded, created = grant_service.create(
+            db,
+            session=session,
+            actor=session.actor,
+            objective=str(draft["objective"]),
+            groups=draft["groups"],
+            limits=draft["limits"],
+            project_ids=list(draft["project_ids"]),
+            installation_ids=list(draft["installation_ids"]),
+            allowed_resource_roots=list(draft["allowed_resource_roots"]),
+            expires_at=grant_contract.parse_iso(draft["expires_at"]),
+            expected_digest=body.grant_digest,
+        )
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message, status=409) from exc
+
+    # The click ends here.  What follows is server policy, not a second consent.
+    result: dict = {
+        "grant_id": loaded.id,
+        "delegation_id": loaded.row.id,
+        "status": grant_contract.grant_status(loaded.grant, now=utcnow()),
+        "status_label": grant_contract.STATUS_LABELS.get(
+            grant_contract.grant_status(loaded.grant, now=utcnow()), ""
+        ),
+        "schema": grant_contract.SCHEMA,
+        "grant_digest": loaded.grant.get("grant_digest"),
+        "created": bool(created),
+        "objective": loaded.grant.get("objective"),
+        "limits": loaded.grant.get("limits"),
+        "execution": None,
+    }
+    from shine.services import add_audit
+
+    add_audit(
+        db,
+        session.actor,
+        "SUPPORT_TASK_GRANT_AUTHORIZED",
+        "support_delegation",
+        loaded.row.id,
+        {
+            "grant_id": loaded.id,
+            "grant_digest": loaded.grant.get("grant_digest"),
+            "groups": draft["groups"],
+            "created": bool(created),
+            "objective_digest": loaded.grant.get("objective_digest"),
+        },
+        project_id=session.project_id,
+    )
+    db.commit()
+
+    if body.run:
+        result["execution"] = _run_grant(
+            db, settings, gateway, session=session, grant_id=loaded.id, max_steps=12
+        )
+    return result
+
+
+@router.get("/task-grants/{grant_id}")
+def support_task_grant_get(grant_id: str, db: DBSession):
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+
+    try:
+        loaded = grant_service.load(db, grant_id)
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message, status=404) from exc
+    return {
+        **grant_contract.grant_public(loaded.grant, now=utcnow()),
+        "sub_actions": grant_service.sub_action_public(loaded.grant),
+        "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
+        "not_allowed": [
+            "修改源码",
+            "执行任意命令",
+            "删除用户素材",
+        ],
+    }
+
+
+@router.post("/task-grants/{grant_id}/revoke")
+def support_task_grant_revoke(grant_id: str, db: DBSession):
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+
+    try:
+        loaded = grant_service.revoke(
+            db, grant_id, actor="local-user", reason="用户撤销后续 AI 操作"
+        )
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message, status=409) from exc
+    from shine.services import add_audit
+
+    add_audit(
+        db,
+        "local-user",
+        "SUPPORT_TASK_GRANT_REVOKED",
+        "support_delegation",
+        loaded.row.id,
+        {"grant_id": grant_id},
+        project_id=None,
+    )
+    db.commit()
+    return {
+        "grant_id": grant_id,
+        "status": grant_contract.grant_status(loaded.grant, now=utcnow()),
+        "status_label": grant_contract.STATUS_LABELS.get(
+            grant_contract.grant_status(loaded.grant, now=utcnow()), ""
+        ),
+        # An already submitted executor task is not cancelled by this:
+        # it follows its own safe-stop rules.
+        "note": "已停止后续 AI 操作；已提交给原执行器的任务不会被强制取消。",
+    }
+
+
+@router.post("/task-grants/{grant_id}/run")
+def support_task_grant_run(
+    grant_id: str,
+    body: TaskGrantRunRequest,
+    settings: SettingsDep,
+    gateway: GatewayDep,
+    db: DBSession,
+):
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+
+    session = _require_session(db, body.session_id)
+    try:
+        loaded = grant_service.load(db, grant_id)
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message, status=404) from exc
+    return _run_grant(
+        db, settings, gateway, session=session, grant_id=grant_id, max_steps=body.max_steps
+    )
+
+
+@router.get("/sessions/{session_id}/task-grant")
+def support_session_task_grant(session_id: str, db: DBSession):
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+
+    session = _require_session(db, session_id)
+    loaded = grant_service.latest_for_session(db, session.id)
+    if loaded is None:
+        return {"grant": None, "preview": _grant_draft(session) or None}
+    return {
+        "grant": {
+            **grant_contract.grant_public(loaded.grant, now=utcnow()),
+            "sub_actions": grant_service.sub_action_public(loaded.grant),
+            "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
+        },
+        "preview": None,
+    }
+
+
+def _run_grant(db, settings, gateway, *, session, grant_id: str, max_steps: int) -> dict:
+    """Run the bounded loop and translate its outcome into grant state."""
+    from shine.copilot import task_grant as grant_contract
+    from shine.copilot import tool_loop, tool_registry
+    from shine.support import grants as grant_service
+
+    loaded = grant_service.load(db, grant_id)
+    tools = tool_registry.grant_tool_specs(loaded.grant)
+    try:
+        outcome = tool_loop.run(
+            db,
+            settings,
+            grant_id=grant_id,
+            objective=str(loaded.grant.get("objective") or ""),
+            tools=tools,
+            actor=session.actor,
+            session_id=session.id,
+            gateway=gateway,
+            limits=tool_loop.LoopLimits(max_steps=max_steps),
+        )
+    except grant_contract.GrantError as exc:
+        return {"status": "PAUSED_USER_DECISION", "stop_reason": exc.code,
+                "final": exc.message, "steps": []}
+
+    try:
+        grant_service.set_status(
+            db, grant_id, outcome.status, reason=outcome.stop_reason
+        )
+    except grant_contract.GrantError:
+        # A concurrent revoke/expiry wins over this write; report the real state.
+        pass
+    from shine.services import add_audit
+
+    add_audit(
+        db,
+        session.actor,
+        "SUPPORT_TASK_GRANT_RUN_FINISHED",
+        "support_delegation",
+        loaded.row.id,
+        {
+            "grant_id": grant_id,
+            "status": outcome.status,
+            "stop_reason": outcome.stop_reason,
+            "steps": len(outcome.steps),
+            "satisfied": sum(1 for step in outcome.steps if step.get("satisfied")),
+        },
+        project_id=session.project_id,
+    )
+    db.commit()
+    return outcome.public()

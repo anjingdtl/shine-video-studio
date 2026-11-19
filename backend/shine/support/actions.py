@@ -338,6 +338,92 @@ def _workflow_target_facts(
     }, None
 
 
+def _resource_plan_target_facts(
+    db, settings, params: dict[str, Any], project_id: str | None
+) -> tuple[dict[str, Any], str | None]:
+    """Facts a frozen installation plan depends on.
+
+    The resolved snapshot is the *original* resource authority: the plan may
+    only be frozen against the same catalog/manifest/recipe/strategy bytes the
+    person previewed, and the target storage root is part of the identity so a
+    plan cannot silently move to another drive.
+    """
+    from shine.comfyops.resource_resolver import resolve_resources
+    from shine.strategy import GenerationStrategy
+
+    strategy_raw = params.get("strategy")
+    if not isinstance(strategy_raw, dict) or not strategy_raw:
+        return {}, "RESOURCE_STRATEGY_MISSING"
+    try:
+        strategy = GenerationStrategy.model_validate(strategy_raw)
+    except Exception:  # noqa: BLE001 - an invalid strategy is a named refusal
+        return {}, "RESOURCE_STRATEGY_INVALID"
+    preview = resolve_resources(db, settings, strategy)
+    components = sorted(
+        (
+            {
+                "component_id": item.get("component_id"),
+                "kind": item.get("kind"),
+                "bytes": item.get("bytes"),
+                "present": item.get("present"),
+            }
+            for item in preview.get("components") or []
+        ),
+        key=lambda item: str(item.get("component_id")),
+    )
+    return {
+        "catalog_sha256": preview.get("catalog_sha256"),
+        "manifest_sha256": preview.get("manifest_sha256"),
+        "recipe_sha256": preview.get("compiled_recipe_sha256"),
+        "snapshot_sha256": preview.get("snapshot_sha256"),
+        "download_eligible": bool(preview.get("download_eligible")),
+        "strategy_sha256": strategy.strategy_sha256(),
+        "components": components,
+        "requested": {
+            "instance_id": params.get("instance_id"),
+            "source_preference": params.get("source_preference") or "AUTO",
+        },
+    }, None
+
+
+def _workflow_graph_target_facts(
+    db, params: dict[str, Any], project_id: str | None
+) -> tuple[dict[str, Any], str | None]:
+    """Facts a new user-level workflow registration depends on.
+
+    A name collision inside the same scope is the original business identity of
+    that registration; the graph hash is what makes "the same draft" the same
+    draft across a retry.
+    """
+    from shine.comfy.workflow import graph_hash
+    from shine.models import WorkflowProfile
+
+    graph = params.get("graph")
+    if not isinstance(graph, dict) or not graph:
+        return {}, "WORKFLOW_GRAPH_MISSING"
+    name = str(params.get("name") or "")
+    if not name:
+        return {}, "WORKFLOW_NAME_MISSING"
+    scoped = select(WorkflowProfile).where(WorkflowProfile.name == name)
+    scoped = (
+        scoped.where(WorkflowProfile.project_id == project_id)
+        if project_id
+        else scoped.where(WorkflowProfile.project_id.is_(None))
+    )
+    existing = db.scalar(scoped)
+    return {
+        "graph_sha256": graph_hash(graph),
+        "name": name,
+        "project_id": project_id,
+        "existing_profile_id": existing.id if existing is not None else None,
+        "existing_graph_sha256": existing.graph_sha256 if existing is not None else None,
+        "mode": params.get("mode"),
+        "required_nodes": sorted(params.get("required_nodes") or []),
+        "parameter_map": params.get("parameter_map") or {},
+        "media_transfers": params.get("media_transfers") or {},
+    }, None
+
+
 def _release_target_facts(
     db, params: dict[str, Any]
 ) -> tuple[dict[str, Any], str | None]:
@@ -571,6 +657,12 @@ def _target_fingerprint(
             facts.update(scoped)
         elif kind == "workflow_user_copy":
             scoped, reason = _workflow_target_facts(db, params)
+            facts.update(scoped)
+        elif kind == "resource_install_plan":
+            scoped, reason = _resource_plan_target_facts(db, settings, params, project_id)
+            facts.update(scoped)
+        elif kind == "workflow_graph_register":
+            scoped, reason = _workflow_graph_target_facts(db, params, project_id)
             facts.update(scoped)
         elif kind == "managed_release":
             scoped, reason = _release_target_facts(db, params)
@@ -919,6 +1011,94 @@ def _preflight(db, settings, kind: str, params: dict[str, Any]) -> dict[str, Any
             "will_modify_user_comfyui": False,
             "authorization_summary": "只新增副本并调用既有工作流校验；源合同和内置模板不会被修改，"
             "可在执行后回滚删除该副本。",
+        }
+    if kind == "resource_install_plan":
+        from shine.comfyops.resource_resolver import resolve_resources
+        from shine.strategy import GenerationStrategy
+
+        raw = params.get("strategy")
+        if not isinstance(raw, dict) or not raw:
+            raise ActionInvalid("缺少可解析的策略合同。")
+        try:
+            strategy = GenerationStrategy.model_validate(raw)
+        except Exception as exc:  # noqa: BLE001 - the original contract refused it
+            raise ActionInvalid(f"策略合同不符合既有定义：{str(exc)[:160]}") from exc
+        preview = resolve_resources(db, settings, strategy)
+        components = [
+            {
+                "component_id": item.get("component_id"),
+                "kind": item.get("kind"),
+                "bytes": item.get("bytes"),
+                "present": bool(item.get("present")),
+            }
+            for item in preview.get("components") or []
+        ]
+        missing = [item for item in components if not item["present"]]
+        return {
+            **common,
+            "summary": "把当前缺失资源冻结成一份待批准安装计划；这一步不下载任何文件。",
+            "missing_components": [item["component_id"] for item in missing],
+            "download_bytes": int(preview.get("download_bytes") or 0),
+            "components": components,
+            "snapshot_sha256": preview.get("snapshot_sha256"),
+            "download_eligible": bool(preview.get("download_eligible")),
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "只冻结计划并登记组件；下载与安装仍由原安装计划、原 Installer "
+            "与 Setup Worker 执行，不会写入节点源码。",
+        }
+    if kind == "workflow_graph_register":
+        from shine.comfy.workflow import graph_hash, validate_graph
+
+        graph = params.get("graph")
+        if not isinstance(graph, dict) or not graph:
+            raise ActionInvalid("缺少待注册的工作流图。")
+        try:
+            validate_graph(graph, required_nodes=list(params.get("required_nodes") or []))
+        except Exception as exc:  # noqa: BLE001 - the original validator refused it
+            raise ActionInvalid(f"工作流图未通过既有静态校验：{str(exc)[:160]}") from exc
+        parameter_map = dict(params.get("parameter_map") or {})
+        for key in ("positive_prompt", "duration"):
+            if key not in parameter_map:
+                raise ActionInvalid(f"parameter_map 必须映射 {key} 才能在真实生产中选择。")
+        # Reuse, don't duplicate: the same name and the same graph bytes are the
+        # same registration, whatever the caller's tool_call_id says (GRANT-18).
+        from shine.models import WorkflowProfile
+
+        target_project = params.get("project_id")
+        name = str(params.get("name") or "")
+        scoped = select(WorkflowProfile).where(WorkflowProfile.name == name)
+        scoped = (
+            scoped.where(WorkflowProfile.project_id == target_project)
+            if target_project
+            else scoped.where(WorkflowProfile.project_id.is_(None))
+        )
+        existing = db.scalar(scoped)
+        same_graph = bool(
+            existing is not None and existing.graph_sha256 == graph_hash(graph)
+        )
+        return {
+            **common,
+            "summary": "把这份图注册成用户级工作流合同，并调用原有节点校验。",
+            "missing_components": [],
+            "download_bytes": 0,
+            "graph_sha256": graph_hash(graph),
+            "node_count": len(graph),
+            "node_classes": sorted(
+                {str((node or {}).get("class_type")) for node in graph.values()}
+            )[:24],
+            "parameter_map": sorted(parameter_map),
+            "media_transfers": sorted(params.get("media_transfers") or {}),
+            "target": {"name": params.get("name"), "project_id": params.get("project_id")},
+            "reuse_existing_profile_id": existing.id if same_graph else None,
+            "name_conflict_profile_id": (
+                existing.id if existing is not None and not same_graph else None
+            ),
+            "will_modify_builtin_template": False,
+            "will_start_gpu": False,
+            "will_modify_user_comfyui": False,
+            "authorization_summary": "只新增一条用户级工作流合同并调用原注册与节点校验；"
+            "内置模板与节点源码不变。登记成功不等于可生产，仍需原 validate 与小样任务。",
         }
     if kind == "project_create":
         return {
@@ -1850,6 +2030,46 @@ def approve_action(
                 "web_search": bool(value.get("web_search")),
                 "checked_at": utcnow().isoformat(),
             }
+        elif dispatch == "resource_install_plan":
+            from shine.api_setup import ResourcePlanRequest, create_resource_install_plan
+
+            body = ResourcePlanRequest.model_validate(model_payload(declaration, params))
+            value = create_resource_install_plan(body, settings, db)
+            row.status = "EXECUTED"
+            row.verification = {
+                "outcome": "PLAN_FROZEN",
+                # A frozen plan is not a download and is definitely not an
+                # installed component: the executor's own state is reported.
+                "executor": spec.executor,
+                "authority": "GET /api/v1/setup/verdict",
+                "installation_plan_id": value.get("plan_id"),
+                "plan_sha256": value.get("sha256"),
+                "plan_status": value.get("status"),
+                "download_bytes": value.get("download_bytes"),
+                "disk_required": value.get("disk_required"),
+                "production_ready": False,
+                "checked_at": utcnow().isoformat(),
+            }
+        elif dispatch == "workflow_graph_register":
+            from shine.api_comfy import create_workflow_profile
+            from shine.schemas import WorkflowProfileCreate
+
+            body = WorkflowProfileCreate.model_validate(model_payload(declaration, params))
+            created = create_workflow_profile(body, settings=settings, db=db)
+            row.status = "EXECUTED"
+            row.verification = {
+                # Registration alone never claims production readiness: the
+                # live node contract decides between VERIFIED and pending.
+                "outcome": "VERIFIED" if created.validated_against else "REGISTERED_NOT_EXECUTABLE",
+                "executor": spec.executor,
+                "authority": "workflow_profiles.validated_against",
+                "created_profile_id": created.id,
+                "created_profile_name": created.name,
+                "graph_sha256": created.graph_sha256,
+                "validated_against": created.validated_against,
+                "production_ready": False,
+                "checked_at": utcnow().isoformat(),
+            }
         elif dispatch == "workflow_user_copy":
             import copy
 
@@ -2449,6 +2669,76 @@ def refresh_action(db, settings, row: SupportAction) -> dict[str, Any]:
             db.commit()
         return _public(row)
 
+    if row.kind == "resource_install_plan":
+        if row.status != "EXECUTED":
+            return _public(row)
+        from shine.comfyops.models import InstallationPlan
+
+        plan_id = (row.verification or {}).get("installation_plan_id")
+        plan = db.get(InstallationPlan, str(plan_id or "")) if plan_id else None
+        if plan is None:
+            # The plan row is the original ledger; without it the outcome is
+            # unknown, never "installed".
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "安装计划记录已不存在，无法确认这一步的结果。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "installation_plan_id": plan_id,
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
+            return _public(row)
+        row.verification = {
+            **(row.verification or {}),
+            "plan_status": plan.status,
+            "plan_sha256": plan.sha256,
+            "original_authority": "installation_plans",
+            "production_ready": False,
+            "checked_at": utcnow().isoformat(),
+        }
+        db.commit()
+        return _public(row)
+
+    if row.kind == "workflow_graph_register":
+        if row.status != "EXECUTED":
+            return _public(row)
+        from shine.models import WorkflowProfile
+
+        profile_id = (row.verification or {}).get("created_profile_id")
+        profile = db.get(WorkflowProfile, str(profile_id or "")) if profile_id else None
+        if profile is None:
+            row.status = "NEEDS_REVIEW"
+            row.last_error = "注册出来的工作流合同已不存在，无法确认这一步的结果。"
+            row.verification = {
+                **(row.verification or {}),
+                "outcome": "UNKNOWN",
+                "created_profile_id": profile_id,
+                "checked_at": utcnow().isoformat(),
+            }
+            db.commit()
+            return _public(row)
+        validated = profile.validated_against or None
+        missing_nodes = list((validated or {}).get("missing_nodes") or [])
+        missing_inputs = list((validated or {}).get("missing_inputs") or [])
+        executable = bool(validated) and not missing_nodes and not missing_inputs
+        row.verification = {
+            **(row.verification or {}),
+            "created_profile_id": profile.id,
+            "graph_sha256": profile.graph_sha256,
+            "validated_against": validated,
+            # Registration is not production: the node contract and a real
+            # sample task decide the last mile.
+            "outcome": "VERIFIED" if executable else "REGISTERED_NOT_EXECUTABLE",
+            "node_contract_executable": executable,
+            "missing_nodes": missing_nodes,
+            "missing_input_count": len(missing_inputs),
+            "production_ready": False,
+            "checked_at": utcnow().isoformat(),
+        }
+        db.commit()
+        return _public(row)
+
     if row.kind == "managed_release":
         if row.status in {"DELEGATED", "EXECUTED"}:
             # Legacy or interrupted release: there is no attributable executor
@@ -2732,3 +3022,432 @@ def rollback_action(
     )
     db.commit()
     return _public(row)
+
+
+# ---------------------------------------------------------------------------
+# V3.1: one task grant, many sub-actions, the same executor
+# ---------------------------------------------------------------------------
+
+#: Capabilities whose declared cost is a *count* of new business artefacts.
+_COUNT_COSTS: dict[str, dict[str, int]] = {
+    "workflow_graph_register": {"max_new_workflow_profiles": 1},
+    "node_package_plan": {"max_installed_node_packages": 1},
+    "node_package_execute": {"max_installed_node_packages": 1},
+    "test_inference": {"max_test_inference_jobs": 1},
+}
+
+
+def _grant_cost(kind: str, preview: dict[str, Any]) -> dict[str, int]:
+    """The server-computed cost of one step, never a model estimate."""
+    cost: dict[str, int] = {}
+    download_bytes = preview.get("download_bytes")
+    if isinstance(download_bytes, int) and download_bytes > 0:
+        cost["max_download_bytes"] = download_bytes
+        # A download writes the same bytes to disk, plus a little overhead.
+        cost["max_disk_write_bytes"] = download_bytes
+    cost.update(_COUNT_COSTS.get(kind, {}))
+    return cost
+
+
+def _session_factory(db):
+    from shine.db import make_session_factory
+
+    return make_session_factory(db.get_bind())
+
+
+def execute_under_grant(
+    db,
+    settings,
+    *,
+    grant_id: str,
+    capability_id: str,
+    params: dict[str, Any],
+    tool_call_id: str,
+    actor: str = "local-user",
+    session_id: str | None = None,
+    expected_target: dict[str, Any] | None = None,
+    app=None,
+    gateway=None,
+) -> dict[str, Any]:
+    """Execute one reviewed capability inside an already authorized task grant.
+
+    This is the *only* autonomous write path of the copilot.  It does not
+    replace any existing check: it runs the original ``preview_action`` (which
+    re-reads the snapshot, the target fingerprint, the capability contract and
+    the original Pydantic parameters) and then the original ``approve_action``
+    (which re-verifies all of them again before the atomic claim).  What it adds
+    is the grant layer:
+
+    1. the envelope must be usable (actor, session, status, validity, revoke),
+    2. the capability must be inside the frozen scope and permission set,
+    3. its contract must be the one frozen at authorization time,
+    4. its server-computed cost must fit the frozen budget,
+    5. one ``tool_call_id`` maps to exactly one ``SupportAction`` row.
+
+    A refusal is returned as a structured receipt, never as an exception the
+    model could interpret as "try another way".
+    """
+    from shine.copilot import task_grant as grant_contract
+    from shine.support import grants as grant_service
+    from shine.support.tools import ToolTier
+
+    expected = dict(expected_target or {})
+    receipt: dict[str, Any] = {
+        "status": "REFUSED",
+        "capability_id": capability_id,
+        "tool_call_id": tool_call_id,
+        "grant_id": grant_id,
+        "action_id": None,
+        "original_task_id": None,
+        "observed_facts": {},
+        "authority": None,
+        "resource_usage": {},
+        "next_available_actions": [],
+        "error_code": None,
+        "message": "",
+    }
+    try:
+        loaded = grant_service.load(db, grant_id)
+        grant_contract.assert_identity(
+            loaded.grant, actor=actor, session_id=session_id
+        )
+        grant_contract.assert_usable(loaded.grant, now=utcnow())
+        grant_contract.assert_contract_frozen(loaded.grant, capability_id)
+        if not grant_contract.capability_allowed(loaded.grant, capability_id):
+            raise grant_contract.GrantError(
+                "GRANT_PERMISSION_NOT_GRANTED",
+                "这次授权没有包含该操作所需的能力权限。",
+                details={"capability_id": capability_id},
+            )
+        spec = action_spec(capability_id)
+        if spec.tier is not ToolTier.CONFIRM:
+            raise grant_contract.GrantError(
+                "CAPABILITY_NOT_WRITABLE",
+                "这个操作不是可以在授权内自动执行的写动作。",
+                details={"capability_id": capability_id},
+            )
+        session = None
+        if session_id:
+            from shine.support.models import SupportSession
+
+            session = db.get(SupportSession, session_id)
+        scope_project = (
+            str(params.get("project_id") or "")
+            or (session.project_id if session is not None else None)
+        )
+        grant_contract.assert_project_scope(
+            loaded.grant, project_id=scope_project, capability_id=capability_id
+        )
+        installation_id = (
+            expected.get("installation_id")
+            or params.get("installation_id")
+            or params.get("instance_id")
+        )
+        grant_contract.assert_installation_scope(
+            loaded.grant, installation_id=installation_id
+        )
+        grant_service.assert_tool_call_budget(loaded.grant)
+        grant_service.assert_runtime_budget(
+            loaded.grant,
+            started_at=grant_contract.parse_iso(loaded.grant["created_at"])
+            if loaded.grant.get("created_at")
+            else None,
+        )
+
+        # --- idempotency: one tool call is one action, whatever is retried ---
+        identity = grant_contract.child_key(
+            grant_id,
+            tool_call_id,
+            capability_id,
+            dict(params or {}),
+            str(expected.get("target_identity") or installation_id or scope_project or ""),
+        )
+        existing = db.scalar(
+            select(SupportAction).where(SupportAction.grant_tool_key == identity)
+        )
+        if existing is not None:
+            return _grant_receipt(
+                db, settings, existing, receipt, reused=True
+            )
+
+        # --- the original preview: facts, fingerprint, contract, preflight ---
+        prepared, _ = preview_action(
+            db,
+            settings,
+            kind=capability_id,
+            params=dict(params or {}),
+            actor=actor,
+            session_id=session_id,
+            project_id=scope_project or None,
+            app=app,
+        )
+        row = db.get(SupportAction, str(prepared.get("id")))
+        if row is None:
+            raise ActionUnknown()
+        reuse_profile_id = (prepared.get("preview") or {}).get("reuse_existing_profile_id")
+        if reuse_profile_id:
+            # The same name and the same graph bytes already exist.  Report the
+            # existing original record instead of creating an infinite copy.
+            reuse = _reuse_existing_profile(db, row, str(reuse_profile_id), grant_id,
+                                            tool_call_id, identity)
+            return _grant_receipt(db, settings, row, receipt, reused=True) | {
+                "observed_facts": {**reuse, "reused_existing_action": True},
+            }
+        cost = _grant_cost(capability_id, prepared.get("preview") or {})
+
+        if row.status in {"SUCCEEDED", "DELEGATED", "EXECUTED"}:
+            # The business identity already produced this work (for example the
+            # same installation plan).  Bind the grant and report the original
+            # state instead of creating a duplicate.
+            _bind_grant(db, row, grant_id, tool_call_id, identity)
+            return _grant_receipt(db, settings, row, receipt, reused=True)
+        if row.status in TERMINAL_ACTION_STATUSES and row.status not in {"EXPIRED"}:
+            _bind_grant(db, row, grant_id, tool_call_id, identity)
+            return _grant_receipt(db, settings, row, receipt, reused=True)
+        if row.status == "APPROVED" and _approval_abandoned(row):
+            raise grant_contract.GrantError(
+                "PREVIEW_STALE",
+                "上一步授权未完成就中断了，请重新发起这一步。",
+                details={"action_id": row.id},
+            )
+
+        # --- reserve before the external call, exactly like a submit intent ---
+        # Only the *resource* cost is reserved here.  The tool-call counter is
+        # spent exactly once, by ``record_tool_call`` below, so one call can
+        # never consume two slots.
+        grant_service.reserve(
+            db,
+            grant_id,
+            capability_id=capability_id,
+            cost=cost,
+        )
+        _bind_grant(db, row, grant_id, tool_call_id, identity)
+        grant_service.record_tool_call(
+            db,
+            grant_id,
+            tool_call_id=tool_call_id,
+            capability_id=capability_id,
+            status="SUBMITTED",
+            action_id=row.id,
+            detail={"target_fingerprint": row.target_fingerprint},
+        )
+
+        result, _ = approve_action(
+            db,
+            settings,
+            _session_factory(db),
+            action_id=row.id,
+            preview_hash=row.preview_hash,
+            actor=actor,
+            gateway=gateway,
+            app=app,
+        )
+        db.refresh(row)
+        grant_service.bind_sub_action(
+            db,
+            grant_id,
+            action_id=row.id,
+            tool_call_id=tool_call_id,
+            capability_id=capability_id,
+            project_id=row.project_id,
+            original_task_id=row.original_task_id,
+        )
+        grant_service.settle(db, grant_id, cost=cost)
+        receipt = _grant_receipt(db, settings, row, receipt, reused=False)
+        receipt["observed_facts"]["executor_status"] = result.get("status")
+        return receipt
+    except ActionBlocked as exc:
+        receipt.update(
+            {
+                "status": "BLOCKED",
+                "error_code": exc.code,
+                "message": exc.message,
+                "observed_facts": {"details": exc.details},
+                "next_available_actions": _next_actions_after_block(exc.code),
+            }
+        )
+        return receipt
+    except grant_contract.GrantError as exc:
+        receipt.update(
+            {
+                "status": "BLOCKED",
+                "error_code": exc.code,
+                "message": exc.message,
+                "observed_facts": {"details": exc.details},
+                "next_available_actions": _next_actions_after_block(exc.code),
+            }
+        )
+        return receipt
+
+
+def _reuse_existing_profile(
+    db,
+    row: SupportAction,
+    profile_id: str,
+    grant_id: str,
+    tool_call_id: str,
+    identity: str,
+) -> dict[str, Any]:
+    """Record a reuse of an already-registered identical user profile."""
+    from shine.models import WorkflowProfile
+
+    profile = db.get(WorkflowProfile, profile_id)
+    validated = (profile.validated_against or None) if profile is not None else None
+    missing_nodes = list((validated or {}).get("missing_nodes") or [])
+    missing_inputs = list((validated or {}).get("missing_inputs") or [])
+    executable = bool(validated) and not missing_nodes and not missing_inputs
+    row.status = "EXECUTED"
+    row.verification = {
+        "outcome": "VERIFIED" if executable else "REGISTERED_NOT_EXECUTABLE",
+        "executor": "shine.api_comfy.create_workflow_profile",
+        "authority": "workflow_profiles.validated_against",
+        "created_profile_id": profile_id,
+        "reused_existing_profile": True,
+        "graph_sha256": profile.graph_sha256 if profile is not None else None,
+        "node_contract_executable": executable,
+        "missing_nodes": missing_nodes,
+        "missing_input_count": len(missing_inputs),
+        "production_ready": False,
+        "checked_at": utcnow().isoformat(),
+    }
+    _bind_grant(db, row, grant_id, tool_call_id, identity)
+    db.commit()
+    return {
+        "created_profile_id": profile_id,
+        "verification_outcome": row.verification["outcome"],
+        "reused_existing_profile": True,
+        "node_contract_executable": executable,
+    }
+
+
+def _next_actions_after_block(code: str) -> list[str]:
+    """What the model may usefully try next, by refusal family.
+
+    A refusal that needs a person says so; a refusal that is out of scope says
+    so.  None of them suggests "bypass the check".
+    """
+    if code in {"SCOPE_EXCEEDED", "GRANT_PERMISSION_NOT_GRANTED"}:
+        return ["report_blocked", "finish"]
+    if code in {"GRANT_BUDGET_EXCEEDED", "GRANT_TOOL_CALL_BUDGET_EXHAUSTED",
+                "GRANT_RUNTIME_BUDGET_EXHAUSTED"}:
+        return ["report_blocked", "finish"]
+    if code in {"GRANT_EXPIRED", "GRANT_REVOKED", "GRANT_NOT_RUNNING", "GRANT_CANCELLED"}:
+        return ["finish"]
+    if code in {"GRANT_CONTRACT_CHANGED"}:
+        return ["report_blocked", "finish"]
+    if code in {"PREVIEW_STALE", "TARGET_FACTS_UNAVAILABLE", "BUSY", "GPU_BUSY"}:
+        return ["re_inspect", "finish"]
+    return ["re_inspect", "report_blocked", "finish"]
+
+
+def _bind_grant(
+    db, row: SupportAction, grant_id: str, tool_call_id: str, identity: str
+) -> None:
+    """Persist the grant identity on the original action row.
+
+    The unique constraint on ``grant_tool_key`` is what makes a concurrent
+    duplicate collapse here instead of executing twice.
+    """
+    if row.grant_tool_key == identity and row.grant_id == grant_id:
+        return
+    try:
+        db.execute(
+            update(SupportAction)
+            .where(SupportAction.id == row.id)
+            .values(
+                grant_id=row.grant_id or grant_id,
+                tool_call_id=row.tool_call_id or tool_call_id,
+                grant_tool_key=row.grant_tool_key or identity,
+                updated_at=utcnow(),
+            )
+        )
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+    db.refresh(row)
+
+
+def _grant_receipt(
+    db,
+    settings,
+    row: SupportAction,
+    base: dict[str, Any],
+    *,
+    reused: bool,
+) -> dict[str, Any]:
+    """The uniform tool output: original status, original task, real evidence."""
+    public = _public(row)
+    verification = row.verification or {}
+    outcome = str(verification.get("outcome") or "")
+    return {
+        **base,
+        "status": str(public.get("status") or row.status),
+        "action_id": row.id,
+        "original_task_id": row.original_task_id,
+        "observed_facts": {
+            "action_status": row.status,
+            "verification_outcome": outcome,
+            "executor": verification.get("executor"),
+            "task_status": verification.get("task_status"),
+            "created_profile_id": verification.get("created_profile_id"),
+            "installation_plan_id": verification.get("installation_plan_id"),
+            "target_fingerprint": row.target_fingerprint,
+            "reused_existing_action": bool(reused),
+        },
+        "authority": verification.get("authority"),
+        "resource_usage": {
+            key: value
+            for key, value in (row.preview or {}).get("fingerprint", {}).items()
+            if key in {"available", "reason"}
+        },
+        "next_available_actions": _next_actions_for_status(row.status),
+        "error_code": row.last_error if row.status in TERMINAL_ACTION_STATUSES else None,
+        "message": str(public.get("last_error") or ""),
+    }
+
+
+def _next_actions_for_status(status: str) -> list[str]:
+    if status == "SUCCEEDED":
+        return ["re_inspect", "finish"]
+    if status in {"DELEGATED", "EXECUTED", "APPROVED"}:
+        return ["read_original_task", "finish"]
+    if status == "NEEDS_REVIEW":
+        return ["report_blocked", "finish"]
+    if status in {"FAILED", "REFUSED", "EXPIRED", "SUPERSEDED"}:
+        return ["re_inspect", "report_blocked", "finish"]
+    return ["re_inspect", "finish"]
+
+
+def read_under_grant(
+    db,
+    settings,
+    *,
+    action_id: str,
+    grant_id: str,
+) -> dict[str, Any]:
+    """Read one sub-action's original result back, never resubmitting it."""
+    from shine.support import grants as grant_service
+
+    row = db.get(SupportAction, action_id)
+    if row is None:
+        raise ActionUnknown()
+    if row.grant_id and row.grant_id != grant_id:
+        raise ActionBlocked(
+            "ACTION_NOT_IN_GRANT",
+            "这个动作不属于当前任务授权，不能读取。",
+            details={"action_id": action_id},
+        )
+    public = refresh_action(db, settings, row)
+    db.refresh(row)
+    return {
+        "status": str(public.get("status") or row.status),
+        "action_id": row.id,
+        "original_task_id": row.original_task_id,
+        "observed_facts": {
+            "action_status": row.status,
+            "verification": row.verification or {},
+        },
+        "authority": (row.verification or {}).get("authority"),
+        "error_code": row.last_error,
+        "message": str(public.get("last_error") or ""),
+    }

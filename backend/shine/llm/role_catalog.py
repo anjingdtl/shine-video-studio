@@ -83,7 +83,8 @@ TEXT_ROLE_CATALOG: tuple[TextRoleDefinition, ...] = (
     TextRoleDefinition(
         AgentRole.SUPPORT_AGENT, "AI 管家", "工程与审查", "本机 AI 管家", False,
         "structured_text", ("support",),
-        "解释环境与任务证据；不可执行命令、修改源码或替代权威裁决。",
+        "解释环境与任务证据；在用户一次任务授权内调用已审查的后台能力。"
+        "不可执行命令、修改源码或替代权威裁决。",
     ),
 )
 

@@ -1117,6 +1117,100 @@
       "security": []
     },
     {
+      "body": {
+        "fields": {
+          "disk_free": {
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "instance_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "snapshot_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "type": "string"
+          },
+          "source_preference": {
+            "default": "AUTO",
+            "enum": [
+              "AUTO",
+              "MIRROR_FIRST",
+              "OFFICIAL_FIRST"
+            ],
+            "type": "string"
+          },
+          "strategy": {
+            "type": "object"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "disk_free",
+          "project_id",
+          "snapshot_sha256",
+          "strategy"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "disk_free": {
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "instance_id": {
+              "anyOf": [
+                {
+                  "maxLength": 96,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "snapshot_sha256": {
+              "pattern": "^[a-f0-9]{64}$",
+              "type": "string"
+            },
+            "source_preference": {
+              "default": "AUTO",
+              "enum": [
+                "AUTO",
+                "MIRROR_FIRST",
+                "OFFICIAL_FIRST"
+              ],
+              "type": "string"
+            },
+            "strategy": {
+              "additionalProperties": true,
+              "type": "object"
+            }
+          },
+          "required": [
+            "project_id",
+            "strategy",
+            "snapshot_sha256",
+            "disk_free"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "b5b24c20358a528b9cbb0a64b9c6ed26e992cad5b967b332b4c1d937e8d5de73"
+      },
+      "operation": "POST /api/v1/setup/resources/install-plan",
+      "parameters": [],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
       "body": null,
       "operation": "GET /api/v1/setup/verdict",
       "parameters": [],
@@ -1680,6 +1774,28 @@
         "security": []
       },
       "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/workflow-profiles/{}",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "profile_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
     }
   ],
   "api_contract_version": "openapi-normalized-2026.11-v1",
@@ -2192,6 +2308,300 @@
       "reversible": "NO",
       "rollback_policy": "删除副本即可；原模板不变。",
       "scope": "OPTIONAL",
+      "status": "GUARDED",
+      "tier": "PREVIEW"
+    },
+    {
+      "action_id": "resource_install_plan",
+      "api_contract_digest": "960be679627951e7b356e61697fa8c27dfba2d8ddc6726fb5152f691cf395cd8",
+      "api_operations": [
+        "POST /api/v1/setup/resources/install-plan",
+        "GET /api/v1/setup/verdict"
+      ],
+      "api_route": "POST /api/v1/setup/resources/install-plan",
+      "authority": "GET /api/v1/setup/verdict",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示将下载的组件与体积，确认后由原安装计划执行。",
+      "contract_digest": "5f0dd3fe977c888f78fa15a6eade870429ba07031fdc1dc76cf4be7a772aaae0",
+      "contract_revision": 1,
+      "description": "按现有资源解析结果冻结一份待批准安装计划，返回计划号与体积；不下载、不写 comfyui、不启动第二套安装器。",
+      "dispatch": "resource_install_plan",
+      "examples": [],
+      "executor": "shine.api_setup.create_resource_install_plan",
+      "executor_bound": true,
+      "feature_id": "model-download-verify",
+      "gates": [],
+      "gpu": false,
+      "idempotency_policy": "同一 snapshot_sha256 与目标目录复原有计划，不重复创建。",
+      "introduced_version": "3.1.0",
+      "label": "冻结缺失资源的安装计划",
+      "module": "comfyops",
+      "note": "AI 只能冻结计划；批准与执行仍走原安装计划与 Worker。",
+      "occupancy_gate": "NONE",
+      "page": "基础配置",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": null,
+          "minimum": 0,
+          "name": "disk_free",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 96,
+          "name": "instance_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 120,
+          "name": "project_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "name": "snapshot_sha256",
+          "nullable": false,
+          "pattern": "^[a-f0-9]{64}$",
+          "required": true,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "AUTO",
+          "enum": [
+            "AUTO",
+            "MIRROR_FIRST",
+            "OFFICIAL_FIRST"
+          ],
+          "has_default": true,
+          "max_length": 16,
+          "name": "source_preference",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": null,
+          "name": "strategy",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_setup:ResourcePlanRequest",
+          "type": "object"
+        }
+      ],
+      "params": [
+        "disk_free",
+        "instance_id",
+        "project_id",
+        "snapshot_sha256",
+        "source_preference",
+        "strategy"
+      ],
+      "preconditions": [
+        "资源解析快照仍然有效",
+        "磁盘剩余空间由原解析结果确认"
+      ],
+      "readback": "GET /api/v1/setup/verdict",
+      "readback_contract": "读取安装计划、安装回执与 /setup/verdict 能力状态。",
+      "request_schema": "shine.api_setup:ResourcePlanRequest",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只冻结计划；真实下载由原 Installer 与 Setup Worker 完成。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "取消未执行的计划即可；不删除已下载文件。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "PREVIEW"
+    },
+    {
+      "action_id": "workflow_graph_register",
+      "api_contract_digest": "f3b210bf8b7374c02fb8a3500a5895173c04135a9bfb062a2fbc2e6020826e24",
+      "api_operations": [
+        "POST /api/v1/workflow-profiles",
+        "GET /api/v1/workflow-profiles/{}"
+      ],
+      "api_route": "POST /api/v1/workflow-profiles",
+      "authority": "GET /api/v1/workflow-profiles/{profile_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示图摘要与参数映射，确认后由原注册接口写入用户级合同。",
+      "contract_digest": "ce52afe164cf96938de7158e78ebab45f42fff3e31aeb466804836ae9453a687",
+      "contract_revision": 1,
+      "description": "把一份服务端校验过的 Graph 草稿注册为用户级工作流合同，复用原注册、原图哈希与原节点校验；不改内置模板。",
+      "dispatch": "workflow_graph_register",
+      "examples": [],
+      "executor": "shine.api_comfy.create_workflow_profile",
+      "executor_bound": true,
+      "feature_id": "workflow-assembly",
+      "gates": [],
+      "gpu": false,
+      "idempotency_policy": "同名同项目由数据库唯一约束拒绝重复注册。",
+      "introduced_version": "3.1.0",
+      "label": "注册用户级工作流图",
+      "module": "comfyops",
+      "note": "登记成功不等于可生产；真实验证仍需 validate / validate-managed 与小样任务。",
+      "occupancy_gate": "FULL",
+      "page": "基础配置",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": "MiniMax-H3-Base",
+          "enum": [],
+          "has_default": true,
+          "max_length": 160,
+          "name": "checkpoint_id",
+          "nullable": false,
+          "required": false,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": null,
+          "name": "graph",
+          "nullable": false,
+          "required": true,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "media_transfers",
+          "nullable": true,
+          "required": false,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 48,
+          "name": "mode",
+          "nullable": false,
+          "required": true,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 120,
+          "min_length": 1,
+          "name": "name",
+          "nullable": false,
+          "required": true,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": {},
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "parameter_map",
+          "nullable": false,
+          "required": true,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 120,
+          "name": "project_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 100,
+          "name": "required_nodes",
+          "nullable": false,
+          "required": false,
+          "source": "shine.schemas:WorkflowProfileCreate",
+          "type": "string_list"
+        }
+      ],
+      "params": [
+        "checkpoint_id",
+        "graph",
+        "media_transfers",
+        "mode",
+        "name",
+        "parameter_map",
+        "project_id",
+        "required_nodes"
+      ],
+      "preconditions": [
+        "Graph 通过既有静态校验",
+        "parameter_map 必须映射 positive_prompt 与 duration",
+        "媒体传输族必须属于 image/video/audio 且带绝对 upload_path"
+      ],
+      "readback": "GET /api/v1/workflow-profiles/{profile_id}",
+      "readback_contract": "读取 WorkflowProfile、graph_sha256 与 validated_against。",
+      "request_schema": "shine.schemas:WorkflowProfileCreate",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只写用户级数据；内置模板与节点源码不变。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "删除该用户级副本即可；原模板不变。",
+      "scope": "PROJECT",
       "status": "GUARDED",
       "tier": "PREVIEW"
     },
@@ -2991,9 +3401,9 @@
     }
   ],
   "digests": {
-    "api_contract": "638282d3906acb57a2c671f0c376ac4dc114fa8be8636404ab1bf605cbedd6f1",
-    "api_schema": "29bd6d06b2629896db32c79a5273c9e8162363695c30c5d44304bcd7a1cce2c9",
-    "contracts": "d5271a360b2f51d20b6539e954dadad9f6561bfd0054237c0fdde093aecf1665"
+    "api_contract": "e7fae921a7ab4caa893be36bce4ac7ac9475b6bc7ffbd9e610aee0f5a0757fd3",
+    "api_schema": "b2a7c75d072a399c215c0c0e5152dc027f62fce239bb9f1ab5a54bc2339b9d5e",
+    "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [
     {
@@ -5292,12 +5702,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/setup/resources/inspect-local",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/setup/resources/install-plan",
       "status": "DISCOVERED"
     },
     {

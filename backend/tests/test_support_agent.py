@@ -53,6 +53,10 @@ def test_tool_registry_has_no_shell_or_source_write_capability():
         "production_control",
         "literary_scripts_generate",
         "support_web_search_update",
+        # V3.1: both still delegate to an existing executor and neither is a
+        # shell / source-write / arbitrary-HTTP capability.
+        "resource_install_plan",
+        "workflow_graph_register",
     }
     with pytest.raises(ToolDenied):
         tool_spec("run_shell")

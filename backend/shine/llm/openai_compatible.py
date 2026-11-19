@@ -482,6 +482,52 @@ class OpenAICompatibleProvider:
                       "http_status": response.status_code, "provider_code": provider_code},
         )
 
+    def complete_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str = "auto",
+        options_override: dict[str, Any] | None = None,
+        system: str = "",
+    ) -> dict[str, Any]:
+        """One native tool-calling turn, using this provider's own transport.
+
+        This is the same endpoint, the same authentication and the same error
+        classification as :meth:`complete`; only the request shape differs.  The
+        raw JSON body is returned so the caller owns the parsing and can fall
+        back deterministically when a provider ignores or rejects ``tools``.
+        """
+        started = time.perf_counter()
+        options = dict(self.config.generation_options)
+        options.update(options_override or {})
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "messages": messages,
+            "temperature": self.config.temperature,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            **options,
+        }
+        response = self._request("POST", _chat_url(self.config.base_url), payload=payload)
+        try:
+            body = response.json()
+        except json.JSONDecodeError as exc:
+            raise LLMFormatError(
+                "Provider returned a non-JSON response",
+                details={"status": response.status_code},
+            ) from exc
+        if not isinstance(body, dict):
+            raise LLMFormatError(
+                "Provider returned a malformed completion",
+                details={"status": response.status_code},
+            )
+        return {
+            "body": body,
+            "http_status": response.status_code,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
     def detect_capabilities(self) -> dict[str, Any]:
         """Read the model catalog and report what it can actually prove.
 

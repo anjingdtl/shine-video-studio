@@ -11,6 +11,7 @@ import {
   subscribeCopilotProfile,
   type CopilotProfile,
 } from '../copilotProfile';
+import { TaskGrantCard } from './TaskGrantCard';
 
 type Fact = { key: string; value: string; source: string };
 
@@ -299,6 +300,9 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [approvedSteps, setApprovedSteps] = useState<Record<string, number[]>>({});
   const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
   const [delegation, setDelegation] = useState<Record<string, unknown> | null>(null);
+  //: The objective of the one task-level authorization currently on screen.
+  //: Non-null means the person asked for the "one click, let it work" flow.
+  const [taskObjective, setTaskObjective] = useState<string | null>(null);
   const [delegating, setDelegating] = useState(false);
   const [panelSize, setPanelSize] = useState<{ width: number; height: number }>(() => readPanelSize());
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -1202,6 +1206,15 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
               </div>
             )}
             {notice && <p className="copilot-notice" aria-live="polite">{notice}</p>}
+
+            {taskObjective && session ? (
+              <TaskGrantCard
+                sessionId={session.id}
+                projectId={projectId || null}
+                objective={taskObjective}
+                onClose={() => setTaskObjective(null)}
+              />
+            ) : null}
           </div>
 
           <div className="copilot-compose">
@@ -1212,6 +1225,18 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                     {question}
                   </button>
                 ))}
+              </div>
+            )}
+            {session && draft.trim().length >= 4 && !taskObjective && (
+              <div className="copilot-suggestions">
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => setTaskObjective(draft.trim())}
+                  title="AI 先展示一次授权范围，你点一次授权后它自动完成后续步骤"
+                >
+                  一次授权，让 AI 自动完成这件事
+                </button>
               </div>
             )}
             <div className="copilot-input-row">

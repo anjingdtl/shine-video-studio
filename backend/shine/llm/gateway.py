@@ -66,6 +66,49 @@ the provider instead of losing a whole scene to a momentary throttle; the
 plain connectivity probe keeps its own stricter budget.
 """
 
+#: Which configured text role the copilot inherits when nobody routed
+#: ``support_agent`` explicitly.  The order is deterministic and auditable: the
+#: machine-operations role first (its subject matter is the setup/environment
+#: domain the copilot works in), then the planning role, then the writing role.
+#: A person never has to re-enter an API key to use the copilot (GRANT-15).
+ROLE_INHERITANCE: tuple[str, ...] = (
+    "comfyops",
+    "producer",
+    "scriptwriter",
+    "qc_reviewer",
+    "repair_planner",
+    "director",
+)
+
+
+def inherited_profile(db: Session, role: str) -> tuple[ProviderProfile, str]:
+    """Resolve a role profile, inheriting an already-configured text model.
+
+    Returns ``(profile, source_role)``.  ``source_role`` is the role that
+    actually supplied the profile, so the copilot can say "using 制作环境助理's
+    model" instead of pretending the person configured a copilot model.
+    """
+    from shine.models import AgentRoute, ProviderProfile
+
+    route = db.scalar(select(AgentRoute).where(AgentRoute.role == role))
+    if route is not None:
+        profile = db.get(ProviderProfile, route.provider_profile_id)
+        if profile is not None and profile.enabled:
+            return profile, role
+    for candidate in ROLE_INHERITANCE:
+        if candidate == role:
+            continue
+        route = db.scalar(select(AgentRoute).where(AgentRoute.role == candidate))
+        if route is None:
+            continue
+        profile = db.get(ProviderProfile, route.provider_profile_id)
+        if profile is not None and profile.enabled:
+            return profile, candidate
+    raise LLMNotConfigured(
+        f"No provider profile is routed to the {role} role and no text role is configured to inherit"
+    )
+
+
 
 def agent_output_config(config: ProviderConfig) -> ProviderConfig:
     """Limit each agent response without expanding a configured smaller budget."""
@@ -192,6 +235,111 @@ class LLMGateway:
         if not profile:
             raise LLMNotConfigured(f"The provider profile routed to {role} no longer exists")
         return profile
+
+    def profile_for_role_or_inherit(
+        self, db: Session, role: str
+    ) -> tuple[ProviderProfile, str]:
+        """The pinned task profile, the explicit route, or an inherited one.
+
+        The copilot uses this: an explicit ``support_agent`` route always wins,
+        and otherwise the already-configured text model is inherited instead of
+        asking the person to configure the copilot separately.
+        """
+        pinned = self._pinned_roles.get(role)
+        if pinned is not None:
+            return pinned, role
+        return inherited_profile(db, role)
+
+    def complete_tools_for_role(
+        self,
+        db: Session,
+        role: str,
+        *,
+        system: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        tool_choice: str = "auto",
+        options: dict[str, Any] | None = None,
+    ) -> Any | None:
+        """One native tool-calling turn, or ``None`` when native is unavailable.
+
+        ``None`` is a *decision*, not an error: the caller then uses the
+        validated structured-intent protocol through the ordinary
+        :meth:`complete_for_role` path.  A provider that answers 400/422 to a
+        ``tools`` payload (some OpenAI-compatible gateways do) is treated the
+        same way, and the degradation is recorded rather than hidden.
+        """
+        from shine.llm.base import LLMError
+        from shine.llm.tool_calls import (
+            ToolSpec,
+            anthropic_tools,
+            openai_tools,
+            parse_anthropic_turn,
+            parse_openai_turn,
+        )
+
+        profile, source_role = self.profile_for_role_or_inherit(db, role)
+        config = self.config_for(profile)
+        config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
+        provider = self.provider_factory(config, self.mock_responder)
+        if not hasattr(provider, "complete_with_tools"):
+            return None
+        specs = [item for item in tools if isinstance(item, ToolSpec)]
+        from shine.comfyops.scheduler import CURRENT_RESOURCE
+        from shine.security import is_loopback_url
+
+        needs_local_gpu = config.kind != "mock" and (
+            config.kind == "ollama" or is_loopback_url(config.base_url)
+        )
+        if CURRENT_RESOURCE.get() is not None and needs_local_gpu:
+            raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
+
+        def send() -> Any:
+            if config.kind == "anthropic":
+                raw = provider.complete_with_tools(
+                    list(messages),
+                    tools=anthropic_tools(specs),
+                    tool_choice=tool_choice,
+                    options_override=options,
+                    system=system,
+                )
+                return parse_anthropic_turn(
+                    raw["body"], latency_ms=raw["latency_ms"], model=config.model
+                )
+            raw = provider.complete_with_tools(
+                [{"role": "system", "content": system}, *messages] if system else list(messages),
+                tools=openai_tools(specs),
+                tool_choice=tool_choice,
+                options_override=options,
+                system=system,
+            )
+            return parse_openai_turn(
+                raw["body"], latency_ms=raw["latency_ms"], model=config.model
+            )
+
+        try:
+            if not needs_local_gpu:
+                turn = send()
+            else:
+                from shine.comfyops.scheduler import resource_slot
+                from shine.db import make_session_factory
+
+                with resource_slot(
+                    make_session_factory(db.get_bind()), "AGENT", 1, wait_seconds=300
+                ):
+                    turn = send()
+        except LLMError as exc:
+            status = exc.details.get("status")
+            if status in {400, 404, 422, 501}:
+                # The provider refused the *shape*: degrade by contract, not by
+                # guessing, and let the caller record why.
+                return None
+            raise
+        if getattr(turn, "model", None) is None:
+            turn.model = config.model
+        turn.raw_meta = {**getattr(turn, "raw_meta", {}), "profile_source_role": source_role,
+                         "profile_id": profile.id}
+        return turn
 
     def complete_for_role(
         self,

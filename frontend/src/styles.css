@@ -2654,3 +2654,34 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 @media (max-width:900px){
   .copilot-settings-grid,.copilot-toggle-rows,.copilot-status-grid{grid-template-columns:1fr}
 }
+
+/* ---- V3.1 任务级一次授权卡片 -------------------------------------------- */
+.copilot-grant{margin:9px 0 0;padding:10px 11px;border:1px solid var(--line-2);border-radius:9px;background:var(--surface-2)}
+.copilot-grant-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.copilot-grant-stage{display:inline-flex;align-items:center;gap:5px;font-size:var(--fs-caption);font-weight:600}
+.copilot-grant-stage.tone-busy{color:var(--olive-dark)}
+.copilot-grant-stage.tone-good{color:var(--ok)}
+.copilot-grant-stage.tone-warn{color:var(--sand-ink)}
+.copilot-grant-stage.tone-bad{color:var(--danger-deep)}
+.copilot-grant-objective{margin:6px 0 0;font-size:var(--fs-caption);color:var(--ink);line-height:1.6}
+.copilot-grant-body{margin-top:7px;font-size:var(--fs-caption);color:var(--ink-2);line-height:1.6}
+.copilot-grant-body h4{margin:9px 0 3px;font-size:var(--fs-caption);color:var(--ink)}
+.copilot-grant-body ul{margin:0;padding-left:18px}
+.copilot-grant-body li{margin:2px 0}
+.copilot-grant-risks{margin:7px 0 0;padding:6px 8px;border-radius:6px;background:var(--sand-bg);color:var(--sand-ink)}
+.copilot-grant-model{margin:8px 0 0;color:var(--muted)}
+.copilot-grant-authorize{display:inline-flex;align-items:center;justify-content:center;gap:6px;width:100%;min-height:34px;margin-top:10px}
+.copilot-grant-error{margin:6px 0 0;color:var(--danger-deep);font-size:var(--fs-caption);line-height:1.55}
+.copilot-grant-status{margin:6px 0 0;font-weight:600;color:var(--ink)}
+.copilot-grant-final{margin:6px 0 0;line-height:1.6}
+.copilot-grant-steps{margin:7px 0 0;padding-left:18px}
+.copilot-grant-steps li{margin:3px 0;display:flex;gap:6px;flex-wrap:wrap}
+.copilot-grant-steps li em{font-style:normal;color:var(--muted)}
+.copilot-grant-steps li[data-satisfied="true"] em{color:var(--ok)}
+.copilot-grant-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:9px}
+.copilot-grant-actions .link{display:inline-flex;align-items:center;gap:4px;padding:0;border:none;background:none;color:var(--olive-dark);font-size:var(--fs-caption);cursor:pointer}
+.copilot-grant-details{margin-top:8px;padding-top:7px;border-top:1px dashed var(--line-2)}
+.copilot-grant-details dl{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0;font-size:var(--fs-caption)}
+.copilot-grant-details dt{color:var(--muted)}
+.copilot-grant-details dd{margin:0;word-break:break-all;font-family:var(--mono)}
+.copilot-grant-loading{display:flex;align-items:center;gap:6px;margin:7px 0 0;font-size:var(--fs-caption);color:var(--muted)}

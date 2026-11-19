@@ -17,6 +17,7 @@ import inspect
 import types
 from collections.abc import Callable
 from dataclasses import replace
+from enum import Enum
 from typing import Annotated, Any, Literal, Union, get_args, get_origin
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
@@ -223,6 +224,25 @@ def _generic_value(spec: ParamSpec, value: Any) -> Any:
     return value.strip() if spec.name in {"title", "language", "filename", "name"} else value
 
 
+def _coerce_enum(field, value: Any) -> Any:
+    """Let a JSON string reach a ``StrEnum`` request field.
+
+    The request models declare ``GenerationMode`` and friends, and the HTTP
+    layer receives them as strings.  Strict mode is right for the *shape*
+    (a list is not a string) but an enum member is legitimately identified by
+    its value, so the scalar is converted here instead of loosening the whole
+    adapter.  An unknown value stays a named parameter error.
+    """
+    annotation, _optional = _unwrap_optional(getattr(field, "annotation", Any))
+    if isinstance(value, str) and isinstance(annotation, type) and issubclass(annotation, Enum):
+        try:
+            return annotation(value)
+        except ValueError as exc:
+            allowed = ", ".join(str(member.value) for member in annotation)
+            raise ParamError(f"必须是 {allowed} 之一。") from exc
+    return value
+
+
 def _value_for(row: CapabilityDeclaration, spec: ParamSpec, value: Any) -> Any:
     adapter = _EXPLICIT_VALIDATORS.get((row.action_id, spec.name)) or _EXPLICIT_VALIDATORS.get(
         (None, spec.name)
@@ -234,6 +254,7 @@ def _value_for(row: CapabilityDeclaration, spec: ParamSpec, value: Any) -> Any:
     field = _field_for(row, spec.name)
     if field is None:
         return _generic_value(spec, value)
+    value = _coerce_enum(field, value)
     try:
         validated = _adapter_for(field).validate_python(value)
     except ValidationError as exc:

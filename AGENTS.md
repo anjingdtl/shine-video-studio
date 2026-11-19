@@ -2112,3 +2112,36 @@ hand-maintained lists. When you add or change a product capability:
   （三类真实小样 + 五模式出图，指纹 `ede62ef0…`）。证据
   `docs/ACCEPTANCE_20261119_IMAGE_FOUND_RUNNABLE_CONVERGENCE.md`。
   本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
+
+## 2026-11-19 Copilot V3.1 — 任务级一次授权（硬约束，不得绕开）
+
+V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权内的自主运维」。以下每条都是**结构约束**，
+不是文案要求；违反任意一条即视为回退到 V2 的逐项点击模型。
+
+1. **唯一授权事实**：`SupportDelegation.payload["grant"]`（`shine.copilot.task-grant.v1`）是任务授权的唯一事实。
+   `SupportDelegation.grant_id / grant_digest / expires_at / budget_version` 是它的列级投影。
+   禁止为 AI 另建授权表、预算表或任务表。
+2. **唯一写入口**：`shine.support.grants` 是 grant 的唯一写入者；`shine.support.actions.execute_under_grant`
+   是唯一自主执行入口。两者都不执行任何业务动作本身。
+3. **不跳过原校验**：`execute_under_grant` 必须先调 `preview_action`（快照、目标指纹、能力合同、原 Pydantic 参数），
+   再调 `approve_action`（二次校验 + 原子 claim），最后用 `refresh_action` 回读。任何让子动作"直接执行"的改动都是缺陷。
+4. **权限来源**：`effective = actor ∩ grant.permissions ∩ capability_contract ∩ original_executor_policy`。
+   `modify_source_code / arbitrary_shell / arbitrary_http / delete_user_assets` 永久为 false，不接受任何输入开启。
+5. **能力目录一致**：`copilot/task_grant.py::CAPABILITY_PERMISSIONS` 的每个键都必须在
+   `copilot/declarations.py::WRITE_ACTIONS` 里有声明。没有声明、没有执行器的名字不得出现（否则预览会列出假能力）。
+6. **模型只提议**：模型输出 `ToolIntent` 或原生 `tool_calls`，永不携带权限。工具名必须是已注册能力；
+   未注册即 `TOOL_NOT_DECLARED` 并计入无进展。禁用 `eval/exec` 解释模型文本。
+7. **成功只来自原裁决**：`SUCCEEDED` 仅在存在原任务回执（`verification.outcome ∈ {VERIFIED, PLAN_FROZEN, ...}`）时给出。
+   模型说"做完了"但无回执 → `PAUSED_USER_DECISION / NO_AUTHORITATIVE_EVIDENCE`。
+   `REGISTERED_NOT_EXECUTABLE`、`UNKNOWN`、`NEEDS_REVIEW` 一律停止并保留现场，不得重提。
+8. **有界**：`copilot/tool_loop.py` 必须有步数、墙钟、工具调用次数、无进展四道上限，且都由 grant 预算或 `LoopLimits` 提供。
+   禁止无上限循环。
+9. **LLM 继承**：`support_agent` 显式路由优先；没有路由时按 `ROLE_INHERITANCE` 继承已配置的文本模型。
+   不得要求用户为管家重新输入 API Key 或新建 ProviderProfile。
+10. **两条传输，一个裁决**：原生 tool calling（OpenAI 兼容 / Anthropic）与结构化 JSON 意图都必须汇入
+    `execute_under_grant`。provider 拒绝 `tools` 形状时降级并记录 `degraded_reason`，不得静默失败。
+11. **构建产物同步**：新增/修改能力声明或路由后必须重新生成 `backend/shine/support/generated/copilot_contracts.json`
+    与 `knowledge_manifest.json`（`python -m scripts.generate_shine_copilot_contracts`，开发检出**不要**带 `--commit`）。
+12. **测试**：`backend/tests/test_copilot_task_grant_v31.py`（授权合同）、`test_copilot_grant_execution_v31.py`（执行链）、
+    `test_copilot_tool_loop_v31.py`（循环与有界）、`test_copilot_llm_tools_v31.py`（继承与工具协议）
+    与 `frontend/src/test/taskGrantCard.test.tsx` 是本轮回归基线，不得删除或弱化断言。

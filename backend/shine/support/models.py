@@ -64,13 +64,26 @@ class SupportMessage(Base):
 
 class SupportAction(Base):
     __tablename__ = "support_actions"
-    __table_args__ = (UniqueConstraint("request_identity", name="uq_support_action_identity"),)
+    __table_args__ = (
+        UniqueConstraint("request_identity", name="uq_support_action_identity"),
+        # V3.1: one tool call inside one task grant is one action.  The index is
+        # partial in effect - legacy rows leave the key NULL - so old data and
+        # the per-click flow keep their original uniqueness rule.
+        UniqueConstraint("grant_tool_key", name="uq_support_action_grant_tool"),
+        Index("ix_support_actions_grant", "grant_id", "created_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     kind: Mapped[str] = mapped_column(String(48), nullable=False)
     status: Mapped[str] = mapped_column(String(24), default="PREVIEWED", nullable=False)
+    #: The one task grant this action was executed under, when it was executed
+    #: autonomously.  An action approved by a click keeps these NULL, so the
+    #: two authorization modes stay distinguishable in the audit trail.
+    grant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_call_id: Mapped[str | None] = mapped_column(String(96), nullable=True)
+    grant_tool_key: Mapped[str | None] = mapped_column(String(96), nullable=True)
     #: Stable identity of the requested change (kind + params + actor + project).
     request_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     #: Monotonic attempt for that request key.  A terminal action never blocks a
@@ -99,12 +112,19 @@ class SupportDelegation(Base):
 
     This is authorization metadata, not a second production system: every step
     is still executed by ``support.actions`` through the original executor.
+
+    V3.1 adds the *task grant* envelope: ``payload["grant"]`` holds the frozen
+    boundary (objective, scope, permissions, limits, validity) and
+    ``budget_version`` is the optimistic lock used to reserve budget atomically
+    without a second ledger table.  A V2 delegation simply has no ``grant``
+    key and keeps its original plan-walking behaviour.
     """
 
     __tablename__ = "support_delegations"
     __table_args__ = (
         UniqueConstraint("authorization_key", name="uq_support_delegation_authorization"),
         Index("ix_support_delegations_session_created", "session_id", "created_at"),
+        Index("ix_support_delegations_grant", "grant_id", "status"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
@@ -118,6 +138,13 @@ class SupportDelegation(Base):
     stop_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     waiting_action_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    #: V3.1 task grant identity.  ``grant_id`` is also the idempotency anchor of
+    #: the one user click; ``grant_digest`` is the frozen boundary hash.
+    grant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    grant_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    #: Optimistic concurrency for the budget ledger inside ``payload``.
+    budget_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 

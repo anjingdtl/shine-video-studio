@@ -164,6 +164,52 @@ class AnthropicMessagesProvider:
                       "http_status": response.status_code},
         )
 
+    def complete_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        tools: list[dict[str, Any]],
+        tool_choice: str = "auto",
+        options_override: dict[str, Any] | None = None,
+        system: str = "",
+    ) -> dict[str, Any]:
+        """One native tool-use turn over the same Messages transport.
+
+        ``messages`` here are already in Anthropic's block shape; the copilot
+        builds them so a ``tool_result`` block can answer a previous
+        ``tool_use``.  No vendor SDK is introduced.
+        """
+        started = time.perf_counter()
+        payload: dict[str, Any] = {
+            "model": self.config.model,
+            "max_tokens": _max_tokens_for(config=self.config),
+            "temperature": self.config.temperature,
+            "messages": messages,
+            "tools": tools,
+            "tool_choice": {"type": tool_choice},
+            **(options_override or {}),
+        }
+        if system:
+            payload["system"] = system
+        response = self._post(payload)
+        try:
+            body = response.json()
+        except (json.JSONDecodeError, ValueError) as exc:
+            raise LLMFormatError(
+                "Anthropic returned a non-JSON response",
+                details={"status": response.status_code},
+            ) from exc
+        if not isinstance(body, dict):
+            raise LLMFormatError(
+                "Anthropic returned a malformed completion",
+                details={"status": response.status_code},
+            )
+        return {
+            "body": body,
+            "http_status": response.status_code,
+            "latency_ms": int((time.perf_counter() - started) * 1000),
+        }
+
     def detect_capabilities(self) -> dict[str, Any]:
         base = self.config.base_url.rstrip("/")
         url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
