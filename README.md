@@ -157,11 +157,29 @@ are preserved. This is not a declaration of final film-quality acceptance.
 
 Requirements: Python 3.12, Astral `uv`, Node.js 20+ and npm. FFmpeg/FFprobe are optional but required for decode and silence QC. No API key, GPU, ComfyUI, or Codex runtime is needed for the Mock workflow.
 
-On Windows, double-click `启动 Shine 工作台.cmd`. With the required tools installed,
-the launcher synchronizes the pinned dependencies on first use. You can also start
-or stop the same stack from PowerShell in the repository:
+On Windows, double-click `启动 Shine 工作台.cmd`. The one entry runs the whole
+cycle in order: check this checkout against its upstream, stop the running stack
+only when the code really moved, then start. With the required tools installed,
+the launcher also synchronizes the pinned dependencies on first use.
+
+The update step is conservative by design and never blocks a start:
+
+| Situation | What the entry does |
+| --- | --- |
+| Branch is current | starts without stopping anything |
+| Branch is behind and clean | fast-forwards, stops the old stack, starts the new code |
+| Tracked files are modified | skips the update, starts your local code untouched |
+| Local and remote diverged | skips the update, starts your local code |
+| Offline or proxy down (15 s budget) | starts the local code |
+| No `.git` (zip or packaged copy) | starts the local code, exactly as before |
+
+It never merges, resets or stashes. Run `scripts/update_checkout.ps1 -Check` to
+see the decision without changing anything. A manual pull needs a stop first,
+because a running stack keeps serving the old code:
 
 ```powershell
+./scripts/stop_shine.ps1
+git pull --ff-only
 ./scripts/start_shine.ps1 -AutoPorts -OpenBrowser
 ./scripts/check_health.ps1
 # To stop:
