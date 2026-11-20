@@ -764,30 +764,11 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
     units = state["units"]
     cursor = state.get("cursor", 0)
     blocked = state.get("blocked_episodes", {})
-    fit_closed = dict(state.get("fit_closed_episodes") or {})
-    target = state.get("target_seconds")
-    if target is not None:
-        # The confirmed per-episode seconds are the cause: once an episode's
-        # landed shots reach the goal, its remaining units are out of scope and
-        # must not buy more model calls.
-        from shine.director.contracts import planned_seconds
-        from shine.models import Shot
-
-        with factory() as db:
-            for ep_id in {u["episode_id"] for u in units}:
-                if ep_id in fit_closed or ep_id in blocked:
-                    continue
-                landed = 0.0
-                for result in state.get("results", []):
-                    if (result.get("unit") or {}).get("episode_id") != ep_id:
-                        continue
-                    for sid in (result.get("apply") or {}).get("shot_ids", []):
-                        shot = db.get(Shot, sid)
-                        if shot is not None and shot.project_id == project_id:
-                            landed += planned_seconds(shot)
-                if landed >= float(target):
-                    fit_closed[ep_id] = {"landed_seconds": round(landed, 1)}
-    state = {**state, "fit_closed_episodes": fit_closed}
+    # The confirmed per-episode seconds are the cause: once an episode's
+    # landed shots reach the goal, its remaining units are out of scope and
+    # must not buy more model calls.
+    state = _update_fit_closed_episodes(factory, project_id, state)
+    fit_closed = state.get("fit_closed_episodes") or {}
     # Skip units whose episode already failed or reached its confirmed target:
     # an independent episode continues.
     while cursor < len(units) and (units[cursor]["episode_id"] in blocked
@@ -980,6 +961,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
              "resume_steps": {}, "pending_landing": None,
              "results": [*state.get("results", []),
                          {"unit": unit, "storyboard": result, "apply": applied}]}
+    state = _update_fit_closed_episodes(factory, project_id, state)
     _finish_step(factory, task_id, version, worker_id, state)
     # Confirm only after the landed unit is durable in the run trace: the episode
     # coverage gate reads its shots from that trace, not from this local state.
@@ -1211,9 +1193,14 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
                if section is not None else {}),
         })
     episodes: list[dict] = []
+    fit_closed_episodes = trace.get("fit_closed_episodes") or {}
     plan = _latest_plan(db, project_id)
     plan_payload = (plan.payload or {}) if plan is not None else {}
     if plan is not None and plan_payload.get("mode") == "sections":
+        from shine.director.contracts import duration_target_verdict, planned_seconds
+
+        plan_target = float(plan.target_seconds)
+        plan_tolerance = float(plan.tolerance_seconds)
         for order, episode in enumerate(plan_payload.get("episodes", []), start=1):
             episode_id = episode.get("episode_id")
             scenes = episode_scene_facts(db, project_id, episode, section_index)
@@ -1237,9 +1224,22 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
                     sec["state"] = "IN_PROGRESS"
             shot_ids = [sid for sec in scenes for sid in sec["shot_ids"]]
             active = [sec for sec in scenes if sec["state"] != "MERGED"]
+            pending_count = sum(1 for sec in active if not sec["shot_count"])
+            fit_closed = episode_id in fit_closed_episodes
+            if (not fit_closed and pending_count > 0 and shot_ids and marker is None
+                    and row.status in {"SUCCEEDED", "NEEDS_REVIEW", "PAUSED"}):
+                ep_shots = [s for s in (db.get(Shot, sid) for sid in shot_ids)
+                            if s is not None and s.project_id == project_id]
+                ep_total = sum(planned_seconds(s) for s in ep_shots)
+                if ep_total >= plan_target or duration_target_verdict(ep_total, plan_target, plan_tolerance) is None:
+                    fit_closed = True
+            if fit_closed:
+                for sec in scenes:
+                    if sec["state"] == "IN_PROGRESS" and sec["shot_count"] > 0:
+                        sec["state"] = "APPLIED"
             if marker is not None:
                 status = "BLOCKED"
-            elif active and all(sec["shot_count"] for sec in active):
+            elif (active and all(sec["shot_count"] for sec in active)) or (fit_closed and shot_ids):
                 status = "APPLIED"
             elif shot_ids:
                 status = "IN_PROGRESS"
@@ -1248,9 +1248,10 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
             episodes.append({
                 "episode_id": episode_id, "order": order,
                 "units": ep_units, "shot_ids": shot_ids, "status": status,
+                "fit_closed": fit_closed,
                 "blocker": marker, "sections": scenes,
                 "landed_shot_count": len(shot_ids),
-                "pending_section_count": sum(1 for sec in active if not sec["shot_count"]),
+                "pending_section_count": pending_count,
             })
     else:
         # Legacy shots-mode runs: the trace is the only membership evidence.
@@ -1397,10 +1398,6 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
         for sid in resolved["shot_ids"]:
             section_of_shot[sid] = section_id
         shot_ids.extend(resolved["shot_ids"])
-    if pending and not fit_target:
-        raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
-                                  "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
-                                  "pending": pending[:50]})
     # The landed total is checked against the same target window the plan was
     # confirmed under: the crew aims for the goal, and the person confirms an
     # episode that actually reaches it (or explicitly accepts the deviation).
@@ -1412,14 +1409,29 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     actual_total = sum(planned_seconds(s) for s in ordered_shots)
     duration_verdict = duration_target_verdict(
         actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
+    latest_run = db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
+    ).order_by(AgentTaskRecord.created_at.desc())).first()
+    run_fit_closed = bool(
+        latest_run is not None
+        and episode_id in ((latest_run.trace or {}).get("fit_closed_episodes") or {})
+    )
+    target_reached = bool(shot_ids) and (
+        run_fit_closed or duration_verdict is None or actual_total >= float(payload.target_seconds)
+    )
+    if pending and not fit_target and not target_reached:
+        raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
+                                  "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
+                                  "pending": pending[:50]})
     out_of_scope = list(payload.out_of_scope_section_ids)
     kept_sections = list(target.section_ids)
-    if fit_target:
-        if not shot_ids:
+    if fit_target or (target_reached and pending):
+        if fit_target and not shot_ids:
             raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                       "message": "本集还没有落镜，没有可按目标确认的内容",
                                       "episode_id": episode_id})
-        if duration_verdict and ordered_shots:
+        if fit_target and duration_verdict and ordered_shots:
             fit = derive_episode_plan(
                 ordered_shots, target_seconds=payload.target_seconds,
                 tolerance_seconds=payload.tolerance_seconds)
@@ -1429,13 +1441,20 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
             duration_verdict = duration_target_verdict(
                 actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
         selected_sections = {section_of_shot[sid] for sid in shot_ids}
-        out_of_scope += [sid for sid in target.section_ids
-                         if sid not in selected_sections and sid not in merged_sections
-                         and sid not in out_of_scope]
         kept_sections = [sid for sid in target.section_ids
                          if sid in selected_sections or sid in merged_sections]
-        out_of_scope += [row["section_id"] for row in pending
-                         if row["section_id"] not in out_of_scope]
+        unproduced = [
+            sid for sid in target.section_ids
+            if sid not in selected_sections and sid not in merged_sections and sid not in out_of_scope
+        ]
+        if fit_target:
+            out_of_scope += unproduced
+        out_of_scope += [
+            row["section_id"] for row in pending
+            if row["section_id"] not in selected_sections
+            and row["section_id"] not in merged_sections
+            and row["section_id"] not in out_of_scope
+        ]
     if duration_verdict and not acknowledge_duration_deviation:
         raise HTTPException(409, {**duration_verdict,
                                   "code": "EPISODE_DURATION_OUT_OF_TARGET",

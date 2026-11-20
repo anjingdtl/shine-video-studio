@@ -1672,6 +1672,7 @@ export type EpisodeStoryboardState = {
                    section_order?: number; section_title?: string }>;
     shot_ids: string[];
     status: 'PENDING' | 'IN_PROGRESS' | 'APPLIED' | 'BLOCKED' | string;
+    fit_closed?: boolean;
     sections?: Array<{ production_section_id: string; section_order?: number;
                        section_title?: string; shot_count: number; state: string;
                        unit_count: number; applied_count: number }>;

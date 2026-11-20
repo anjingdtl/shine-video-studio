@@ -614,19 +614,43 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
 
   const episodes = state?.episodes ?? [];
   const railPresent = useRailPresent();
+  const episodeShotCount = (row: EpisodeStoryboardState['episodes'][number]) =>
+    tables[row.episode_id]?.shots.length ?? row.landed_shot_count ?? row.shot_ids.length;
   const readyCount = episodes.filter((row) => confirmedEpisodes[row.episode_id]).length;
   // 操作栏必须名实一致：全部集都已确认且没有待重新确认的新拆镜时，没有「未确认
   // 的场次」可再跑，主操作应是去旅程的下一步（拍摄素材准备），而不是挂一个空跑
   // 的再跑按钮，也不能跳过素材准备直接去导演包。
   const allConfirmed = episodes.length > 0 && readyCount === episodes.length
     && !episodes.some((row) => tables[row.episode_id]?.stale);
-  // 提示必须名实一致：只有真的存在可确认的集，才承诺「先处理已完成的集」；
-  // 否则给出真实出口（范围由②决定），不挂虚假选择。
-  const confirmableCount = episodes.filter((row) =>
-    (row.status === 'APPLIED' && !confirmedEpisodes[row.episode_id])
-    || tables[row.episode_id]?.stale).length;
-  const landedTotal = episodes.reduce((sum, row) =>
-    sum + (tables[row.episode_id]?.shots.length ?? row.shot_ids.length), 0);
+  // 一套事实、一个裁决：已落镜或达到②目标秒数停跑（fit_closed）且尚未确认（或有新拆镜待重确认）的集，
+  // 才属于待确认集；右边框体与每集按钮共享同一份可确认清单与同一个确认执行者。
+  const confirmableEpisodes = episodes.filter((row) => {
+    if (episodeShotCount(row) <= 0) return false;
+    if (tables[row.episode_id]?.stale) return true;
+    if (confirmedEpisodes[row.episode_id]) return false;
+    return row.status === 'APPLIED' || Boolean(row.fit_closed);
+  });
+  const confirmableCount = confirmableEpisodes.length;
+  const landedTotal = episodes.reduce((sum, row) => sum + episodeShotCount(row), 0);
+  const confirmAllReady = () =>
+    act('confirm-all', async () => {
+      for (const episode of confirmableEpisodes) {
+        const table = tables[episode.episode_id];
+        const fitTarget = Boolean(table?.targetFit || episode.fit_closed);
+        try {
+          await confirmEpisodeShots(projectId, episode.episode_id, false, fitTarget);
+        } catch (error) {
+          if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
+            setDurationDeviation({ episodeId: episode.episode_id, text: error.message });
+          }
+          throw error;
+        }
+      }
+      setDurationDeviation(null);
+      onJourneyRefresh?.();
+    }, confirmableEpisodes.length > 1
+      ? `已确认全部 ${confirmableEpisodes.length} 集落镜。`
+      : `第 ${confirmableEpisodes[0]?.order ?? confirmableEpisodes[0]?.episode_id} 集镜头已落定。`);
   const resumeRun = () => {
     const id = state?.task_id; const version = state?.state_version ?? 0;
     if (!id) return;
@@ -635,8 +659,8 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     }, '后台分镜已继续。');
   };
   const blockedEpisode = episodes.find((row) => row.status === 'BLOCKED' && row.blocker);
-  // 主按钮与页内按钮共用同一执行者：暂停→继续；被阻塞且未知→核对+授权重发+重试；
-  // 不挂名实不符的空跑按钮。
+  // 主按钮与页内按钮共用同一执行者：暂停→继续；全确认→去素材准备；
+  // 已有可确认落镜→确认全部落镜（不误报「再跑一遍」）；被阻塞且未知→核对+授权重发+重试。
   const primary: RailAction | null = running
     ? null
     : state?.status === 'PAUSED'
@@ -650,8 +674,13 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                 blockedEpisode.blocker?.reconcile_task_id ?? blockedEpisode.blocker?.failed_task_id ?? null,
                 blockedEpisode.blocker?.reconcile_state_version ?? 0),
               loading: busy === `reconcile-${blockedEpisode.episode_id}`, icon: <ShieldCheck size={14} /> }
-          : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
-              loading: busy === 'generate', icon: <Sparkles size={14} /> };
+          : confirmableEpisodes.length > 0 && !blockedEpisode
+            ? { label: confirmableEpisodes.length > 1
+                  ? `确认全部已落镜（${confirmableEpisodes.length} 集）`
+                  : `确认全部已落镜（第 ${confirmableEpisodes[0].order ?? confirmableEpisodes[0].episode_id} 集）`,
+                onClick: confirmAllReady, loading: busy === 'confirm-all', icon: <Check size={14} /> }
+            : { label: state?.task_id ? '再跑一遍（未确认的场次）' : '生成分镜', onClick: generate,
+                loading: busy === 'generate', icon: <Sparkles size={14} /> };
   useStageRail('episode-storyboard', {
     priority: 1,
     primary,
@@ -905,18 +934,18 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
             <Check size={13} /> 按②目标确认（取前 {table.targetFit.shot_count} 镜 · {
               Math.round(table.targetFit.seconds)} 秒）
           </button>}
-          {applied && !confirmedVersion && <button type="button"
+          {(applied || episode.fit_closed) && !confirmedVersion && <button type="button"
             className={table?.targetFit ? 'btn-secondary' : 'btn-primary'}
-            disabled={busy !== '' || !table?.shots.length}
-            onClick={() => confirmEpisode(episode.episode_id)}>
-            <Check size={13} /> 确认全部落镜（{table?.shots.length ?? 0} 镜）
+            disabled={busy !== '' || episodeShotCount(episode) === 0}
+            onClick={() => confirmEpisode(episode.episode_id, false, Boolean(episode.fit_closed))}>
+            <Check size={13} /> 确认全部落镜（{episodeShotCount(episode)} 镜）
           </button>}
           {confirmedVersion && table?.stale && <div className="notice" role="alert">
-            <p>最新拆镜落了 {table.shots.length} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
+            <p>最新拆镜落了 {episodeShotCount(episode)} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
               重新确认本集才会用新镜头替换旧确认；旧镜头与已出片产物作为历史保留，不会被改写。</p>
-            <button type="button" className="btn-primary" disabled={busy !== '' || !table.shots.length}
-              onClick={() => confirmEpisode(episode.episode_id)}>
-              <Check size={13} /> 重新确认本集（采用最新 {table.shots.length} 镜）
+            <button type="button" className="btn-primary" disabled={busy !== '' || episodeShotCount(episode) === 0}
+              onClick={() => confirmEpisode(episode.episode_id, false, Boolean(episode.fit_closed))}>
+              <Check size={13} /> 重新确认本集（采用最新 {episodeShotCount(episode)} 镜）
             </button>
           </div>}
           {durationDeviation?.episodeId === episode.episode_id && <div className="notice" role="alert">

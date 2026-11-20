@@ -14,6 +14,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { EpisodeStoryboardPanel } from '../components/StreamlinePanels';
+import { StageRailProvider } from '../components/StageRail';
 import { StudioStub, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
@@ -305,5 +306,69 @@ describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确
     expect(await screen.findByRole('button', { name: '去素材准备' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /再跑一遍（未确认的场次）/ })).toBeNull();
     expect(screen.queryByRole('button', { name: '去导演包' })).toBeNull();
+  });
+
+  it('两集都已落镜达标但未确认时，右栏提供确认入口而非「再跑一遍」，且每集按钮可点击', async () => {
+    const ep1Shots = [liveShot('ep1-s1', 1), liveShot('ep1-s2', 2)];
+    const ep2Shots = [liveShot('ep2-s1', 1), liveShot('ep2-s2', 2)];
+    const confirmedMap: Record<string, string[]> = {};
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/state$/,
+      respond: () => jsonResponse({
+        task_id: 'run-1', status: 'SUCCEEDED', state_version: 5, cursor: 4, total_units: 4,
+        episodes: [
+          { episode_id: 'ep-01', order: 1, units: [], shot_ids: ['ep1-s1', 'ep1-s2'],
+            status: 'APPLIED', fit_closed: true, landed_shot_count: 2 },
+          { episode_id: 'ep-02', order: 2, units: [], shot_ids: ['ep2-s1', 'ep2-s2'],
+            status: 'APPLIED', fit_closed: false, landed_shot_count: 2 },
+        ],
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/shots$/,
+      respond: () => jsonResponse({
+        episode_id: 'ep-01', shots: ep1Shots, total_editorial_seconds: 60, shot_count: 2,
+        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null, target_fit: null,
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-02\/shots$/,
+      respond: () => jsonResponse({
+        episode_id: 'ep-02', shots: ep2Shots, total_editorial_seconds: 60, shot_count: 2,
+        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null, target_fit: null,
+      }) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/episode-plans$/,
+      respond: () => jsonResponse([{
+        version: Object.keys(confirmedMap).length + 1, status: 'CONFIRMED',
+        payload: {
+          episodes: [
+            { episode_id: 'ep-01', shot_ids: confirmedMap['ep-01'] ?? [] },
+            { episode_id: 'ep-02', shot_ids: confirmedMap['ep-02'] ?? [] },
+          ],
+        },
+      }]) });
+    stub.add({ method: 'POST', pattern: /projects\/p1\/director\/storyboard\/episodes\/(ep-0\d)\/confirm$/,
+      respond: (url) => {
+        const epId = /episodes\/(ep-0\d)\/confirm/.exec(url)?.[1] ?? '';
+        confirmedMap[epId] = epId === 'ep-01' ? ['ep1-s1', 'ep1-s2'] : ['ep2-s1', 'ep2-s2'];
+        return jsonResponse({ plan_version: 2, episode_id: epId, shot_ids: confirmedMap[epId] });
+      } });
+
+    render(
+      <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解">
+        <EpisodeStoryboardPanel projectId={PROJECT} />
+      </StageRailProvider>,
+    );
+
+    const railConfirm = await screen.findByRole('button', { name: '确认全部已落镜（2 集）' });
+    expect(railConfirm).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /再跑一遍（未确认的场次）/ })).toBeNull();
+    const perEpisodeButtons = screen.getAllByRole('button', { name: /确认全部落镜（2 镜）/ });
+    expect(perEpisodeButtons).toHaveLength(2);
+    perEpisodeButtons.forEach((btn) => expect(btn).toBeEnabled());
+
+    await userEvent.setup().click(railConfirm);
+    await waitFor(() => {
+      expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)).toHaveLength(1);
+      expect(stub.callsOf('POST', /episodes\/ep-02\/confirm$/)).toHaveLength(1);
+    });
+    expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[0].body).toMatchObject({ fit_target: true });
+    expect(stub.callsOf('POST', /episodes\/ep-02\/confirm$/)[0].body).toMatchObject({ fit_target: false });
+    expect(await screen.findByRole('button', { name: '去素材准备' })).toBeInTheDocument();
   });
 });

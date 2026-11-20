@@ -133,3 +133,136 @@ def test_manual_episode_confirm_enforces_the_goal_but_auto_confirm_proceeds(api)
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
         json={"acknowledge_duration_deviation": True}, headers=LOCAL)
     assert accepted.status_code == 200, accepted.text
+
+
+def test_fit_closed_episode_is_applied_and_confirmable(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4, section_seconds=30)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+
+    # Simulate an episode that stopped early after hitting target_seconds (fit_closed)
+    # before its second section ran: it must surface as APPLIED (not IN_PROGRESS)
+    # and allow confirmation without rejecting the skipped section.
+    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL).json()
+    task_id = queued["task_id"]
+
+    from shine.llm.gateway import LLMGateway
+    from shine.llm.secrets import SecretStore
+    from shine.models import AgentTaskRecord
+    from tests.test_director_streamline import _chain_responder
+
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
+
+    # Run only the first unit (sec-01 of ep-01), then mark ep-01 fit_closed with 60s
+    # while leaving sec-02 un-run.
+    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
+    with factory.begin() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        trace = dict(task.trace)
+        trace["fit_closed_episodes"] = {"ep-01": {"landed_seconds": 60.0}}
+        task.trace = trace
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    ep1 = next(ep for ep in state["episodes"] if ep["episode_id"] == "ep-01")
+    assert ep1["fit_closed"] is True
+    assert ep1["status"] == "APPLIED"
+    assert ep1["shot_ids"]
+
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
+
+
+def test_target_window_reached_episode_confirms_without_fit_closed_trace(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4, section_seconds=10)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=20, tolerance_seconds=10)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+
+    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL).json()
+    task_id = queued["task_id"]
+
+    from shine.llm.gateway import LLMGateway
+    from shine.llm.secrets import SecretStore
+    from shine.models import AgentTaskRecord
+    from tests.test_director_streamline import _chain_responder
+
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
+
+    # Land only sec-01 (13s, inside 20±10 window) and mark task SUCCEEDED without
+    # fit_closed_episodes in trace (simulating pre-fix persisted runs).
+    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
+    with factory.begin() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        trace = dict(task.trace)
+        trace.pop("fit_closed_episodes", None)
+        task.trace = trace
+        task.status = "SUCCEEDED"
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    ep1 = next(ep for ep in state["episodes"] if ep["episode_id"] == "ep-01")
+    assert ep1["fit_closed"] is True
+    assert ep1["status"] == "APPLIED"
+
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
+        json={}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
+
+
+def test_single_long_section_split_into_units_fit_closed_confirms(api):
+    """A single long section split into multiple units that stops early via fit_closed
+    must keep that section in kept_sections and NOT also list it in out_of_scope."""
+    client, factory, settings = api
+    from shine.llm.gateway import LLMGateway
+    from shine.llm.secrets import SecretStore
+    from tests.test_director_streamline import _approved_outline, _chain_responder, _document
+    from tests.test_film_crew import prepare
+
+    project, _style, _profile = prepare(
+        client, freeze=False, character_entity_id="老周", character_filename="老周.png")
+    # 2000 chars -> split into 2 units by segment_document(max_scene_chars=1200)
+    long_body = ("第1场\n老周把怀表贴近耳朵，又放回丝绒垫上。客人留下硬币，走进雨里。\n" + "。" * 1950 + "\n")
+    document = _document(client, project, "长场.txt", long_body)
+    _approved_outline(factory, project, document, [{
+        "production_section_id": "sec-01", "order": 1, "title": "第1场",
+        "estimated_duration_s": 400.0, "start_offset": 0, "end_offset": len(long_body),
+    }])
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=10, tolerance_seconds=5)
+    assert client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book/confirm",
+        json={"plan_version": book["plan_version"], "expected_sha256": book["plan_sha256"],
+              "style": {"profile_id": "wong-kar-wai", "film_type": "live_action"},
+              "acknowledge_deviation": True},
+        headers=LOCAL).status_code == 200
+
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
+    # Run first unit (13s >= target 10s), then next tick marks ep-01 fit_closed and skips unit 2.
+    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
+    streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    ep1 = state["episodes"][0]
+    assert ep1["fit_closed"] is True
+    assert ep1["status"] == "APPLIED"
+
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
+        json={"fit_target": True}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
+
+
