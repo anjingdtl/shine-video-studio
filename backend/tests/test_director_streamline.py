@@ -376,6 +376,23 @@ def test_outline_version_chain_tracks_draft_and_confirmed(api):
         resolved = basis.outline_for_document(db, project, document)
         assert resolved is not None and resolved.id == body["artifact_id"]
 
+    # The expert route can select an earlier approved revision. The director
+    # and journey must follow that recorded choice instead of creation order.
+    restored = client.post(
+        f"/api/v1/projects/{project}/story-preparation/outlines/{outline['id']}/confirm",
+        json={"expected_sha256": current["sha256"]},
+        headers=LOCAL,
+    )
+    assert restored.status_code == 200, restored.text
+    assert restored.json() == {"artifact_id": outline["id"], "approved": True}
+    current_view = client.get(f"/api/v1/projects/{project}/director/outline").json()
+    assert current_view["confirmed_artifact_id"] == outline["id"]
+    script_stage = next(
+        stage for stage in client.get(f"/api/v1/projects/{project}/journey").json()["stages"]
+        if stage["id"] == "script"
+    )
+    assert script_stage["done"] and script_stage["blockers"] == []
+    assert script_stage["facts"]["outline_artifact_id"] == outline["id"]
 
 # ---------------------------------------------------------------------------
 # ② storyboard book

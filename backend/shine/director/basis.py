@@ -26,7 +26,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.models import AgentArtifact, Project, ProjectDocument
+from shine.models import AgentArtifact, AppSetting, Project, ProjectDocument
 
 #: The task role the script section runner records under.
 SECTION_RUN_ROLE = "story_section_run"
@@ -68,6 +68,9 @@ def current_script_basis(db: Session, project: Project) -> dict[str, Any]:
 def outline_for_document(db: Session, project_id: str, document) -> AgentArtifact | None:
     """The confirmed outline of this document; a draft only if nothing was confirmed.
 
+    A document's confirmation pointer records the selected revision. For older
+    data without a usable pointer, fall back to the most recent approval.
+
     A saved-but-unconfirmed revision must not displace the confirmed basis:
     episodes, packages and the journey keep reading the last confirmed version
     until the person confirms the new one.  When no version was ever confirmed,
@@ -78,6 +81,10 @@ def outline_for_document(db: Session, project_id: str, document) -> AgentArtifac
     It cannot *claim* to belong to another script, so it stays usable as the
     legacy fallback; an outline that names a different document never is.
     """
+    if document is None:
+        return None
+    pointer = db.get(AppSetting, f"current-story-outline:{project_id}:{document.id}")
+    confirmed_id = (pointer.value or {}).get("artifact_id") if pointer else None
     rows = db.scalars(
         select(AgentArtifact)
         .where(
@@ -87,16 +94,20 @@ def outline_for_document(db: Session, project_id: str, document) -> AgentArtifac
         )
         .order_by(AgentArtifact.created_at.desc())
     ).all()
+    confirmed: AgentArtifact | None = None
     draft: AgentArtifact | None = None
     legacy_confirmed: AgentArtifact | None = None
     legacy_draft: AgentArtifact | None = None
     for row in rows:
         payload = row.payload_json or {}
         declared = payload.get("document_id")
-        if document is not None and declared == document.id:
+        if declared == document.id:
             if row.approved_at:
-                return row
-            if draft is None:
+                if row.id == confirmed_id:
+                    return row
+                if confirmed is None:
+                    confirmed = row
+            elif draft is None:
                 draft = row
         elif not declared:
             if row.approved_at:
@@ -104,9 +115,7 @@ def outline_for_document(db: Session, project_id: str, document) -> AgentArtifac
                     legacy_confirmed = row
             elif legacy_draft is None:
                 legacy_draft = row
-    if document is None:
-        return None
-    return legacy_confirmed or draft or legacy_draft
+    return confirmed or legacy_confirmed or draft or legacy_draft
 
 
 def confirmed_outline(db: Session, project: Project) -> AgentArtifact | None:

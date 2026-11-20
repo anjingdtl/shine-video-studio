@@ -25,7 +25,7 @@ from shine.llm.secrets import SecretStore
 from shine.materialprep import scenes, text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent
 from shine.materialprep.source_spans import HEADING, MAX_SCENE_CHARS, is_narrative_fragment, segment_document
-from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, ProviderProfile, utcnow
+from shine.models import AgentArtifact, AgentTaskRecord, Project, ProjectDocument, ProviderProfile, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit
 
@@ -1256,22 +1256,29 @@ def approved_outline_for(db, project_id: str, document_id: str | None = None):
     return rows[0] if rows else None
 
 
+def require_story_document(db, project_id, document_id, expected_hash=None):
+    document = db.get(ProjectDocument, document_id)
+    if document is None or document.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
+    if expected_hash is not None and document.sha256 != expected_hash:
+        raise HTTPException(409, "STORY_DOCUMENT_CHANGED")
+    return document
+
+
 def confirm_outline_artifact(db, project_id, row, *, expected_sha256, acknowledge_questions_sha256,
-                             actor) -> dict:
-    """The one outline confirmation: sha gate, questions gate, invalidation.
-
-    Both the expert endpoint and the four-stage pipeline's volume route go
-    through this function, so the two entrances can never diverge.
-    """
-    from fastapi import HTTPException
-
+                             actor, select_as_basis=False, preserve_document_errors=False) -> dict:
+    """Confirm an outline revision and, for project entry points, select its document."""
     if (row is None or row.project_id != project_id or row.kind != "StoryOutline" or row.stale
             or row.sha256 != expected_sha256 or row.sha256 != digest(row.payload_json)):
         raise HTTPException(409, "STORY_OUTLINE_CHANGED")
-    document = db.get(ProjectDocument, row.payload_json["document_id"])
-    if document is None or document.project_id != project_id \
-            or document.sha256 != row.payload_json.get("document_sha256"):
-        raise HTTPException(409, "STORY_OUTLINE_CHANGED")
+    try:
+        document = require_story_document(
+            db, project_id, row.payload_json["document_id"], row.payload_json.get("document_sha256") or "",
+        )
+    except HTTPException as exc:
+        if preserve_document_errors:
+            raise
+        raise HTTPException(409, "STORY_OUTLINE_CHANGED") from exc
     questions = list(row.payload_json.get("questions") or [])
     if questions:
         expected = digest({"artifact": row.id, "questions": questions})
@@ -1281,6 +1288,10 @@ def confirm_outline_artifact(db, project_id, row, *, expected_sha256, acknowledg
     if not was_approved:
         row.approved_by, row.approved_at = actor, utcnow()
     changed = select_outline_revision(db, project_id, row)
+    if select_as_basis:
+        project = db.get(Project, project_id)
+        if project is not None and project.current_document_id != document.id:
+            project.current_document_id = document.id
     if changed or not was_approved:
         add_audit(db, actor, "STORY_OUTLINE_CONFIRMED", "agent_artifact", row.id,
                   {"sha256": row.sha256, "invalidated_section_ids": changed,

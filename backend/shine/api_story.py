@@ -14,6 +14,7 @@ from shine.llm.base import LLMError
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import story
 from shine.materialprep.source_spans import segment_document
+from shine.materialprep.story import require_story_document as _document
 from shine.models import AgentArtifact, AgentTaskRecord, ProjectDocument, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit, require_project, switch_script_basis
@@ -26,15 +27,6 @@ class OutlineRequest(APIModel):
     expected_document_hash: str = Field(min_length=64, max_length=64)
     locked_facts: list[str] = Field(default_factory=list, max_length=100)
     pacing: Literal["compact", "balanced", "relaxed"] = "balanced"
-
-
-def _document(db, project_id, document_id, expected_hash=None):
-    document = db.get(ProjectDocument, document_id)
-    if document is None or document.project_id != project_id:
-        raise HTTPException(404, "MATERIAL_DOCUMENT_NOT_FOUND")
-    if expected_hash and document.sha256 != expected_hash:
-        raise HTTPException(409, "STORY_DOCUMENT_CHANGED")
-    return document
 
 
 class ScriptBasisRequest(APIModel):
@@ -225,35 +217,16 @@ class OutlineApproval(APIModel):
 @router.post("/projects/{project_id}/story-preparation/outlines/{artifact_id}/confirm")
 def confirm_outline(project_id: str, artifact_id: str, body: OutlineApproval, actor: Operator, db: DBSession):
     row = db.get(AgentArtifact, artifact_id)
-    if (row is None or row.project_id != project_id or row.kind != "StoryOutline" or row.stale
-            or row.sha256 != body.expected_sha256 or row.sha256 != digest(row.payload_json)):
-        raise HTTPException(409, "STORY_OUTLINE_CHANGED")
-    _document(db, project_id, row.payload_json["document_id"], row.payload_json["document_sha256"])
-    # Confirming an outline is an explicit choice of the script it was built
-    # from: that document becomes the project's production basis.  An upload
-    # that was never confirmed stays a candidate.
-    from shine.models import Project
-
-    project = db.get(Project, project_id)
-    if project is not None and project.current_document_id != row.payload_json["document_id"]:
-        project.current_document_id = row.payload_json["document_id"]
-    questions = list(row.payload_json.get("questions") or [])
-    if questions:
-        expected = digest({"artifact": row.id, "questions": questions})
-        if body.acknowledge_questions_sha256 != expected:
-            raise HTTPException(409, "STORY_OUTLINE_QUESTIONS_REQUIRE_FACTS")
-    was_approved = bool(row.approved_at)
-    if not was_approved:
-        row.approved_by, row.approved_at = actor, utcnow()
-    changed = story.select_outline_revision(db, project_id, row)
-    if changed or not was_approved:
-        add_audit(db, actor, "STORY_OUTLINE_CONFIRMED", "agent_artifact", row.id,
-                  {"sha256": row.sha256, "invalidated_section_ids": changed,
-                   # The artifact payload is immutable and stays checked against
-                   # its own digest, so the accepted ambiguity is recorded here.
-                   "questions_acknowledged": questions or None}, project_id=project_id)
+    result = story.confirm_outline_artifact(
+        db, project_id, row,
+        expected_sha256=body.expected_sha256,
+        acknowledge_questions_sha256=body.acknowledge_questions_sha256,
+        actor=actor,
+        select_as_basis=True,
+        preserve_document_errors=True,
+    )
     db.commit()
-    return {"artifact_id": row.id, "approved": True}
+    return {"artifact_id": result["artifact_id"], "approved": result["approved"]}
 
 
 class SectionRequest(APIModel):

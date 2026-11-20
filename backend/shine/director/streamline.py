@@ -207,17 +207,13 @@ def confirm_outline_director(db, project_id: str, artifact_id: str, expected_sha
         raise HTTPException(404, "STORY_OUTLINE_NOT_FOUND")
     questions = list(row.payload_json.get("questions") or [])
     acknowledge = digest({"artifact": row.id, "questions": questions}) if questions else None
-    result = confirm_outline_artifact(
+    return confirm_outline_artifact(
         db, project_id, row,
         expected_sha256=expected_sha256,
         acknowledge_questions_sha256=acknowledge,
         actor=actor,
+        select_as_basis=True,
     )
-    project = require_project(db, project_id)
-    document_id = row.payload_json.get("document_id")
-    if document_id and project.current_document_id != document_id:
-        project.current_document_id = document_id
-    return result
 
 
 # ---------------------------------------------------------------------------
