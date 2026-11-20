@@ -155,13 +155,8 @@ def _blocker(db, job, shot):
     )).all()
     if any(not _proven_pre_submit_mapping_failure(db, candidate) for candidate in unresolved):
         return "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
-    if db.scalar(select(ResourceLease.id).where(ResourceLease.status == "RECONCILE_REQUIRED")):
-        return "GPU_LEASE_RECONCILIATION_REQUIRED"
-    for series in db.scalars(select(ProductionSeries).join(ProductionSeriesItem).where(
-            ProductionSeriesItem.job_id == job.id)):
-        lease = db.get(ResourceLease, series.lease_id) if series.lease_id else None
-        if lease and lease.status != "RELEASED":
-            return "GPU_LEASE_RECONCILIATION_REQUIRED"
+    # 重拍入口只负责将新任务排入队列，GPU 独占仲裁由 ResourceScheduler 与 Worker
+    # 作为唯一执行者统一把守；用户暂停中片、或另一镜头尚待对账，都不阻断对已通过镜头排拍重做。
     return None
 
 
@@ -375,16 +370,14 @@ def regenerate(project_id: str, shot_id: str, body: SegmentAction, actor: Operat
     ), settings=resolve_runtime(db, request.app.state.settings), offline=request.app.state.settings.offline_simulation)
     binding_keys = ("style_version_id", "style_hash", "rulepack_id", "rulepack_hash", "prompt_skill_hash",
                     "workflow_profile_hash", "model_checkpoint_id", "reference_manifest", "shot_spec")
+    retired = bool(shot and source.shot_revision < shot.revision)
     if job is not None:
-        # A revision retake intentionally changes the shot spec (the user's
-        # edit); the render bindings (style/rulepack/workflow/masters) must
-        # still be identical.  Same-revision retakes keep the full comparison.
-        retired = source.shot_revision < shot.revision
-        keys = [k for k in binding_keys if not (retired and k == "shot_spec")]
+        # 修订重拍允许同时修正镜头规格与角色绑定（如剔除未出场角色）；同修订重拍仍锁死全套绑定。
+        keys = [k for k in binding_keys if not (retired and k in {"shot_spec", "reference_manifest"})]
         if any(source.request.get(k) != job.request.get(k) for k in keys):
             raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
         job.request_revision = source.request_revision + 1
-    else:
+    elif not retired:
         # A retake of a continuation shot waits for its source media, so the
         # Worker creates the job.  The masters it will use are compared here.
         source_masters = [r for r in (source.request.get("reference_manifest") or [])

@@ -188,6 +188,85 @@ it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注�
   const rail = screen.getByLabelText('本阶段操作');
   await user.click(within(rail).getByRole('button', { name: '生成分镜书' }));
   await waitFor(() => expect(bodies).toHaveLength(1));
-  expect(bodies[0]).toMatchObject({ episode_count: 3, target_seconds: 45 });
+  expect(bodies[0]).toMatchObject({ episode_count: 3, target_seconds: 45, tolerance_seconds: 11, max_shot_seconds: 15 });
+  stub.restore();
+});
+
+it('大纲超出设定集数时，显示当前覆盖章节、后续预计集数，并在重挂载后从服务端读回预览', async () => {
+  const scopedBook = {
+    plan_version: 2,
+    plan_sha256: 'f'.repeat(64),
+    status: 'DRAFT',
+    preview: {
+      mode: 'sections',
+      target_seconds: 60,
+      tolerance_seconds: 15,
+      max_shot_seconds: 10,
+      episode_count: 2,
+      total_planned_seconds: 120,
+      episodes: [
+        {
+          episode_id: 'ep-01', order: 1, title: '第 1 集', planned_seconds: 60,
+          deviation_seconds: 0, boundary_note: null, section_count: 2, sections: [],
+        },
+        {
+          episode_id: 'ep-02', order: 2, title: '第 2 集', planned_seconds: 60,
+          deviation_seconds: 0, boundary_note: null, section_count: 2, sections: [],
+        },
+      ],
+      covered_scope: {
+        covered_section_count: 4,
+        total_section_count: 10,
+        from_order: 1,
+        to_order: 4,
+        from_title: '雨夜钟表铺',
+        to_title: '失踪的怀表',
+        covered_seconds: 120,
+        total_outline_seconds: 300,
+        coverage_percent: 40,
+        note: '本次 2 集覆盖大纲第 1 场「雨夜钟表铺」至第 4 场「失踪的怀表」（共 4/10 场，原文预计约 120 / 300 秒，占 40%）。',
+      },
+      out_of_scope: {
+        count: 6,
+        from_order: 5,
+        to_order: 10,
+        from_title: '阁楼暗格',
+        to_title: '黎明重逢',
+        remaining_seconds: 180,
+        estimated_remaining_episodes: 3,
+        estimated_total_episodes: 5,
+        note: '当前 2 集覆盖至第 4 场「失踪的怀表」；后续另有 6 场不在本次 2 集范围内（第 5 场「阁楼暗格」至第 10 场「黎明重逢」，预计约 180 秒）；按每集 60 秒预计后续还需约 3 集（全剧共约 5 集），可先拍本次计划，后续再由你决定是否继续或调整集数。',
+      },
+    },
+  };
+  let savedBook: typeof scopedBook | null = null;
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
+      { id: 'noir', name_zh: '黑色电影', summary_zh: '低照度、硬光', version: '1.0' },
+    ]) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse(savedBook ? [{
+      version: 2, status: 'DRAFT', target_seconds: 60,
+      payload: { target_seconds: 60, episodes: [{ episode_id: 'ep-01' }, { episode_id: 'ep-02' }], source: { max_shot_seconds: 10 } },
+    }] : []) },
+    { method: 'GET', pattern: /\/director\/storyboard-book$/, respond: () => jsonResponse(savedBook) },
+    { method: 'POST', pattern: /\/director\/storyboard-book$/, respond: () => {
+      savedBook = scopedBook;
+      return jsonResponse(scopedBook, 201);
+    } },
+  ]);
+  const user = userEvent.setup();
+  const { unmount } = render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  await screen.findByRole('option', { name: /黑色电影/ });
+  fireEvent.change(screen.getByLabelText('单镜秒数上限'), { target: { value: '10' } });
+  await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
+
+  expect(await screen.findByText(/单镜上限 10 秒/)).toBeInTheDocument();
+  expect(screen.getByText(/本次 2 集覆盖大纲第 1 场「雨夜钟表铺」至第 4 场「失踪的怀表」/)).toBeInTheDocument();
+  expect(screen.getByText(/按每集 60 秒预计后续还需约 3 集（全剧共约 5 集）/)).toBeInTheDocument();
+
+  // 切页回来重新挂载：直接从服务端读回已生成分镜书与覆盖范围，不丢失预览。
+  unmount();
+  render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
+  expect(await screen.findByText(/按每集 60 秒预计后续还需约 3 集（全剧共约 5 集）/)).toBeInTheDocument();
   stub.restore();
 });

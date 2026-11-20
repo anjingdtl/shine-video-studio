@@ -663,3 +663,84 @@ def test_material_criticality_is_the_journey_verdict_not_profile_slots():
     # 被镜头按 id 点名的素材无论_family_都是必需。
     assert _critical_from_verdict(
         "prop", "怀表", entry, {"s1": []}, {}) is True
+
+
+def test_recommit_after_revision_1_queued_skips_already_queued_without_409(api):
+    """已有 rev=1 生图队列的项再次随同整单提交时，不能因 MATERIAL_NOTHING_TO_GENERATE 回滚 confirm。"""
+    from shine.materialprep.models import MaterialItem, MaterialRun
+    from tests.conftest import PNG, approve_lock, upload_asset
+
+    client, factory, settings = api
+    project, derived = _episode_one_requirements(client, settings)
+    if len(derived["requirements"]) < 2:
+        shots = client.get(
+            f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/shots").json()["shots"]
+        client.post(
+            f"/api/v1/projects/{project}/director/storyboard/shots/{shots[0]['shot_id']}/requested-assets",
+            json={"family": "prop", "name": "怀表", "description": "老周的旧怀表"}, headers=LOCAL)
+        derived = client.post(f"/api/v1/projects/{project}/director/materials/derive",
+                              json={}, headers=LOCAL).json()
+    reqs = derived["requirements"]
+    char_req = next(row for row in reqs if row["family"] == "character")
+    other_req = next(row for row in reqs if row["requirement_id"] != char_req["requirement_id"])
+
+    first_decisions = _decisions_for(derived)
+    first = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": derived["plan_revision_id"],
+            "expected_snapshot": derived["expected_snapshot"],
+            "decisions": first_decisions,
+        },
+        headers=LOCAL,
+    )
+    assert first.status_code == 201, first.text
+    assert first.json()["batch"] is not None
+
+    master = upload_asset(
+        client, project, content=PNG + b"-recommit-master",
+        filename="scene.png", role=other_req["family"], entity_id=other_req["entity_id"],
+    )
+    approve_lock(client, master["id"])
+
+    latest = client.get(f"/api/v1/projects/{project}/director/materials/requirements")
+    assert latest.status_code == 200
+    latest_body = latest.json()
+
+    second_decisions = [
+        (
+            {**row, "strategy": "reuse_master", "asset_id": master["id"]}
+            if row["requirement_id"] == other_req["requirement_id"]
+            else row
+        )
+        for row in first_decisions
+    ]
+    second = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": latest_body["plan_revision_id"],
+            "expected_snapshot": latest_body["expected_snapshot"],
+            "decisions": second_decisions,
+        },
+        headers=LOCAL,
+    )
+    assert second.status_code == 201, second.text
+    second_body = second.json()
+    assert second_body["replayed"] is False
+    assert second_body["generate_count"] == 0
+    assert second_body["batch"] is None
+
+    # 新的决策（other_req -> reuse_master）必须已落库，而 char_req 仍保持 rev=1 单批。
+    refreshed = client.get(f"/api/v1/projects/{project}/director/materials/requirements")
+    assert refreshed.status_code == 200
+    by_id = {row["requirement_id"]: row for row in refreshed.json()["requirements"]}
+    assert by_id[other_req["requirement_id"]]["strategy"] == "reuse_master"
+    assert by_id[other_req["requirement_id"]]["matched_master"]["asset_id"] == master["id"]
+
+    with factory() as db:
+        assert db.query(MaterialRun).filter(MaterialRun.project_id == project).count() == 1
+        assert db.query(MaterialItem).filter(
+            MaterialItem.project_id == project,
+            MaterialItem.requirement_id == char_req["requirement_id"],
+        ).count() == 1
+

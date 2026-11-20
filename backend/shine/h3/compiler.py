@@ -480,6 +480,29 @@ def _shot_text(ctx: _Context) -> str:
     return " ".join(part.strip() for part in parts if part.strip())
 
 
+_DIALOGUE_AMBIENCE_PREP_RE = re.compile(
+    r"\s*\b(?:beneath|under|below)\s+(?:the\s+)?(?:original\s+)?dialogue\b",
+    flags=re.IGNORECASE,
+)
+
+
+def non_vocal_ambience_text(text: str) -> str:
+    """Strip dialogue-assuming clauses from an ambience/environment note for silent shots.
+
+    A project-wide sound direction rule (e.g. ``...restrained beneath the original
+    dialogue and preserve intentional silence``) is valid on spoken shots, but on
+    dialogue-free shots telling H3 about "original dialogue" primes it to invent
+    foreign-language speech.  Sharing this one sanitizer between landing and
+    prompt compilation guarantees consistent behaviour across new and retaken shots.
+    """
+    cleaned = _DIALOGUE_AMBIENCE_PREP_RE.sub("", text or "")
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = re.sub(r"\s+([.,;:])", r"\1", cleaned).strip()
+    if re.search(r"\bdialogue\b", cleaned, flags=re.IGNORECASE):
+        return ""
+    return cleaned
+
+
 def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_sound: bool = False) -> str:
     """The spoken-language contract of the shot.
 
@@ -500,6 +523,7 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_s
     pack rejects CJK outside the dialogue tags, so a project setting written in
     another script may never be copied into the prompt.
     """
+    language = (project_language or "").strip()
     if not spec.dialogue:
         if legacy_sound:
             return (
@@ -507,11 +531,15 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_s
                 "whispering, mumbling, singing, humming or vocal sounds of any kind. Any speech or voice "
                 "mentioned in story facts or visual descriptions is context only, not an audio instruction."
             )
-        return (
-            "This shot has no dialogue: the soundtrack is entirely non-vocal. Words quoted in the "
-            "story facts or visual description stay silent context and are never heard."
+        setting = (
+            f" The scene takes place in a {language}-language world, and every sound stays wordless."
+            if language else ""
         )
-    language = (project_language or "").strip()
+        return (
+            "This shot has no dialogue: the soundtrack is entirely non-vocal."
+            f"{setting} Words quoted in the story facts or visual description stay silent context "
+            "and are never heard."
+        )
     if not language:
         return ""
     if legacy_sound:
@@ -533,6 +561,9 @@ def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "", *
     style = _prompt_style(spec, style)
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
+    if not spec.dialogue and not legacy_sound:
+        environment = non_vocal_ambience_text(environment)
+        ambience = non_vocal_ambience_text(ambience)
     if not environment and not ambience:
         if spec.dialogue:
             sentences = [
@@ -645,9 +676,14 @@ def _subject_definitions(ctx: _Context) -> str:
             identity = f"the {_ordinal(subject_index)} listed performer"
             if role:
                 identity += f" ({role})"
+            appearance_note = (
+                ", build, and reference appearance"
+                if not ctx.legacy_sound
+                else " and build"
+            )
             lines.append(
                 f"{item.label} is the approved, locked reference for {identity}, "
-                f"shown in <Picture {positions[id(item)]}>; this exact face, hairstyle and build "
+                f"shown in <Picture {positions[id(item)]}>; this exact face, hairstyle{appearance_note} "
                 "must be kept in every frame of this shot."
             )
             subject_index += 1

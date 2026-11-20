@@ -20,6 +20,11 @@ from sqlalchemy.orm import Session
 #: The series states that own their shots.
 LIVE_SERIES_STATUSES = ("QUEUED", "RUNNING", "PAUSED", "PAUSE_REQUESTED")
 
+#: The item states within a live series that still actively own their shot.
+#: An already-settled item (PASSED / BLOCKED / CANCELLED) inside a paused or
+#: multi-shot series no longer blocks retaking that shot.
+LIVE_SERIES_ITEM_STATUSES = ("PENDING", "QUEUED", "RUNNING")
+
 #: The job states that own their shot.
 LIVE_JOB_STATUSES = ("PLANNED", "QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING")
 
@@ -45,6 +50,7 @@ def shot_ownership(db: Session, project_id: str, shot_ids: list[str]) -> dict[st
         .where(
             ProductionSeries.project_id == project_id,
             ProductionSeries.status.in_(LIVE_SERIES_STATUSES),
+            ProductionSeriesItem.status.in_(LIVE_SERIES_ITEM_STATUSES),
             ProductionSeriesItem.shot_id.in_(wanted),
         )
     ).all()

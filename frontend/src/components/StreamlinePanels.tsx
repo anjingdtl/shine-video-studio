@@ -12,12 +12,13 @@
  * 已持久化状态恢复。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Check, Film, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, TriangleAlert, Upload } from 'lucide-react';
+import { Check, Film, History, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import { RequiredActionNotice } from './RequiredActionNotice';
 import type { ErrorActionTarget } from '../errorActions';
 import {
   ApiError,
   api,
+  json,
   confirmEpisodeShots,
   confirmStoryboardBook,
   controlDirectorStoryboardTask,
@@ -25,6 +26,7 @@ import {
   fetchDirectorStoryboardState,
   fetchEpisodeShots,
   fetchEpisodeSubtitles,
+  fetchLatestStoryboardBook,
   generateStoryboardBook,
   deriveShotMaterials,
   queueDirectorStoryboard,
@@ -43,7 +45,14 @@ import {
   type EpisodeStoryboardState,
   type ShotSubtitleLine,
   type StoryboardBook,
+  type Style,
+  type StyleDimension,
+  type StyleVersion,
 } from '../api';
+import { emptyStyle, styleFields } from '../constants';
+import {
+  matchStyleOption, presetForStyle, STYLE_DIMENSION_OPTIONS, STYLE_PRESETS,
+} from '../styleCatalog';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { MaterialPromptModal, ShotAssetRequestModal, ShotPromptModal, ShotSubtitleModal } from './ShotEditors';
@@ -80,9 +89,16 @@ function describeError(error: unknown): string {
 
 /* ============================ ② 分镜书 ============================ */
 
-export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConfirmed, onGoStage }: {
+type StyleStrength = 'subtle' | 'balanced' | 'strong';
+
+export function StoryboardBookPanel({
+  projectId, currentStyle, styles = [], onApplyStyleToAllShots, onRefreshFreeze, onMessage, onConfirmed, onGoStage,
+}: {
   projectId: string;
   currentStyle?: { version: number; id?: string; snapshot?: Record<string, unknown> | null } | null;
+  styles?: StyleVersion[];
+  onApplyStyleToAllShots?: () => void;
+  onRefreshFreeze?: () => void;
   onMessage?: (message: string) => void;
   onConfirmed?: () => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
@@ -90,12 +106,16 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 }) {
   const [catalog, setCatalog] = useState<StyleCatalogEntry[]>([]);
   const [profileId, setProfileId] = useState('');
+  const [strength, setStrength] = useState<StyleStrength>('balanced');
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
   const [maxShotSeconds, setMaxShotSeconds] = useState(15);
   const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
+  const [dimensions, setDimensions] = useState<Style>(emptyStyle);
+  const [dimensionsTouched, setDimensionsTouched] = useState(false);
+  const [customFields, setCustomFields] = useState<Set<StyleDimension>>(new Set());
   const [book, setBook] = useState<StoryboardBook | null>(null);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
@@ -112,20 +132,59 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
   /** 计划时长超出目标容差窗：服务端具名拒绝后，由用户显式接受或调整目标/分集。 */
   const [planDeviation, setPlanDeviation] = useState<string | null>(null);
 
+  const loadProfileDimensions = useCallback(async (id: string, isCancelled?: () => boolean) => {
+    if (!id) return;
+    try {
+      const detail = await api<{ profile?: { style_bible?: Partial<Style> } }>(`/director-styles/${id}`);
+      if (isCancelled?.()) return;
+      const bible = detail?.profile?.style_bible;
+      if (!bible) return;
+      setDimensions((current) => ({
+        ...current,
+        ...Object.fromEntries(styleFields.map(([field]) => [field, String(bible[field] ?? '')])),
+      }));
+      setCustomFields(new Set());
+      setDimensionsTouched(false);
+    } catch {
+      // Minimal stubs may not mount /director-styles/{id}; backend still resolves by profileId.
+    }
+  }, []);
+
   // 表单的唯一事实是服务端已持久化的决定：最新计划（草稿优先于旧确认）的
   // 集数/秒数 + director-style 草稿（无草稿时回退冻结快照）的风格参数。
   // 挂载/换作品/冻结版本变化时读回，切页回来不再掉回硬编码默认值。
   useEffect(() => {
     let cancelled = false;
+    let resolvedCatalogId = '';
+    let resolvedServerProfileId = '';
+    let hasServerDimensions = false;
+    const isCancelled = () => cancelled;
+
+    const maybeSyncDefaultDimensions = () => {
+      if (cancelled || hasServerDimensions) return;
+      const targetId = resolvedServerProfileId || resolvedCatalogId;
+      if (targetId) void loadProfileDimensions(targetId, isCancelled);
+    };
+
     api<StyleCatalogEntry[]>('/director-styles')
       .then((rows) => {
         if (cancelled) return;
         setCatalog(rows);
-        setProfileId((current) => current || (rows[0]?.id ?? ''));
+        resolvedCatalogId = rows[0]?.id ?? '';
+        setProfileId((current) => current || resolvedCatalogId);
+        maybeSyncDefaultDimensions();
       })
       .catch(() => setCatalog([]));
+    fetchLatestStoryboardBook(projectId)
+      .then((latest) => {
+        if (cancelled || !latest || !latest.preview) return;
+        setBook((current) => current ?? latest);
+      })
+      .catch(() => undefined);
     api<Array<{ version: number; status: string; sha256?: string; target_seconds?: number;
-      payload?: { episodes?: unknown[]; target_seconds?: number } }>>(`/projects/${projectId}/episode-plans`)
+      payload?: { episodes?: unknown[]; target_seconds?: number; source?: { max_shot_seconds?: number } } }>>(
+      `/projects/${projectId}/episode-plans`,
+    )
       .then((rows) => {
         if (cancelled) return;
         const confirmed = rows.find((row) => row.status === 'CONFIRMED');
@@ -142,6 +201,10 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
           if (count) setEpisodeCount(count);
           const seconds = basis.payload?.target_seconds ?? basis.target_seconds;
           if (seconds) setTargetSeconds(seconds);
+          const planMaxShot = basis.payload?.source?.max_shot_seconds;
+          if (typeof planMaxShot === 'number' && Number.isFinite(planMaxShot)) {
+            setMaxShotSeconds(Math.min(15, Math.max(4, planMaxShot)));
+          }
         }
         if (latestDraft && (!confirmed || latestDraft.version > confirmed.version)) {
           setConfirmedPlan(null);
@@ -152,16 +215,38 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       })
       .catch(() => undefined);
     api<{ style_draft?: Record<string, unknown> | null;
-      draft_source?: { profile_id?: string } | null;
-      frozen_source?: { profile_id?: string } | null }>(`/projects/${projectId}/director-style`)
+      draft_source?: { profile_id?: string; strength?: StyleStrength } | null;
+      frozen_source?: { profile_id?: string; strength?: StyleStrength } | null }>(`/projects/${projectId}/director-style`)
       .then((view) => {
         if (cancelled) return;
         const source = view.draft_source ?? view.frozen_source;
-        if (source?.profile_id) setProfileId(source.profile_id);
+        if (source?.profile_id) {
+          resolvedServerProfileId = source.profile_id;
+          setProfileId(source.profile_id);
+        }
+        if (source?.strength && ['subtle', 'balanced', 'strong'].includes(source.strength)) {
+          setStrength(source.strength);
+        }
         const facts = view.style_draft ?? currentStyle?.snapshot ?? null;
-        setPersistedStyle(facts ? { ...facts, profile_id: source?.profile_id ?? '' } : null);
+        setPersistedStyle(facts
+          ? { ...facts, profile_id: source?.profile_id ?? '', strength: source?.strength ?? 'balanced' }
+          : null);
         setStyleLoaded(true);
-        if (!facts) return;
+        if (!facts) {
+          maybeSyncDefaultDimensions();
+          return;
+        }
+        const loadedAllSeven = styleFields.every(([field]) => String(facts[field] ?? '').trim().length > 0);
+        if (loadedAllSeven) {
+          hasServerDimensions = true;
+          setDimensions((current) => ({
+            ...current,
+            ...Object.fromEntries(styleFields.map(([field]) => [field, String(facts[field] ?? '')])),
+          }));
+          setDimensionsTouched(false);
+        } else {
+          maybeSyncDefaultDimensions();
+        }
         const filmTypeValue = facts.film_type;
         if (filmTypeValue === 'live_action' || filmTypeValue === 'animation') setFilmType(filmTypeValue);
         const ratio = Number(facts.dialogue_ratio_percent);
@@ -182,11 +267,47 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, currentStyle?.id]);
 
+  const allSevenFilled = styleFields.every(([field]) => String(dimensions[field] ?? '').trim().length > 0);
+  const matchedPreset = presetForStyle(dimensions);
+
+  function handleProfileChange(nextId: string) {
+    setProfileId(nextId);
+    void loadProfileDimensions(nextId);
+  }
+
+  function applyPreset(presetId: string) {
+    const preset = STYLE_PRESETS.find((row) => row.id === presetId);
+    if (!preset) return;
+    setDimensions((value) => ({ ...value, ...preset.values }));
+    setCustomFields(new Set());
+    setDimensionsTouched(true);
+    onMessage?.(`已套用预设「${preset.label}」；点击确认分镜书后一并冻结。`);
+  }
+
+  function chooseOption(field: StyleDimension, optionId: string) {
+    if (optionId === 'custom') {
+      setCustomFields((current) => new Set(current).add(field));
+      setDimensionsTouched(true);
+      return;
+    }
+    const option = STYLE_DIMENSION_OPTIONS[field].find((row) => row.id === optionId);
+    if (!option) return;
+    setDimensions((value) => ({ ...value, [field]: option.text }));
+    setCustomFields((current) => { const next = new Set(current); next.delete(field); return next; });
+    setDimensionsTouched(true);
+  }
+
   async function generate() {
     setBusy(true); setProblem(''); setFailure(null);
     try {
+      // Scale episode duration tolerance with targetSeconds so short targets (e.g. 20-30s)
+      // never swallow multiple extra scenes up to +30s.
+      const toleranceSeconds = Math.min(30, Math.max(4, Math.round(targetSeconds * 0.25)));
       const body = await generateStoryboardBook(projectId, {
-        episode_count: episodeCount, target_seconds: targetSeconds, tolerance_seconds: 30,
+        episode_count: episodeCount,
+        target_seconds: targetSeconds,
+        tolerance_seconds: toleranceSeconds,
+        max_shot_seconds: maxShotSeconds,
       });
       setBook(body);
       // 新生成的一版尚未确认：旧的确认态不能继续挡住确认按钮。
@@ -203,17 +324,35 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       ? { version: book.plan_version, sha256: book.plan_sha256 }
       : basisPlan;
     if (!plan || !styleLoaded) return;
+    if (dimensionsTouched && !allSevenFilled) {
+      setProblem('请先把「逐项微调七个风格维度（高级）」里的七项内容填完整后再确认。');
+      return;
+    }
     setBusy(true); setProblem('');
+    const dialogueRatio = DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45;
+    const sevenDimensions = allSevenFilled
+      ? {
+          photography_language: dimensions.photography_language.trim(),
+          shot_blocking: dimensions.shot_blocking.trim(),
+          color_palette: dimensions.color_palette.trim(),
+          lighting_tone: dimensions.lighting_tone.trim(),
+          lens_texture: dimensions.lens_texture.trim(),
+          editing_rhythm: dimensions.editing_rhythm.trim(),
+          sound_performance: dimensions.sound_performance.trim(),
+        }
+      : undefined;
     try {
       await confirmStoryboardBook(projectId, {
         plan_version: plan.version,
         expected_sha256: plan.sha256,
         style: {
           profile_id: profileId,
+          strength,
           film_type: filmType,
-          dialogue_ratio_percent: DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45,
+          dialogue_ratio_percent: dialogueRatio,
           narration_level: narrationLevel,
           max_shot_seconds: maxShotSeconds,
+          ...(sevenDimensions ? { dimensions: sevenDimensions } : {}),
         },
         acknowledge_deviation: acknowledge,
       });
@@ -221,6 +360,16 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       setBasisPlan(plan);
       setPendingDraft(null);
       setPlanDeviation(null);
+      setDimensionsTouched(false);
+      setPersistedStyle({
+        ...(sevenDimensions ?? {}),
+        profile_id: profileId,
+        strength,
+        film_type: filmType,
+        dialogue_ratio_percent: dialogueRatio,
+        narration_level: narrationLevel,
+        max_shot_seconds: maxShotSeconds,
+      });
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
       onConfirmed?.();
     } catch (error) {
@@ -234,9 +383,14 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 
   // 表单与已持久化决定的差异：只有服务端写过的字段才参与比较，
   // 旧快照缺某个设置时不把默认值当成「用户改了」。
+  const persistedHasSeven = Boolean(
+    persistedStyle && styleFields.every(([field]) => String(persistedStyle[field] ?? '').trim().length > 0),
+  );
   const styleDirty = Boolean(confirmedPlan && persistedStyle && (
     (typeof persistedStyle.profile_id === 'string' && persistedStyle.profile_id !== ''
       && profileId !== persistedStyle.profile_id)
+    || (typeof persistedStyle.strength === 'string' && persistedStyle.strength !== ''
+      && strength !== persistedStyle.strength)
     || (persistedStyle.film_type === 'live_action' || persistedStyle.film_type === 'animation'
       ? filmType !== persistedStyle.film_type : false)
     || (typeof persistedStyle.dialogue_ratio_percent === 'number'
@@ -247,6 +401,9 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       ? narrationLevel !== persistedStyle.narration_level : false)
     || (typeof persistedStyle.max_shot_seconds === 'number'
       && maxShotSeconds !== persistedStyle.max_shot_seconds)
+    || (persistedHasSeven && allSevenFilled
+      && styleFields.some(([field]) => dimensions[field].trim() !== String(persistedStyle[field] ?? '').trim()))
+    || (dimensionsTouched && !allSevenFilled)
   ));
 
   const railPresent = useRailPresent();
@@ -261,17 +418,17 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
             onClick: () => void confirm(Boolean(planDeviation)), loading: busy, icon: <Check size={14} /> }
         : null);
   useStageRail('storyboard-book', { priority: 1, primary },
-    [book, busy, confirmedPlan, profileId, filmType, dialogueLevel, narrationLevel,
-      episodeCount, targetSeconds, maxShotSeconds, planDeviation, styleDirty, basisPlan, styleLoaded]);
+    [book, busy, confirmedPlan, profileId, strength, filmType, dialogueLevel, narrationLevel,
+      episodeCount, targetSeconds, maxShotSeconds, dimensions, dimensionsTouched, planDeviation,
+      styleDirty, basisPlan, styleLoaded]);
 
   return <section className="card section-card" id="storyboard-book">
     <div className="section-heading">
       <div>
         <div className="section-kicker">第 2 阶段 · 分镜书</div>
-        <h2>四个决定，一次确认</h2>
-        <p>导演风格、影片类型、集数和每集目标秒数。每集秒数决定每集范围：场次按自然边界
-          整场装入；集数是上限，超出上限的场次在预览里显式声明不在本次范围，
-          不会把整剧塞进第一集。单场超长的偏差会如实写在预览里。</p>
+        <h2>设定范围与风格，一次确认</h2>
+        <p>导演风格、影片类型、集数、每集目标秒数与单镜上限共用这一套决定。场次按自然边界
+          整场装入并严格控制在设定集数内；超出部分不排入本次计划，可在下方预览看到当前覆盖到大纲的哪一章以及后续还需拍多少集。</p>
       </div>
       {confirmedPlan && <span className="head-chip ok">
         <Check size={11} /> 第 {confirmedPlan.version} 版已确认
@@ -281,7 +438,7 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 
     <div className="book-settings">
       <label>导演风格
-        <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+        <select value={profileId} onChange={(event) => handleProfileChange(event.target.value)}>
           {catalog.length === 0 && <option value="">（目录未加载）</option>}
           {catalog.map((entry) => (
             <option key={entry.id} value={entry.id}>
@@ -332,6 +489,114 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
       </p>
     </div>
 
+    <details className="stage-dock book-style-advanced" id="style-detail">
+      <summary className="produce-focus-summary">
+        <span className="focus-summary-label">逐项微调七个风格维度（高级）</span>
+      </summary>
+      <div className="book-style-advanced-body">
+        <p className="run-hint">
+          上方选择的导演风格已直接带入这七个维度；这里调整的任何内容都会在点击「确认分镜书」或「重新确认分镜书」时一并冻结，不需要另外采用到草稿或再走第二处冻结。
+        </p>
+        <div className="style-preset-row">
+          <label className="style-preset-label" htmlFor="book-style-strength">风格强度
+            <select
+              id="book-style-strength"
+              value={strength}
+              onChange={(event) => setStrength(event.target.value as StyleStrength)}
+              disabled={busy}
+            >
+              <option value="subtle">轻</option>
+              <option value="balanced">均衡</option>
+              <option value="strong">鲜明</option>
+            </select>
+          </label>
+          <label className="style-preset-label" htmlFor="book-style-preset">整套预设
+            <select
+              id="book-style-preset"
+              value={matchedPreset?.id ?? ''}
+              onChange={(event) => applyPreset(event.target.value)}
+              disabled={busy}
+            >
+              <option value="">跟随当前导演风格 / 自定义</option>
+              {STYLE_PRESETS.map((preset) => <option key={preset.id} value={preset.id}>{preset.label}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="style-grid">
+          {styleFields.map(([field, label, hint], index) => {
+            const matched = matchStyleOption(field, dimensions[field]);
+            const customActive = customFields.has(field) || (!matched && !!String(dimensions[field] ?? '').trim());
+            const selectValue = matched?.id ?? (String(dimensions[field] ?? '').trim() || customActive ? 'custom' : '');
+            return (
+              <div className="style-field" key={field}>
+                <span><i>0{index + 1}</i>{label}</span>
+                <select
+                  aria-label={label}
+                  value={selectValue}
+                  onChange={(event) => chooseOption(field, event.target.value)}
+                  disabled={busy}
+                >
+                  <option value="">请选择…</option>
+                  {STYLE_DIMENSION_OPTIONS[field].map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                  <option value="custom">自定义…</option>
+                </select>
+                {customActive && (
+                  <textarea
+                    aria-label={`${label}（自定义）`}
+                    value={dimensions[field]}
+                    placeholder={hint}
+                    rows={2}
+                    disabled={busy}
+                    onChange={(event) => {
+                      setCustomFields((current) => new Set(current).add(field));
+                      setDimensions((value) => ({ ...value, [field]: event.target.value }));
+                      setDimensionsTouched(true);
+                    }}
+                  />
+                )}
+                {!customActive && !String(dimensions[field] ?? '').trim() && (
+                  <small className="style-field-hint">{hint}</small>
+                )}
+                {!customActive && String(dimensions[field] ?? '').trim() && (
+                  <small className="style-field-hint">{dimensions[field]}</small>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        {currentStyle && (onApplyStyleToAllShots || onRefreshFreeze) && (
+          <div className="style-freeze-tools">
+            <div>
+              <b>已冻结风格维护</b>
+              <span>旧风格、旧镜头和旧成片保留为历史；有镜头正在拍摄时会拒绝。</span>
+            </div>
+            {onApplyStyleToAllShots && (
+              <button type="button" className="btn-secondary" disabled={busy} onClick={onApplyStyleToAllShots}>
+                应用当前风格到全部镜头
+              </button>
+            )}
+            {onRefreshFreeze && (
+              <button type="button" className="btn-secondary" disabled={busy} onClick={onRefreshFreeze}>
+                解锁并应用新冻结
+              </button>
+            )}
+          </div>
+        )}
+        {styles.length > 0 && (
+          <div className="version-row">
+            <span className="version-label"><History size={12} /> 版本记录</span>
+            {styles.map((version) => (
+              <span className={`version-chip ${version.id === currentStyle?.id ? 'current' : ''}`} key={version.id}>
+                V{version.version} · {version.sha256.slice(0, 8)}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
+
     {styleDirty && <div className="notice" role="status">
       <p>风格选择已修改。素材出图与下游只读<b>已冻结</b>的风格：点「重新确认分镜书」后新风格才会冻结生效。</p>
       {!railPresent && <button type="button" className="btn-secondary" disabled={busy || !styleLoaded}
@@ -349,14 +614,25 @@ export function StoryboardBookPanel({ projectId, currentStyle, onMessage, onConf
 
     {book && <div className="book-preview">
       <div className="book-preview-head">
-        <b>{book.preview.episode_count} 集 · 计划总时长 {Math.round(book.preview.total_planned_seconds)} 秒</b>
+        <b>
+          {book.preview.episode_count} 集 · 每集目标 {book.preview.target_seconds} 秒 · 单镜上限{' '}
+          {book.preview.max_shot_seconds ?? maxShotSeconds} 秒 · 计划总时长 {Math.round(book.preview.total_planned_seconds)} 秒
+        </b>
         {!confirmedPlan && !railPresent && <button type="button" className="btn-primary" disabled={busy} onClick={() => void confirm()}>
           <Check size={13} /> 确认分镜书（分集 + 风格）
         </button>}
       </div>
-      {book.preview.out_of_scope && <p className="run-hint">
-        <TriangleAlert size={12} /> {book.preview.out_of_scope.note}
+      {book.preview.covered_scope && <p className="run-hint">
+        <Check size={12} /> {book.preview.covered_scope.note}
       </p>}
+      {book.preview.out_of_scope && <div className="notice" role="status">
+        <TriangleAlert size={13} />
+        <p>{book.preview.out_of_scope.note}</p>
+      </div>}
+      {book.preview.scope_warning && <div className="notice" role="status">
+        <TriangleAlert size={13} />
+        <p>{book.preview.scope_warning}</p>
+      </div>}
       <ol className="run-episode-plan">
         {book.preview.episodes.map((episode) => (
           <li key={episode.episode_id}>
@@ -1003,7 +1279,7 @@ const FAMILY_LABEL: Record<string, string> = {
   character: '人物', scene: '场景', prop: '道具',
 };
 
-export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone, onAdvance }: {
+export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone, onAdvance, onJourneyRefresh }: {
   projectId: string;
   onMessage?: (message: string) => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
@@ -1012,6 +1288,8 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   assetsDone?: boolean;
   /** 进入 journey.next_stage 对应页面（与阶段衔接同一导航执行者）。 */
   onAdvance?: () => void;
+  /** 同步刷新外层 journey / director overview，使第 5 阶段等下游与台账保持同一事实。 */
+  onJourneyRefresh?: () => void;
 }) {
   const [view, setView] = useState<DirectorMaterialsView | null>(null);
   const [decisions, setDecisions] = useState<Record<string, Decision>>({});
@@ -1026,19 +1304,33 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   const [batchTarget, setBatchTarget] = useState<Decision>('generate');
   const [progressKey, setProgressKey] = useState(0);
   const submitting = useRef(false);
+  const knownMasters = useRef<Record<string, string | null>>({});
 
   const apply = useCallback((body: DirectorMaterialsView) => {
     setView(body);
+    const prevMasters = knownMasters.current;
+    const nextMasters: Record<string, string | null> = {};
+    for (const row of body.requirements) {
+      nextMasters[row.requirement_id] = row.matched_master?.asset_id ?? null;
+    }
+    knownMasters.current = nextMasters;
     setDecisions((current) => {
       // 已经做过的选择不会被一次刷新覆盖；但当裁决变化使旧选择失效（必需项不能
-      // 跳过、缺主素材不能复用）时回到默认，避免提交被服务端拒绝（三原则：决策
-      // 跟随同一份裁决）。
+      // 跳过、缺主素材不能复用）或该项刚上传/晋升并采用主素材时，跟随同一份
+      // 权威事实切到 reuse_master，避免下一次整单提交把已上传图片重置回生成。
       const next: Record<string, Decision> = {};
       for (const row of body.requirements) {
         const prev = current[row.requirement_id];
+        const hadMaster = prevMasters[row.requirement_id] ?? null;
+        const nowMaster = row.matched_master?.asset_id ?? null;
+        const newlyAdopted = nowMaster !== null && nowMaster !== hadMaster && row.strategy === 'reuse_master';
         const stale = prev === 'skip' && row.critical
           || prev === 'reuse_master' && !row.matched_master;
-        next[row.requirement_id] = prev && !stale ? prev : defaultDecision(row);
+        if (newlyAdopted || (prev === 'upload' && row.matched_master)) {
+          next[row.requirement_id] = 'reuse_master';
+        } else {
+          next[row.requirement_id] = prev && !stale ? prev : defaultDecision(row);
+        }
       }
       return next;
     });
@@ -1073,6 +1365,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         })),
       });
       onMessage?.('素材清单已按已确认镜头生成；每一项都标了用在哪些镜头。');
+      onJourneyRefresh?.();
     } catch (error) {
       setFailure(error);
       setProblem(describeError(error));
@@ -1082,7 +1375,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     }
   }
 
-  async function commit() {
+  async function commit(queueGeneration = true) {
     if (!view?.plan_revision_id || !view.expected_snapshot || submitting.current) return;
     submitting.current = true;
     setBusy('commit'); setProblem(''); setResult(null);
@@ -1100,7 +1393,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         plan_revision_id: view.plan_revision_id,
         expected_snapshot: view.expected_snapshot,
         decisions: rows,
-        queue_generation: true,
+        queue_generation: queueGeneration,
       });
       const queued = outcome.batch?.item_count ?? outcome.generate_count;
       const parts = [
@@ -1113,12 +1406,14 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       if (outcome.batch_error) setProblem(outcome.batch_error.message);
       onMessage?.('素材决策已确认。');
       await load();
+      onJourneyRefresh?.();
       setProgressKey((key) => key + 1);
       return !outcome.batch_error;
     } catch (error) {
       setProblem(describeError(error));
       // 断连或超时：先读台账，确认是否其实已经生效，再让用户决定。
       await load().catch(() => undefined);
+      onJourneyRefresh?.();
       return false;
     } finally {
       submitting.current = false;
@@ -1128,14 +1423,19 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
 
   /** 素材已就绪：确认决策后进入 journey 的下一阶段（导演包），不再重复备料。 */
   async function commitThenAdvance() {
-    const ok = await commit();
+    const ok = await commit(false);
     if (ok) onAdvance?.();
   }
 
-  /** 重新生成素材：唯一 regenerate-all 执行者；有勾选用勾选集，否则全部需求。 */
+  /** 重新生成素材：唯一 regenerate-all 执行者；有勾选用勾选集，否则只重生成尚未采用主素材的需求（全部已采用时全量）。 */
   async function regenerateAll() {
     if (busy !== '' || !requirements.length) return;
-    const ids = selectedIds.length ? selectedIds : requirements.map((row) => row.requirement_id);
+    const unadoptedIds = requirements
+      .filter((row) => !(row.strategy === 'reuse_master' && row.matched_master))
+      .map((row) => row.requirement_id);
+    const ids = selectedIds.length
+      ? selectedIds
+      : (unadoptedIds.length ? unadoptedIds : requirements.map((row) => row.requirement_id));
     setBusy('commit'); setProblem(''); setResult(null);
     try {
       const outcome = await api<{ items?: string[] }>(
@@ -1144,6 +1444,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
           body: JSON.stringify({ idempotency_key: `director-regen-all-${Date.now()}`, requirement_ids: ids }) });
       setResult(`已为 ${outcome.items?.length ?? ids.length} 项重新排队出图；旧候选保留，出图后在上方选定并采用。`);
       await load();
+      onJourneyRefresh?.();
       setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
@@ -1178,11 +1479,13 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
           queue_generation: false,
         });
       }
+      setDecisions((current) => ({ ...current, [row.requirement_id]: strategy }));
       setResult(strategy === 'generate'
         ? `「${row.name ?? row.entity_id}」已重新排队制作候选；出图后由你选定并采用。`
         : `「${row.name ?? row.entity_id}」已改用你上传的主素材。`);
       onMessage?.('这一项素材已更新。');
       await load();
+      onJourneyRefresh?.();
       setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
@@ -1191,15 +1494,31 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     }
   }
 
-  /** 用户自行上传：上传 → 确认 → 锁定 → 直接把这一项回绑到新素材。 */
+  /** 用户自行上传：上传 →（若尚未批准/锁定则补全批准与锁定）→ 直接把这一项回绑到该主素材。
+   *  同一文件若此前已上传并批准锁定，直接复用同一 Asset 回绑，避免重复 approve 报 409。 */
   async function uploadFor(row: DirectorMaterialRequirement, file: File) {
     setBusy(`row-${row.requirement_id}`); setProblem(''); setResult(null);
     try {
+      const targetEntity = row.entity_id ?? row.name ?? undefined;
       const asset = await uploadProjectAsset(projectId, file, {
-        role: row.family, entityId: row.entity_id ?? row.name ?? undefined,
+        role: row.family, entityId: targetEntity,
       });
-      await approveProjectAsset(asset.id);
-      await lockProjectAsset(asset.id);
+      if ((asset.role && asset.role !== row.family)
+          || (targetEntity && asset.entity_id && asset.entity_id !== targetEntity)) {
+        throw new Error(
+          `这张图片已在本作品中登记为「${asset.entity_id ?? asset.filename}」，不能重复用于「${targetEntity ?? row.family}」，请换一张图片或去素材中心查看。`,
+        );
+      }
+      if (targetEntity && !asset.entity_id && asset.locked) {
+        throw new Error(
+          `这张图片已锁定但未归属到「${targetEntity}」，请换一张图片或在素材中心调整。`,
+        );
+      }
+      if (targetEntity && asset.role && !asset.entity_id && !asset.locked) {
+        await api(`/assets/${asset.id}/metadata`, json('PATCH', { entity_id: targetEntity }));
+      }
+      if (!asset.approved) await approveProjectAsset(asset.id);
+      if (!asset.locked) await lockProjectAsset(asset.id);
       await commitOne(row, 'reuse_master', asset.id);
     } catch (error) {
       setProblem(describeError(error));
@@ -1246,6 +1565,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       setResult(`已为所选 ${outcome.items?.length ?? selectedIds.length} 项重新排队出图；旧候选保留，出图后在同一候选栏选定并采用。`);
       setSelected({});
       await load();
+      onJourneyRefresh?.();
       setProgressKey((key) => key + 1);
     } catch (error) {
       setProblem(describeError(error));
@@ -1307,7 +1627,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
           requirement_id: row.requirement_id, entity_id: row.entity_id, family: row.family,
           asset_id: row.matched_master!.asset_id,
         }))}
-      onPromoted={() => { void load(); }}
+      onPromoted={() => { void load(); onJourneyRefresh?.(); }}
       onUnadopt={async (requirementId) => {
         const row = requirements.find((r) => r.requirement_id === requirementId);
         if (!row || !view?.plan_revision_id || !view.expected_snapshot) return;
@@ -1319,7 +1639,9 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             entity_id: row.entity_id ?? row.name ?? 'unknown', asset_id: null }],
           queue_generation: false,
         });
+        setDecisions((current) => ({ ...current, [requirementId]: 'generate' }));
         await load();
+        onJourneyRefresh?.();
       }} />
 
     {loaded && !requirements.length && <p className="empty-inline">
@@ -1353,8 +1675,17 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
           title="勾选后点这里：只对所选需求统一重新出图，旧候选保留"
           onClick={() => void regenerateSelected()}>重新生成所选（{selectedIds.length}）</button>
         <button type="button" className="btn-secondary" disabled={busy !== ''}
-          title="一键把全部素材设为 AI 制作"
-          onClick={() => { toggleAll(true); applyBatch('generate', requirements.map((row) => row.requirement_id)); }}>
+          title="把尚未采用主素材的条目设为 AI 制作；已上传或已采用的主素材保留"
+          onClick={() => {
+            const unadoptedIds = requirements
+              .filter((row) => !(row.strategy === 'reuse_master' && row.matched_master))
+              .map((row) => row.requirement_id);
+            const targetIds = unadoptedIds.length
+              ? unadoptedIds
+              : requirements.map((row) => row.requirement_id);
+            setSelected(Object.fromEntries(targetIds.map((id) => [id, true])));
+            applyBatch('generate', targetIds);
+          }}>
           全部 AI 制作</button>
         <button type="button" className="btn-text" disabled={busy !== '' || selectedIds.length === 0}
           onClick={() => setSelected({})}>清空选择</button>

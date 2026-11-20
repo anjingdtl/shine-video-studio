@@ -1,24 +1,68 @@
-/** Counterexamples (audit 2026-11-01 + the 2026-11-02 style catalog round):
- *  the user saved draft A, edited the form to B without saving, clicked
- *  freeze — and the server froze A while the screen showed B.  The fix freezes
- *  exactly the on-screen form: save first, then grant, then freeze.  The
- *  2026-11-02 round adds the preset/dropdown interaction: every scenario now
- *  goes through the catalog dropdowns instead of hand-typed prose, and custom
- *  text keeps its own verbatim path. */
+/** 归一化后的第 2 阶段风格冻结（三原则：一套事实、一个裁决、一个执行者）：
+ *  - 剧本统筹页只保留一个「第 2 阶段 · 分镜书」入口，「逐项微调七个风格维度（高级）」
+ *    直接折叠在其内部，不再保留第二套「导演风格/影片类型/采用到草稿/批准并冻结」。
+ *  - 屏幕上的七维微调与影片类型通过同一个 confirmStoryboardBook 执行者一次性冻结。
+ *  - 失败或刷新时保留用户选择；已确认后改七维或影片类型也通过同一个重新确认入口冻结。 */
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
 import { STYLE_DIMENSION_OPTIONS } from '../styleCatalog';
-import { FROZEN_STYLE, StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
+import { DIRECTOR_STYLE_CATALOG, FROZEN_STYLE, StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
 
-const PUT_DRAFT = /\/api\/v1\/projects\/proj-1\/style\/draft$/;
+const BOOK = {
+  plan_version: 1,
+  plan_sha256: 'e'.repeat(64),
+  status: 'DRAFT',
+  preview: {
+    mode: 'sections',
+    target_seconds: 60,
+    tolerance_seconds: 15,
+    max_shot_seconds: 15,
+    episode_count: 2,
+    total_planned_seconds: 120,
+    episodes: [
+      {
+        episode_id: 'ep-01', order: 1, title: '第 1 集', planned_seconds: 60,
+        deviation_seconds: 0, boundary_note: null, section_count: 1, sections: [],
+      },
+      {
+        episode_id: 'ep-02', order: 2, title: '第 2 集', planned_seconds: 60,
+        deviation_seconds: 0, boundary_note: null, section_count: 1, sections: [],
+      },
+    ],
+  },
+};
+
+const TEMPLATE_BIBLE = {
+  photography_language: '固定中景，机位平视。',
+  shot_blocking: '正面构图，保持轴线。',
+  color_palette: '冷青与暖灯对比。',
+  lighting_tone: '实景低调光影。',
+  lens_texture: '35mm 胶片颗粒。',
+  editing_rhythm: '舒缓情绪剪辑。',
+  sound_performance: '真实环境音与克制对白。',
+};
 
 beforeEach(() => {
   stub = new StudioStub(baseRoutes());
+  stub.add({
+    method: 'GET',
+    pattern: /\/api\/v1\/director-styles\/[^/]+$/,
+    respond: () => jsonResponse({
+      ...DIRECTOR_STYLE_CATALOG[0],
+      profile: {
+        id: 'wong-kar-wai',
+        name_zh: '王家卫参考风格',
+        version: '1.0.0',
+        summary_zh: '城市情绪',
+        style_bible: TEMPLATE_BIBLE,
+      },
+    }),
+  });
 });
 
 afterEach(() => {
@@ -26,227 +70,166 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-/** Select the first catalog option of every dimension through the real UI. */
-async function fillSevenOptions(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole('button', { name: /调整细节/ }, { timeout: 8000 }));
-  const labels = ['摄影语言', '镜头调度', '色彩风格', '影调与灯光', '镜头质感', '剪辑与节奏', '声音表演'];
-  for (const labelText of labels) {
-    const select = (await screen.findByLabelText(labelText, undefined, { timeout: 8000 })) as HTMLSelectElement;
-    const firstOption = select.options[1].value;
-    await user.selectOptions(select, firstOption);
-  }
-}
+describe('第 2 阶段风格归一化合并（三原则）', () => {
+  it('剧本统筹页不再出现第二套导演风格模板/采用到草稿/批准并冻结按钮', async () => {
+    window.location.hash = '#d/assets';
+    render(<App />);
+    expect(await screen.findByText('逐项微调七个风格维度（高级）')).toBeInTheDocument();
+    expect(screen.queryByRole('combobox', { name: '选择导演风格模板' })).toBeNull();
+    expect(screen.queryByRole('button', { name: '采用到草稿' })).toBeNull();
+    expect(screen.queryByRole('button', { name: /批准并冻结/ })).toBeNull();
+  });
 
-
-describe('风格冻结：批准内容必须等于冻结快照', () => {
-  it.each([70, null])('未保存修改直接冻结，核对正文与对白比例 %s', async (ratio) => {
+  it('在高级折叠里微调七个维度并选择动画后，由同一个确认分镜书入口直接冻结（无需采用到草稿）', async () => {
     const user = userEvent.setup();
-    const custom = {
-      photography_language: '手持近景，缓慢推近。（未保存的新修改）', shot_blocking: 'A调度', color_palette: 'A色',
-      lighting_tone: 'A影调', lens_texture: 'A质感', editing_rhythm: 'A节奏', sound_performance: 'A声音',
-      dialogue_ratio_percent: 45,
-    };
-    const project = baseProject({ style_draft: custom });
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([project]) });
-    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1$/, respond: () => jsonResponse(project) });
-    let savedDraft: unknown = project.style_draft;
+    const confirms: Array<Record<string, unknown>> = [];
     stub.add({
-      method: 'PUT', pattern: PUT_DRAFT,
+      method: 'POST',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book$/,
+      respond: () => jsonResponse(BOOK, 201),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book\/confirm$/,
       respond: (_url, init) => {
-        savedDraft = JSON.parse(String(init?.body));
-        return jsonResponse({ project_id: 'proj-1', style_draft: savedDraft, frozen: false });
+        confirms.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return jsonResponse({ plan_version: 1, style: { style_version_id: FROZEN_STYLE.id } });
       },
     });
-    stub.add({
-      method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse({
-        ...FROZEN_STYLE,
-        snapshot: Object.fromEntries(Object.entries(savedDraft as object).filter(([, value]) => value !== null)),
-      }),
-    });
 
     window.location.hash = '#d/assets';
     render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    const textarea = await screen.findByLabelText('摄影语言（自定义）', undefined, { timeout: 9000 });
+    await user.click(await screen.findByText('逐项微调七个风格维度（高级）'));
+
+    // 导演风格模板加载的七维内容直接出现在微调框中
     await waitFor(() => {
-      expect(textarea).toHaveValue('手持近景，缓慢推近。（未保存的新修改）');
+      expect(screen.getByLabelText('摄影语言（自定义）')).toHaveValue(TEMPLATE_BIBLE.photography_language);
     });
 
-    await user.clear(textarea);
-    await user.type(textarea, '固定远景，禁止推近。（准备批准的最终修改）');
-    const ratioInput = screen.getByRole('spinbutton', { name: '对白比例（%）' });
-    await user.clear(ratioInput);
-    if (ratio !== null) await user.type(ratioInput, String(ratio));
+    // 用户直接修改其中一维为目录选项，另一维保持自定义并改写文本
+    const blockingSelect = screen.getByLabelText('镜头调度') as HTMLSelectElement;
+    const firstBlockingOption = STYLE_DIMENSION_OPTIONS.shot_blocking[0];
+    await user.selectOptions(blockingSelect, firstBlockingOption.id);
 
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
-    await waitFor(() => {
-      expect(screen.getByText(/已冻结第 1 版/)).toBeInTheDocument();
-    });
-    const draftPuts = stub.callsOf('PUT', /style\/draft$/);
-    expect(draftPuts).toHaveLength(1);
-    const freezes = stub.callsOf('POST', /style\/freeze$/);
-    expect(freezes).toHaveLength(1);
-    expect(freezes[0].body).toMatchObject({ expected_style: savedDraft });
-    expect(draftPuts[0].body).toMatchObject({
-      photography_language: '固定远景，禁止推近。（准备批准的最终修改）',
-      dialogue_ratio_percent: ratio,
-    });
-    const putIndex = stub.calls.findIndex((call) => call.method === 'PUT' && /style\/draft$/.test(call.url));
-    const postIndex = stub.calls.findIndex((call) => call.method === 'POST' && /style\/freeze$/.test(call.url));
-    expect(putIndex).toBeLessThan(postIndex);
-    expect(stub.callsOf('POST', /approval-grants/)).toHaveLength(1);
-  });
-});
+    const photoTextarea = screen.getByLabelText('摄影语言（自定义）');
+    await user.clear(photoTextarea);
+    await user.type(photoTextarea, '固定远景，缓慢推近。（用户微调）');
 
-describe('影片类型', () => {
-  it('选择动画后保存的草稿带上 film_type，并展示固定英文范例', async () => {
-    const user = userEvent.setup();
-    window.location.hash = '#d/assets';
-    render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ }));
-    expect(screen.getAllByText(/2D cel-shaded animation/).length).toBeGreaterThan(0);
-    await user.click(screen.getByRole('button', { name: '保存草稿' }));
-    await waitFor(() => {
-      expect(stub.callsOf('PUT', PUT_DRAFT)).toHaveLength(1);
+    await user.selectOptions(screen.getByLabelText('影片类型'), 'animation');
+
+    await user.click(screen.getAllByRole('button', { name: /生成分镜书/ })[0]);
+    await screen.findByText(/计划总时长/);
+    await user.click(screen.getAllByRole('button', { name: /确认分镜书（分集 \+ 风格）/ })[0]);
+
+    await waitFor(() => expect(confirms).toHaveLength(1));
+    expect(confirms[0]).toMatchObject({
+      plan_version: 1,
+      expected_sha256: BOOK.plan_sha256,
+      style: {
+        profile_id: 'wong-kar-wai',
+        film_type: 'animation',
+        dimensions: {
+          photography_language: '固定远景，缓慢推近。（用户微调）',
+          shot_blocking: firstBlockingOption.text,
+          color_palette: TEMPLATE_BIBLE.color_palette,
+          lighting_tone: TEMPLATE_BIBLE.lighting_tone,
+          lens_texture: TEMPLATE_BIBLE.lens_texture,
+          editing_rhythm: TEMPLATE_BIBLE.editing_rhythm,
+          sound_performance: TEMPLATE_BIBLE.sound_performance,
+        },
+      },
     });
-    expect(stub.callsOf('PUT', PUT_DRAFT)[0].body).toMatchObject({ film_type: 'animation' });
+    // 没有再走第二条 style/draft + style/freeze 链路
+    expect(stub.callsOf('PUT', /style\/draft$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /style\/freeze$/)).toHaveLength(0);
   });
 
-  it('刷新工作台不丢弃未保存的影片类型选择', async () => {
-    const user = userEvent.setup();
-    window.location.hash = '#d/assets';
-    render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    const animation = await screen.findByRole('button', { name: /动画（2D 赛璐璐）/ });
-    await user.click(animation);
-    expect(animation).toHaveAttribute('aria-pressed', 'true');
-    const projectGetsBefore = stub.callsOf('GET', /\/api\/v1\/projects\/proj-1$/).length;
-    await user.click(screen.getByTitle('刷新全部数据'));
-    await waitFor(() => {
-      expect(stub.callsOf('GET', /\/api\/v1\/projects\/proj-1$/).length).toBeGreaterThan(projectGetsBefore);
-    });
-    expect(screen.getByRole('button', { name: /动画（2D 赛璐璐）/ })).toHaveAttribute('aria-pressed', 'true');
-  });
-});
-
-describe('风格冻结（下拉交互）', () => {
-  it('免密冻结仍保持保存→授权→冻结顺序，授权后草稿变化被拒绝并保留选项', async () => {
+  it('确认分镜书失败（网络错误）时，高级区已修改的七维选择保留不丢失', async () => {
     const user = userEvent.setup();
     stub.add({
-      method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/,
-      respond: () => jsonResponse({ grant_id: 'grant-1', snapshot: 'snap-1' }),
+      method: 'POST',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book$/,
+      respond: () => jsonResponse(BOOK, 201),
     });
     stub.add({
-      method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse({ detail: 'PLAN_HASH_CHANGED' }, 409),
-    });
-
-    window.location.hash = '#d/assets';
-    render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
-
-    await waitFor(() => {
-      expect(screen.getByText(/PLAN_HASH_CHANGED/)).toBeInTheDocument();
-    });
-    const draftPuts = stub.callsOf('PUT', /style\/draft$/);
-    const grants = stub.callsOf('POST', /approval-grants/);
-    const freezes = stub.callsOf('POST', /style\/freeze$/);
-    expect(draftPuts).toHaveLength(1);
-    expect(grants).toHaveLength(1);
-    expect(freezes).toHaveLength(1);
-    const putIndex = stub.calls.findIndex((call) => call.method === 'PUT' && /style\/draft$/.test(call.url));
-    const grantIndex = stub.calls.findIndex((call) => call.method === 'POST' && /approval-grants/.test(call.url));
-    const postIndex = stub.calls.findIndex((call) => call.method === 'POST' && /style\/freeze$/.test(call.url));
-    expect(putIndex < grantIndex && grantIndex < postIndex).toBe(true);
-    expect(screen.getByLabelText('摄影语言')).toHaveValue(STYLE_DIMENSION_OPTIONS.photography_language[0].id);
-  });
-
-  it('首次通过下拉选满七项后直接点击批准并冻结即可成功', async () => {
-    const user = userEvent.setup();
-    stub.add({
-      method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: (_url, init) => jsonResponse({
-        ...FROZEN_STYLE, snapshot: JSON.parse(String(init?.body)).expected_style,
-      }),
-    });
-
-    window.location.hash = '#d/assets';
-    render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
-    await waitFor(() => {
-      expect(screen.getByText(/已冻结第 1 版/)).toBeInTheDocument();
-    });
-    const freezes = stub.callsOf('POST', /style\/freeze$/);
-    expect(freezes).toHaveLength(1);
-    expect(freezes[0].body).toMatchObject({ expected_style: {
-      photography_language: STYLE_DIMENSION_OPTIONS.photography_language[0].text,
-      sound_performance: STYLE_DIMENSION_OPTIONS.sound_performance[0].text,
-    } });
-    expect(stub.callsOf('PUT', /style\/draft$/)).toHaveLength(1);
-  });
-
-  it('保存失败（网络错误）时下拉选择保留（故障注入）', async () => {
-    const user = userEvent.setup();
-    stub.add({
-      method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
+      method: 'POST',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book\/confirm$/,
       respond: () => { throw new Error('网络中断'); },
     });
 
     window.location.hash = '#d/assets';
     render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
+    await user.click(await screen.findByText('逐项微调七个风格维度（高级）'));
     await waitFor(() => {
-      expect(screen.getByText(/网络中断/)).toBeInTheDocument();
+      expect(screen.getByLabelText('摄影语言（自定义）')).toHaveValue(TEMPLATE_BIBLE.photography_language);
     });
-    expect(screen.getByLabelText('摄影语言')).toHaveValue(STYLE_DIMENSION_OPTIONS.photography_language[0].id);
+    const photoSelect = screen.getByLabelText('摄影语言') as HTMLSelectElement;
+    const option = STYLE_DIMENSION_OPTIONS.photography_language[0];
+    await user.selectOptions(photoSelect, option.id);
+
+    await user.click(screen.getAllByRole('button', { name: /生成分镜书/ })[0]);
+    await screen.findByText(/计划总时长/);
+    await user.click(screen.getAllByRole('button', { name: /确认分镜书（分集 \+ 风格）/ })[0]);
+
+    await waitFor(() => expect(screen.getByText(/网络中断/)).toBeInTheDocument());
+    expect(screen.getByLabelText('摄影语言')).toHaveValue(option.id);
   });
 
-  it('携带七项确认内容，签发前的其他页面修改被拒绝时保留选项', async () => {
+  it('已确认后在高级区修改七个维度之一，触发同一个重新确认入口冻结新版本', async () => {
     const user = userEvent.setup();
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/preparation\/approval-grants$/,
-      respond: () => jsonResponse({ grant_id: 'grant-for-other-tab', snapshot: 'other-tab-snapshot' }) });
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse({ detail: 'STYLE_APPROVAL_CONTENT_CHANGED' }, 409) });
-    window.location.hash = '#d/assets';
-    render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
-    await screen.findByText(/风格草稿已在其他页面修改/);
-    const decision = stub.callsOf('POST', /style\/freeze$/)[0].body;
-    expect(decision).toMatchObject({ expected_style: {
-      photography_language: STYLE_DIMENSION_OPTIONS.photography_language[0].text,
-      shot_blocking: STYLE_DIMENSION_OPTIONS.shot_blocking[0].text,
-      color_palette: STYLE_DIMENSION_OPTIONS.color_palette[0].text,
-      lighting_tone: STYLE_DIMENSION_OPTIONS.lighting_tone[0].text,
-      lens_texture: STYLE_DIMENSION_OPTIONS.lens_texture[0].text,
-      editing_rhythm: STYLE_DIMENSION_OPTIONS.editing_rhythm[0].text,
-      sound_performance: STYLE_DIMENSION_OPTIONS.sound_performance[0].text,
-    } });
-    expect(screen.getByLabelText('摄影语言')).toHaveValue(STYLE_DIMENSION_OPTIONS.photography_language[0].id);
-    expect(screen.queryByText(/已冻结第 1 版/)).not.toBeInTheDocument();
-  });
+    const confirms: Array<Record<string, unknown>> = [];
+    const project = baseProject({
+      frozen_style_version_id: FROZEN_STYLE.id,
+      style_draft: { ...TEMPLATE_BIBLE, film_type: 'live_action', dialogue_ratio_percent: 45, narration_level: 'none', max_shot_seconds: 15 },
+    });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([project]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1$/, respond: () => jsonResponse(project) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/styles$/, respond: () => jsonResponse([{ ...FROZEN_STYLE, snapshot: project.style_draft }]) });
+    stub.add({
+      method: 'GET',
+      pattern: /\/api\/v1\/projects\/proj-1\/episode-plans$/,
+      respond: () => jsonResponse([
+        { version: 1, status: 'CONFIRMED', sha256: BOOK.plan_sha256, target_seconds: 60, payload: { target_seconds: 60, episodes: [{ episode_id: 'ep-01' }] } },
+      ]),
+    });
+    stub.add({
+      method: 'GET',
+      pattern: /\/api\/v1\/projects\/proj-1\/director-style$/,
+      respond: () => jsonResponse({
+        style_draft: project.style_draft,
+        draft_source: { profile_id: 'wong-kar-wai', strength: 'balanced' },
+        frozen_source: { profile_id: 'wong-kar-wai', strength: 'balanced' },
+      }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/storyboard-book\/confirm$/,
+      respond: (_url, init) => {
+        confirms.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        return jsonResponse({ plan_version: 1, style: { style_version_id: 'style-2' } });
+      },
+    });
 
-  it('不把不匹配的服务端冻结结果报告为与屏幕一致', async () => {
-    const user = userEvent.setup();
-    stub.add({ method: 'POST', pattern: /\/api\/v1\/projects\/proj-1\/style\/freeze$/,
-      respond: () => jsonResponse(FROZEN_STYLE) });
     window.location.hash = '#d/assets';
     render(<App />);
-    await user.click(await screen.findByText('逐项微调七个风格维度(高级)'));
-    await fillSevenOptions(user);
-    await user.click(screen.getByRole('button', { name: /批准并冻结/ }));
-    await screen.findByText(/冻结结果与本次确认的风格内容不一致/);
-    expect(screen.getByLabelText('摄影语言')).toHaveValue(STYLE_DIMENSION_OPTIONS.photography_language[0].id);
+    await screen.findByText(/第 1 版已确认/);
+    await user.click(await screen.findByText('逐项微调七个风格维度（高级）'));
+    const colorSelect = screen.getByLabelText('色彩风格') as HTMLSelectElement;
+    const warmColor = STYLE_DIMENSION_OPTIONS.color_palette[1];
+    await user.selectOptions(colorSelect, warmColor.id);
+
+    await screen.findByText(/风格选择已修改/);
+    await user.click(screen.getAllByRole('button', { name: /重新确认分镜书（冻结新风格）/ })[0]);
+    await waitFor(() => expect(confirms).toHaveLength(1));
+    expect(confirms[0]).toMatchObject({
+      plan_version: 1,
+      expected_sha256: BOOK.plan_sha256,
+      style: {
+        profile_id: 'wong-kar-wai',
+        dimensions: {
+          color_palette: warmColor.text,
+        },
+      },
+    });
   });
 });

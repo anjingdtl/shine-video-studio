@@ -306,3 +306,33 @@ def test_episode_current_jobs_overlays_the_assembly_selection(api):
         assert current[shots[1]["id"]].id == retake.id    # 当前事实=选定重拍
         assert current[shots[0]["id"]].id == jobs[0]["id"]
         assert current[shots[2]["id"]].id == jobs[2]["id"]
+
+
+def test_paused_series_and_unrelated_reconcile_lease_do_not_block_retake_of_passed_shot(api):
+    """暂停或他镜待对账期间，已完成且本身无未结算任务的镜头仍可排入重拍。"""
+    from shine.comfyops.scheduler import ResourceScheduler
+
+    client, factory, project, shots, jobs, _hashes, root = _three(api)
+    scheduler = ResourceScheduler()
+    with factory.begin() as db:
+        other_lease = scheduler.enqueue(db, f"h3:{jobs[2]['id']}", 16384, True, 100)
+        other_lease.status = "RECONCILE_REQUIRED"
+        active_lease = scheduler.enqueue(db, f"series:{root}", 16384, True, 100)
+        active_lease.status = "ACTIVE"
+        db.flush()
+        series = db.get(ProductionSeries, root)
+        series.status = "PAUSED"
+        series.lease_id = active_lease.id
+
+    listing = client.get(f"/api/v1/projects/{project}/generation-segments")
+    assert listing.status_code == 200, listing.text
+    row1 = next(row for row in listing.json()["segments"] if row["shot_id"] == shots[1]["id"])
+    assert row1["blocker"] is None
+    assert row1["can_regenerate"] is True
+
+    retake = client.post(
+        f"/api/v1/projects/{project}/generation-segments/{shots[1]['id']}/regenerate",
+        json={"source_job_id": jobs[1]["id"], "expected_shot_revision": 1},
+        headers=LOCAL,
+    )
+    assert retake.status_code == 202, retake.text

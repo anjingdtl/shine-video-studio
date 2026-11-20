@@ -13,7 +13,6 @@ import { EngineStatusEntry } from './components/EngineStatusEntry';
 import { DirectorStoryboardStage } from './components/StoryboardDraftSection';
 import { ScriptEntryPanel } from './components/ScriptEntryPanel';
 import { SchemaNotice } from './components/SchemaNotice';
-import StylePanel from './components/StylePanel';
 import ShotPanel from './components/ShotPanel';
 import ProductionPanel from './components/ProductionPanel';
 import AuditPanel from './components/AuditPanel';
@@ -28,6 +27,7 @@ import { JourneyBridge, JourneyRail } from './components/JourneyRail';
 import { StageRailProvider } from './components/StageRail';
 import { ModuleGuide } from './components/RequiredAction';
 import { Meter } from './components/Meter';
+import { HardwareMonitor } from './components/HardwareMonitor';
 import { WorkStackMonitor } from './components/WorkStackMonitor';
 import { GuideTip } from './components/GuideTip';
 import type { RailBlocker } from './components/ActionRail';
@@ -156,12 +156,12 @@ function StageDock({ id, title, children }: { id: string; title: string; childre
 function App() {
   const studio = useStudio();
   const {
-    projects, workflowKinds, workflowKindError, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, workflowKinds, workflowKindError, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, report, dismissNotice, busy, dataEpoch,
     loadAudit, refreshAll,
-    createProject, createManual4Project, saveStyle, freezeStyle,
+    createProject, createManual4Project,
     createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze,
     previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
@@ -306,25 +306,48 @@ function App() {
   const [journeyState, setJourneyState] = useState<'idle' | 'loading' | 'ready' | 'error'>('idle');
   const [journeyError, setJourneyError] = useState('');
   const [journeyRetry, setJourneyRetry] = useState(0);
+  const journeyScope = projectId && !isManual4 ? `${projectId}::${directorPackageId ?? ''}` : '';
+  const journeyScopeRef = useRef('');
+  const hasJourneyForScopeRef = useRef(false);
   useEffect(() => {
-    if (!projectId || isManual4) { setJourney(null); setJourneyState('idle'); return; }
+    if (!projectId || isManual4) {
+      journeyScopeRef.current = '';
+      hasJourneyForScopeRef.current = false;
+      setJourney(null);
+      setJourneyState('idle');
+      return;
+    }
     let alive = true;
-    // Switching works never shows the previous work's stages while loading.
-    setJourney((current) => (current && current.project_id === projectId ? current : null));
-    setJourneyState('loading');
+    const scopeChanged = journeyScopeRef.current !== journeyScope;
+    journeyScopeRef.current = journeyScope;
+    if (scopeChanged || !hasJourneyForScopeRef.current) {
+      // Switching works / packages or retrying from empty: never show the previous
+      // work's stages while loading. Same-scope background refreshes keep the
+      // existing ready state so the JourneyRail banner never flickers.
+      hasJourneyForScopeRef.current = false;
+      setJourney(null);
+      setJourneyState('loading');
+    }
     // The journey and the overview must describe the SAME scope: a deep link
     // that names a package projects that package everywhere, never the newest
     // package here and the named one there (C-06a).
     getJourney(projectId, directorPackageId ? { packageId: directorPackageId } : undefined)
-      .then((row) => { if (alive) { setJourney(row); setJourneyState('ready'); setJourneyError(''); } })
+      .then((row) => {
+        if (!alive) return;
+        hasJourneyForScopeRef.current = true;
+        setJourney(row);
+        setJourneyState('ready');
+        setJourneyError('');
+      })
       .catch((error) => {
         if (!alive) return;
+        hasJourneyForScopeRef.current = false;
         setJourney(null);
         setJourneyState('error');
         setJourneyError(error instanceof Error ? error.message : String(error));
       });
     return () => { alive = false; };
-  }, [projectId, isManual4, dataEpoch, journeyRetry, directorPackageId]);
+  }, [projectId, isManual4, dataEpoch, journeyRetry, directorPackageId, journeyScope]);
   /** V2 统一只读投影：项目与按集状态都来自这一份聚合，前端不自行猜完成度。 */
   const [overview, setOverview] = useState<DirectorOverview | null>(null);
   useEffect(() => {
@@ -522,13 +545,6 @@ function App() {
     window.scrollTo({ top: 0 });
   }
 
-  /** 旧锚点导航(偏好面板引导等):落到对应页面后滚动到同名区块。 */
-  function goTo(id: string) {
-    const page = LEGACY_ANCHOR_PAGES[id] ?? 'advanced';
-    goToDirectorPage(page);
-    window.setTimeout(() => document.getElementById(id)?.scrollIntoView({ behavior: 'auto', block: 'start' }), 90);
-  }
-
   useEffect(() => {
     if (!helpOpen) return;
     const onKey = (event: KeyboardEvent) => { if (event.key === 'Escape') setHelpOpen(false); };
@@ -671,7 +687,10 @@ function App() {
             <Sparkles size={15} /><span>AI 管家配置</span>
           </button>
         </nav>
-        <WorkStackMonitor />
+        <div className="sidebar-monitors">
+          <HardwareMonitor />
+          <WorkStackMonitor />
+        </div>
         <div className="director-sidebar-foot">
           <i aria-hidden="true" className={`status-led ${apiOnline ? '' : systemChecked ? 'offline' : 'checking'}`} />
           <span>{apiOnline ? '本机服务在线' : systemChecked ? '本机服务失联' : '正在检查服务'}</span>
@@ -964,39 +983,21 @@ function App() {
                 key={`book-${projectId}`}
                 projectId={projectId}
                 currentStyle={currentStyle}
+                styles={styles}
+                onApplyStyleToAllShots={() => void applyStyleToAllShots()}
+                onRefreshFreeze={() => void refreshStyleFreeze()}
                 onGoStage={(target) => { resolveBlockerTarget(target)(); }}
                 onMessage={report}
                 onConfirmed={() => refreshAll().catch(() => undefined)}
               />
-              <>
-                <StageDock id="style-detail" title="逐项微调七个风格维度(高级)">
-                  <StylePanel
-                    key={`style-${projectId}`}
-                    projectId={projectId}
-                    style={style}
-                    setStyle={setStyle}
-                    serverDraft={project.style_draft}
-                    currentStyle={currentStyle}
-                    styles={styles}
-                    busy={busy}
-                    onSave={saveStyle}
-                    onFreeze={freezeStyle}
-                    onApplyStyleToAllShots={() => void applyStyleToAllShots()}
-                    onRefreshFreeze={() => void refreshStyleFreeze()}
-                    onDraftApplied={() => { refreshAll().catch(() => undefined); }}
-                    onNavigate={goTo}
-                    onMessage={report}
-                  />
-                </StageDock>
-                <StageDock id="terminology" title="人物名称与术语统一">
-                  <TerminologyPanel
-                    key={`terminology-${projectId}`}
-                    projectId={projectId}
-                    busy={busy}
-                    onMessage={report}
-                  />
-                </StageDock>
-              </>
+              <StageDock id="terminology" title="人物名称与术语统一">
+                <TerminologyPanel
+                  key={`terminology-${projectId}`}
+                  projectId={projectId}
+                  busy={busy}
+                  onMessage={report}
+                />
+              </StageDock>
               </StageRailProvider>
             </div>
 
@@ -1062,6 +1063,7 @@ function App() {
                 <ShotMaterialsPanel key={`shot-materials-${projectId}`} projectId={projectId}
                   onMessage={report}
                   assetsDone={stageDone.assets}
+                  onJourneyRefresh={() => refreshAll().catch(() => undefined)}
                   onAdvance={() => { if (nextStage) goToDirectorPage(nextStage.page, nextStage.id); }}
                   onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
 

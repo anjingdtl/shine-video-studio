@@ -25,6 +25,7 @@ from shine.api_common import DBSession, llm_gateway
 from shine.api_operator import Operator
 from shine.asset_identity import resolve_character_asset, split_character_names
 from shine.director_styles.service import camera_style_text, resolve_frozen_binding, sound_style_text
+from shine.h3.compiler import non_vocal_ambience_text
 from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, RuleValidationReport, digest
 from shine.llm.base import LLMError, text_provider_snapshot
 from shine.llm.gateway import LLMGateway
@@ -688,7 +689,10 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     camera_fields["director_style"] = visual_rules
                 sound_rules = sound_style_text(style_resolution)
                 if sound_rules:
-                    sound_fields["ambience"] = sound_rules
+                    if not beat["dialogue"]:
+                        sound_rules = non_vocal_ambience_text(sound_rules)
+                    if sound_rules:
+                        sound_fields["ambience"] = sound_rules
             spec = ShotSpec(
                 story_beat=visual,
                 duration_target_s=intent["duration_s"],

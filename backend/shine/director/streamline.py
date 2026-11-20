@@ -256,21 +256,27 @@ def _section_beats_view(db, project_id: str, section: dict[str, Any]) -> dict[st
 
 def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -> dict[str, Any]:
     """The readable storyboard book: episodes -> sections -> beats/dialogue."""
-    from shine.director.contracts import EpisodePlanPayload
+    from shine.director.contracts import EpisodePlanPayload, derive_episode_plan_from_sections
 
     payload = EpisodePlanPayload.model_validate(plan_payload)
     outline = _confirmed_outline_for_plan(db, project_id, payload)
+    all_sections = sorted(
+        list((outline.payload_json or {}).get("production_sections") or []),
+        key=lambda row: int(row.get("order") or 0),
+    ) if outline else []
     sections_by_id = {
         str(row["production_section_id"]): row
-        for row in ((outline.payload_json or {}).get("production_sections") or [])
-    } if outline else {}
+        for row in all_sections
+    }
     episodes = []
     total = 0.0
+    covered_rows: list[dict[str, Any]] = []
     for episode in payload.episodes:
-        section_views = [
-            _section_beats_view(db, project_id, sections_by_id[sid])
-            for sid in episode.section_ids if sid in sections_by_id
-        ]
+        section_views = []
+        for sid in episode.section_ids:
+            if sid in sections_by_id:
+                covered_rows.append(sections_by_id[sid])
+                section_views.append(_section_beats_view(db, project_id, sections_by_id[sid]))
         planned = float(episode.planned_seconds)
         total += planned
         episodes.append({
@@ -283,6 +289,42 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
             "section_count": len(episode.section_ids),
             "sections": section_views,
         })
+    total_outline_seconds = round(
+        sum(float(row.get("estimated_duration_s") or 0.0) for row in all_sections), 1
+    )
+    covered_seconds = round(
+        sum(float(row.get("estimated_duration_s") or 0.0) for row in covered_rows), 1
+    )
+    covered_scope = None
+    if covered_rows:
+        cov_from = covered_rows[0]
+        cov_to = covered_rows[-1]
+        cov_from_order = int(cov_from.get("order") or 1)
+        cov_to_order = int(cov_to.get("order") or cov_from_order)
+        cov_from_title = str(cov_from.get("title") or f"第 {cov_from_order} 场")
+        cov_to_title = str(cov_to.get("title") or f"第 {cov_to_order} 场")
+        coverage_pct = (
+            round(min(100.0, covered_seconds / total_outline_seconds * 100))
+            if total_outline_seconds > 0
+            else (round(len(covered_rows) / len(all_sections) * 100) if all_sections else 100)
+        )
+        covered_scope = {
+            "covered_section_count": len(covered_rows),
+            "total_section_count": len(all_sections),
+            "from_order": cov_from_order,
+            "to_order": cov_to_order,
+            "from_title": cov_from_title,
+            "to_title": cov_to_title,
+            "covered_seconds": covered_seconds,
+            "total_outline_seconds": total_outline_seconds,
+            "coverage_percent": coverage_pct,
+            "note": (
+                f"本次 {len(episodes)} 集覆盖大纲第 {cov_from_order} 场「{cov_from_title}」"
+                f"至第 {cov_to_order} 场「{cov_to_title}」"
+                f"（共 {len(covered_rows)}/{len(all_sections)} 场，"
+                f"原文预计约 {round(covered_seconds)} / {round(total_outline_seconds)} 秒，占 {coverage_pct}%）。"
+            ),
+        }
     out_ids = list(payload.out_of_scope_section_ids)
     out_rows = [sections_by_id[sid] for sid in out_ids if sid in sections_by_id]
     out_of_scope = None
@@ -290,23 +332,103 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
         orders = [int(row.get("order") or 0) for row in out_rows]
         first = out_rows[0].get("title") if out_rows else None
         last = out_rows[-1].get("title") if out_rows else None
+        remaining_seconds = round(
+            sum(float(row.get("estimated_duration_s") or 0.0) for row in out_rows), 1
+        )
+        # Use the exact same packing verdict to estimate how many more episodes
+        # the remaining out-of-scope sections require at the user's target length.
+        estimated_remaining_episodes = (
+            len(
+                derive_episode_plan_from_sections(
+                    out_rows,
+                    target_seconds=payload.target_seconds,
+                    tolerance_seconds=payload.tolerance_seconds,
+                ).episodes
+            )
+            if out_rows
+            else 0
+        )
+        estimated_total_episodes = len(episodes) + estimated_remaining_episodes
+        covered_tail = (
+            f"当前 {len(episodes)} 集覆盖至第 {covered_scope['to_order']} 场「{covered_scope['to_title']}」；"
+            if covered_scope
+            else ""
+        )
+        out_range = (
+            f"（第 {min(orders)} 场「{first}」至第 {max(orders)} 场「{last}」，预计约 {round(remaining_seconds)} 秒）"
+            if orders
+            else ""
+        )
+        remaining_hint = (
+            f"按每集 {payload.target_seconds} 秒预计后续还需约 {estimated_remaining_episodes} 集"
+            f"（全剧共约 {estimated_total_episodes} 集），"
+            if estimated_remaining_episodes > 0
+            else ""
+        )
         out_of_scope = {
             "count": len(out_ids),
             "from_order": min(orders) if orders else None,
             "to_order": max(orders) if orders else None,
-            "note": (f"另有 {len(out_ids)} 场不在本次 {len(episodes)} 集范围内"
-                     + (f"（第 {min(orders)} 场「{first}」至第 {max(orders)} 场「{last}」）"
-                        if orders else "")
-                     + "；每集范围由你确认的秒数决定，如需整剧请增加集数。"),
+            "from_title": first,
+            "to_title": last,
+            "remaining_seconds": remaining_seconds,
+            "estimated_remaining_episodes": estimated_remaining_episodes,
+            "estimated_total_episodes": estimated_total_episodes,
+            "note": (
+                f"{covered_tail}后续另有 {len(out_ids)} 场不在本次 {len(episodes)} 集范围内"
+                f"{out_range}；{remaining_hint}可先拍本次计划，后续再由你决定是否继续或调整集数。"
+            ),
         }
+    scope_warning = None
+    max_budget = len(episodes) * (payload.target_seconds + payload.tolerance_seconds)
+    if not out_ids and covered_seconds > max_budget and len(episodes) > 0:
+        est_eps = max(len(episodes), round(covered_seconds / max(1, payload.target_seconds)))
+        scope_warning = (
+            f"当前大纲已拆场次较少（共 {len(all_sections)} 场），所覆盖原文按字数约 {round(covered_seconds)} 秒"
+            f"（按每集 {payload.target_seconds} 秒全篇约需 {est_eps} 集），已超出本次 {len(episodes)} 集的总时长窗口；"
+            f"第③步拆镜时仍会严格按每集 {payload.target_seconds} 秒目标控制成片范围。"
+        )
+    source = payload.source or {}
+    max_shot_seconds = source.get("max_shot_seconds")
     return {
         "mode": payload.mode,
         "target_seconds": payload.target_seconds,
         "tolerance_seconds": payload.tolerance_seconds,
+        "max_shot_seconds": float(max_shot_seconds) if max_shot_seconds is not None else None,
         "episode_count": len(episodes),
         "total_planned_seconds": round(total, 3),
         "episodes": episodes,
+        "covered_scope": covered_scope,
         "out_of_scope": out_of_scope,
+        "scope_warning": scope_warning,
+    }
+
+
+def latest_storyboard_book(db, project_id: str) -> dict[str, Any] | None:
+    """Return the latest active storyboard book (newest draft ahead of confirmed, or confirmed)."""
+    from shine.director.models import DirectorEpisodePlan
+
+    rows = db.scalars(
+        select(DirectorEpisodePlan)
+        .where(DirectorEpisodePlan.project_id == project_id)
+        .order_by(DirectorEpisodePlan.version.desc())
+    ).all()
+    if not rows:
+        return None
+    confirmed = next((row for row in rows if row.status == "CONFIRMED"), None)
+    latest_draft = next((row for row in rows if row.status == "DRAFT"), None)
+    target = (
+        latest_draft
+        if latest_draft is not None and (confirmed is None or latest_draft.version > confirmed.version)
+        else (confirmed or latest_draft)
+    )
+    if target is None:
+        return None
+    return {
+        "plan_version": target.version,
+        "plan_sha256": target.sha256,
+        "status": target.status,
+        "preview": storyboard_book_preview(db, project_id, target.payload),
     }
 
 
@@ -407,15 +529,18 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     from shine.director_styles.catalog import DirectorStyleCatalog, DirectorStyleCatalogError
     from shine.director_styles.service import make_binding, register_profile_revision
     from shine.models import StyleVersion
-    from shine.schemas import FilmType
+    from shine.schemas import STYLE_BIBLE_FIELDS, FilmType, StyleBible
     from shine.services import freeze_style, update_style_draft
 
     profile_id = style.get("profile_id")
     strength = style.get("strength") or "balanced"
+    if strength not in {"subtle", "balanced", "strong"}:
+        raise HTTPException(422, "STYLE_STRENGTH_INVALID")
     film_type = style.get("film_type")
     dialogue_ratio = style.get("dialogue_ratio_percent")
     narration_level = style.get("narration_level")
     max_shot_seconds = style.get("max_shot_seconds")
+    dimensions = style.get("dimensions")
     if not profile_id:
         raise HTTPException(422, "STYLE_PROFILE_REQUIRED")
     try:
@@ -427,7 +552,7 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
         if project.frozen_style_version_id else None
     )
     current = project.style_draft or (frozen_current.snapshot if frozen_current else {}) or {}
-    style_bible = entry.profile.style_bible.model_copy(update={
+    updates: dict[str, Any] = {
         "dialogue_ratio_percent": dialogue_ratio if dialogue_ratio is not None
         else current.get("dialogue_ratio_percent"),
         # Narration is a storyboard-style decision: it tells the crew how much
@@ -438,6 +563,20 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
         else current.get("max_shot_seconds"),
         "film_type": FilmType(film_type) if film_type else (
             FilmType(current["film_type"]) if current.get("film_type") else None),
+    }
+    if isinstance(dimensions, dict):
+        for field in STYLE_BIBLE_FIELDS:
+            if field in dimensions:
+                value = str(dimensions[field] or "").strip()
+                if not value:
+                    raise HTTPException(422, {
+                        "code": "STYLE_DIMENSION_EMPTY",
+                        "message": f"风格维度「{field}」不能为空",
+                    })
+                updates[field] = value
+    style_bible = StyleBible.model_validate({
+        **entry.profile.style_bible.model_dump(mode="json"),
+        **updates,
     })
     register_profile_revision(db, entry)
     update_style_draft(db, project, style_bible, preserve_director_style=False)
@@ -751,6 +890,34 @@ def run_pending_director_storyboard(factory, settings, worker_id, *, gateway=Non
                           "failed_unit_index": cursor if cursor < len(units) else state.get("failed_unit_index")},
                          "NEEDS_REVIEW", str(code)[:64])
     return True
+
+
+def _update_fit_closed_episodes(factory, project_id: str, state: dict) -> dict:
+    """Record episodes whose landed shots have already reached ``target_seconds``."""
+    units = state.get("units") or []
+    blocked = state.get("blocked_episodes") or {}
+    fit_closed = dict(state.get("fit_closed_episodes") or {})
+    target = state.get("target_seconds")
+    if target is None:
+        return state
+    from shine.director.contracts import planned_seconds
+    from shine.models import Shot
+
+    with factory() as db:
+        for ep_id in {u["episode_id"] for u in units}:
+            if ep_id in fit_closed or ep_id in blocked:
+                continue
+            landed = 0.0
+            for result in state.get("results", []):
+                if (result.get("unit") or {}).get("episode_id") != ep_id:
+                    continue
+                for sid in (result.get("apply") or {}).get("shot_ids", []):
+                    shot = db.get(Shot, sid)
+                    if shot is not None and shot.project_id == project_id:
+                        landed += planned_seconds(shot)
+            if landed >= float(target):
+                fit_closed[ep_id] = {"landed_seconds": round(landed, 1)}
+    return {**state, "fit_closed_episodes": fit_closed}
 
 
 def _advance_director_unit(factory, settings, gateway, task_id, version, worker_id, project_id, state):
@@ -2078,6 +2245,7 @@ def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strat
     the old frame.
     """
     from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
+    from shine.director.package import package_readiness
     from shine.schemas import OutputSpec
 
     def norm(value) -> dict | None:
@@ -2102,6 +2270,10 @@ def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strat
         if binding.get("strategy_sha256") != strategy_sha:
             continue
         if norm(binding.get("output")) != wanted_output:
+            continue
+        # 若镜头修订/绑定等已导致该冻结包不再可启动，不能复用旧包去重放旧的 CANCELLED 运行，
+        # 而是让单入口重新打包并确认最新镜头快照。
+        if not package_readiness(db, package).get("startable"):
             continue
         return package
     return None

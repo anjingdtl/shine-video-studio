@@ -164,7 +164,7 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
             onClick={() => void promote(candidate)}>
             {promoting === candidate.candidate_id ? '晋升中…' : '选用并晋升'}</button>
         </figure>)}
-        {masters.map((master) => <figure className="mgp-candidate" key={master.asset_id}>
+        {masters.map((master) => <figure className="mgp-candidate" key={`${master.requirement_id}-${master.asset_id}`}>
           <img src={`${API}/assets/${master.asset_id}/thumbnail`}
             alt={`${master.entity_id ?? '素材'} 已采用`} loading="lazy" />
           <span className="mgp-candidate-entity">{FAMILY_LABEL[master.family ?? ''] ?? master.family} · {master.entity_id ?? '素材'}</span>

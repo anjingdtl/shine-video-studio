@@ -1603,27 +1603,65 @@ export type StoryboardBookEpisode = {
 export type StoryboardBook = {
   plan_version: number;
   plan_sha256: string;
+  status?: string;
   preview: {
     mode: string;
     target_seconds: number;
     tolerance_seconds: number;
+    max_shot_seconds?: number | null;
     episode_count: number;
     total_planned_seconds: number;
     episodes: StoryboardBookEpisode[];
-    out_of_scope?: { count: number; from_order: number | null; to_order: number | null;
-                     note: string } | null;
+    covered_scope?: {
+      covered_section_count: number;
+      total_section_count: number;
+      from_order: number | null;
+      to_order: number | null;
+      from_title: string;
+      to_title: string;
+      covered_seconds: number;
+      total_outline_seconds: number;
+      coverage_percent: number;
+      note: string;
+    } | null;
+    out_of_scope?: {
+      count: number;
+      from_order: number | null;
+      to_order: number | null;
+      from_title?: string | null;
+      to_title?: string | null;
+      remaining_seconds?: number;
+      estimated_remaining_episodes?: number;
+      estimated_total_episodes?: number;
+      note: string;
+    } | null;
+    scope_warning?: string | null;
   };
 };
 
+export const fetchLatestStoryboardBook = (projectId: string) =>
+  api<StoryboardBook | null>(`/projects/${projectId}/director/storyboard-book`);
+
 export const generateStoryboardBook = (projectId: string, body: {
-  episode_count: number; target_seconds: number; tolerance_seconds: number,
+  episode_count: number; target_seconds: number; tolerance_seconds: number; max_shot_seconds?: number;
 }) => api<StoryboardBook>(`/projects/${projectId}/director/storyboard-book`, json('POST', body));
 
 export const confirmStoryboardBook = (projectId: string, body: {
   plan_version: number; expected_sha256: string;
-  style: { profile_id: string; film_type?: string; dialogue_ratio_percent?: number;
-    narration_level?: 'none' | 'low' | 'high'; max_shot_seconds?: number | null } | null,
-  acknowledge_deviation?: boolean,
+  style: {
+    profile_id: string;
+    strength?: 'subtle' | 'balanced' | 'strong';
+    film_type?: string;
+    dialogue_ratio_percent?: number;
+    narration_level?: 'none' | 'low' | 'high';
+    max_shot_seconds?: number | null;
+    dimensions?: Partial<Record<
+      'photography_language' | 'shot_blocking' | 'color_palette' | 'lighting_tone'
+      | 'lens_texture' | 'editing_rhythm' | 'sound_performance',
+      string
+    >>;
+  } | null;
+  acknowledge_deviation?: boolean;
 }) => api<{ plan_version: number; style: { style_version_id: string } | null }>(
   `/projects/${projectId}/director/storyboard-book/confirm`, json('POST', body));
 
@@ -2238,3 +2276,34 @@ export const createManual4Project = (payload: {
   max_shot_seconds?: number;
 }) =>
   api<PlatformProject>('/platform/manual4-projects', json('POST', payload));
+
+export type GpuTelemetry = {
+  index: number;
+  name: string;
+  utilization_pct: number | null;
+  memory_used_mb: number | null;
+  memory_total_mb: number | null;
+  memory_pct: number | null;
+  temperature_c: number | null;
+  power_w: number | null;
+  power_limit_w: number | null;
+};
+
+export type HardwareTelemetry = {
+  checked_at: string;
+  cpu: {
+    utilization_pct: number | null;
+    temperature_c: number | null;
+    power_w: number | null;
+  };
+  memory: {
+    utilization_pct: number | null;
+    used_mb: number | null;
+    total_mb: number | null;
+  };
+  gpus: GpuTelemetry[];
+  gpu_error: string | null;
+};
+
+export const fetchHardwareTelemetry = () =>
+  api<HardwareTelemetry>('/setup/hardware-telemetry', { cache: 'no-store' });

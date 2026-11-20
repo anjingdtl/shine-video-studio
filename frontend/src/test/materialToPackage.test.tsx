@@ -285,3 +285,211 @@ describe('素材就绪后主操作进入下一步（journey 单一裁决）', ()
     expect(await within(rail).findByRole('button', { name: '确认决策并开始准备素材' })).toBeInTheDocument();
   });
 });
+
+describe('上传主素材后其他项选 AI 制作不丢失已上传图片', () => {
+  it('先上传第 1 项并采用，再点「全部 AI 制作」与「确认决策」时第 1 项保持 reuse_master 并在候选区保留', async () => {
+    let uploaded = false;
+    let aiQueued = false;
+    const commits: Array<Record<string, unknown>> = [];
+    stub.add({
+      method: 'GET',
+      pattern: /projects\/p1\/director\/materials\/requirements$/,
+      respond: () => jsonResponse({
+        ...REQUIREMENTS,
+        requirements: REQUIREMENTS.requirements.map((row) => (
+          row.requirement_id === 'r1' && uploaded
+            ? { ...row, strategy: 'reuse_master', matched_master: { asset_id: 'uploaded-1', sha256: 'u'.repeat(64) }, status: 'matched' }
+            : row
+        )),
+      }),
+    });
+    stub.add({
+      method: 'GET',
+      pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({
+        project_id: 'p1',
+        runs: aiQueued ? [{
+          run_id: 'run-2', status: 'SUCCEEDED', kind: 'production',
+          counts: { total: 1, candidate_ready: 1, failed: 0, needs_review: 0, queued: 0, running: 0 },
+          items: [{
+            item_id: 'i2', requirement_id: 'r2', entity_id: '码头', family: 'scene',
+            status: 'CANDIDATE_READY', error_code: null,
+            candidates: [{
+              candidate_id: 'cand-2', status: 'READY_FOR_REVIEW', content_sha256: 'c'.repeat(64),
+              is_mock: false, formal_asset_id: null, attempt_no: 1,
+            }],
+          }],
+        }] : [],
+      }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/assets$/,
+      respond: () => jsonResponse({ id: 'uploaded-1' }, 201),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /preparation\/approval-grants$/,
+      respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /assets\/uploaded-1\/approve$/,
+      respond: () => jsonResponse({ id: 'uploaded-1', approved: true }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /assets\/uploaded-1\/lock$/,
+      respond: () => jsonResponse({ id: 'uploaded-1', locked: true }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/director\/materials\/commit$/,
+      respond: (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as {
+          decisions: Array<{ requirement_id: string; strategy: string; asset_id: string | null }>;
+          queue_generation: boolean;
+        };
+        commits.push(body);
+        if (body.decisions.some((d) => d.requirement_id === 'r1' && d.strategy === 'reuse_master')) {
+          uploaded = true;
+        }
+        if (body.queue_generation && body.decisions.some((d) => d.requirement_id === 'r2' && d.strategy === 'generate')) {
+          aiQueued = true;
+        }
+        return jsonResponse({ confirmation: {}, generate_count: 1, batch: null });
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+
+    await screen.findByText('沈砚');
+    const row1 = screen.getByText('沈砚').closest('tr')!;
+    const fileInput = row1.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['png-bytes'], 'shenyan.png', { type: 'image/png' });
+    await user.upload(fileInput, file);
+
+    // 上传后第 1 项决定必须自动同步为 reuse_master，并在候选区显示「已采用」
+    await waitFor(() => {
+      expect((screen.getByLabelText('处理方式：沈砚') as HTMLSelectElement).value).toBe('reuse_master');
+    });
+    expect(await screen.findByAltText('沈砚 已采用')).toBeInTheDocument();
+
+    // 再点「全部 AI 制作」并确认提交：只对未采用的「码头」排队 AI 制作，不得把「沈砚」重置掉
+    await user.click(screen.getByRole('button', { name: '全部 AI 制作' }));
+    expect((screen.getByLabelText('处理方式：沈砚') as HTMLSelectElement).value).toBe('reuse_master');
+    expect((screen.getByLabelText('处理方式：码头') as HTMLSelectElement).value).toBe('generate');
+
+    const rail = screen.getByLabelText('本阶段操作');
+    await user.click(within(rail).getByRole('button', { name: '确认决策并开始准备素材' }));
+
+    await waitFor(() => expect(commits).toHaveLength(2));
+    const secondCommit = commits[1] as {
+      decisions: Array<{ requirement_id: string; strategy: string; asset_id: string | null }>;
+    };
+    expect(secondCommit.decisions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ requirement_id: 'r1', strategy: 'reuse_master', asset_id: 'uploaded-1' }),
+      expect.objectContaining({ requirement_id: 'r2', strategy: 'generate', asset_id: null }),
+    ]));
+
+    // 候选区同时可见已上传的主素材与 AI 生成的候选图
+    expect(await screen.findByAltText('沈砚 已采用')).toBeInTheDocument();
+    expect(await screen.findByAltText('码头 候选 1')).toBeInTheDocument();
+  });
+
+  it('重复上传已批准并锁定的同一张图片时，不重复调用 approve/lock 报 409，直接回绑并刷新候选区', async () => {
+    let adopted = false;
+    stub.add({
+      method: 'GET',
+      pattern: /projects\/p1\/director\/materials\/requirements$/,
+      respond: () => jsonResponse({
+        ...REQUIREMENTS,
+        requirements: REQUIREMENTS.requirements.map((row) => (
+          row.requirement_id === 'r1' && adopted
+            ? { ...row, strategy: 'reuse_master', matched_master: { asset_id: 'dup-asset-1', sha256: 'd'.repeat(64) }, status: 'matched' }
+            : row
+        )),
+      }),
+    });
+    stub.add({
+      method: 'GET',
+      pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [] }),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/assets$/,
+      respond: () => jsonResponse({
+        id: 'dup-asset-1', role: 'character', entity_id: '沈砚',
+        approved: true, locked: true, filename: 'shenyan.png',
+      }, 201),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/director\/materials\/commit$/,
+      respond: () => {
+        adopted = true;
+        return jsonResponse({ confirmation: {}, generate_count: 0, batch: null });
+      },
+    });
+
+    const user = userEvent.setup();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+
+    await screen.findByText('沈砚');
+    const row1 = screen.getByText('沈砚').closest('tr')!;
+    const fileInput = row1.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File(['same'], 'shenyan.png', { type: 'image/png' }));
+
+    expect(await screen.findByAltText('沈砚 已采用')).toBeInTheDocument();
+    expect(stub.callsOf('POST', /approve$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /lock$/)).toHaveLength(0);
+    expect(stub.callsOf('POST', /director\/materials\/commit$/)).toHaveLength(1);
+    expect((screen.getByLabelText('处理方式：沈砚') as HTMLSelectElement).value).toBe('reuse_master');
+  });
+
+  it('在素材页上传或确认进入下一步时同步触发 onJourneyRefresh，保证导演包阶段读取同一最新事实', async () => {
+    const commitBodies: Array<{ queue_generation: boolean }> = [];
+    stubMaterials();
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/assets$/,
+      respond: () => jsonResponse({
+        id: 'asset-sync-1', role: 'character', entity_id: '沈砚',
+        approved: true, locked: true, filename: 'shenyan-sync.png',
+      }, 201),
+    });
+    stub.add({
+      method: 'POST',
+      pattern: /projects\/p1\/director\/materials\/commit$/,
+      respond: (_url, init) => {
+        commitBodies.push(JSON.parse(String(init?.body || '{}')) as { queue_generation: boolean });
+        return jsonResponse({ confirmation: {}, generate_count: 0, batch: null });
+      },
+    });
+
+    const user = userEvent.setup();
+    const refresh = vi.fn();
+    const advance = vi.fn();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" assetsDone onJourneyRefresh={refresh} onAdvance={advance} />
+    </StageRailProvider>);
+
+    await screen.findByText('沈砚');
+    const row1 = screen.getByText('沈砚').closest('tr')!;
+    const fileInput = row1.querySelector('input[type="file"]') as HTMLInputElement;
+    await user.upload(fileInput, new File(['sync'], 'shenyan-sync.png', { type: 'image/png' }));
+    await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1));
+
+    const rail = screen.getByLabelText('本阶段操作');
+    await user.click(within(rail).getByRole('button', { name: '确认并进入下一步' }));
+    await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(commitBodies[commitBodies.length - 1]?.queue_generation).toBe(false);
+  });
+});

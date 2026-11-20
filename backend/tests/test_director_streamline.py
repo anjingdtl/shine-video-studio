@@ -1182,3 +1182,101 @@ def test_crew_chain_records_the_literary_budget(api):
         sample = budgeted[0].trace["call_budget"]
         assert sample["output_request_tokens"] > 0
         assert "window_source" in sample
+
+
+def test_storyboard_book_preview_reports_covered_scope_and_remaining_episodes(api):
+    client, _factory, _settings = api
+    prepared = _prepare_project(client, sections=6, section_seconds=30.0)
+    project = prepared["project"]
+
+    response = client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book",
+        json={"episode_count": 1, "target_seconds": 60, "tolerance_seconds": 15,
+              "max_shot_seconds": 10},
+        headers=LOCAL,
+    )
+    assert response.status_code == 201, response.text
+    book = response.json()
+    preview = book["preview"]
+    assert preview["episode_count"] == 1
+    assert preview["max_shot_seconds"] == 10.0
+    covered = preview["covered_scope"]
+    assert covered["from_order"] == 1 and covered["to_order"] == 2
+    assert covered["covered_section_count"] == 2 and covered["total_section_count"] == 6
+    assert covered["coverage_percent"] == 33
+    out = preview["out_of_scope"]
+    assert out["count"] == 4
+    assert out["from_order"] == 3 and out["to_order"] == 6
+    assert out["remaining_seconds"] == 120.0
+    assert out["estimated_remaining_episodes"] == 2
+    assert out["estimated_total_episodes"] == 3
+    assert "第 1 场" in covered["note"] and "第 2 场" in covered["note"]
+    assert "还需约 2 集" in out["note"]
+
+    # GET returns the exact persisted latest plan preview on reload.
+    fetched = client.get(f"/api/v1/projects/{project}/director/storyboard-book")
+    assert fetched.status_code == 200, fetched.text
+    assert fetched.json()["plan_version"] == book["plan_version"]
+    assert fetched.json()["preview"]["out_of_scope"]["estimated_remaining_episodes"] == 2
+
+
+def test_storyboard_book_confirm_freezes_customized_seven_dimensions(api):
+    from shine.models import Project, StyleVersion
+
+    client, factory, _settings = api
+    prepared = _prepare_project(client, sections=2, section_seconds=30.0)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
+
+    custom_dims = {
+        "photography_language": "固定远景，水平稳定推进。",
+        "shot_blocking": "双人对角站位，严守轴线。",
+        "color_palette": "低饱和青灰配一点暖灯。",
+        "lighting_tone": "低调侧逆光，暗部有层次。",
+        "lens_texture": "50mm 胶片柔焦与细腻颗粒。",
+        "editing_rhythm": "克制节奏，保留停顿呼吸。",
+        "sound_performance": "真实环境雨声与克制普通话对白。",
+    }
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book/confirm",
+        json={
+            "plan_version": book["plan_version"],
+            "expected_sha256": book["plan_sha256"],
+            "style": {
+                "profile_id": "wong-kar-wai",
+                "strength": "strong",
+                "film_type": "animation",
+                "dialogue_ratio_percent": 70,
+                "narration_level": "low",
+                "max_shot_seconds": 10,
+                "dimensions": custom_dims,
+            },
+        },
+        headers=LOCAL,
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    with factory() as db:
+        proj = db.get(Project, project)
+        frozen = db.get(StyleVersion, proj.frozen_style_version_id)
+        assert frozen is not None
+        for key, value in custom_dims.items():
+            assert frozen.snapshot[key] == value
+        assert frozen.snapshot["film_type"] == "animation"
+        assert frozen.snapshot["max_shot_seconds"] == 10
+        assert frozen.director_style_binding["strength"] == "strong"
+
+
+def test_storyboard_book_exceeding_sections_returns_chinese_guidance(api):
+    client, _factory, _settings = api
+    prepared = _prepare_project(client, sections=2, section_seconds=30.0)
+    project = prepared["project"]
+    refused = client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book",
+        json={"episode_count": 5, "target_seconds": 60},
+        headers=LOCAL,
+    )
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail["code"] == "EPISODE_COUNT_EXCEEDS_SECTIONS"
+    assert "共 2 个场次" in detail["message"]
+

@@ -660,3 +660,25 @@ def test_historical_compiler_versions_keep_their_exact_prompt_bytes():
         current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, project_language="Chinese")
         assert current.compiler_version == COMPILER_VERSION
         assert current.prompt_sha256 != expected, name
+
+
+def test_silent_shot_sanitizes_dialogue_ambience_and_anchors_project_language():
+    """无对白镜头剥离环境音里的原对话字样并锚定工程语言背景，防止 H3 编造外语语音。"""
+    silent = compile_prompt(
+        [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="安娜", role="character")],
+        shot=spec(sound={
+            "ambience": (
+                "Keep diegetic city ambience restrained beneath the original dialogue "
+                "and preserve intentional silence."
+            ),
+        }),
+        project_language="Chinese",
+    )
+    soundscape = silent.sections["overall_soundscape"]
+    assert "dialogue" not in soundscape.lower().replace("has no dialogue", "")
+    assert "beneath the original dialogue" not in soundscape.lower()
+    assert "Chinese-language world" in soundscape
+    assert "the soundtrack is entirely non-vocal" in soundscape
+    assert "reference appearance" in silent.sections["subject_definitions"]
+    for token in (*_PRIMING_VOCABULARY, "narration"):
+        assert token not in silent.prompt.lower(), token

@@ -1272,6 +1272,14 @@ def work_stacks(request: Request, db: DBSession):
     return work_stack_snapshot(db, request.app.state.settings)
 
 
+@router.get('/hardware-telemetry')
+def hardware_telemetry():
+    """Read-only snapshot of host CPU, RAM and GPU utilization, power and temperature."""
+    from shine.hardware_telemetry import read_hardware_telemetry
+
+    return read_hardware_telemetry()
+
+
 @router.post('/managed-processes/release')
 def release_managed_processes(request: Request, actor: Operator, db: DBSession,
                               body: ManagedReleaseRequest | None = None):

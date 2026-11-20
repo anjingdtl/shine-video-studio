@@ -344,10 +344,12 @@ def crew_prompt(
                 "editorial_shot_lengths_s[i-1] seconds long, measured from that beat's own zero; "
                 "a line that ends later does not fit its editorial shot, so keep the line verbatim "
                 "and place it inside that window. "
-                "List in characters only the people who actually appear in that beat. Do not repeat "
+                "List in characters only the people who actually appear visibly on screen in that beat "
+                "(never add an off-screen observer or point-of-view character). Do not repeat "
                 "the whole cast in every beat: every listed character becomes a required subject "
                 "reference in the render, so a character who does not appear in the beat must not be "
-                "listed."
+                "listed. List characters in exact first-visual-appearance order, and do not describe "
+                "conflicting clothing, hoods or headgear that override an approved character master."
             )
     if role == "director":
         parts.append(
@@ -389,8 +391,11 @@ def crew_prompt(
         if reference_budget_note:
             parts.append(reference_budget_note)
         parts.append(
-            "List the character masters of a shot in the order the shot's beats list their "
-            "characters, and introduce the performers in that same order in visual prose. "
+            "List ONLY the character masters visibly appearing in a shot, in the exact order they "
+            "first appear in visual prose (so the first described person is always the first listed "
+            "character). Never include an off-screen observer or point-of-view reference in asset_ids "
+            "unless that character delivers a spoken dialogue line in the segment, and never describe "
+            "a hood, mask or costume change that conflicts with an approved character master image. "
             "A dialogue speaker owns its line even when it never appears on screen: the approved "
             "character master of EVERY speaker whose line a segment contains must be in that "
             "segment's asset_ids, exactly as for a visible character."

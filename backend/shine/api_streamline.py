@@ -132,6 +132,13 @@ class StoryboardBookBody(APIModel):
     episode_count: int = Field(ge=1, le=200)
     target_seconds: int = Field(default=60, ge=8, le=3600)
     tolerance_seconds: int = Field(default=15, ge=0, le=900)
+    max_shot_seconds: float | None = Field(default=None, ge=4.0, le=15.0)
+
+
+@router.get("/projects/{project_id}/director/storyboard-book")
+def get_storyboard_book(project_id: str, db: DBSession) -> dict[str, Any] | None:
+    require_project(db, project_id)
+    return streamline.latest_storyboard_book(db, project_id)
 
 
 @router.post("/projects/{project_id}/director/storyboard-book", status_code=201)
@@ -149,14 +156,31 @@ def generate_storyboard_book(project_id: str, body: StoryboardBookBody, actor: O
     sections = _outline_sections(outline)
     if not sections:
         raise HTTPException(422, "SCRIPT_OUTLINE_HAS_NO_SECTIONS")
+    source_meta: dict[str, Any] = {
+        "outline_artifact_id": outline.id,
+        "outline_sha256": outline.sha256,
+    }
+    if body.max_shot_seconds is not None:
+        source_meta["max_shot_seconds"] = float(body.max_shot_seconds)
     try:
         payload = derive_episode_plan_by_count(
             sections, episode_count=body.episode_count,
             target_seconds=body.target_seconds, tolerance_seconds=body.tolerance_seconds,
-            source={"outline_artifact_id": outline.id, "outline_sha256": outline.sha256},
+            source=source_meta,
         )
     except ValueError as exc:
-        raise HTTPException(422, {"code": "EPISODE_PLAN_INVALID", "problems": [str(exc)[:400]]}) from exc
+        code = str(exc)
+        if code == "EPISODE_COUNT_EXCEEDS_SECTIONS":
+            raise HTTPException(422, {
+                "code": code,
+                "message": (
+                    f"当前已确认大纲共 {len(sections)} 个场次/章节，每集至少需要 1 个场次，"
+                    f"无法划分为 {body.episode_count} 集；请将集数设为不超过 {len(sections)}，"
+                    "或在剧本中补充「第N场」标题后重新提取大纲。"
+                ),
+                "problems": [code],
+            }) from exc
+        raise HTTPException(422, {"code": "EPISODE_PLAN_INVALID", "problems": [code[:400]]}) from exc
     problems = _section_plan_problems(db, project_id, payload)
     if problems:
         raise HTTPException(422, {"code": "EPISODE_PLAN_COVERAGE_INVALID", "problems": problems})
@@ -178,10 +202,14 @@ def generate_storyboard_book(project_id: str, body: StoryboardBookBody, actor: O
 
     add_audit(db, actor, "STORYBOARD_BOOK_GENERATED", "director_episode_plan", row.id,
               {"version": row.version, "episode_count": body.episode_count,
-               "target_seconds": body.target_seconds}, project_id=project_id)
+               "target_seconds": body.target_seconds,
+               **({"max_shot_seconds": float(body.max_shot_seconds)}
+                  if body.max_shot_seconds is not None else {})},
+              project_id=project_id)
     db.commit()
     db.refresh(row)
     return {"plan_version": row.version, "plan_sha256": row.sha256,
+            "status": row.status,
             "preview": streamline.storyboard_book_preview(db, project_id, row.payload)}
 
 
@@ -576,6 +604,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     from shine.comfy.workflow import graph_hash
     from shine.materialprep import service
     from shine.materialprep.contracts import MaterialConfirmation
+    from shine.materialprep.models import MaterialItem
     from shine.services import add_audit
 
     require_project(db, project_id)
@@ -612,21 +641,30 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         confirmation = service.confirm(db, actor, project_id, confirmation_body, commit=False)
         generate_ids = [row["requirement_id"] for row in confirmation["decisions"]
                         if row["strategy"] == "generate"]
+        # 唯一台账裁决：已有 rev=1 MaterialItem 的需求已入过首轮队列，重复确认决策或
+        # 仅上传/调整部分项后再提交时，只把尚未入过首轮队列的 generate 项送去 create_batch，
+        # 避免 create_batch 因 MATERIAL_NOTHING_TO_GENERATE 回滚整次 confirm。
+        already_queued = set(db.scalars(select(MaterialItem.requirement_id).where(
+            MaterialItem.project_id == project_id,
+            MaterialItem.requirement_id.in_(generate_ids),
+            MaterialItem.generation_revision == 1,
+        )).all()) if body.queue_generation and generate_ids else set()
+        pending_generate_ids = [rid for rid in generate_ids if rid not in already_queued]
         batch = None
-        if body.queue_generation and generate_ids:
+        if body.queue_generation and pending_generate_ids:
             batch = service.create_batch(
                 db,
                 project_id,
                 confirmation_id=confirmation["confirmation_id"],
                 confirmation_hash=confirmation["confirmation_hash"],
-                requirement_ids=generate_ids,
-                idempotency_key=request_key + ":" + graph_hash(sorted(generate_ids)),
+                requirement_ids=pending_generate_ids,
+                idempotency_key=request_key + ":" + graph_hash(sorted(pending_generate_ids)),
                 rights_id=None,
                 commit=False,
             )
         result = {
             "confirmation": confirmation,
-            "generate_count": len(generate_ids),
+            "generate_count": len(pending_generate_ids),
             "batch": batch,
             "batch_error": None,
             "request_key": request_key,
@@ -641,7 +679,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                    "bound_shot_count": bound_shots,
                    "confirmation_id": confirmation["confirmation_id"],
                    "confirmation_hash": confirmation["confirmation_hash"],
-                   "generate_count": len(generate_ids),
+                   "generate_count": len(pending_generate_ids),
                    "batch": ({k: batch.get(k) for k in ("run_id", "item_count", "status") if k in batch}
                              if batch else None)},
                   project_id=project_id)
