@@ -105,6 +105,7 @@ def test_submission_timeout_is_uncertain_but_history_can_be_reconciled(fake_comf
         service.submit(render_request(), PROFILE, {})
     prompt_id = next(iter(fake_comfy.prompts))
     assert service.reconcile(prompt_id) == "completed"
+    assert fake_comfy.prompt_count == 1
 
 
 @pytest.mark.parametrize("body", [b"broken JSON", b"[]", b'{"unexpected":"shape"}'])
@@ -119,7 +120,6 @@ def test_unreadable_post_prompt_ack_requires_reconciliation(body):
     with pytest.raises(ComfySubmissionUncertain):
         client.queue_prompt(GRAPH)
     assert [(req.method, req.url.path) for req in requests] == [("POST", "/prompt")]
-    assert fake_comfy.prompt_count == 1
 
 
 def test_missing_output_and_node_errors_are_explicit(fake_comfy):
