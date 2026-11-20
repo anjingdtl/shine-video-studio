@@ -3416,7 +3416,7 @@
   ],
   "digests": {
     "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
-    "api_schema": "7c62524fc6e7dd33a4d8b4add29eb845af7ee5f1ccc046379f898d55aa438be7",
+    "api_schema": "baeac136a5347c631ca0983b9ef4e16f8e2dbba1556a0c20524eaa8b9548a316",
     "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [
@@ -3880,6 +3880,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/operator/jobs/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/platform/environment",
       "status": "DISCOVERED"
     },
     {
@@ -5013,6 +5019,12 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/platform/capabilities/check",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/platform/manual4-projects",
       "status": "DISCOVERED"
     },
@@ -5020,6 +5032,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/platform/projects/{}/workflow",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/platform/setup/prepare",
       "status": "DISCOVERED"
     },
     {

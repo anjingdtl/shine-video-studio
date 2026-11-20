@@ -17,11 +17,13 @@ from uuid import uuid4
 
 from shine.comfyops.isolated_stage import WindowsJob
 
+_NAMED_JOB_RE = re.compile(r"Local\\Shine(?:M4)?Handoff-[a-f0-9]{32}")
+
 
 def inspect_named_group(name, pid, birth):
     """Read-only cross-process membership check; never terminates or adopts a process."""
     if (os.name != "nt" or not isinstance(name, str)
-            or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name)
+            or not _NAMED_JOB_RE.fullmatch(name)
             or type(pid) is not int or pid <= 0 or not isinstance(birth, str) or not birth.isdecimal()):
         raise ValueError("NAMED_JOB_ID_INVALID")
     import ctypes
@@ -76,7 +78,7 @@ def named_group_active_processes(name):
     else raises, because a lease may only be released when the renderer is
     *provably* gone — uncertainty is never death.
     """
-    if os.name != "nt" or not isinstance(name, str) or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name):
+    if os.name != "nt" or not isinstance(name, str) or not _NAMED_JOB_RE.fullmatch(name):
         raise ValueError("NAMED_JOB_ID_INVALID")
     import ctypes
     from ctypes import wintypes
@@ -117,7 +119,7 @@ def terminate_named_group(name, *, timeout=10):
     kernel must confirm that no member survives. The caller is responsible for
     proving that the recorded PID and birth identity still belong to this group.
     """
-    if os.name != "nt" or not isinstance(name, str) or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name):
+    if os.name != "nt" or not isinstance(name, str) or not _NAMED_JOB_RE.fullmatch(name):
         raise ValueError("NAMED_JOB_ID_INVALID")
     if timeout <= 0:
         raise ValueError("NAMED_JOB_ID_INVALID")

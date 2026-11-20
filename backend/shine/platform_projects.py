@@ -12,6 +12,7 @@ This module is part of the minimal platform shell:
 from __future__ import annotations
 
 import logging
+import shutil
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -55,9 +56,12 @@ def _require_loopback_operator(
         raise HTTPException(403, "Cross-origin platform action forbidden")
     if request.headers.get("sec-fetch-site") == "cross-site":
         raise HTTPException(403, "Cross-site local action forbidden")
-    if request.headers.get("x-shine-local-action") == "1" or not authorization:
+    token = authorization.strip()
+    if request.headers.get("x-shine-local-action") == "1" and not token:
         return "local-user"
-    return "local-user"
+    if token.lower().startswith("bearer ") and len(token) > 7:
+        return "local-user"
+    raise HTTPException(403, "Platform write action requires x-shine-local-action header")
 
 
 def get_project_workflow_record(db: Session, project_id: str) -> dict[str, Any]:
@@ -288,6 +292,10 @@ def create_manual4_project(
             )
     except Exception as exc:  # noqa: BLE001 - compensate platform registry on m4 failure
         try:
+            shutil.rmtree(project_dir, ignore_errors=True)
+        except Exception:
+            pass
+        try:
             row = db.get(Project, project.id)
             if row is not None:
                 db.delete(row)
@@ -307,3 +315,86 @@ def create_manual4_project(
         "max_shot_seconds": float(body.max_shot_seconds),
         "created_at": project.created_at.isoformat() + "Z",
     }
+
+
+class CapabilityCheckBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capability: str = Field(default="h3", max_length=32)
+    variant_id: str = Field(default="h3-ref2va-int8-convrot", max_length=80)
+    accelerator_id: str = Field(default="pdd8", max_length=32)
+    second_pass: dict[str, Any] = Field(default_factory=dict)
+    upscale: dict[str, Any] = Field(default_factory=dict)
+    source_line: Literal["director7", "manual4"] = "manual4"
+    project_id: str | None = None
+
+
+class PlatformPrepareBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    capabilities: list[str] = Field(default_factory=lambda: ["h3"])
+    variant_id: str | None = None
+    project_id: str | None = None
+    deep_scan: bool = False
+    reconcile_only: bool = False
+
+
+@router.get("/environment")
+def read_platform_environment(request: Request, db: PlatformDB) -> dict[str, Any]:
+    """Single authoritative environment snapshot shared by director7 and manual4."""
+    from shine.foundation.environment import environment_snapshot
+
+    settings = request.app.state.settings
+    snap = environment_snapshot(db, settings)
+    m4_status = getattr(request.app.state, "m4_status", {"available": False, "error_code": "MANUAL4_DB_UNINITIALIZED"})
+    snap["subsystems"] = {
+        "director7": {"available": True},
+        "manual4": m4_status,
+    }
+    return snap
+
+
+@router.post("/capabilities/check")
+def check_platform_capability(
+    body: CapabilityCheckBody,
+    request: Request,
+    db: PlatformDB,
+) -> dict[str, Any]:
+    from shine.foundation.environment import check_capability
+
+    settings = request.app.state.settings
+    return check_capability(
+        db,
+        settings,
+        recipe={
+            "capability": body.capability,
+            "variant_id": body.variant_id,
+            "accelerator_id": body.accelerator_id,
+            "second_pass": body.second_pass,
+            "upscale": body.upscale,
+        },
+        source_line=body.source_line,
+        project_id=body.project_id,
+    )
+
+
+@router.post("/setup/prepare")
+def trigger_platform_setup_prepare(
+    body: PlatformPrepareBody,
+    request: Request,
+    db: PlatformDB,
+    actor: Annotated[str, Depends(_require_loopback_operator)],
+) -> dict[str, Any]:
+    from shine.foundation.environment import prepare_missing
+
+    settings = request.app.state.settings
+    return prepare_missing(
+        db,
+        settings,
+        capabilities=body.capabilities,
+        project_id=body.project_id,
+        variant_id=body.variant_id,
+        actor=actor,
+        deep_scan=body.deep_scan,
+        reconcile_only=body.reconcile_only,
+    )

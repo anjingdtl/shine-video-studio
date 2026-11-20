@@ -496,13 +496,37 @@ def create_app(
     from shine.manual4.storage.migrations import ensure_m4_schema
 
     m4_root = manual4_data_root(actual_asset_root)
-    m4_root.mkdir(parents=True, exist_ok=True)
-    m4_engine = make_m4_engine(manual4_database_url(actual_asset_root))
-    ensure_m4_schema(m4_engine)
-    app.state.m4_engine = m4_engine
-    app.state.m4_session_factory = make_m4_session_factory(m4_engine)
+    m4_engine = None
+    app.state.m4_engine = None
+    app.state.m4_session_factory = None
     app.state.m4_root = m4_root
     app.state.m4_llm_responder = None
+    app.state.m4_status = {"available": False, "error_code": None, "error": None}
+    try:
+        m4_root.mkdir(parents=True, exist_ok=True)
+        m4_engine = make_m4_engine(manual4_database_url(actual_asset_root))
+        with m4_engine.connect() as m4_conn:
+            qc_row = m4_conn.exec_driver_sql("PRAGMA quick_check(1)").fetchone()
+            if not qc_row or str(qc_row[0]).lower() != "ok":
+                raise RuntimeError(f"manual4.sqlite integrity check failed: {qc_row}")
+        ensure_m4_schema(m4_engine)
+        app.state.m4_engine = m4_engine
+        app.state.m4_session_factory = make_m4_session_factory(m4_engine)
+        app.state.m4_status = {"available": True, "error_code": None, "error": None}
+    except Exception as exc:  # noqa: BLE001 - manual4 DB failure must never block director7 startup
+        logger.warning("manual4_subsystem_degraded error=%s detail=%s", type(exc).__name__, exc)
+        if m4_engine is not None:
+            try:
+                m4_engine.dispose()
+            except Exception:
+                pass
+        app.state.m4_engine = None
+        app.state.m4_session_factory = None
+        app.state.m4_status = {
+            "available": False,
+            "error_code": "MANUAL4_DB_UNAVAILABLE",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
     # A migration runs inside an API request.  If the process died mid-way,
     # the lock it left cannot belong to a live migration any more; clearing it
     # here keeps a crash from refusing every write for the whole stale window.

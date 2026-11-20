@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.orm import Session
 
+from shine.manual4.api.deps import (
+    M4DB,
+    M4Operator,
+    PlatformDB,
+)
+from shine.manual4.api.deps import (
+    require_m4_project as _project,
+)
 from shine.manual4.production.service import (
     control_production_run,
     create_production_run,
@@ -23,45 +30,9 @@ from shine.manual4.prompts.service import (
     update_shot_render_options,
 )
 from shine.manual4.storage.files import safe_m4_path
-from shine.manual4.storage.models import M4Job, M4Project
-from shine.platform_projects import require_manual4_project
+from shine.manual4.storage.models import M4Job
 
 production_router = APIRouter()
-
-
-def _m4_db(request: Request):
-    session: Session = request.app.state.m4_session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
-def _platform_db(request: Request):
-    session: Session = request.app.state.session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
-def _require_m4_operator(request: Request) -> str:
-    from shine.manual4.api.router import m4_operator
-
-    return m4_operator(request)
-
-
-M4DB = Annotated[Session, Depends(_m4_db)]
-PlatformDB = Annotated[Session, Depends(_platform_db)]
-M4Operator = Annotated[str, Depends(_require_m4_operator)]
-
-
-def _project(project_id: str, platform_db: Session, m4_db: Session) -> M4Project:
-    require_manual4_project(platform_db, project_id)
-    row = m4_db.get(M4Project, project_id)
-    if row is None:
-        raise HTTPException(404, "M4_PROJECT_RECORD_MISSING")
-    return row
 
 
 class M4ShotOptionsBody(BaseModel):

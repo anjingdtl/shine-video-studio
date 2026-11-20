@@ -196,3 +196,147 @@ def test_p1_platform_gpu_mutex_between_director7_and_manual4(tmp_path):
         assert scheduler.admit(db, d7_waiting_id) is True
 
     engine.dispose()
+
+
+def test_p1_corrupt_manual4_db_degrades_gracefully_without_blocking_director7(tmp_path):
+    """A12: Corrupt manual4.sqlite must not prevent director7 API & projects from starting."""
+    db_path = tmp_path / "shine.db"
+    database_url = f"sqlite:///{db_path.as_posix()}"
+    engine = make_engine(database_url)
+    Base.metadata.create_all(engine)
+    engine.dispose()
+
+    # Corrupt manual4.sqlite deliberately
+    (tmp_path / "manual4.sqlite").write_bytes(b"CORRUPTED_SQLITE_HEADER_BYTES_1234567890")
+    settings = Settings(data_dir=tmp_path, database_url=database_url, node_pack_gate="diagnose")
+    app = create_app(settings=settings, database_url=database_url, asset_root=tmp_path)
+    try:
+        with TestClient(app) as client:
+            health = client.get("/health")
+            assert health.status_code == 200
+
+            d7_create = client.post("/api/v1/projects", json={"title": "七阶不受影响作品"})
+            assert d7_create.status_code == 201
+            assert client.get("/api/v1/projects").status_code == 200
+
+            env = client.get("/api/v1/platform/environment")
+            assert env.status_code == 200
+            assert env.json()["subsystems"]["director7"]["available"] is True
+            assert env.json()["subsystems"]["manual4"]["available"] is False
+            assert env.json()["subsystems"]["manual4"]["error_code"] == "MANUAL4_DB_UNAVAILABLE"
+
+            m4_sys = client.get("/api/v1/manual4/system/status")
+            assert m4_sys.status_code == 503
+            assert m4_sys.json()["detail"] == "MANUAL4_DB_UNINITIALIZED"
+    finally:
+        app.state.engine.dispose()
+
+
+def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
+    """A01/A10/A22: Unified environment facts, adopted recipe reuse & GPU epoch advance."""
+    import hashlib
+    import json
+
+    from shine.comfyops.handoff_startup import reconcile_dead_renderer_leases
+    from shine.comfyops.models import ComfyInstance
+    from shine.foundation.environment import resolve_shared_comfy_launch
+    from shine.models import AppSetting
+
+    app, factory, settings = _build_isolated_app(tmp_path)
+
+    # Create a minimal fake adopted ComfyUI install + managed_recipe.json
+    comfy_root = tmp_path / "ext_comfy" / "ComfyUI"
+    py_exe = tmp_path / "ext_comfy" / "python_embeded" / "python.exe"
+    runtime_root = tmp_path / "comfyops" / "adopted-runtime" / "inst-1"
+    adapter_dir = runtime_root / "custom_nodes" / "shine_managed_comfy_handoff"
+    bootstrap = tmp_path / "bootstrap.py"
+    sampling_node = runtime_root / "custom_nodes" / "shine_managed_h3_sampling_mode.py"
+    for p in (comfy_root / "main.py", py_exe, adapter_dir / "__init__.py", adapter_dir / "barrier.py", bootstrap, sampling_node):
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("# stub\n", encoding="utf-8")
+    (runtime_root / "shine-node-paths.yaml").write_text("shine:\n  is_default: true\n", encoding="utf-8")
+
+    parts = [
+        hashlib.sha256((adapter_dir / "__init__.py").read_bytes()).digest(),
+        hashlib.sha256((adapter_dir / "barrier.py").read_bytes()).digest(),
+    ]
+    adapter_sha = hashlib.sha256(b"".join(parts)).hexdigest()
+    recipe_path = tmp_path / "comfyops" / "setup" / "managed_recipe.json"
+    recipe_path.parent.mkdir(parents=True, exist_ok=True)
+    recipe_doc = {
+        "renderer": {
+            "instance_id": "inst-1",
+            "root": str(comfy_root),
+            "base_directory": str(comfy_root),
+            "runtime_data_root": str(runtime_root),
+            "python": str(py_exe),
+            "bootstrap": str(bootstrap),
+            "adapter_dir": str(adapter_dir),
+            "adapter_sha256": adapter_sha,
+            "gpu_uuid": "GPU-TEST-1",
+            "port": 8188,
+            "argv": [
+                "{python}",
+                str(bootstrap),
+                "--listen",
+                "127.0.0.1",
+                "--port",
+                "{port}",
+                "--disable-all-custom-nodes",
+                "--whitelist-custom-nodes",
+                "shine_managed_comfy_handoff",
+                "shine_managed_h3_sampling_mode.py",
+                "ComfyUI-KJNodes",
+            ],
+            "pinned_files": ["{python}", "{root}\\main.py"],
+            "node_pack_dirs": {"ComfyUI-KJNodes": "ComfyUI-KJNodes"},
+        },
+        "reviews": {},
+    }
+    recipe_path.write_text(json.dumps(recipe_doc), encoding="utf-8")
+
+    with factory.begin() as db:
+        db.add(ComfyInstance(id="inst-1", status="STOPPED", payload={"managed": True, "adopted": True, "is_mock": False, "port": 8188, "root": str(comfy_root)}, sha256="x"))
+
+    with TestClient(app) as client:
+        env = client.get("/api/v1/platform/environment")
+        assert env.status_code == 200
+        assert env.json()["schema"] == "shine.environment.v1"
+
+        cap = client.post(
+            "/api/v1/platform/capabilities/check",
+            json={"capability": "h3", "variant_id": "h3-ref2va-int8-convrot", "accelerator_id": "pdd8", "source_line": "manual4"},
+        )
+        assert cap.status_code == 200
+        assert cap.json()["status"] in {"ready", "missing_required", "optional_missing"}
+
+        turbo_cap = client.post(
+            "/api/v1/platform/capabilities/check",
+            json={"capability": "h3", "variant_id": "h3-ref2va-int8-convrot", "accelerator_id": "turbo4", "source_line": "manual4"},
+        )
+        assert turbo_cap.status_code == 200
+        assert turbo_cap.json()["status"] == "unsupported"
+
+    with factory() as db:
+        spec = resolve_shared_comfy_launch(db, settings, tmp_path / "manual4")
+        assert spec["source"] == "managed_recipe"
+        assert spec["root"] == str(comfy_root.resolve())
+        assert spec["python"] == str(py_exe.resolve())
+        assert spec["port"] >= 8198 and spec["port"] != 8188
+        assert "--extra-model-paths-config" in spec["argv"]
+        assert "shine_managed_comfy_handoff" in spec["whitelist_nodes"]
+        assert "ComfyUI-KJNodes" in spec["whitelist_nodes"]
+
+    # Acquire m4 lease -> epoch advances; expire it -> reconcile_dead_renderer_leases cleans it safely
+    m4_lease = acquire_m4_gpu_lease(factory, tmp_path, owner="m4:run-epoch")
+    with factory() as db:
+        epoch_row = db.get(AppSetting, "physical-resource-epoch")
+        assert epoch_row is not None and epoch_row.value["lease_id"] == m4_lease["lease_id"]
+    with factory.begin() as db:
+        row = db.get(ResourceLease, m4_lease["lease_id"])
+        row.expires_at = utcnow() - timedelta(seconds=10)
+    findings = reconcile_dead_renderer_leases(factory, settings)
+    assert any(f["lease_id"] == m4_lease["lease_id"] and f["action"] == "released" for f in findings)
+
+    app.state.m4_engine.dispose()
+    app.state.engine.dispose()

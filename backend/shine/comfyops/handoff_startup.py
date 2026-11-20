@@ -453,6 +453,16 @@ def release_dead_renderer_lease(db, lease, *, text_unloaded: bool = False) -> bo
 
     # A handoff can have launched a replacement after the startup record was
     # written. Its unresolved journal must not be bypassed by the older PID.
+    if str(lease.owner or "").startswith("m4:"):
+        from shine.platform_gpu import data_dir_for_session, is_m4_renderer_gone_for_lease
+
+        if lease.expires_at is None or lease.expires_at > utcnow():
+            return False
+        if not is_m4_renderer_gone_for_lease(data_dir_for_session(db), lease.id):
+            return False
+        ResourceScheduler().release(db, lease.id, lease.owner, reconciled=True)
+        return True
+
     handoffs = db.scalars(select(AppSetting).where(AppSetting.key.like(HANDOFF_PREFIX + "%"))).all()
     for row in handoffs:
         value = row.value

@@ -576,12 +576,25 @@ def execute_next_m4_run(
                         r.updated_at = m4_utcnow()
                 return run_id
 
+            def _on_lease(lease_id: str, lease_owner: str) -> None:
+                with m4_factory.begin() as db:
+                    r = db.get(M4ProductionRun, run_id)
+                    if r is not None:
+                        r.lease_id = lease_id
+                        r.lease_owner = lease_owner
+                        r.updated_at = m4_utcnow()
+
+            def _on_hb() -> None:
+                heartbeat_m4_worker(m4_factory, worker_id, status="RUNNING", current_run_id=run_id)
+
             with managed_m4_comfyui(
                 platform_factory,
                 m4_factory,
                 settings,
                 m4_root,
                 owner=f"m4-worker-{worker_id}-{run_id[:8]}",
+                on_lease_acquired=_on_lease,
+                on_heartbeat=_on_hb,
             ) as (client, _spec):
                 object_info = client.object_info()
                 for jid in queued_job_ids:
@@ -661,6 +674,10 @@ def serve_worker(*, once: bool = False, poll_interval: float = 2.0, worker_id: s
             if once:
                 break
             if handled is None:
+                try:
+                    reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
+                except Exception:
+                    pass
                 heartbeat_m4_worker(m4_factory, wid, status="IDLE", current_run_id=None)
                 time.sleep(max(0.5, poll_interval))
     finally:

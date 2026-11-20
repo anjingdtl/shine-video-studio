@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy.orm import Session
 
-from shine.manual4.storage.models import M4Project, m4_utcnow
+from shine.manual4.api.deps import (
+    M4DB,
+    M4Operator,
+    PlatformDB,
+)
+from shine.manual4.api.deps import (
+    require_m4_project as _project,
+)
+from shine.manual4.storage.models import m4_utcnow
 from shine.manual4.storyboard.service import (
     confirm_storyboard_plan,
     get_storyboard_state,
@@ -17,46 +24,10 @@ from shine.manual4.storyboard.service import (
 )
 from shine.platform_projects import (
     list_platform_llm_profiles,
-    require_manual4_project,
     resolve_platform_llm_connection,
 )
 
 storyboard_router = APIRouter()
-
-
-def _m4_db(request: Request):
-    session: Session = request.app.state.m4_session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
-def _platform_db(request: Request):
-    session: Session = request.app.state.session_factory()
-    try:
-        yield session
-    finally:
-        session.close()
-
-
-def _require_m4_operator(request: Request) -> str:
-    from shine.manual4.api.router import m4_operator
-
-    return m4_operator(request)
-
-
-M4DB = Annotated[Session, Depends(_m4_db)]
-PlatformDB = Annotated[Session, Depends(_platform_db)]
-M4Operator = Annotated[str, Depends(_require_m4_operator)]
-
-
-def _project(project_id: str, platform_db: Session, m4_db: Session) -> M4Project:
-    require_manual4_project(platform_db, project_id)
-    row = m4_db.get(M4Project, project_id)
-    if row is None:
-        raise HTTPException(404, "M4_PROJECT_RECORD_MISSING")
-    return row
 
 
 class M4ProjectSettingsBody(BaseModel):

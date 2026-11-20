@@ -49,47 +49,54 @@ class ResourceScheduler:
         return lease
 
     def admit(self, db, lease_id):
-        # Caller starts a fresh transaction; reserve the SQLite writer before reading budgets.
-        db.execute(text("BEGIN IMMEDIATE"))
-        now = utcnow()
-        rows = db.scalars(select(ResourceLease).order_by(ResourceLease.created_at, ResourceLease.id)).all()
-        candidate = next((x for x in rows if x.id == lease_id), None)
-        for row in rows:
-            if row.status == "ACTIVE" and row.expires_at <= now:
-                row.status = "RECONCILE_REQUIRED"
-            elif row.status == "WAITING" and row.expires_at <= now and row.id != lease_id:
-                # WAITING never owns a model process or external request. Its
-                # expiry only means no live caller is maintaining this queue
-                # position; re-admission by that owner will create a fresh
-                # queue intent. Active/expired leases remain reconciliation
-                # blockers above.
-                row.status = "RELEASED"
-        if candidate and candidate.status == "WAITING" and candidate.expires_at <= now:
-            # The current caller proves this request is live. It can renew its
-            # own expired waiting position, with a fresh age, before ordering.
-            candidate.created_at = now
-            candidate.heartbeat_at = now
-            candidate.expires_at = now + timedelta(seconds=self.WAITING_LEASE_TTL_SECONDS)
-        active = [x for x in rows if x.status in {"ACTIVE", "RECONCILE_REQUIRED"}]
-        waiting = [x for x in rows if x.status == "WAITING"]
-        # Aging prevents starvation while H3 starts with higher priority.
-        waiting.sort(key=lambda x: (-x.priority - int((now - x.created_at).total_seconds() / 30), x.created_at, x.id))
-        if not candidate or candidate.status != "WAITING" or not waiting or waiting[0].id != lease_id:
-            db.commit()
-            return False
-        # Model stages are serial even when their estimated budgets would fit.
-        # This also protects old non-exclusive leases created before this policy.
-        if active:
-            db.commit()
-            return False
-        candidate.status = "ACTIVE"
-        candidate.expires_at = now + timedelta(seconds=60)
-        candidate.heartbeat_at = now
-        from shine.comfyops.resource_epoch import advance_epoch
+        from shine.platform_gpu import data_dir_for_session, gpu_arbitrator_lock
 
-        advance_epoch(db, candidate.id, "lease")
-        db.commit()
-        return True
+        # Acquire the single platform OS mutex before reserving the SQLite writer
+        # so director7 and manual4 serialize identically across processes.
+        with gpu_arbitrator_lock(data_dir_for_session(db)):
+            # Caller starts a fresh transaction; reserve the SQLite writer before reading budgets.
+            db.execute(text("BEGIN IMMEDIATE"))
+            now = utcnow()
+            rows = db.scalars(select(ResourceLease).order_by(ResourceLease.created_at, ResourceLease.id)).all()
+            candidate = next((x for x in rows if x.id == lease_id), None)
+            for row in rows:
+                if row.status == "ACTIVE" and row.expires_at <= now:
+                    row.status = "RECONCILE_REQUIRED"
+                elif row.status == "WAITING" and row.expires_at <= now and row.id != lease_id:
+                    # WAITING never owns a model process or external request. Its
+                    # expiry only means no live caller is maintaining this queue
+                    # position; re-admission by that owner will create a fresh
+                    # queue intent. Active/expired leases remain reconciliation
+                    # blockers above.
+                    row.status = "RELEASED"
+            if candidate and candidate.status == "WAITING" and candidate.expires_at <= now:
+                # The current caller proves this request is live. It can renew its
+                # own expired waiting position, with a fresh age, before ordering.
+                candidate.created_at = now
+                candidate.heartbeat_at = now
+                candidate.expires_at = now + timedelta(seconds=self.WAITING_LEASE_TTL_SECONDS)
+            active = [x for x in rows if x.status in {"ACTIVE", "RECONCILE_REQUIRED"}]
+            waiting = [x for x in rows if x.status == "WAITING"]
+            # Aging prevents starvation while H3 starts with higher priority.
+            waiting.sort(
+                key=lambda x: (-x.priority - int((now - x.created_at).total_seconds() / 30), x.created_at, x.id)
+            )
+            if not candidate or candidate.status != "WAITING" or not waiting or waiting[0].id != lease_id:
+                db.commit()
+                return False
+            # Model stages are serial even when their estimated budgets would fit.
+            # This also protects old non-exclusive leases created before this policy.
+            if active:
+                db.commit()
+                return False
+            candidate.status = "ACTIVE"
+            candidate.expires_at = now + timedelta(seconds=60)
+            candidate.heartbeat_at = now
+            from shine.comfyops.resource_epoch import advance_epoch
+
+            advance_epoch(db, candidate.id, "lease")
+            db.commit()
+            return True
 
     def heartbeat(self, db, lease_id, owner):
         lease = db.get(ResourceLease, lease_id)
