@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from shine.manual4.comfy.workflow import graph_hash
-
 MODEL_FAMILY = "Qwen-Image-2.1"
 GENERATION_MODE = "T2I"
 OUTPUT_NODE = "461"
@@ -50,7 +48,7 @@ def build_qwen_t2i_graph(
         },
         "480": {
             "class_type": "QwenImage21Cache",
-            "inputs": {"model": ["451", 0], "threshold": 0.12, "max_skip": 3},
+            "inputs": {"model": ["451", 0], "device": "auto", "dtype": "default"},
         },
         "453": {
             "class_type": "CLIPLoader",
@@ -62,11 +60,12 @@ def build_qwen_t2i_graph(
         },
         "452": {
             "class_type": "TextEncodeQwenImage21",
-            "inputs": {"clip": ["453", 0], "prompt": prompt},
-        },
-        "455": {
-            "class_type": "ConditioningZeroOut",
-            "inputs": {"conditioning": ["452", 0]},
+            "inputs": {
+                "clip": ["453", 0],
+                "prompt": prompt,
+                "negative_prompt": "",
+                "resolution": max(int(width), int(height)),
+            },
         },
         "456": {
             "class_type": "EmptyLatentImage",
@@ -76,14 +75,14 @@ def build_qwen_t2i_graph(
             "class_type": "KSampler",
             "inputs": {
                 "model": ["480", 0],
-                "positive": ["452", 0],
-                "negative": ["455", 0],
-                "latent_image": ["456", 0],
                 "seed": int(seed),
                 "steps": int(steps),
                 "cfg": float(cfg),
                 "sampler_name": DEFAULT_SAMPLER,
                 "scheduler": DEFAULT_SCHEDULER,
+                "positive": ["452", 0],
+                "negative": ["452", 1],
+                "latent_image": ["456", 0],
                 "denoise": 1.0,
             },
         },
@@ -96,7 +95,3 @@ def build_qwen_t2i_graph(
             "inputs": {"images": ["457", 0], "filename_prefix": "shine_m4_asset"},
         },
     }
-
-
-def qwen_t2i_graph_hash() -> str:
-    return graph_hash(build_qwen_t2i_graph(prompt="hash-probe"))

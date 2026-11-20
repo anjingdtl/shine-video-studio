@@ -184,13 +184,13 @@ class M4ComfyClient:
 
     def handoff_resume(self, token: str) -> dict[str, Any]:
         with self._client(timeout=10.0) as client:
-            resp = client.post("/shine-handoff/resume", headers={"x-shine-handoff-token": token})
+            resp = client.post("/shine-handoff/resume", headers={"Authorization": f"Bearer {token}"})
             resp.raise_for_status()
             return resp.json()
 
     def handoff_drain(self, token: str) -> dict[str, Any]:
         with self._client(timeout=30.0) as client:
-            resp = client.post("/shine-handoff/drain", headers={"x-shine-handoff-token": token})
+            resp = client.post("/shine-handoff/drain", headers={"Authorization": f"Bearer {token}"})
             resp.raise_for_status()
             return resp.json()
 
@@ -205,6 +205,9 @@ class M4ComfyClient:
         while time.monotonic() < deadline:
             hist = self.history(prompt_id).get(prompt_id)
             if isinstance(hist, dict):
+                status = hist.get("status") or {}
+                if status.get("status_str") == "error":
+                    raise M4ComfyError("ComfyUI 渲染失败", details={"status": status})
                 return hist
             time.sleep(poll_interval)
         raise M4ComfySubmissionUncertain(f"ComfyUI prompt {prompt_id} exceeded poll timeout {timeout_s}s")

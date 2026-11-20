@@ -541,7 +541,12 @@ def select_or_generate_material(
             owner=f"m4-t2i-{project.id}",
         ) as (client, _spec):
             obj_info = client.object_info()
-            validate_against_object_info(graph, obj_info)
+            v_res = validate_against_object_info(graph, {}, obj_info)
+            if v_res["missing_nodes"] or v_res["missing_inputs"]:
+                raise HTTPException(
+                    422,
+                    {"code": "M4_T2I_NODES_UNAVAILABLE", "message": f"Qwen T2I 节点不满足：{v_res}"},
+                )
             queued = client.queue_prompt(graph, extra_data={"shine_line": "manual4", "project_id": project.id})
             prompt_id = str(queued.get("prompt_id") or "")
             if not prompt_id:
