@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  api, json, noteSupervisorPort, timeoutSignal, type AgentRoute, type Asset, type AuditPage, type Job, type Project,
+  api, createManual4Project as apiCreateManual4Project, getPlatformProjects, json, noteSupervisorPort, timeoutSignal,
+  type AgentRoute, type Asset, type AuditPage, type Job, type Project,
   type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion,
-  type Shot, type Style, type StyleVersion, type SystemStatus, type WorkflowProfile,
+  type Shot, type Style, type StyleVersion, type SystemStatus, type WorkflowKind, type WorkflowProfile,
 } from './api';
 import { emptyStyle } from './constants';
 
@@ -12,6 +13,9 @@ import { emptyStyle } from './constants';
  *  用户的生成意图单独保存，绝不据此推断环境就绪。 */
 export function useStudio() {
   const [projects, setProjects] = useState<Project[]>([]);
+  const [workflowKinds, setWorkflowKinds] = useState<Record<string, WorkflowKind>>({});
+  const workflowKindsRef = useRef<Record<string, WorkflowKind>>({});
+  workflowKindsRef.current = workflowKinds;
   const [projectId, setProjectId] = useState('');
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectsLoadError, setProjectsLoadError] = useState('');
@@ -156,6 +160,11 @@ export function useStudio() {
   }, []);
 
   const loadProject = useCallback(async (id: string) => {
+    if (workflowKindsRef.current[id] === 'manual4') {
+      loadedProject.current = id;
+      setAssets([]); setStyles([]); setShots([]); setJobs([]); setAudit(null); setWorkflowProfiles([]);
+      return;
+    }
     const signal = timeoutSignal(8000);
     if (loadedProject.current !== id) {
       // Switching productions: the previous list belongs to another film. A
@@ -197,8 +206,19 @@ export function useStudio() {
     // for an empty workspace. A later manual refresh supersedes this request.
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const rows = await api<Project[]>('/projects', { signal: timeoutSignal(3000), cache: 'no-store' });
+        const [rows, platformRows] = await Promise.all([
+          api<Project[]>('/projects', { signal: timeoutSignal(3000), cache: 'no-store' }),
+          getPlatformProjects().catch(() => null),
+        ]);
         if (requestId !== projectsRequest.current) return null;
+        if (platformRows) {
+          const nextKinds: Record<string, WorkflowKind> = {};
+          for (const item of platformRows) {
+            nextKinds[item.id] = item.workflow_kind;
+          }
+          workflowKindsRef.current = nextKinds;
+          setWorkflowKinds(nextKinds);
+        }
         setProjects(rows);
         setProjectsLoaded(true);
         setProjectsLoadError('');
@@ -275,7 +295,7 @@ export function useStudio() {
   }, [checkConnection, loadProjects, projectsLoaded]);
 
   useEffect(() => {
-    if (!projectId) return;
+    if (!projectId || workflowKinds[projectId] === 'manual4') return;
     const timer = window.setInterval(() => {
       Promise.all([
         api<Job[]>(`/projects/${projectId}/jobs`),
@@ -286,16 +306,43 @@ export function useStudio() {
       }).catch(() => undefined);
     }, 3000);
     return () => window.clearInterval(timer);
-  }, [projectId]);
+  }, [projectId, workflowKinds]);
 
   async function createProject(): Promise<string | null> {
     if (!projectTitle.trim()) return null;
     let createdId: string | null = null;
     await withBusy(async () => {
       const created = await api<Project>('/projects', json('POST', { title: projectTitle.trim(), description: '' }));
+      workflowKindsRef.current = { ...workflowKindsRef.current, [created.id]: 'director7' };
+      setWorkflowKinds((prev) => ({ ...prev, [created.id]: 'director7' }));
       setProjectTitle(''); setProjects((rows) => [created, ...rows]); setProjectId(created.id);
       createdId = created.id;
       report('作品已建好。下一步：在「创意与剧本」输入想法或导入剧本。');
+    });
+    return createdId;
+  }
+
+  async function createManual4Project(): Promise<string | null> {
+    if (!projectTitle.trim()) return null;
+    let createdId: string | null = null;
+    await withBusy(async () => {
+      const created = await apiCreateManual4Project({ title: projectTitle.trim(), description: '' });
+      const asProject: Project = {
+        id: created.id,
+        title: created.title,
+        description: created.description,
+        language: created.language,
+        created_at: created.created_at,
+        frozen_style_version_id: null,
+        style_draft: null,
+        allow_remote_review: false,
+        auto_repair_enabled: false,
+      };
+      workflowKindsRef.current = { ...workflowKindsRef.current, [created.id]: 'manual4' };
+      setWorkflowKinds((prev) => ({ ...prev, [created.id]: 'manual4' }));
+      setProjectTitle(''); setProjects((rows) => [asProject, ...rows]); setProjectId(created.id);
+      createdId = created.id;
+      report('四阶 H3 自主制片作品已建好。下一步：在「① 人工分镜书」导入或编辑分镜计划。');
     });
     return createdId;
   }
@@ -662,7 +709,7 @@ export function useStudio() {
 
   return {
     // data
-    projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, workflowKinds, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, notice, report, dismissNotice, busy, dataEpoch, apiOnline,
@@ -671,7 +718,7 @@ export function useStudio() {
     // loaders
     loadAudit, refreshAll,
     // actions
-    createProject, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
+    createProject, createManual4Project, saveStyle, freezeStyle, uploadAsset, confirmAssets, patchAssetMetadata,
     createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze, unlockAsset,
     setShotContinuity, previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,

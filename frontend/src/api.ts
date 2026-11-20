@@ -2194,3 +2194,26 @@ export const promoteMaterialCandidate = async (candidateId: string, isMock: bool
       evidence: '导演模式素材准备页人工选用并晋升素材候选。',
     }));
 };
+
+export type WorkflowKind = 'director7' | 'manual4';
+
+export type PlatformProject = {
+  id: string;
+  title: string;
+  description: string;
+  language: string;
+  workflow_kind: WorkflowKind;
+  selection_revision: number;
+  created_at: string;
+};
+
+export const getPlatformProjects = () =>
+  api<PlatformProject[]>('/platform/projects', { cache: 'no-store' });
+
+export const createManual4Project = (payload: {
+  title: string;
+  description?: string;
+  language?: string;
+  max_shot_seconds?: number;
+}) =>
+  api<PlatformProject>('/platform/manual4-projects', json('POST', payload));

@@ -769,6 +769,24 @@ class RelayUpscaleItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+class ProjectWorkflow(Base):
+    """Platform-level project production line selection registry.
+
+    Projects without a row here are historical seven-stage projects and are
+    always interpreted as ``director7``.  Once selected, ``workflow_kind`` is
+    immutable for that project identity.
+    """
+
+    __tablename__ = "project_workflows"
+
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    workflow_kind: Mapped[str] = mapped_column(String(24), default="director7", nullable=False)
+    selection_revision: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
 # V1.3 extends this same metadata/SQLite ledger.
 from shine.asset_center import models as asset_center_models  # noqa: E402,F401
 from shine.comfyops import models as preparation_models  # noqa: E402,F401

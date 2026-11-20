@@ -1,12 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Check, Clapperboard, Plus } from 'lucide-react';
 import {
-  api, type Asset, type Journey, type Project, type Shot, type StyleVersion,
+  api, type Asset, type Journey, type Project, type Shot, type StyleVersion, type WorkflowKind,
 } from '../api';
+import type { M4Overview } from '../manual4/api/client';
 
 type ProjectRow = {
   id: string;
   title: string;
+  workflowKind: WorkflowKind;
   approvedAssets: number;
   totalAssets: number;
   styleVersion: number | null;
@@ -26,13 +28,20 @@ const STAGE_LABELS: Record<string, string> = {
   post: '后期成片',
 };
 
+const M4_STAGE_LABELS: Record<string, string> = {
+  storyboard: '① 人工分镜书',
+  materials: '② 素材生成',
+  production: '③ 排片生产',
+  delivery: '④ 产出成片',
+};
+
 function valueOf<T>(result: PromiseSettledResult<T>, fallback: T): T {
   return result.status === 'fulfilled' ? result.value : fallback;
 }
 
-function emptyRow(project: Project): ProjectRow {
+function emptyRow(project: Project, workflowKind: WorkflowKind): ProjectRow {
   return {
-    id: project.id, title: project.title,
+    id: project.id, title: project.title, workflowKind,
     approvedAssets: 0, totalAssets: 0, styleVersion: null, shots: 0, outputs: 0,
     nextStage: null, state: 'loading',
   };
@@ -40,11 +49,14 @@ function emptyRow(project: Project): ProjectRow {
 
 type Props = {
   projects: Project[];
+  workflowKinds?: Record<string, WorkflowKind>;
   currentProjectId: string;
   productionLabel: string;
   productionDetail?: string;
   projectTitle: string;
   setProjectTitle: (value: string) => void;
+  newWorkflowKind?: WorkflowKind;
+  onChangeNewWorkflowKind?: (kind: WorkflowKind) => void;
   busy: boolean;
   refreshEpoch: number;
   onOpen: (projectId: string) => void;
@@ -53,19 +65,47 @@ type Props = {
 
 /**
  * 项目管理：每个作品一行，素材、风格、分镜、制作方式、产出物和下一步都在同一行。
- * 这里只读各作品现有的真实接口，不额外推断任何完成态。
+ * 按作品所属生产线分别读取对应只读接口：七阶读七阶接口，四阶只读 `/manual4/projects/{id}/overview`。
  */
 export function ProjectPortfolio({
-  projects, currentProjectId, productionLabel, productionDetail,
-  projectTitle, setProjectTitle, busy, refreshEpoch, onOpen, onCreate,
+  projects, workflowKinds, currentProjectId, productionLabel, productionDetail,
+  projectTitle, setProjectTitle, newWorkflowKind = 'director7', onChangeNewWorkflowKind,
+  busy, refreshEpoch, onOpen, onCreate,
 }: Props) {
-  const [rows, setRows] = useState<ProjectRow[]>(() => projects.map(emptyRow));
+  const [rows, setRows] = useState<ProjectRow[]>(() =>
+    projects.map((project) => emptyRow(project, workflowKinds?.[project.id] ?? 'director7')),
+  );
 
   useEffect(() => {
     let alive = true;
     // 刷新时保留上一次读到的值，只给新出现的作品显示“读取中”，避免整表闪烁。
-    setRows((current) => projects.map((project) => current.find((row) => row.id === project.id) ?? emptyRow(project)));
+    setRows((current) => projects.map((project) => {
+      const kind = workflowKinds?.[project.id] ?? 'director7';
+      const existing = current.find((row) => row.id === project.id);
+      return existing && existing.workflowKind === kind ? existing : emptyRow(project, kind);
+    }));
     void Promise.all(projects.map(async (project): Promise<ProjectRow> => {
+      const kind = workflowKinds?.[project.id] ?? 'director7';
+      if (kind === 'manual4') {
+        try {
+          const ov = await api<M4Overview>(`/manual4/projects/${project.id}/overview`);
+          const summary = ov.readiness.summary ?? {};
+          return {
+            id: project.id,
+            title: project.title,
+            workflowKind: 'manual4',
+            approvedAssets: Number(summary.promoted_assets ?? 0),
+            totalAssets: Number(summary.total_assets ?? 0),
+            styleVersion: null,
+            shots: Number(summary.shots ?? 0),
+            outputs: Number(summary.deliveries ?? 0),
+            nextStage: ov.readiness.all_done ? null : ov.readiness.next_stage,
+            state: 'ready',
+          };
+        } catch {
+          return { ...emptyRow(project, 'manual4'), state: 'error' };
+        }
+      }
       const [assetResult, styleResult, shotResult, journeyResult, deliveryResult] = await Promise.allSettled([
         api<Asset[]>(`/projects/${project.id}/assets`),
         api<StyleVersion[]>(`/projects/${project.id}/styles`),
@@ -85,6 +125,7 @@ export function ProjectPortfolio({
       return {
         id: project.id,
         title: project.title,
+        workflowKind: 'director7',
         approvedAssets: assets.filter((asset) => asset.approved && asset.locked).length,
         totalAssets: assets.length,
         styleVersion: currentStyle?.version ?? null,
@@ -99,7 +140,7 @@ export function ProjectPortfolio({
       if (alive) setRows((current) => current.map((row) => ({ ...row, state: 'error' })));
     });
     return () => { alive = false; };
-  }, [projects, refreshEpoch]);
+  }, [projects, workflowKinds, refreshEpoch]);
 
   return <section className="card portfolio" aria-label="项目管理">
     <header className="portfolio-head">
@@ -116,6 +157,17 @@ export function ProjectPortfolio({
         <span>起个名字就能开始，所有内容留在本机。</span>
       </div>
       <div className="portfolio-create-actions">
+        {onChangeNewWorkflowKind && (
+          <select
+            className="new-project-inline"
+            aria-label="选择生产线"
+            value={newWorkflowKind}
+            onChange={(event) => onChangeNewWorkflowKind(event.target.value as WorkflowKind)}
+          >
+            <option value="director7">AI 导演 · 七阶段</option>
+            <option value="manual4">H3 自主制片 · 四阶段</option>
+          </select>
+        )}
         <input className="new-project-inline" value={projectTitle}
           onChange={(event) => setProjectTitle(event.target.value)}
           placeholder="新作品名称"
@@ -149,6 +201,7 @@ export function ProjectPortfolio({
                 <span className="portfolio-icon"><Clapperboard size={14} /></span>
                 <span className="portfolio-work-copy">
                   <b>{row.title}</b>
+                  {row.workflowKind === 'manual4' && <em>H3 自主四阶</em>}
                   {current && <em>当前作品</em>}
                 </span>
               </th>
@@ -159,10 +212,12 @@ export function ProjectPortfolio({
                 </span>
               </td>
               <td>
-                {row.state === 'loading' ? <span className="portfolio-metric muted">读取中…</span>
-                  : row.styleVersion
-                    ? <span className="portfolio-badge ok"><Check size={10} />第 {row.styleVersion} 版</span>
-                    : <span className="portfolio-badge pending">待冻结</span>}
+                {row.workflowKind === 'manual4'
+                  ? <span className="portfolio-metric muted">人工直拍</span>
+                  : row.state === 'loading' ? <span className="portfolio-metric muted">读取中…</span>
+                    : row.styleVersion
+                      ? <span className="portfolio-badge ok"><Check size={10} />第 {row.styleVersion} 版</span>
+                      : <span className="portfolio-badge pending">待冻结</span>}
               </td>
               <td>
                 <span className={`portfolio-metric ${row.shots ? '' : 'muted'}`}>
@@ -182,7 +237,9 @@ export function ProjectPortfolio({
                 {row.state === 'loading' ? <span className="portfolio-metric muted">读取中…</span>
                   : row.state === 'error' ? <span className="portfolio-badge error">读取失败</span>
                     : row.nextStage
-                      ? <span className="portfolio-next">{STAGE_LABELS[row.nextStage] ?? row.nextStage}</span>
+                      ? <span className="portfolio-next">
+                        {(row.workflowKind === 'manual4' ? M4_STAGE_LABELS : STAGE_LABELS)[row.nextStage] ?? row.nextStage}
+                      </span>
                       : <span className="portfolio-badge ok"><Check size={10} />全部完成</span>}
               </td>
               <td className="portfolio-action">

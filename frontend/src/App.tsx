@@ -37,7 +37,9 @@ import { getDirectorOverview, getJourney, presencePing, restartStack, restartSta
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
 import { ShineCopilot } from './components/ShineCopilot';
 import { CopilotSettingsPage } from './components/CopilotSettingsPage';
-import type { Asset, Project } from './api';
+import type { Asset, Project, WorkflowKind } from './api';
+import { Manual4App } from './manual4/Manual4App';
+import type { M4StageKey } from './manual4/api/client';
 
 /** 导演工作台是唯一入口。旧专业模式深链按用途映射到对应阶段或高级设置，
  *  不再保留第二套界面;安装器落地的 #setup 与旧 #v/… 书签都落到这里。 */
@@ -90,8 +92,14 @@ function resolveHash(hash: string): {
   assetPage?: AssetCenterPage;
   packageId?: string;
   produceFocus?: ProduceStageFocus;
+  m4Stage?: M4StageKey;
 } {
   const raw = hash.replace(/^#/, '');
+  if (raw.startsWith('m4/')) {
+    const stageRaw = raw.slice(3).split('?')[0] as M4StageKey;
+    const valid: M4StageKey[] = ['storyboard', 'materials', 'production', 'delivery'];
+    return { ui: 'director', page: 'creative', m4Stage: valid.includes(stageRaw) ? stageRaw : 'storyboard' };
+  }
   if (raw.startsWith('a/')) {
     const page = raw.slice(2) as AssetCenterPage;
     const pages: AssetCenterPage[] = ['home', 'images', 'voices', 'library', 'assignments'];
@@ -148,12 +156,12 @@ function StageDock({ id, title, children }: { id: string; title: string; childre
 function App() {
   const studio = useStudio();
   const {
-    projects, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, workflowKinds, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, report, dismissNotice, busy, dataEpoch,
     loadAudit, refreshAll,
-    createProject, saveStyle, freezeStyle,
+    createProject, createManual4Project, saveStyle, freezeStyle,
     createShot, saveBindings, adoptShotStyle, applyStyleToAllShots, refreshStyleFreeze,
     previewShot, queueShot, togglePause, loadJobQC, loadJobGates,
     suggestRepair, applyRepair, recheckReview, updateProjectSettings, createProfile, testProfile,
@@ -169,7 +177,7 @@ function App() {
       window.history.replaceState(null, '', '#d/materials');
       return;
     }
-    if (raw && !raw.startsWith('#d/') && !raw.startsWith('#a/')) {
+    if (raw && !raw.startsWith('#d/') && !raw.startsWith('#a/') && !raw.startsWith('#m4/')) {
       const route = resolveHash(raw);
       if (route.ui === 'director') {
         window.history.replaceState(null, '', `#d/${route.page}`);
@@ -181,12 +189,27 @@ function App() {
   const [assetPage, setAssetPage] = useState<AssetCenterPage>(() => resolveHash(window.location.hash).assetPage ?? 'home');
   const [assetReturnHash, setAssetReturnHash] = useState(() => window.location.hash.startsWith('#a/') ? '#d/projects' : (window.location.hash || '#d/projects'));
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
+  const [m4Stage, setM4Stage] = useState<M4StageKey>(() => resolveHash(window.location.hash).m4Stage ?? 'storyboard');
+  const [newWorkflowKind, setNewWorkflowKind] = useState<WorkflowKind>('director7');
+  const currentWorkflowKind: WorkflowKind = projectId ? (workflowKinds[projectId] ?? 'director7') : 'director7';
+  const isManual4 = currentWorkflowKind === 'manual4';
   /** The exact package a deep link named, so the workbench opens that one. */
   const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
     () => resolveHash(window.location.hash).packageId);
   const [setupFocusTab, setSetupFocusTab] = useState<'env' | 'models' | 'extra'>('env');
-  /** 建好作品后直接进入第一步：项目管理不占阶段序号，但新作品要立刻能开工。 */
+  /** 建好作品后直接进入第一步：按所选生产线分流进入七阶或四阶入口。 */
   const createProjectAndEnter = async () => {
+    if (newWorkflowKind === 'manual4') {
+      const created = await createManual4Project();
+      if (created) {
+        setM4Stage('storyboard');
+        setUi('director');
+        setDirectorPage('creative');
+        window.history.pushState(null, '', '#m4/storyboard');
+        window.scrollTo({ top: 0 });
+      }
+      return;
+    }
     const created = await createProject();
     if (created) goToDirectorPage('creative');
   };
@@ -255,9 +278,9 @@ function App() {
 
   /** 进入高级设置(审计追踪所在页)自动读一次最新操作记录,不必先手动点刷新。 */
   useEffect(() => {
-    if (directorPage !== 'advanced' || !projectId) return;
+    if (directorPage !== 'advanced' || !projectId || isManual4) return;
     loadAudit(projectId, 0).catch((error: Error) => report(error.message, 'error'));
-  }, [directorPage, projectId, loadAudit]);
+  }, [directorPage, projectId, isManual4, loadAudit]);
 
 
   /** 七阶段完成态：全部来自服务端 /journey，包含本次范围、版本和真实服务端状态。 */
@@ -267,7 +290,7 @@ function App() {
   const [journeyError, setJourneyError] = useState('');
   const [journeyRetry, setJourneyRetry] = useState(0);
   useEffect(() => {
-    if (!projectId) { setJourney(null); setJourneyState('idle'); return; }
+    if (!projectId || isManual4) { setJourney(null); setJourneyState('idle'); return; }
     let alive = true;
     // Switching works never shows the previous work's stages while loading.
     setJourney((current) => (current && current.project_id === projectId ? current : null));
@@ -284,18 +307,18 @@ function App() {
         setJourneyError(error instanceof Error ? error.message : String(error));
       });
     return () => { alive = false; };
-  }, [projectId, dataEpoch, journeyRetry, directorPackageId]);
+  }, [projectId, isManual4, dataEpoch, journeyRetry, directorPackageId]);
   /** V2 统一只读投影：项目与按集状态都来自这一份聚合，前端不自行猜完成度。 */
   const [overview, setOverview] = useState<DirectorOverview | null>(null);
   useEffect(() => {
-    if (!projectId) { setOverview(null); return; }
+    if (!projectId || isManual4) { setOverview(null); return; }
     let alive = true;
     setOverview((current) => (current && current.project_id === projectId ? current : null));
     getDirectorOverview(projectId, { packageId: directorPackageId })
       .then((row) => { if (alive) setOverview(row); })
       .catch(() => { if (alive) setOverview(null); });
     return () => { alive = false; };
-  }, [projectId, dataEpoch, journeyRetry, directorPackageId]);
+  }, [projectId, isManual4, dataEpoch, journeyRetry, directorPackageId]);
   /** 生产还在推进 = 本次运行仍活跃，或还有排队/生成中的任务。
    *  推进期间按固定间隔跟读同一份权威投影（journey/overview），停止后再收敛读一次：
    *  ⑥ 的集卡、右轨与运行卡不能各自保留不同时刻的旧事实——后台拍完了，页面还写
@@ -321,7 +344,7 @@ function App() {
   }, [productionMoving, projectId]);
   /** 跟读只更新事实，不重置 loading 态：读失败保留上一次真实投影，手动重试另有入口。 */
   useEffect(() => {
-    if (!projectId || projectionEpoch === 0) return;
+    if (!projectId || isManual4 || projectionEpoch === 0) return;
     let alive = true;
     getJourney(projectId, directorPackageId ? { packageId: directorPackageId } : undefined)
       .then((row) => { if (alive) { setJourney(row); setJourneyState('ready'); setJourneyError(''); } })
@@ -507,10 +530,11 @@ function App() {
       }
       setUi('director');
       setDirectorPage(target.page);
+      if (target.m4Stage) setM4Stage(target.m4Stage);
       setDirectorPackageId(target.packageId);
       // 旧深链落到导演页后,地址栏统一成规范 #d/… 形式。
       const raw = window.location.hash;
-      if (raw && !raw.startsWith('#d/') && !raw.startsWith('#a/')) {
+      if (raw && !raw.startsWith('#d/') && !raw.startsWith('#a/') && !raw.startsWith('#m4/')) {
         window.history.replaceState(null, '', `#d/${target.page}`);
       }
       if (target.anchor) {
@@ -642,7 +666,9 @@ function App() {
           <div className="topbar-context">
             <nav className="breadcrumb" aria-label="当前位置">
               <span>工作区</span><span className="crumb-slash">/</span>
-              <b>{DIRECTOR_PAGE_LABELS[directorPage]}</b>
+              <b>{isManual4 && directorPage !== 'projects' && directorPage !== 'setup' && directorPage !== 'advanced' && directorPage !== 'copilot'
+                ? 'H3 自主制片 · 四阶段'
+                : DIRECTOR_PAGE_LABELS[directorPage]}</b>
             </nav>
             {project && (projects.length > 1
               ? <label className="project-switch">
@@ -761,7 +787,15 @@ function App() {
                 <li><b>⑦ 后期成片</b><span>逐集剪辑与交付</span></li>
               </ol>
               <div className="create-project">
-                <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && createProject()} />
+                <select
+                  aria-label="选择生产线"
+                  value={newWorkflowKind}
+                  onChange={(event) => setNewWorkflowKind(event.target.value as WorkflowKind)}
+                >
+                  <option value="director7">AI 导演 · 七阶段</option>
+                  <option value="manual4">H3 自主制片 · 四阶段</option>
+                </select>
+                <input value={projectTitle} onChange={(event) => setProjectTitle(event.target.value)} placeholder="给作品起个名字（如：巷口的灯）" onKeyDown={(event) => event.key === 'Enter' && void createProjectAndEnter()} />
                 <button className="btn-secondary" title="创建后直接进入第 1 阶段" disabled={busy || !projectTitle.trim()} onClick={() => void createProjectAndEnter()}>创建作品</button>
                 <GuideTip>起个名字，点这里开始第 1 步</GuideTip>
               </div>
@@ -783,8 +817,18 @@ function App() {
           </section>}
 
           {project && <>
-            {/* 唯一的一条旅程：步骤、完成态、下一步提示和阻塞数都在这里。 */}
-            {directorPage !== 'setup' && directorPage !== 'projects' && directorPage !== 'advanced' && directorPage !== 'copilot' && <JourneyRail
+            {/* 唯一的一条旅程：四阶作品挂载独立 Manual4App，七阶作品维持原样。 */}
+            {isManual4 && directorPage !== 'projects' && directorPage !== 'setup' && directorPage !== 'advanced' && directorPage !== 'copilot' && (
+              <Manual4App
+                key={`m4-${projectId}`}
+                projectId={projectId}
+                initialStage={m4Stage}
+                onBackToProjects={() => goToDirectorPage('projects')}
+                onMessage={report}
+              />
+            )}
+
+            {!isManual4 && directorPage !== 'setup' && directorPage !== 'projects' && directorPage !== 'advanced' && directorPage !== 'copilot' && <JourneyRail
               stages={DIRECTOR_STAGES}
               currentPage={directorPage}
               activeStageId={activeDirectorStage?.id ?? null}
@@ -796,43 +840,67 @@ function App() {
               onNavigate={(stage) => goToDirectorPage(stage.page, stage.id)}
               onRetry={() => setJourneyRetry((n) => n + 1)}
             />}
-            <div className="demo-ribbon-slot" hidden={directorPage === 'setup' || directorPage === 'advanced' || directorPage === 'copilot'}><DemoRibbon production={production ?? {
+            {!isManual4 && <div className="demo-ribbon-slot" hidden={directorPage === 'setup' || directorPage === 'advanced' || directorPage === 'copilot'}><DemoRibbon production={production ?? {
               mode: 'BLOCKED', label: '状态未知', detail: '暂无法确认制作环境。', action: null, code: null,
               render_provider: 'mock', runtime_status: 'NOT_ACTIVATED', renderer_online: false,
               worker_online: false, running_jobs: 0, series_active: 0,
-            }} onEnable={() => goToDirectorSetup('env')} /></div>
+            }} onEnable={() => goToDirectorSetup('env')} /></div>}
 
             {directorPage === 'projects' && <div className="director-page">
               <section className="welcome-row">
                 <div>
                   <div className="eyebrow"><span className="eyebrow-line" /> 项目管理</div>
                   <h1>每一部作品，<em>都清清楚楚。</em></h1>
-                  <p>{journeyState !== 'ready' || !journey
-                    ? heroGuidance.hint
-                    : '所有作品的进度和产出物都在这里；选中哪部就继续。'}</p>
+                  <p>{isManual4
+                    ? '当前选中的是四阶 H3 自主制片作品；点右侧按钮进入四阶段工作台。'
+                    : journeyState !== 'ready' || !journey
+                      ? heroGuidance.hint
+                      : '所有作品的进度和产出物都在这里；选中哪部就继续。'}</p>
                 </div>
-                <button className="btn-primary" disabled={journeyState === 'loading' && !journey}
-                  onClick={() => (journeyState === 'error' ? setJourneyRetry((n) => n + 1) : goToDirectorPage(heroGuidance.page))}>
-                  {journeyState === 'error' ? '重新读取进度' : '打开当前作品'}
+                <button className="btn-primary" disabled={!isManual4 && journeyState === 'loading' && !journey}
+                  onClick={() => {
+                    if (isManual4) {
+                      setM4Stage('storyboard');
+                      setUi('director');
+                      setDirectorPage('creative');
+                      window.history.pushState(null, '', '#m4/storyboard');
+                      return;
+                    }
+                    if (journeyState === 'error') setJourneyRetry((n) => n + 1);
+                    else goToDirectorPage(heroGuidance.page);
+                  }}>
+                  {!isManual4 && journeyState === 'error' ? '重新读取进度' : '打开当前作品'}
                 </button>
                 <GuideTip>接着上次停下的那一步继续</GuideTip>
               </section>
               <ProjectPortfolio
                 projects={projects as Project[]}
+                workflowKinds={workflowKinds}
                 currentProjectId={projectId}
                 productionLabel={modeLabel}
                 productionDetail={production?.detail}
                 projectTitle={projectTitle}
                 setProjectTitle={setProjectTitle}
+                newWorkflowKind={newWorkflowKind}
+                onChangeNewWorkflowKind={setNewWorkflowKind}
                 busy={busy}
                 refreshEpoch={dataEpoch}
                 onOpen={(id) => {
                   if (id !== projectId) setProjectId(id);
+                  if ((workflowKinds[id] ?? 'director7') === 'manual4') {
+                    setM4Stage('storyboard');
+                    setUi('director');
+                    setDirectorPage('creative');
+                    window.history.pushState(null, '', '#m4/storyboard');
+                    return;
+                  }
                   goToDirectorPage(nextStage?.page ?? 'creative');
                 }}
                 onCreate={() => void createProjectAndEnter()}
               />
             </div>}
+
+            {!isManual4 && <>
 
             <div className="director-page" id="creative" hidden={directorPage !== 'creative'}>
               <StageRailProvider stageId="script" stageLabel="第①步 · 创意与剧本" blockers={railBlockers('script')}>
@@ -1109,6 +1177,7 @@ function App() {
             )}
 
             <footer className="page-footer" hidden={directorPage === 'setup' || directorPage === 'advanced'}><span>SHINE VIDEO STUDIO <i>·</i> DIRECTOR WORKBENCH</span><span><ShieldCheck size={12} /> 本地数据库 · 素材由你掌控</span></footer>
+          </>}
           </>}
         </div>
       </main>

@@ -431,6 +431,9 @@ def _worker_status(instance: WorkerInstance, *, now: datetime, offline_after: in
 async def _lifespan(app: FastAPI):
     yield
     app.state.engine.dispose()
+    m4_engine = getattr(app.state, "m4_engine", None)
+    if m4_engine is not None:
+        m4_engine.dispose()
 
 
 _SCHEMA_HEAD: list[str | None] = []
@@ -483,6 +486,23 @@ def create_app(
     app.state.settings = settings
     app.state.asset_root = actual_asset_root
     app.state.mock_llm_responder = None
+
+    from shine.manual4.storage.db import (
+        make_m4_engine,
+        make_m4_session_factory,
+        manual4_data_root,
+        manual4_database_url,
+    )
+    from shine.manual4.storage.migrations import ensure_m4_schema
+
+    m4_root = manual4_data_root(actual_asset_root)
+    m4_root.mkdir(parents=True, exist_ok=True)
+    m4_engine = make_m4_engine(manual4_database_url(actual_asset_root))
+    ensure_m4_schema(m4_engine)
+    app.state.m4_engine = m4_engine
+    app.state.m4_session_factory = make_m4_session_factory(m4_engine)
+    app.state.m4_root = m4_root
+    app.state.m4_llm_responder = None
     # A migration runs inside an API request.  If the process died mid-way,
     # the lock it left cannot belong to a live migration any more; clearing it
     # here keeps a crash from refusing every write for the whole stale window.
@@ -549,6 +569,44 @@ def create_app(
     from shine.api_output import router as output_router
 
     app.include_router(output_router)
+
+    from shine.manual4.api.router import router as manual4_router
+    from shine.platform_projects import router as platform_router
+
+    app.include_router(platform_router)
+    app.include_router(manual4_router)
+
+    import re as _re
+
+    _SEVEN_STAGE_PROJECT_SUBPATH = _re.compile(r"^/api/v1/projects/([^/]+)/.+$")
+
+    @app.middleware("http")
+    async def _cross_line_project_guard(request: Request, call_next):
+        match = _SEVEN_STAGE_PROJECT_SUBPATH.match(request.url.path)
+        if match:
+            project_id = match.group(1)
+            try:
+                from shine.platform_projects import WORKFLOW_MANUAL4, get_workflow_kind_if_known
+
+                with app.state.session_factory() as db:
+                    kind = get_workflow_kind_if_known(db, project_id)
+                if kind == WORKFLOW_MANUAL4:
+                    from fastapi.responses import JSONResponse
+
+                    return JSONResponse(
+                        status_code=409,
+                        content={
+                            "detail": {
+                                "code": "PROJECT_IS_MANUAL4_NOT_DIRECTOR7",
+                                "message": "四阶 H3 自主制片项目禁止调用七阶业务接口。",
+                                "project_id": project_id,
+                                "workflow_kind": kind,
+                            }
+                        },
+                    )
+            except Exception:  # noqa: BLE001 - uninitialized DB is handled by the route itself
+                pass
+        return await call_next(request)
 
     @app.middleware("http")
     async def _loopback_only(request: Request, call_next):
