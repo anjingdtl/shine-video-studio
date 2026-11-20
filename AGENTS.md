@@ -2376,3 +2376,43 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 - 回归：`test_shot_subtitles` +字号单一事实用例、delivery_assembly/episode_subtitle_cut
   绿；Ruff/tsc 干净。真机：字号 28 重烧 v4，抽帧字幕小而清晰（原 48 过大）。
   未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
+
+## 2026-11-20 V2 双生产线收尾验收（统一底座 + 七阶/四阶真机双线）
+
+- **架构定案：一套基础底座 + 两条独立业务线。** 统一基础配置、公共素材中心、公共 H3 制片底座各只有
+  一套事实/裁决/执行者；七阶（导演模式）与四阶（manual4 人工分镜线）只保留各自的业务阶段裁决与编排
+  （Run/Job/续跑/质检状态独立）。四阶经公共能力门面使用底座，不得越过门面依赖七阶导演/文学/导演包业务
+  内部实现；七阶既有 API/UI/数据库行/出片行为兼容不变；manual4.sqlite 与历史作业、提示词 SHA、交付
+  证据全部保留，迁移期禁止双写、重投或删除旧媒体。方案与 A01–A22 逐项 PASS 台账见
+  `docs/SHINE_UNIFIED_FOUNDATIONS_DUAL_PIPELINES_CLOSEOUT_V2_20261120.md`、
+  `docs/SHINE_FOUNDATION_DUAL_PIPELINE_FINAL_ACCEPTANCE.md`。
+- **H3 提交与 ACK 对账只有一条链**（`foundation/h3.py` 与七阶 `comfy/provider.py` 共用
+  `submit_prepared_prompt`、`ComfySubmission`、ComfyUI 客户端及历史/队列对账；四阶移除重复的真实图编译
+  与 `object_info` 读取）：先持久化参数化图 SHA-256，再提交，收到 ACK 后持久化外部 ID；对账先按外部
+  ID，ACK 缺失时按幂等键+图 SHA 定位，证据不足进待核对、绝不盲重投。七阶沿用既有幂等键，四阶从已有
+  Job+attempt 号推导提交身份，`_recover_comfy_job` 恢复查询同样携带幂等键。提示词来源不混淆：
+  七阶编译、四阶手写冻结（提交前强制 `sha256(prompt_text)==job.prompt_sha256`）。
+- **环境就绪与能力标签单一来源**：`foundation/environment.py` 合并整备投影与运行回执，四阶 API 嵌同一
+  快照、`Manual4App` 按前端类型合同读 `capabilities.*.state`；`SETUP_CAPABILITY_LABEL` 让 `READY`、
+  `VERIFIED_RENDER`、`BOUND` 等能力状态在两条线同一套措辞。加载失败显示原因，配方准入结果仍由
+  `/platform/capabilities/check.status` 表达。
+- **大纲确认只有一个写入路径**：旧确认入口复用 `confirm_outline_artifact`；七阶正文、`/journey` 与
+  分集读取同一个已记录确认指针（旧项目按版本创建时间回退兼容，旧入口的响应与错误码保留）。确认成功
+  触发既有工作台刷新；历史大纲回选由契约测试钉住。
+- **GPU 跨线互斥双向实测**：四阶持真实独占租约时七阶准入 `409 GPU_BUSY_RETRY_OR_QUEUE`，七阶持租约
+  时四阶 `409 GPU_BUSY_OTHER_LINE`；完工时活跃租约与待核对租约均为空，跨线仲裁只有
+  `ResourceScheduler` 一套。
+- **真机双线交付**：七阶导入剧本路径 1 集 2 镜、四阶人工分镜 2 集 3 镜全部真实 H3 出片（Ref2VA INT8
+  ConvRot / PDD8、672×384），过 FFprobe、全片解码、SHA-256 与播放端点核验（Chrome 实际载入帧）。
+  四阶批次中途暂停→重启→同批次恢复：首镜媒体 SHA 前后一致、每镜 attempt=1；跨集边界自动清空
+  `previous_job_id`，不串集尾帧。七阶重放启动请求返回同一个生产 Run。
+- **如实未满足项**：七阶跨镜持续单租约未满足——本轮经既有 review handoff 在首镜后释放第一个 H3 租约、
+  再顺序取得第二个（两个顺序租约），按原行为保留并如实列为未满足。本轮改过 `worker.py`（恢复查询携带
+  幂等键；`client_review_identity` 钉住该文件），旧 VLM revision 按设计失效；隔离栈 VLM/ASR 路由
+  未配置（`VLM_ROUTE_NOT_CONFIGURED`/`ASR_ROUTE_NOT_CONFIGURED`），真实正负校准仍未完成，不得声称
+  已校准。两线成片均为 `pending_review`，待用户看片签验，不改 accepted。
+- **执行契约**：本轮方案 §13——未经用户明确指示不得自行推送远端 main、不得自动合并 PR。
+- 证据：`docs/SHINE_V2_FINAL_CLOSEOUT_ACCEPTANCE.md`（双线收尾全记录，含真机媒体 SHA 与证据文件
+  清单）。回归：后端 8 分片全量在最终代码 `b839c97` 上完整一轮全绿（一次 `WinError 10053` 本地连接
+  中止偶发：同用例隔离复跑通过后完整重跑 8/8 干净）+ `backend/tests/manual4` 专项 + 前端 vitest
+  全量 + `tsc`/Vite build + Ruff。
