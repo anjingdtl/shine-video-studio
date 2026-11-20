@@ -92,3 +92,99 @@ export async function m4Request<T>(path: string, init?: RequestInit): Promise<T>
 export function fetchM4Overview(projectId: string): Promise<M4Overview> {
   return m4Request<M4Overview>(`/manual4/projects/${projectId}/overview`, { cache: 'no-store' });
 }
+
+export type M4RequestedAsset = {
+  family: 'character' | 'scene' | 'prop';
+  name: string;
+  variant?: string;
+};
+
+export type M4DraftShot = {
+  episode_code: string;
+  shot_no: number;
+  shot_code: string;
+  target_seconds: number | null;
+  summary: string;
+  dialogue: Array<{ speaker: string; text: string }>;
+  requested_assets: M4RequestedAsset[];
+  source_span?: Record<string, unknown>;
+  aspect_ratio?: string;
+  continuity_mode?: string;
+};
+
+export type M4DraftEpisode = {
+  episode_no: number;
+  episode_code: string;
+  title: string;
+  target_total_seconds: number | null;
+  shots: M4DraftShot[];
+};
+
+export type M4StoryboardPayload = {
+  episodes: M4DraftEpisode[];
+  ambiguities: Array<{ code: string; message: string; episode_code?: string; shot_code?: string }>;
+  extractor: string;
+};
+
+export type M4StoryboardState = {
+  project_id: string;
+  max_shot_seconds: number;
+  draft: {
+    revision_id: string | null;
+    revision: number;
+    status: string;
+    source_sha256: string;
+    summary_sha256: string;
+    max_shot_seconds: number;
+    payload: M4StoryboardPayload;
+    confirmed_at: string | null;
+  };
+  confirmed: unknown | null;
+  source_documents: Array<{ id: string; filename: string; source_format: string; sha256: string; byte_size: number }>;
+  confirmed_episodes: Array<Record<string, unknown>>;
+  confirmed_shots: Array<Record<string, unknown>>;
+};
+
+export function fetchM4StoryboardDraft(projectId: string): Promise<M4StoryboardState> {
+  return m4Request<M4StoryboardState>(`/manual4/projects/${projectId}/storyboard/draft`, { cache: 'no-store' });
+}
+
+export function importM4Storyboard(
+  projectId: string,
+  input: { file?: File; text?: string; filename?: string; useLlm?: boolean; llmProfileId?: string; remoteConsent?: boolean },
+): Promise<{ document: Record<string, unknown>; draft: M4StoryboardState['draft'] }> {
+  const form = new FormData();
+  if (input.file) form.append('file', input.file);
+  if (input.text !== undefined) form.append('text', input.text);
+  if (input.filename) form.append('filename', input.filename);
+  if (input.useLlm) form.append('use_llm', 'true');
+  if (input.llmProfileId) form.append('llm_profile_id', input.llmProfileId);
+  if (input.remoteConsent) form.append('remote_consent', 'true');
+  return m4Request(`/manual4/projects/${projectId}/storyboard/import`, { method: 'POST', body: form });
+}
+
+export function saveM4StoryboardDraft(
+  projectId: string,
+  payload: M4StoryboardPayload,
+  expectedRevision?: number,
+): Promise<{ draft: M4StoryboardState['draft'] }> {
+  return m4Request(`/manual4/projects/${projectId}/storyboard/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ payload, expected_revision: expectedRevision ?? null }),
+  });
+}
+
+export function confirmM4Storyboard(
+  projectId: string,
+  opts: { expectedRevision?: number; acknowledgeDurationMismatch?: boolean },
+): Promise<{ confirmed: M4StoryboardState['draft']; invalidated_prompts: string[]; requirements_count: number }> {
+  return m4Request(`/manual4/projects/${projectId}/storyboard/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      expected_revision: opts.expectedRevision ?? null,
+      acknowledge_duration_mismatch: Boolean(opts.acknowledgeDurationMismatch),
+    }),
+  });
+}

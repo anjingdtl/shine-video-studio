@@ -23,6 +23,10 @@ from shine.platform_projects import require_manual4_project
 
 router = APIRouter(prefix="/api/v1/manual4", tags=["manual4"])
 
+from shine.manual4.api.storyboard_routes import storyboard_router  # noqa: E402
+
+router.include_router(storyboard_router)
+
 
 def _m4_db(request: Request):
     factory = getattr(request.app.state, "m4_session_factory", None)

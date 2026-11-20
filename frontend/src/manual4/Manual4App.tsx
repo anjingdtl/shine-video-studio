@@ -138,7 +138,9 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
         <StoryboardStagePage
           overview={overview}
           stage={stageByKey.storyboard}
+          onRefresh={refresh}
           onNextStage={() => selectStage('materials')}
+          onMessage={onMessage}
         />
       )}
       {overview && activeStage === 'materials' && (

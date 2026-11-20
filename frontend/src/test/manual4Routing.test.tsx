@@ -103,6 +103,22 @@ describe('P1 平台选线与四阶隔离挂载', () => {
         pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/overview$`),
         respond: () => jsonResponse(makeM4Overview(m4Id, '四阶短片测试')),
       },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/storyboard/draft$`),
+        respond: () => jsonResponse({
+          project_id: m4Id,
+          max_shot_seconds: 15,
+          draft: {
+            revision_id: null, revision: 0, status: 'EMPTY', source_sha256: '', summary_sha256: '',
+            max_shot_seconds: 15, payload: { episodes: [], ambiguities: [], extractor: 'manual' }, confirmed_at: null,
+          },
+          confirmed: null,
+          source_documents: [],
+          confirmed_episodes: [],
+          confirmed_shots: [],
+        }),
+      },
     ]);
 
     render(<App />);

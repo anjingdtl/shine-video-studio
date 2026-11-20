@@ -7,3 +7,4 @@
 |---|---|---|---|---|---|---|
 | 独立 SQLite 引擎与 WAL/外键连接池 | `backend/shine/db.py` | `ee7176be424952611677248732c0ca3ddb579202` | `backend/shine/manual4/storage/db.py` | 2026-11-20 | 使用独立 `M4Base` 与 `manual4.sqlite` URL，彻底隔离七阶 `Base`/`shine.db` | `backend/tests/manual4/test_p1_platform_routing_and_isolation.py` |
 | 安全文件名、路径穿越防护与媒体头校验 | `backend/shine/security.py` | `cbb6797acff596b8d0b0b7a444c7135e5a6298ba` | `backend/shine/manual4/storage/files.py` | 2026-11-20 | 文件落地严格限定于 `<data_dir>/manual4/projects/<id>/`，不读写七阶目录 | `backend/tests/manual4/test_isolation_static.py` |
+| 文档解析（TXT/MD/JSON/DOCX/PDF）与长文本偏移切分 | `backend/shine/agents/script.py`、`backend/shine/materialprep/source_spans.py` | `603f5c0a8b63645f6c9378a79f4be5d8a547c78a`、`d66c755c4602f86b096c416c458fbf0657a562c8` | `backend/shine/manual4/storyboard/parser.py` | 2026-11-20 | 仅保留确定性分集/分镜/时长/实体抽取；扫描图 PDF 明确报 `M4_SCANNED_PDF_OCR_UNSUPPORTED`；不写七阶 `ProjectDocument` | `backend/tests/manual4/test_p2_storyboard.py` |
