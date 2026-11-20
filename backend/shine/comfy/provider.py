@@ -595,57 +595,18 @@ class ComfyUIRenderService:
     ) -> tuple[str | None, str]:
         """Look for an existing ComfyUI submission that matches this request.
 
-        Returns ``(prompt_id, status)``. The status is one of ``completed``,
-        ``running``, ``pending``, ``failed``, ``completed_without_output`` or
-        ``not_found``. An empty prompt id means "no matching submission could
-        be identified" and the caller must escalate to a human.
+        Delegates to ``shine.foundation.h3.reconcile_submission`` so both
+        pipelines share one ``/history`` (dict and list formats) & ``/queue``
+        reconciliation judgment.
         """
-        if prompt_id:
-            try:
-                result = self.poll(prompt_id)
-            except ComfyError as exc:
-                return None, f"unavailable:{exc.code}"
-            if result.status.startswith("unavailable:"):
-                # ComfyUI is unreachable, so nothing can be proven either way.
-                return None, result.status
-            if result.status != "not_found":
-                return prompt_id, result.status
-        if not prompt_graph_sha256:
-            return None, "not_found"
-        try:
-            history = self.client.history()
-        except ComfyError as exc:
-            return None, f"unavailable:{exc.code}"
-        if not isinstance(history, dict):
-            return None, "unavailable:COMFY_PROVIDER_ERROR"
-        for candidate_id, record in history.items():
-            if not isinstance(record, dict):
-                continue
-            prompt_graph = record.get("prompt")
-            if not isinstance(prompt_graph, dict):
-                continue
-            if graph_hash(prompt_graph) != prompt_graph_sha256:
-                continue
-            status = (record.get("status") or {}).get("status_str")
-            if status == "error":
-                return str(candidate_id), "failed"
-            outputs = record.get("outputs") or {}
-            has_output = any(
-                node_output.get(key)
-                for node_output in outputs.values()
-                if isinstance(node_output, dict)
-                for key in ("gifs", "videos", "images", "audio")
-            )
-            return str(candidate_id), "completed" if has_output else "completed_without_output"
-        try:
-            queue = self.client.queue()
-        except ComfyError as exc:
-            return None, f"unavailable:{exc.code}"
-        for key, state in (("queue_running", "running"), ("queue_pending", "pending")):
-            for item in queue.get(key) or []:
-                if isinstance(item, list) and len(item) > 1 and str(item[1]) == prompt_id:
-                    return str(item[1]), state
-        return None, "not_found"
+        from shine.foundation.h3 import reconcile_submission
+
+        matched_id, status, _rec = reconcile_submission(
+            self.client,
+            prompt_id=prompt_id,
+            prompt_graph_sha256=prompt_graph_sha256,
+        )
+        return matched_id, status
 
     def capabilities(self, profile=None) -> dict[str, Any]:
         stats = self.client.system_stats()

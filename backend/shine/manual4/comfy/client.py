@@ -94,6 +94,27 @@ class M4ComfyClient:
         except httpx.HTTPError as exc:
             raise M4ComfyUnavailable(f"ComfyUI object_info unavailable: {exc}") from exc
 
+    def upload_file(
+        self,
+        filename: str,
+        content: bytes,
+        *,
+        upload_path: str = "/upload/image",
+        field_name: str = "image",
+        subfolder: str = "shine_m4",
+        content_type: str = "application/octet-stream",
+        style: str = "multipart",
+    ) -> dict[str, Any]:
+        _ = style
+        return self.upload_image(
+            filename,
+            content,
+            upload_path=upload_path,
+            field_name=field_name,
+            subfolder=subfolder,
+            content_type=content_type,
+        )
+
     def upload_image(
         self,
         filename: str,
@@ -153,10 +174,11 @@ class M4ComfyClient:
         except httpx.HTTPError as exc:
             raise M4ComfyUnavailable(f"ComfyUI /queue unavailable: {exc}") from exc
 
-    def history(self, prompt_id: str) -> dict[str, Any]:
+    def history(self, prompt_id: str | None = None) -> dict[str, Any]:
+        endpoint = f"/history/{prompt_id}" if prompt_id else "/history"
         try:
             with self._client(timeout=max(self.timeout_s, 15.0)) as client:
-                resp = client.get(f"/history/{prompt_id}")
+                resp = client.get(endpoint)
                 resp.raise_for_status()
                 return resp.json()
         except httpx.HTTPError as exc:

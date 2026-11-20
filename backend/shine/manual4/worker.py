@@ -21,20 +21,27 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import sessionmaker
 
 from shine.config import Settings
-from shine.manual4.comfy.client import M4ComfySubmissionUncertain
-from shine.manual4.comfy.h3_adapter import (
-    M4GraphCompileError,
-    M4SecondPassSpec,
-    compile_m4_ref2va_workflow,
+from shine.foundation.h3 import (
+    ComfyH3Executor,
+    ComfySubmissionUncertain,
+    GraphCompileError,
+    H3ExecutionError,
+    H3ExecutionRequest,
+    H3ReferenceInput,
+    SecondPassSpec,
+    compile_h3_ref2va_graph,
+    evaluate_h3_technical_qc,
     extract_last_frame_png,
     extract_video_output,
+    reconcile_submission,
 )
+from shine.foundation.materials import resolve_library_version_file
+from shine.manual4.comfy.client import M4ComfySubmissionUncertain
 from shine.manual4.comfy.managed_instance import managed_m4_comfyui, reconcile_m4_renderer
-from shine.manual4.comfy.workflow import apply_parameters, graph_hash
 from shine.manual4.delivery.technical_qc import M4TechnicalExpectations, run_m4_technical_qc
 from shine.manual4.prompts.service import validate_frozen_prompt_for_shot
 from shine.manual4.storage.db import make_m4_engine, make_m4_session_factory, manual4_data_root, manual4_database_url
@@ -90,11 +97,57 @@ def heartbeat_m4_worker(
             row.current_run_id = current_run_id
 
 
-def reconcile_stalled_m4_runs(m4_factory: sessionmaker, *, stale_seconds: int = 120) -> int:
-    """Recover runs left behind by crashed Manual4 workers without blind resubmits."""
+def _resolve_manifest_ref_path(
+    m4_root: Path,
+    item: dict[str, Any],
+    *,
+    platform_factory: sessionmaker | None = None,
+    settings: Any = None,
+) -> Path:
+    storage_path = str(item.get("storage_path") or "")
+    if storage_path.startswith("library:"):
+        version_id = storage_path.split(":", 1)[1]
+        if platform_factory is None or settings is None:
+            raise H3ExecutionError("M4_LIBRARY_CONTEXT_MISSING", "缺少公共素材库会话上下文，无法解析引用路径。")
+        with platform_factory() as p_db:
+            path, _ct, _sha = resolve_library_version_file(
+                p_db,
+                settings,
+                version_id,
+                expected_sha256=item.get("sha256"),
+            )
+            return path
+    return safe_m4_path(m4_root, storage_path)
+
+
+def _qc_status_for(qc: dict[str, Any]) -> str:
+    res = str(qc.get("result") or "failed").lower()
+    if res == "passed":
+        return "PASSED"
+    if res == "needs_review":
+        return "NEEDS_REVIEW"
+    return "FAILED"
+
+
+def reconcile_stalled_m4_runs(
+    m4_factory: sessionmaker,
+    *,
+    stale_seconds: int = 120,
+    comfy_client: Any = None,
+    m4_root: Path | None = None,
+    settings: Any = None,
+) -> int:
+    """Recover runs left behind by crashed Manual4 workers without blind resubmits.
+
+    When a ComfyUI client is reachable, attempts in ``SUBMITTING``/``RUNNING`` are
+    reconciled against ``/history`` and ``/queue`` by ``(prompt_id, prompt_graph_sha256)``
+    before escalating unresolved ones to ``NEEDS_REVIEW``.
+    """
     recovered = 0
     cutoff = m4_utcnow() - timedelta(seconds=stale_seconds)
     now = m4_utcnow()
+    pending_reconcile: list[tuple[str, str, str, str, str | None, str | None, float, bool]] = []
+
     with m4_factory.begin() as db:
         active_runs = db.scalars(
             select(M4ProductionRun).where(M4ProductionRun.status.in_(["CLAIMED", "RUNNING"]))
@@ -108,6 +161,8 @@ def reconcile_stalled_m4_runs(m4_factory: sessionmaker, *, stale_seconds: int = 
             )
             if not is_stale:
                 continue
+            snap = db.get(M4ExecutionSnapshot, run.execution_snapshot_id)
+            snap_by_shot = {str(it["shot_id"]): it for it in (snap.items_json if snap else [])}
             jobs = db.scalars(
                 select(M4Job).where(M4Job.run_id == run.id).order_by(M4Job.ordinal)
             ).all()
@@ -115,33 +170,178 @@ def reconcile_stalled_m4_runs(m4_factory: sessionmaker, *, stale_seconds: int = 
             has_queued = False
             for job in jobs:
                 if job.status in {"SUBMITTING", "RUNNING", "QC_PENDING"}:
-                    job.status = "NEEDS_REVIEW"
-                    job.failure_code = "M4_WORKER_CRASHED_IN_FLIGHT"
-                    job.failure_detail = "Worker 在任务执行期间退出，已挂起等待对账，禁止自动重投。"
-                    job.state_version += 1
-                    job.updated_at = now
-                    for att in db.scalars(
-                        select(M4JobAttempt).where(
+                    latest_att = db.scalar(
+                        select(M4JobAttempt)
+                        .where(
                             M4JobAttempt.job_id == job.id,
                             M4JobAttempt.status.in_(["SUBMITTING", "RUNNING"]),
                         )
-                    ).all():
-                        att.status = "NEEDS_REVIEW"
-                        att.error_code = "M4_WORKER_CRASHED_IN_FLIGHT"
-                        att.updated_at = now
+                        .order_by(M4JobAttempt.attempt_no.desc())
+                        .limit(1)
+                    )
+                    if (
+                        comfy_client is not None
+                        and latest_att is not None
+                        and (latest_att.prompt_id or latest_att.prompt_graph_sha256)
+                    ):
+                        item = snap_by_shot.get(job.shot_id) or {}
+                        has_audio = any(
+                            r.get("use_as") == "audio" for r in (item.get("reference_manifest") or [])
+                        )
+                        pending_reconcile.append(
+                            (
+                                run.id,
+                                run.project_id,
+                                job.id,
+                                latest_att.id,
+                                latest_att.prompt_id,
+                                latest_att.prompt_graph_sha256,
+                                float(job.target_seconds),
+                                has_audio,
+                            )
+                        )
+                    else:
+                        job.status = "NEEDS_REVIEW"
+                        job.failure_code = "M4_WORKER_CRASHED_IN_FLIGHT"
+                        job.failure_detail = "Worker 在任务执行期间退出，已挂起等待对账，禁止自动重投。"
+                        job.state_version += 1
+                        job.updated_at = now
+                        for att in db.scalars(
+                            select(M4JobAttempt).where(
+                                M4JobAttempt.job_id == job.id,
+                                M4JobAttempt.status.in_(["SUBMITTING", "RUNNING"]),
+                            )
+                        ).all():
+                            att.status = "NEEDS_REVIEW"
+                            att.error_code = "M4_WORKER_CRASHED_IN_FLIGHT"
+                            att.updated_at = now
                     has_uncertain = True
                 elif job.status == "QUEUED":
                     has_queued = True
-            if has_uncertain:
+            if not pending_reconcile:
+                if has_uncertain:
+                    run.status = "NEEDS_REVIEW"
+                elif has_queued:
+                    run.status = "PENDING"
+                    run.worker_id = None
+                    run.lease_id = None
+                    run.lease_owner = None
+                else:
+                    run.status = "COMPLETED" if all(j.status == "PASSED" for j in jobs) else "FAILED"
+                run.updated_at = now
+                recovered += 1
+
+    # Reconcile in-flight submissions outside DB transaction against ComfyUI /history & /queue
+    touched_runs: set[str] = set()
+    for run_id, proj_id, job_id, att_id, pid, gsha, dur_s, has_audio in pending_reconcile:
+        touched_runs.add(run_id)
+        matched_id, state, rec = reconcile_submission(
+            comfy_client,
+            prompt_id=pid,
+            prompt_graph_sha256=gsha,
+        )
+        if state == "completed" and rec is not None and m4_root is not None:
+            try:
+                fname, sub, ftype = extract_video_output(rec)
+                out_name = safe_m4_filename(fname)
+                out_bytes = comfy_client.view(fname, subfolder=sub, file_type=ftype)
+                rel_out, out_sha, abs_out = store_m4_bytes(m4_root, proj_id, "renders", out_name, out_bytes)
+                qc = evaluate_h3_technical_qc(
+                    abs_out,
+                    duration_s=dur_s,
+                    expect_audio=has_audio,
+                    ffprobe_path=getattr(settings, "ffprobe_path", "ffprobe") or "ffprobe",
+                    ffmpeg_path=getattr(settings, "ffmpeg_path", "ffmpeg") or "ffmpeg",
+                )
+                j_status = _qc_status_for(qc)
+            except Exception as exc:
+                with m4_factory.begin() as db:
+                    j = db.get(M4Job, job_id)
+                    a = db.get(M4JobAttempt, att_id)
+                    if j:
+                        j.status = "NEEDS_REVIEW"
+                        j.failure_code = "M4_RECONCILE_FETCH_FAILED"
+                        j.failure_detail = str(exc)[:400]
+                        j.state_version += 1
+                        j.updated_at = m4_utcnow()
+                    if a:
+                        a.prompt_id = a.prompt_id or matched_id
+                        a.status = "NEEDS_REVIEW"
+                        a.error_code = "M4_RECONCILE_FETCH_FAILED"
+                        a.updated_at = m4_utcnow()
+                continue
+
+            with m4_factory.begin() as db:
+                j = db.get(M4Job, job_id)
+                a = db.get(M4JobAttempt, att_id)
+                if j:
+                    j.status = j_status
+                    j.output_storage_path = rel_out
+                    j.output_sha256 = out_sha
+                    j.output_bytes = len(out_bytes)
+                    j.measured_duration_s = qc["duration_s"]
+                    j.measured_width = qc["width"]
+                    j.measured_height = qc["height"]
+                    j.measured_fps = qc["fps"]
+                    j.qc_result = qc
+                    j.failure_code = None if j_status == "PASSED" else f"M4_TECHNICAL_QC_{j_status}"
+                    j.state_version += 1
+                    j.updated_at = m4_utcnow()
+                if a:
+                    a.prompt_id = a.prompt_id or matched_id
+                    a.output_filename = out_name
+                    a.output_sha256 = out_sha
+                    a.output_bytes = len(out_bytes)
+                    a.status = j_status
+                    a.updated_at = m4_utcnow()
+            continue
+
+        with m4_factory.begin() as db:
+            j = db.get(M4Job, job_id)
+            a = db.get(M4JobAttempt, att_id)
+            if state == "failed":
+                if j:
+                    j.status = "FAILED"
+                    j.failure_code = "COMFY_EXECUTION_ERROR"
+                    j.state_version += 1
+                    j.updated_at = m4_utcnow()
+                if a:
+                    a.prompt_id = a.prompt_id or matched_id
+                    a.status = "FAILED"
+                    a.error_code = "COMFY_EXECUTION_ERROR"
+                    a.updated_at = m4_utcnow()
+            else:
+                if j:
+                    j.status = "NEEDS_REVIEW"
+                    j.failure_code = (
+                        "M4_COMFY_STILL_ACTIVE" if state in {"running", "pending"} else "M4_WORKER_CRASHED_IN_FLIGHT"
+                    )
+                    j.state_version += 1
+                    j.updated_at = m4_utcnow()
+                if a:
+                    a.prompt_id = a.prompt_id or matched_id
+                    a.status = "NEEDS_REVIEW"
+                    a.error_code = j.failure_code if j else "M4_WORKER_CRASHED_IN_FLIGHT"
+                    a.updated_at = m4_utcnow()
+
+    for run_id in touched_runs:
+        with m4_factory.begin() as db:
+            run = db.get(M4ProductionRun, run_id)
+            if run is None:
+                continue
+            jobs = db.scalars(select(M4Job).where(M4Job.run_id == run_id)).all()
+            if any(j.status == "NEEDS_REVIEW" for j in jobs):
                 run.status = "NEEDS_REVIEW"
-            elif has_queued:
+            elif jobs and all(j.status == "PASSED" for j in jobs):
+                run.status = "COMPLETED"
+            elif any(j.status == "QUEUED" for j in jobs):
                 run.status = "PENDING"
                 run.worker_id = None
                 run.lease_id = None
                 run.lease_owner = None
             else:
-                run.status = "COMPLETED" if all(j.status == "PASSED" for j in jobs) else "FAILED"
-            run.updated_at = now
+                run.status = "FAILED"
+            run.updated_at = m4_utcnow()
             recovered += 1
     return recovered
 
@@ -149,19 +349,27 @@ def reconcile_stalled_m4_runs(m4_factory: sessionmaker, *, stale_seconds: int = 
 def _claim_next_run(m4_factory: sessionmaker, worker_id: str) -> str | None:
     now = m4_utcnow()
     with m4_factory.begin() as db:
-        candidate = db.scalar(
-            select(M4ProductionRun)
+        candidate_id = db.scalar(
+            select(M4ProductionRun.id)
             .where(M4ProductionRun.status == "PENDING")
             .order_by(M4ProductionRun.created_at.asc())
             .limit(1)
         )
-        if candidate is None:
+        if candidate_id is None:
             return None
-        candidate.status = "RUNNING"
-        candidate.worker_id = worker_id
-        candidate.lease_owner = f"m4-worker-{worker_id}"
-        candidate.updated_at = now
-        return candidate.id
+        res = db.execute(
+            update(M4ProductionRun)
+            .where(M4ProductionRun.id == candidate_id, M4ProductionRun.status == "PENDING")
+            .values(
+                status="RUNNING",
+                worker_id=worker_id,
+                lease_owner=f"m4-worker-{worker_id}",
+                updated_at=now,
+            )
+        )
+        if res.rowcount != 1:
+            return None
+        return candidate_id
 
 
 def _load_run_context(
@@ -186,11 +394,32 @@ def _load_run_context(
                 "id": run.id,
                 "project_id": run.project_id,
                 "provider": run.provider,
+                "execution_generation": int(getattr(run, "execution_generation", 1) or 1),
                 "config": snap.config_json,
             },
             items_by_shot,
             list(queued_job_ids),
         )
+
+
+def _fail_job_precheck(
+    m4_factory: sessionmaker,
+    job_id: str,
+    *,
+    expected_state_ver: int,
+    status: str,
+    code: str,
+    detail: str,
+) -> str:
+    with m4_factory.begin() as db:
+        job = db.get(M4Job, job_id)
+        if job and job.state_version == expected_state_ver:
+            job.status = status
+            job.failure_code = code
+            job.failure_detail = detail
+            job.state_version += 1
+            job.updated_at = m4_utcnow()
+    return status
 
 
 def _execute_single_job(
@@ -204,23 +433,44 @@ def _execute_single_job(
     comfy_client: Any = None,
     object_info: dict[str, Any] | None = None,
     video_stub: Any = None,
+    platform_factory: sessionmaker | None = None,
+    settings: Any = None,
 ) -> str:
-    # 1. Verify prompt + reference integrity + continuity dependency BEFORE touching renderer
-    prev_video_path: Path | None = None
+    # 1. Verify frozen prompt + reference integrity + continuity dependency BEFORE I/O or renderer
+    prev_video_rel: str | None = None
+    prev_output_sha: str | None = None
+    exec_gen = int(run_info.get("execution_generation", 2) or 2)
     with m4_factory.begin() as db:
         run = db.get(M4ProductionRun, run_info["id"])
         job = db.get(M4Job, job_id)
         if run is None or job is None or job.status != "QUEUED":
             return "SKIPPED"
-        if run.status in {"PAUSED", "CANCELLED"}:
+        if run.status in {"PAUSED", "PAUSE_REQUESTED", "CANCELLED"}:
             return "STOPPED"
 
+        exec_gen = int(getattr(job, "execution_generation", exec_gen) or exec_gen)
+        expected_state_ver = job.state_version
+        prompt_text = str(snap_item["prompt_text"])
         shot = db.get(M4Shot, job.shot_id)
         prompt_row = db.get(M4ManualPromptRevision, job.prompt_revision_id) if job.prompt_revision_id else None
         ok, err_code = validate_frozen_prompt_for_shot(db, shot, prompt_row) if shot else (False, "M4_SHOT_NOT_FOUND")
-        if not ok or prompt_row is None or prompt_row.prompt_sha256 != job.prompt_sha256:
+        actual_snap_sha = sha256_bytes(prompt_text.encode())
+        if (
+            not ok
+            or prompt_row is None
+            or prompt_row.prompt_sha256 != job.prompt_sha256
+            or actual_snap_sha != job.prompt_sha256
+        ):
             job.status = "FAILED"
-            job.failure_code = err_code or "M4_MANUAL_PROMPT_INVALIDATED"
+            job.failure_code = (
+                err_code
+                if (not ok and err_code)
+                else (
+                    "M4_MANUAL_PROMPT_SHA_MISMATCH"
+                    if actual_snap_sha != job.prompt_sha256
+                    else "M4_MANUAL_PROMPT_INVALIDATED"
+                )
+            )
             job.failure_detail = "排片提交后分镜、参考素材或人工提示词发生变更，拒绝使用旧文本继续出片。"
             job.state_version += 1
             job.updated_at = m4_utcnow()
@@ -228,19 +478,25 @@ def _execute_single_job(
 
         if job.continuity_mode == "last_frame" and job.previous_job_id:
             prev_job = db.get(M4Job, job.previous_job_id)
-            if prev_job is None or prev_job.status != "PASSED" or not prev_job.output_storage_path:
+            if (
+                prev_job is None
+                or prev_job.status != "PASSED"
+                or not prev_job.output_storage_path
+                or not prev_job.output_sha256
+            ):
                 job.status = "BLOCKED"
                 job.failure_code = "M4_CONTINUITY_SOURCE_NOT_PASSED"
                 job.failure_detail = "前一衔接镜头未通过质检，禁止推测或强行衔接。"
                 job.state_version += 1
                 job.updated_at = m4_utcnow()
                 return "BLOCKED"
-            prev_video_path = safe_m4_path(m4_root, prev_job.output_storage_path)
+            prev_video_rel = prev_job.output_storage_path
+            prev_output_sha = prev_job.output_sha256
 
         cfg = run_info["config"]
         sp_cfg = cfg.get("second_pass")
         sp_spec = (
-            M4SecondPassSpec(
+            SecondPassSpec(
                 denoise=float(sp_cfg.get("denoise", 0.25)),
                 latent_scale=float(sp_cfg.get("latent_scale", 1.0)),
                 nfe=str(sp_cfg.get("nfe", "8")),
@@ -248,118 +504,196 @@ def _execute_single_job(
             if isinstance(sp_cfg, dict) and sp_cfg.get("enabled")
             else None
         )
-
         ref_items = list(snap_item.get("reference_manifest") or [])
         img_items = [r for r in ref_items if r["use_as"] == "image"]
         aud_items = [r for r in ref_items if r["use_as"] == "audio"]
         vid_items = [r for r in ref_items if r["use_as"] == "video"]
-        extra_frame_count = 1 if prev_video_path is not None else 0
+        attempt_no_base = int(job.attempt_count)
+        target_seconds = float(snap_item["target_seconds"])
+        width = int(snap_item["width"])
+        height = int(snap_item["height"])
+        seed = int(snap_item["seed"])
+        variant_id = str(cfg.get("variant_id", "h3-ref2va-int8-convrot"))
+        accelerator_id = str(cfg.get("accelerator_id", "pdd8"))
 
-        try:
-            compiled = compile_m4_ref2va_workflow(
-                variant_id=str(cfg.get("variant_id", "h3-ref2va-int8-convrot")),
-                accelerator_id=str(cfg.get("accelerator_id", "pdd8")),
-                second_pass=sp_spec,
-                aspect_ratio=str(snap_item.get("aspect_ratio", "16:9")),
-                resolution_scale=float(cfg.get("resolution_scale", 1.0)),
-                image_count=len(img_items) + extra_frame_count,
-                audio_count=len(aud_items),
-                video_count=len(vid_items),
-                object_info=object_info,
-            )
-        except M4GraphCompileError as exc:
-            job.status = "FAILED"
-            job.failure_code = exc.code
-            job.failure_detail = exc.message
-            job.state_version += 1
-            job.updated_at = m4_utcnow()
-            return "FAILED"
-
-        # 2. Verify reference bytes on disk match frozen manifest digests BEFORE upload
-        ref_files_to_upload: list[tuple[str, str, bytes, str]] = []
+    # 2. Disk I/O, SHA checks & FFmpeg tail frame extraction OUTSIDE any SQLite transaction
+    h3_refs: list[H3ReferenceInput] = []
+    ref_files_to_upload: list[tuple[str, str, bytes, str]] = []
+    try:
         for idx, item in enumerate(img_items):
-            p = safe_m4_path(m4_root, item["storage_path"])
+            p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
             if not p.is_file():
-                job.status = "FAILED"
-                job.failure_code = "M4_REFERENCE_FILE_MISSING"
-                job.failure_detail = f"参考素材文件丢失：{item.get('role_label')}"
-                job.state_version += 1
-                job.updated_at = m4_utcnow()
-                return "FAILED"
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_FILE_MISSING",
+                    detail=f"参考素材文件丢失：{item.get('role_label')}",
+                )
             raw = p.read_bytes()
             if sha256_bytes(raw) != item["sha256"]:
-                job.status = "FAILED"
-                job.failure_code = "M4_REFERENCE_SHA_MISMATCH"
-                job.failure_detail = f"参考素材字节校验不一致：{item.get('role_label')}"
-                job.state_version += 1
-                job.updated_at = m4_utcnow()
-                return "FAILED"
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_SHA_MISMATCH",
+                    detail=f"参考素材字节校验不一致：{item.get('role_label')}",
+                )
+            h3_refs.append(
+                H3ReferenceInput(
+                    family="image",
+                    path=p,
+                    filename=safe_m4_filename(p.name),
+                    content_type=str(item.get("content_type") or "image/png"),
+                    sha256=str(item["sha256"]),
+                    role_label=str(item.get("role_label") or ""),
+                )
+            )
             ref_files_to_upload.append(
                 (f"reference_image_{idx + 1}", safe_m4_filename(p.name), raw, item["content_type"])
             )
 
-        if prev_video_path is not None:
-            frame_png = safe_m4_path(m4_root, f"projects/{run_info['project_id']}/continuity/c_{job.id}.png")
-            try:
-                extract_last_frame_png(prev_video_path, frame_png)
-            except M4GraphCompileError as exc:
-                job.status = "FAILED"
-                job.failure_code = exc.code
-                job.failure_detail = exc.message
-                job.state_version += 1
-                job.updated_at = m4_utcnow()
-                return "FAILED"
+        if prev_video_rel is not None and prev_output_sha is not None:
+            prev_video_path = safe_m4_path(m4_root, prev_video_rel)
+            if not prev_video_path.is_file() or sha256_bytes(prev_video_path.read_bytes()) != prev_output_sha:
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_CONTINUITY_SOURCE_SHA_MISMATCH",
+                    detail="前一衔接成片缺失或校验和变化，拒绝续帧。",
+                )
+            frame_png = safe_m4_path(m4_root, f"projects/{run_info['project_id']}/continuity/c_{job_id}.png")
+            ffmpeg_bin = (getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg"
+            extract_last_frame_png(prev_video_path, frame_png, ffmpeg_path=ffmpeg_bin)
             raw_frame = frame_png.read_bytes()
+            frame_sha = sha256_bytes(raw_frame)
+            h3_refs.append(
+                H3ReferenceInput(
+                    family="image",
+                    path=frame_png,
+                    filename=frame_png.name,
+                    content_type="image/png",
+                    sha256=frame_sha,
+                    role_label="last_frame_continuity",
+                )
+            )
             ref_files_to_upload.append(
                 (f"reference_image_{len(img_items) + 1}", frame_png.name, raw_frame, "image/png")
             )
 
         for idx, item in enumerate(aud_items):
-            p = safe_m4_path(m4_root, item["storage_path"])
-            if not p.is_file() or sha256_bytes(p.read_bytes()) != item["sha256"]:
-                job.status = "FAILED"
-                job.failure_code = "M4_REFERENCE_AUDIO_INVALID"
-                job.failure_detail = f"参考音频文件缺失或哈希不匹配：{item.get('role_label')}"
-                job.state_version += 1
-                job.updated_at = m4_utcnow()
-                return "FAILED"
+            p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
+            if not p.is_file():
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_AUDIO_INVALID",
+                    detail=f"参考音频文件缺失：{item.get('role_label')}",
+                )
+            raw_aud = p.read_bytes()
+            if sha256_bytes(raw_aud) != item["sha256"]:
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_AUDIO_INVALID",
+                    detail=f"参考音频哈希不匹配：{item.get('role_label')}",
+                )
+            h3_refs.append(
+                H3ReferenceInput(
+                    family="audio",
+                    path=p,
+                    filename=safe_m4_filename(p.name),
+                    content_type=str(item.get("content_type") or "audio/wav"),
+                    sha256=str(item["sha256"]),
+                    role_label=str(item.get("role_label") or ""),
+                    duration_s=item.get("duration_s"),
+                )
+            )
             ref_files_to_upload.append(
-                (f"reference_audio_{idx + 1}", safe_m4_filename(p.name), p.read_bytes(), item["content_type"])
+                (f"reference_audio_{idx + 1}", safe_m4_filename(p.name), raw_aud, item["content_type"])
             )
 
-        # Persist submit intent BEFORE external ComfyUI call (Rule: never hold SQLite writer across /prompt)
-        attempt_no = int(job.attempt_count) + 1
-        attempt = M4JobAttempt(
-            job_id=job.id,
-            attempt_no=attempt_no,
-            status="SUBMITTING",
-            prompt_graph_sha256=compiled.graph_sha256,
-            submit_intent_at=m4_utcnow(),
+        compiled = compile_h3_ref2va_graph(
+            variant_id=variant_id,
+            accelerator_id=accelerator_id,
+            second_pass=sp_spec,
+            image_count=len(img_items) + (1 if prev_video_rel is not None else 0),
+            audio_count=len(aud_items),
+            video_count=len(vid_items),
+            object_info=object_info,
         )
-        db.add(attempt)
-        db.flush()
-        attempt_id = attempt.id
-        job.attempt_count = attempt_no
-        job.status = "SUBMITTING"
-        job.state_version += 1
-        job.updated_at = m4_utcnow()
+    except (H3ExecutionError, GraphCompileError) as exc:
+        return _fail_job_precheck(
+            m4_factory,
+            job_id,
+            expected_state_ver=expected_state_ver,
+            status="FAILED",
+            code=getattr(exc, "code", "M4_H3_PRECHECK_FAILED"),
+            detail=str(exc)[:400],
+        )
 
-        expected_state_ver = job.state_version
-        prompt_text = str(snap_item["prompt_text"])
-        target_seconds = float(snap_item["target_seconds"])
-        width = int(snap_item["width"])
-        height = int(snap_item["height"])
-        seed = int(snap_item["seed"])
-
-    # 3. Execute external call OUTSIDE SQLite write transaction
+    # 3. Execute external call OUTSIDE SQLite write transaction, persisting intent right before /prompt
+    attempt_id: str | None = None
     out_bytes = b""
     out_filename = f"{snap_item['shot_code']}.mp4"
     is_mock_run = video_stub is not None
     prompt_id = ""
     submitted_graph_sha = compiled.graph_sha256
 
+    def _persist_submit_intent(graph_sha: str, _graph: dict[str, Any] | None = None) -> None:
+        nonlocal attempt_id, expected_state_ver, submitted_graph_sha
+        submitted_graph_sha = graph_sha
+        with m4_factory.begin() as db:
+            j_row = db.get(M4Job, job_id)
+            if j_row is None or j_row.state_version != expected_state_ver:
+                raise H3ExecutionError("M4_STATE_CONFLICT", "任务状态已被并发修改，中止提交。")
+            attempt_no = attempt_no_base + 1
+            att = M4JobAttempt(
+                job_id=job_id,
+                attempt_no=attempt_no,
+                execution_generation=exec_gen,
+                status="SUBMITTING",
+                prompt_graph_sha256=graph_sha,
+                submit_intent_at=m4_utcnow(),
+            )
+            db.add(att)
+            db.flush()
+            attempt_id = att.id
+            j_row.attempt_count = attempt_no
+            j_row.status = "SUBMITTING"
+            j_row.state_version += 1
+            j_row.updated_at = m4_utcnow()
+            expected_state_ver = j_row.state_version
+
+    def _persist_submitted(pid: str) -> None:
+        nonlocal expected_state_ver, prompt_id
+        prompt_id = pid
+        with m4_factory.begin() as db:
+            j_row = db.get(M4Job, job_id)
+            a_row = db.get(M4JobAttempt, attempt_id) if attempt_id else None
+            if j_row and j_row.state_version == expected_state_ver:
+                j_row.status = "RUNNING"
+                j_row.state_version += 1
+                j_row.updated_at = m4_utcnow()
+                expected_state_ver = j_row.state_version
+            if a_row:
+                a_row.prompt_id = pid
+                a_row.prompt_graph_sha256 = submitted_graph_sha
+                a_row.submit_ack_at = m4_utcnow()
+                a_row.status = "RUNNING"
+                a_row.updated_at = m4_utcnow()
+
     try:
         if video_stub is not None:
+            _persist_submit_intent(compiled.graph_sha256)
             stub_res = video_stub(
                 job_id=job_id,
                 shot_code=snap_item["shot_code"],
@@ -369,7 +703,7 @@ def _execute_single_job(
                 height=height,
                 seed=seed,
                 references=ref_files_to_upload,
-                has_continuity_frame=prev_video_path is not None,
+                has_continuity_frame=prev_video_rel is not None,
             )
             out_bytes = stub_res["bytes"] if isinstance(stub_res, dict) else bytes(stub_res)
             is_mock_run = bool(stub_res.get("is_mock", True)) if isinstance(stub_res, dict) else True
@@ -379,61 +713,45 @@ def _execute_single_job(
             prompt_id = str(stub_res.get("prompt_id") or default_pid) if isinstance(stub_res, dict) else default_pid
         else:
             if comfy_client is None:
-                raise RuntimeError("M4_COMFY_CLIENT_UNAVAILABLE")
-            param_values: dict[str, Any] = {
-                "positive_prompt": prompt_text,
-                "duration": target_seconds,
-                "seed": seed,
-                "width": width,
-                "height": height,
-            }
-            for param_key, fname, content, ctype in ref_files_to_upload:
-                uploaded = comfy_client.upload_image(
-                    fname,
-                    content,
-                    subfolder="shine_m4",
-                    content_type=ctype,
-                )
-                name_in_comfy = str(uploaded.get("name") or fname)
-                sub = str(uploaded.get("subfolder") or "").strip("/")
-                param_values[param_key] = f"{sub}/{name_in_comfy}" if sub else name_in_comfy
-
-            final_graph = apply_parameters(compiled.graph, compiled.parameter_map, param_values)
-            submitted_graph_sha = graph_hash(final_graph)
-            queued = comfy_client.queue_prompt(
-                final_graph,
+                raise H3ExecutionError("M4_COMFY_CLIENT_UNAVAILABLE", "ComfyUI 客户端不可用。")
+            h3_req = H3ExecutionRequest(
+                prompt_text=prompt_text,
+                prompt_sha256=str(snap_item["prompt_sha256"]),
+                duration_s=target_seconds,
+                width=width,
+                height=height,
+                seed=seed,
+                references=h3_refs,
+                variant_id=variant_id,
+                accelerator_id=accelerator_id,
+                second_pass=sp_spec,
                 extra_data={"shine_line": "manual4", "job_id": job_id, "run_id": run_info["id"]},
             )
-            prompt_id = str(queued.get("prompt_id") or "")
-            if not prompt_id:
-                raise M4ComfySubmissionUncertain("ComfyUI /prompt did not return prompt_id")
-
-            # Persist external prompt_id immediately after /prompt ack
-            with m4_factory.begin() as db:
-                j_row = db.get(M4Job, job_id)
-                a_row = db.get(M4JobAttempt, attempt_id)
-                if j_row and j_row.state_version == expected_state_ver:
-                    j_row.status = "RUNNING"
-                    j_row.state_version += 1
-                    j_row.updated_at = m4_utcnow()
-                    expected_state_ver = j_row.state_version
-                if a_row:
-                    a_row.prompt_id = prompt_id
-                    a_row.prompt_graph_sha256 = submitted_graph_sha
-                    a_row.submit_ack_at = m4_utcnow()
-                    a_row.status = "RUNNING"
-                    a_row.updated_at = m4_utcnow()
-
+            receipt = ComfyH3Executor().execute(
+                comfy_client,
+                h3_req,
+                on_before_submit=_persist_submit_intent,
+                on_submitted=_persist_submitted,
+                poll_timeout_s=1800.0,
+                poll_interval_s=0.5,
+            )
             heartbeat_m4_worker(m4_factory, worker_id, status="RUNNING", current_run_id=run_info["id"])
-            record = comfy_client.poll_until_done(prompt_id, timeout_s=1800.0, poll_interval=2.0)
-            fname, sub, ftype = extract_video_output(record)
-            out_filename = safe_m4_filename(fname)
-            out_bytes = comfy_client.view(fname, subfolder=sub, file_type=ftype)
+            if receipt.status == "timeout":
+                raise ComfySubmissionUncertain(receipt.error or "ComfyUI 轮询超时，需要核对队列与历史。")
+            if receipt.status != "completed" or receipt.output_bytes is None:
+                raise H3ExecutionError(
+                    receipt.error_code or "M4_RENDER_FAILED",
+                    receipt.error or "ComfyUI 执行失败。",
+                )
+            out_filename = safe_m4_filename(receipt.output_filename or out_filename)
+            out_bytes = receipt.output_bytes
+            prompt_id = receipt.prompt_id or prompt_id
+            submitted_graph_sha = receipt.prompt_graph_sha256
 
-    except M4ComfySubmissionUncertain as exc:
+    except (M4ComfySubmissionUncertain, ComfySubmissionUncertain) as exc:
         with m4_factory.begin() as db:
             j_row = db.get(M4Job, job_id)
-            a_row = db.get(M4JobAttempt, attempt_id)
+            a_row = db.get(M4JobAttempt, attempt_id) if attempt_id else None
             if j_row:
                 j_row.status = "NEEDS_REVIEW"
                 j_row.failure_code = "M4_COMFY_SUBMISSION_OUTCOME_UNKNOWN"
@@ -449,7 +767,7 @@ def _execute_single_job(
     except Exception as exc:
         with m4_factory.begin() as db:
             j_row = db.get(M4Job, job_id)
-            a_row = db.get(M4JobAttempt, attempt_id)
+            a_row = db.get(M4JobAttempt, attempt_id) if attempt_id else None
             if j_row:
                 j_row.status = "FAILED"
                 j_row.failure_code = getattr(exc, "code", "M4_RENDER_FAILED")
@@ -471,23 +789,34 @@ def _execute_single_job(
         out_filename,
         out_bytes,
     )
-    qc = run_m4_technical_qc(
-        abs_out,
-        expectations=M4TechnicalExpectations(
+    expect_audio = len(aud_items) > 0
+    if is_mock_run:
+        qc = run_m4_technical_qc(
+            abs_out,
+            expectations=M4TechnicalExpectations(
+                duration_s=target_seconds,
+                duration_tolerance_s=1.0,
+                expect_audio=expect_audio,
+                expected_fps=24.0,
+                require_decodable=False,
+            ),
+            ffprobe_path="",
+            ffmpeg_path="",
+        )
+    else:
+        qc = evaluate_h3_technical_qc(
+            abs_out,
             duration_s=target_seconds,
             duration_tolerance_s=1.0,
-            expect_audio=False,
-            expected_fps=24.0,
-            require_decodable=not is_mock_run,
-        ),
-        ffprobe_path="" if is_mock_run else "ffprobe",
-        ffmpeg_path="" if is_mock_run else "ffmpeg",
-    )
+            expect_audio=expect_audio,
+            ffprobe_path=(getattr(settings, "ffprobe_path", "ffprobe") if settings else None) or "ffprobe",
+            ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
+        )
 
-    final_status = "PASSED" if qc["result"] == "passed" else "FAILED"
+    final_status = _qc_status_for(qc)
     with m4_factory.begin() as db:
         j_row = db.get(M4Job, job_id)
-        a_row = db.get(M4JobAttempt, attempt_id)
+        a_row = db.get(M4JobAttempt, attempt_id) if attempt_id else None
         if j_row:
             j_row.status = final_status
             j_row.output_storage_path = rel_out
@@ -498,8 +827,12 @@ def _execute_single_job(
             j_row.measured_height = qc["height"]
             j_row.measured_fps = qc["fps"]
             j_row.qc_result = qc
-            j_row.failure_code = None if final_status == "PASSED" else "M4_TECHNICAL_QC_FAILED"
-            j_row.failure_detail = "" if final_status == "PASSED" else f"技术质检未通过：{qc['result']}"
+            j_row.failure_code = (
+                None
+                if final_status == "PASSED"
+                else ("M4_TECHNICAL_QC_NEEDS_REVIEW" if final_status == "NEEDS_REVIEW" else "M4_TECHNICAL_QC_FAILED")
+            )
+            j_row.failure_detail = "" if final_status == "PASSED" else f"技术质检结论：{qc['result']}"
             j_row.state_version += 1
             j_row.updated_at = m4_utcnow()
         if a_row:
@@ -558,6 +891,8 @@ def execute_next_m4_run(
                     item,
                     worker_id=worker_id,
                     video_stub=video_stub,
+                    platform_factory=platform_factory,
+                    settings=settings,
                 )
                 if outcome in {"STOPPED", "NEEDS_REVIEW"}:
                     break
@@ -613,6 +948,8 @@ def execute_next_m4_run(
                         worker_id=worker_id,
                         comfy_client=client,
                         object_info=object_info,
+                        platform_factory=platform_factory,
+                        settings=settings,
                     )
                     if outcome in {"STOPPED", "NEEDS_REVIEW"}:
                         break
@@ -627,9 +964,11 @@ def execute_next_m4_run(
     finally:
         with m4_factory.begin() as db:
             r = db.get(M4ProductionRun, run_id)
-            if r and r.status in {"CLAIMED", "RUNNING"}:
+            if r and r.status in {"CLAIMED", "RUNNING", "PAUSE_REQUESTED"}:
                 jobs = db.scalars(select(M4Job).where(M4Job.run_id == run_id)).all()
-                if any(j.status == "NEEDS_REVIEW" for j in jobs):
+                if r.status == "PAUSE_REQUESTED":
+                    r.status = "PAUSED"
+                elif any(j.status == "NEEDS_REVIEW" for j in jobs):
                     r.status = "NEEDS_REVIEW"
                 elif jobs and all(j.status == "PASSED" for j in jobs):
                     r.status = "COMPLETED"
@@ -657,7 +996,7 @@ def serve_worker(*, once: bool = False, poll_interval: float = 2.0, worker_id: s
     wid = worker_id or f"m4-{os.getpid()}-{uuid4().hex[:6]}"
     register_m4_worker(m4_factory, wid, status="IDLE")
     reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
-    reconcile_stalled_m4_runs(m4_factory)
+    reconcile_stalled_m4_runs(m4_factory, m4_root=m4_root, settings=settings)
 
     stopping = False
 
