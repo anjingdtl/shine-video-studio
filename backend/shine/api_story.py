@@ -140,7 +140,7 @@ def _task_summary(row):
         total = len(trace.get("level_inputs") or [])
         done = int(trace.get("cursor") or 0)
     elif stage == "AWAITING_OUTLINE_CONFIRMATION":
-        label = "等待你确认大纲"
+        label = "已提取大纲"
         total = done = 1
     else:
         label = "准备中"

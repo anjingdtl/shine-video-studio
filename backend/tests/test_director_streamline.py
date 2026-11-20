@@ -286,6 +286,12 @@ def test_outline_edit_revision_and_one_click_confirm(api):
         json={"artifact_id": body["artifact_id"], "expected_sha256": body["sha256"]},
         headers=LOCAL)
     assert confirmed.status_code == 200, confirmed.text
+    journey = client.get(f"/api/v1/projects/{project}/journey").json()
+    script = next(stage for stage in journey["stages"] if stage["id"] == "script")
+    view = client.get(f"/api/v1/projects/{project}/director/outline").json()
+    assert script["done"] is True and script["blockers"] == []
+    assert view["confirmed"] is True
+    assert script["facts"]["outline_artifact_id"] == view["confirmed_artifact_id"] == body["artifact_id"]
     with factory() as db:
         row = db.get(AgentArtifact, body["artifact_id"])
         assert row.approved_at is not None

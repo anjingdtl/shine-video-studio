@@ -49,11 +49,12 @@ function versionTime(iso: string): string {
  * 版本管理：当前最新版本（含未确认草稿）以 director/outline 视图为准，
  * 任务列表只负责进度；保存修改产生新草稿，旧版本保留，确认哪版哪版才是依据。
  */
-export function OutlineConfirmationPanel({ projectId, documentId, documentHash, onMessage, onGoSetupModels }: {
+export function OutlineConfirmationPanel({ projectId, documentId, documentHash, onMessage, onConfirmed, onGoSetupModels }: {
   projectId: string;
   documentId: string;
   documentHash: string;
   onMessage?: (message: string) => void;
+  onConfirmed?: () => void;
   /** 角色没配模型时，把用户送到导演模式内的文本模型配置页。 */
   onGoSetupModels?: () => void;
 }) {
@@ -93,6 +94,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
   const outlineTask = tasks.find((row) => row.role === 'story_outline_run');
   const current = view?.artifact_id ? (view as DirectorOutline & { artifact_id: string }) : null;
   const display = current ?? taskOutline;
+  const confirmed = current?.confirmed ?? false;
   const versions = view?.versions ?? [];
   const questions = current ? current.questions : (taskOutline?.payload.questions ?? []);
   const pacingLabel = typeof view?.payload?.pacing_label === 'string' ? view.payload.pacing_label : null;
@@ -158,21 +160,14 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
       questions: body.questions, user_edited: true, approved: false, confirmed: false,
     } : prev));
   }, '修改已保存为新一版大纲草稿（无需模型调用）；点「确认这版总体大纲」后生效。');
-  const confirmVersion = (target: { artifact_id: string; sha256: string }) => void act(() =>
-    api(`/projects/${projectId}/director/outline/confirm`,
-      json('POST', { artifact_id: target.artifact_id, expected_sha256: target.sha256 })),
-    '大纲已确认，可以进入第 2 阶段分集。');
+  const confirmVersion = (target: { artifact_id: string; sha256: string }) => void act(async () => {
+    await api(`/projects/${projectId}/director/outline/confirm`,
+      json('POST', { artifact_id: target.artifact_id, expected_sha256: target.sha256 }));
+    onConfirmed?.();
+  }, '大纲已确认，可以进入第 2 阶段分集。');
   const confirmOutline = () => {
-    if (current) {
-      confirmVersion({ artifact_id: current.artifact_id, sha256: current.sha256 ?? '' });
-      return;
-    }
-    if (taskOutline) {
-      void act(() => api(
-        `/projects/${projectId}/story-preparation/outlines/${taskOutline.artifact_id}/confirm`,
-        json('POST', { expected_sha256: taskOutline.sha256,
-          acknowledge_questions_sha256: taskOutline.questions_sha256 })),
-      '大纲已确认，可以进入第 2 阶段分集。');
+    if (display?.sha256) {
+      confirmVersion({ artifact_id: display.artifact_id, sha256: display.sha256 });
     }
   };
   const loadVersion = (v: OutlineVersion) => void act(async () => {
@@ -197,7 +192,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
       disabled: busy || running || blockedSameInput || !scriptwriterAllowed,
       disabledReason: outlineBlockReason ?? (blockedSameInput ? '该输入已有待核对结果，先核对再继续' : undefined),
       guide: outlineGuide };
-  } else if (!display.approved) {
+  } else if (!confirmed) {
     outlinePrimary = { label: '确认这版总体大纲', onClick: confirmOutline, loading: busy,
       disabled: busy || display.stale };
   } else {
@@ -213,7 +208,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     primary: outlinePrimary,
     secondary: outlineSecondary ? [outlineSecondary] : [],
     running: running ? { label: '大纲提取中', done: outlineTask?.summary?.done, total: outlineTask?.summary?.total } : null,
-  }, [display, outlineTask, busy, running, blockedSameInput, scriptwriterConfigured, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing]);
+  }, [display, confirmed, outlineTask, busy, running, blockedSameInput, scriptwriterConfigured, scriptwriterAllowed, lockedFacts, documentId, documentHash, editor, versions, pacing, onConfirmed]);
 
   return <section className="card section-card outline-confirm" id="outline-confirm">
     <div className="section-heading compact">
@@ -223,7 +218,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
         <p>系统按原文提取并逐层归并大纲；你确认的这一版就是分集、分镜和导演包的共同依据。
           另一份剧本导入后只是候选，不会自动替换当前依据。</p>
       </div>
-      {display?.approved ? <span className="head-chip ok">大纲已确认</span>
+      {confirmed ? <span className="head-chip ok">大纲已确认</span>
         : display ? <span className="head-chip warn">待确认大纲</span> : null}
     </div>
 
@@ -283,7 +278,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
     )}
 
     {display && <div className="outline-body">
-      <b>大纲版本 {display.artifact_id.slice(0, 8)} · {display.approved ? '你已确认' : '待你审阅'}
+      <b>大纲版本 {display.artifact_id.slice(0, 8)} · {confirmed ? '你已确认' : '待你审阅'}
         {display.user_edited ? ' · 用户编辑稿' : ''}{pacingLabel ? ` · ${pacingLabel}` : ''}</b>
       {current && current.confirmed_artifact_id && current.confirmed_artifact_id !== current.artifact_id && (
         <p className="run-hint">当前确认依据是版本 {current.confirmed_artifact_id.slice(0, 8)}；
@@ -311,7 +306,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
       {questions.length > 0 && <div className="notice" role="note">
         <p>模型疑问（可保留的悬念，不影响确认）：{questions.join('；')}。</p>
       </div>}
-      {!display.approved && !railPresent && <div className="outline-actions">
+      {!confirmed && !railPresent && <div className="outline-actions">
         <button type="button" className="btn-primary"
           disabled={busy || display.stale}
           onClick={confirmOutline}>
@@ -333,7 +328,7 @@ export function OutlineConfirmationPanel({ projectId, documentId, documentHash, 
             <span className="ov-actions">
               <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => loadVersion(v)}>查看正文</button>
-              {!v.approved && !v.stale && <button type="button" className="btn-secondary" disabled={busy}
+              {!v.confirmed && !v.stale && <button type="button" className="btn-secondary" disabled={busy}
                 onClick={() => confirmVersion(v)}>确认此版</button>}
             </span>
           </li>

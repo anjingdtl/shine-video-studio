@@ -223,6 +223,7 @@ export function ScriptEntryPanel({ projectId, onMessage, onDocumentReady, onGoSe
       documentId={selectedDocumentId}
       documentHash={documents.find((row) => row.id === selectedDocumentId)?.sha256 ?? ''}
       onMessage={onMessage}
+      onConfirmed={onDocumentReady}
       onGoSetupModels={onGoSetupModels}
     />}
     {problem && <p className="form-error">{problem}</p>}

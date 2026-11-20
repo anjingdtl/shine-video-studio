@@ -183,6 +183,38 @@ describe('① 创意与剧本 双入口', () => {
     const call = stub.callsOf('POST', /\/projects\/proj-1\/documents$/)[0];
     expect(call.body).toBe('[FormData]');
   });
+
+  it('确认导入剧本的大纲后，正文和右侧待办同步读取新结果', async () => {
+    let confirmed = false;
+    const sha = 'c'.repeat(64);
+    stub.add({ method: 'GET', pattern: /\/projects\/proj-1\/documents$/,
+      respond: () => jsonResponse([{ id: 'doc-1', filename: '钟表铺.txt', source_format: 'txt', sha256: sha }]) });
+    stub.add({ method: 'GET', pattern: /\/projects\/proj-1\/journey$/, respond: () => jsonResponse({
+      ...EMPTY_JOURNEY,
+      stages: EMPTY_JOURNEY.stages.map((stage) => stage.id === 'script' ? {
+        ...stage, done: confirmed, facts: { outline_confirmed: confirmed },
+        blockers: confirmed ? [] : [{ code: 'SCRIPT_OUTLINE_NOT_CONFIRMED', message: '还没有确认大纲' }],
+      } : stage),
+    }) });
+    stub.add({ method: 'GET', pattern: /story-preparation\?document_id=doc-1$/, respond: () => jsonResponse([]) });
+    stub.add({ method: 'GET', pattern: /director\/outline$/, respond: () => jsonResponse({
+      artifact_id: 'outline-1', sha256: sha, markdown: '钟表铺的总体大纲', questions: [],
+      confirmed, approved: confirmed, confirmed_artifact_id: confirmed ? 'outline-1' : null, versions: [],
+    }) });
+    stub.add({ method: 'POST', pattern: /director\/outline\/confirm$/, respond: () => {
+      confirmed = true;
+      return jsonResponse({ artifact_id: 'outline-1', approved: true });
+    } });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 1 阶段：创意与剧本/);
+    expect(await screen.findByText('剧本大纲还没有确认')).toBeVisible();
+    await user.click(await screen.findByRole('button', { name: '确认这版总体大纲' }));
+    expect(await screen.findByText('大纲已确认')).toBeVisible();
+    await waitFor(() => expect(screen.queryByText('剧本大纲还没有确认')).not.toBeInTheDocument());
+    expect(stub.callsOf('POST', /director\/outline\/confirm$/)).toHaveLength(1);
+  });
 });
 
 describe('② 剧本统筹先分集', () => {

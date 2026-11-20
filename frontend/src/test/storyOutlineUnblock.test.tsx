@@ -146,6 +146,10 @@ describe('大纲任务卡在提取剧情要点', () => {
 
 describe('已确认大纲的修订路径', () => {
   it('补充锁定事实的输入与重新提取入口在已确认后仍然存在', async () => {
+    stub.add({ method: 'GET', pattern: /director\/outline$/, respond: () => jsonResponse({
+      artifact_id: 'o1', sha256: 'e'.repeat(64), markdown: '故事摘要', questions: ['悬念一？'],
+      confirmed: true, approved: true, confirmed_artifact_id: 'o1', versions: [],
+    }) });
     stub.add({ method: 'GET', pattern: /text-consent\/doc-1$/, respond: () => jsonResponse({
       roles: [{ role: 'scriptwriter', configured: true, allowed: true }],
     }) });
