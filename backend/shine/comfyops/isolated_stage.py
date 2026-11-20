@@ -70,7 +70,7 @@ class WindowsJob:
         if name is not None:
             import re
 
-            if not isinstance(name, str) or not re.fullmatch(r"Local\\ShineHandoff-[a-f0-9]{32}", name):
+            if not isinstance(name, str) or not re.fullmatch(r"Local\\Shine(?:M4)?Handoff-[a-f0-9]{32}", name):
                 raise ValueError("NAMED_JOB_ID_INVALID")
         ctypes.set_last_error(0)
         self._handle = k.CreateJobObjectW(None, name)

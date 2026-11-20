@@ -2,49 +2,88 @@
 
 > 日期：2026-11-20  
 > 基线提交：`main@c1c69941e4b8ae339da5a490944206ab4cfb78a0`  
+> 收尾分支：`main`（P0 `650db6c` -> P1 `6834332` -> P2 `54f8f34` -> P3 `d823679` -> P4 `0fb933b` -> P5）  
 > 依据方案：[SHINE_UNIFIED_FOUNDATIONS_DUAL_PIPELINES_CLOSEOUT_V2_20261120.md](file:///f:/ClaudeWorkSpace/projects/shine-video-studio/docs/SHINE_UNIFIED_FOUNDATIONS_DUAL_PIPELINES_CLOSEOUT_V2_20261120.md)
 
 ---
 
-## 1. 最高架构边界
+## 1. 最高架构边界（一套事实、一个裁决、一个执行者）
 
-1. **统一平台外壳**：`platform_projects.py`（项目创建与不可变选线）、`platform_gpu.py`（统一 GPU 互斥与租约协调入口）、`shine/foundation/`（双线共用公共能力门面）。
-2. **七阶段 AI 导演业务线（`director7`）**：小说/创意 -> 文学剧本 -> 导演风格与 AI 分镜 -> 自动素材需求与备料 -> AI 编译 H3 提示词 -> 导演包/排片 -> 生产、后期与交付。既有表结构、API、UI 与生产主链保持兼容。
-3. **四阶段 H3 自主制片业务线（`manual4`）**：① 人工分镜导入/编辑/冻结 -> ② 素材需求/引用 -> ③ 手写 H3 提示词/批量排片/冻结 -> ④ 成片/返工/交付。仅通过正式平台门面（`shine.platform_*`、`shine.foundation.*`、`shine.config`）调用公共底座，严禁直接导入七阶业务模块（`director*`、`literary`、`materialprep`、`production`、`services`、`worker`、`api_*` 等）。
-4. **公共能力唯一事实 / 裁决 / 执行者**：
-   - **统一基础配置与运行环境**：唯一安装与配方事实（`comfyops/setup_summary.py`、`comfyops/runtime_configuration.py`、`comfyops/managed_recipe.py`、`comfyops/resource_resolver.py`），唯一整备执行者（`comfyops/setup_preparation.py` + `comfyops/installation_worker.py`），唯一生命周期控制器（`runtime_orchestrator/` + `comfyops/image_renderer.py`）。
-   - **公共素材中心**：唯一不可变版本与权利/QC 台账（`asset_center/models.py`、`asset_center/service.py`），唯一实际出图/声音生成执行入口（`asset_center/execution.py`、`asset_center/voice_execution.py`）。两条线各自管理需求/采纳/镜头绑定。
-   - **公共 H3 制片底座**：唯一能力与配方编译（`comfy/graph_compiler.py`、`h3/mode_policy.py`、`h3/output_frame.py`），唯一 GPU 原子入场账本（`comfyops/scheduler.py:ResourceScheduler` + `platform_gpu.py` OS Mutex + `advance_epoch`），唯一 ComfyUI 提交/对账/技术质检语义。分别接受七阶 AI 编译文本与四阶用户手写冻结文本，绝不混用。
+1. **统一平台外壳**：
+   - `backend/shine/platform_projects.py`：作品创建与不可变选线（`director7` / `manual4`）、跨线写操作本地鉴权（`require_platform_local_action`）。
+   - `backend/shine/platform_gpu.py`：单机单 GPU 跨线原子仲裁、OS 级命名互斥量（`Global\ShineGpuArbitrationMutex`）、`ResourceScheduler` 统一排队与 `physical-resource-epoch` 推进。
+   - `backend/shine/foundation/`：双线共用公共能力门面（`environment.py`、`runtime.py`、`materials.py`、`h3.py`）。
+2. **七阶段 AI 导演业务线（`director7`）**：
+   - 保持既有表结构、API、UI 与生产主链完全兼容（小说/创意 -> 文学剧本 -> 导演风格与 AI 分镜 -> 自动素材需求与备料 -> AI 编译 H3 提示词 -> 导演包/排片 -> 生产、后期与交付）。
+3. **四阶段 H3 自主制片业务线（`manual4`）**：
+   - ① 人工分镜导入/编辑/冻结 -> ② 素材需求/公共素材中心生成与复用 -> ③ 手写 H3 提示词/批量排片/冻结 -> ④ 成片装配/返工/人工验收。
+   - 仅通过正式平台门面（`shine.platform_*`、`shine.foundation.*`、`shine.config`）调用公共底座，由 `backend/tests/manual4/test_isolation_static.py` 强制静态 AST 检查，严禁直接导入七阶业务模块（`director*`、`literary`、`materialprep`、`production`、`services`、`worker`、`api_*` 等）。
 
 ---
 
-## 2. 模块责任矩阵与收敛清单（P0 基线审计结论）
+## 2. 最终调用图（Unified Call Graph）
 
-| 域 | 现有权威实现（保留并作为唯一事实） | P0 审计发现的平行/分裂链路 | V2 收敛目标（P1–P5） |
+```mermaid
+flowchart TD
+  subgraph UI["前端工作台 (frontend/src)"]
+    App["App.tsx / useStudio.ts (作品选线与路由隔离)"]
+    D7UI["七阶 AI 导演工作台 (DirectorWorkbench)"]
+    M4UI["四阶 H3 自主工作台 (Manual4App / 四阶段页)"]
+    SetupUI["统一基础配置 (DirectorSetupPanel / SetupCenter)"]
+    AssetUI["公共素材中心 (AssetsWorkspace)"]
+  end
+
+  subgraph Platform["统一平台与公共基础底座 (backend/shine/platform_* & foundation/*)"]
+    PProj["platform_projects.py (选线台账 + 本地写鉴权)"]
+    PEnv["foundation/environment.py (共享环境事实 + 能力预检 + 启动解析)"]
+    PRun["foundation/runtime.py + platform_gpu.py (ResourceScheduler + OS Mutex + Job Object)"]
+    PMat["foundation/materials.py (公共素材登记 / Qwen 入队 / 授权采纳 / 无损回填)"]
+    PH3["foundation/h3.py (Ref2VA 图编译 + ComfyH3Executor + 对账 + 技术质检)"]
+  end
+
+  subgraph Core["底层权威引擎 (comfyops / asset_center / comfy / quality)"]
+    SetupCore["comfyops/{setup_summary,runtime_configuration,managed_recipe,resource_resolver}.py"]
+    SchedCore["comfyops/{scheduler,owned_process,isolated_stage,image_renderer}.py"]
+    LibCore["asset_center/{models,service,execution}.py"]
+    ComfyCore["comfy/{graph_compiler,client,workflow}.py + quality/technical.py"]
+  end
+
+  App --> PProj
+  SetupUI --> PEnv
+  AssetUI --> LibCore
+  D7UI --> Core
+  M4UI --> PEnv
+  M4UI --> PMat
+  M4UI --> PH3
+  M4UI --> PRun
+
+  PEnv --> SetupCore
+  PRun --> SchedCore
+  PMat --> LibCore
+  PH3 --> ComfyCore
+```
+
+---
+
+## 3. 模块责任矩阵与退役清单
+
+| 域 | 唯一权威事实 / 裁决 / 执行者 | P0–P5 收敛完成情况 | 已退役/删除的重复模块 |
 |---|---|---|---|
-| **运行环境与配置** | `comfyops/runtime_configuration.py`, `comfyops/managed_recipe.py`, `comfyops/setup_summary.py`, `comfyops/resource_resolver.py`, `comfyops/setup_preparation.py` | `manual4/comfy/managed_instance.py` 自行硬编码 `settings.data_dir/comfyops/...`、`whitelist_nodes`、忽略 `runtime_data_root` / `extra-model-paths` / `ACTIVE_KEY` / `storage_root`，自建 `verify_model_file` 死代码与 `comfy_probe_roots` 探测 | P1 建立 `shine/foundation/environment.py`，`manual4` 只读唯一环境事实与按配方能力裁决（`ready / missing_required / optional_missing / temporarily_busy / unsupported`），缺项交由原 Setup Worker 执行 |
-| **受管进程与端口** | `comfyops/owned_process.py`, `comfyops/renderer_supervisor.py`, `comfyops/image_renderer.py`, `runtime_orchestrator/guard.py` | `manual4/comfy/owned_process.py` 复制 Job Object 启停且不做 `CreateFileW` 锁定、`prepare_process_environment()` 清理、`IsProcessInJob` 端口归属验证；启动四阶实例前不退休七阶空闲出图渲染器 | P1 通过 `shine/foundation/runtime.py` 共享环境净化、安装生命周期锁（`renderer_lifecycle_guard`）、七阶空闲出图渲染器退休、受管实例启停与端口排除，同时保留四阶独立端口（8198+）与独立目录（`<m4_root>/comfy-runtime/`） |
-| **GPU 原子仲裁** | `comfyops/scheduler.py:ResourceScheduler` (`resource_leases` + `advance_epoch`), `comfyops/handoff_startup.py` | `platform_gpu.py:acquire_m4_gpu_lease` 绕过 `ResourceScheduler` 排队/epoch；OS Mutex 仅在四阶侧持有；`heartbeat_m4_gpu_lease` 从未被调用导致 >60s 真机渲染必过期成 `RECONCILE_REQUIRED`；七阶 `reconcile_dead_renderer_leases` 不识别 `m4:` 前缀 | P1 收束 `platform_gpu.py` + `ResourceScheduler` 为唯一仲裁入口：双线统一获取 OS Mutex + `resource_leases` + `advance_epoch`；四阶补齐后台租约续期心跳线程；死渲染器对账同时支持 `m4:` 与七阶前缀 |
-| **素材中心** | `asset_center/{models,service,execution,voice_execution}.py` | `manual4/materials/service.py` 独立实现 Qwen T2I 同步生成（在 HTTP 请求内冷启 ComfyUI）与独立 `M4AssetVersion`；`api_asset_center.py` 的 `/assignments`、`/visual-facts`、`/image-jobs`、`/adoptions` 缺少 `manual4` 线隔离校验，可能误写七阶表 | P2 建立 `shine/foundation/materials.py` 平台中立合同与历史 `M4AssetVersion -> LibraryVersion` 无损映射；新 Qwen 生成走公共素材中心任务入口；封堵 `api_asset_center.py` 跨线误写；保留四阶 `M4ShotAssetBinding` 独立绑定与 `M4MaterialRequirement` 需求裁决 |
-| **H3 制片底座** | `comfy/graph_compiler.py`, `comfy/client.py`, `comfy/workflow.py`, `h3/mode_policy.py`, `h3/output_frame.py`, `quality/technical.py` | `manual4/comfy/h3_adapter.py` 复制图编译且仅限 `int8`；`manual4/worker.py` 在 `/prompt` 前写入的是模板 `graph_sha256` 而非参数化终图 SHA；无外部 `/history` 对账；`production/service.py` 跨集串 `prev_job_id`；`extra_last_frame` 用 `idx > 0` 跨集误判 | P3 建立 `shine/foundation/h3.py` 统一 `H3ExecutionRequest` / `H3ExecutionReceipt` 契约与执行底座；保留旧代际（`execution_generation=1`）兼容对账，新任务（`execution_generation=2`）走统一编译器/执行器；修复跨集 `last_frame`、提示词 SHA 强校验与 ComfyUI 对账 |
-| **启动隔离与四阶缺陷** | `main.py`, `platform_projects.py`, `manual4/{storyboard,status,delivery}/*`, `frontend/src/*` | `main.py` 无条件初始化 `manual4.sqlite`（损坏拖垮七阶）；`storyboard/service.py` 仅时长变化才作废提示词且仅 12k 截断 LLM；`readiness.py` 仅凭任意绑定判 Ref2VA 就绪、按条而非按集统计交付验收；`delivery/service.py` 选片不校验修订/真实度；前端存在跨线串调 | P1 修复 `main.py` 四阶 DB 故障隔离降级；P4 修复分镜修订失效、长文本分块 LLM、Ref2VA 真图+权利+SHA 就绪、后期选片与跨线前端防护 |
+| **运行环境与配置** | `shine/foundation/environment.py` -> `comfyops/{setup_summary,runtime_configuration,managed_recipe,resource_resolver}.py` | `/api/v1/platform/environment` 与 `/api/v1/platform/capabilities/check` 输出唯一 `shine.environment.v1` 事实；修复 `resource_resolver.py` 多文件组件（双 VAE）文件名匹配缺陷；四阶直接复用已收编的 `F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI` | 退役 `manual4/comfy/managed_instance.py` 内置独立目录探测与 `verify_model_file` 死代码 |
+| **受管进程与 GPU 仲裁** | `shine/foundation/runtime.py` + `shine/platform_gpu.py` -> `comfyops/{scheduler,owned_process,isolated_stage,image_renderer}.py` | 双线统一经 `ResourceScheduler` + `Global\ShineGpuArbitrationMutex` 申请/续期/释放 GPU 租约并递增 `physical-resource-epoch`；启动四阶 ComfyUI 前安全退休空闲七阶出图渲染器；修复 `isolated_stage.py` 对 `Local\ShineM4Handoff-*` Job Object 命名校验 | **已删除** `backend/shine/manual4/comfy/owned_process.py` |
+| **公共素材中心** | `shine/foundation/materials.py` -> `asset_center/{models,service,execution}.py` | 四阶上传、异步 Qwen-Image-2.1 生图（`LibraryRenderTask`）、晋升、跨线检索与采纳全部落入公共素材中心 `library_*` 台账；`api_asset_center.py` 拦截 `manual4` 项目误写七阶表（`409 PROJECT_IS_MANUAL4_NOT_DIRECTOR7`）；历史非 Mock 主素材无损回填 | 退役四阶 HTTP 请求内同步冷启 ComfyUI 生图路径 |
+| **公共 H3 制片底座** | `shine/foundation/h3.py` -> `comfy/{graph_compiler,client,workflow}.py` + `quality/technical.py` | 唯一 `Ref2VA` 门禁、UTF-8 提示词 SHA 强校验、落盘 `prompt_graph_sha256` 后提交、`/history`（5 元组/字典双兼容）+ `/queue` 对账、跨集 `last_frame` 边界重置、Worker 事务外 I/O 与尾帧提取 | **已删除** `backend/shine/manual4/comfy/workflow.py`；`manual4/comfy/h3_adapter.py` 收敛为兼容薄包装 |
 
 ---
 
-## 3. P0 基线冻结记录
+## 4. A01–A22 验收项对应代码入口索引
 
-### 3.1 本机数据基线备份
-- 备份目录：`F:\ShineTest\backup-v2-p0-20261120`（独立于仓库与 `D:\Shine\data`）
-- `D:\Shine\data\shine.db`：`32,051,200` 字节，SHA-256 `8c65fbab218fe3c03f0f657030be50b6a9f7327f63aea8449af4267a5b670792`（15 个项目、90 个资产、442 个镜头、43 个作业、64 个媒体产物、8 个公共素材资产）
-- `D:\Shine\data\manual4.sqlite`：`356,352` 字节，SHA-256 `2bf978d36a510dfbb006dc93161e07d88c6a6f5eac94ae3405791270a49aeb7e`（当前 0 业务行，仅 `m4_schema_meta=2`）
-- `D:\Shine\data\comfyops\setup\managed_recipe.json`：`3,752` 字节，SHA-256 `8dcd6d5f34ec83ad6a885258ccaff3d88d2ad56a8183eceebb86df15aaee881f`
-- `D:\Shine\data\comfyops\image-runtime.json`：`3,779` 字节，SHA-256 `5f0c73dbb32875c8f84afcf2a299ed02b1b62ff93c676fc797379a215da65de2`
-
-### 3.2 本机共享 ComfyUI 环境（不重装、不重复配置）
-- 已采纳实例 ID：`22ea7c4e-316c-5ff3-a4aa-632186c81a5e`
-- ComfyUI 根目录：`F:\AIGC2026\ComfyUI_Mie_2026_V8.0_Base\ComfyUI`
-- 显卡：NVIDIA GeForce RTX 5080（16303 MiB VRAM）
-
----
-
-> 本文档将在 P5 收尾时补充最终验证后的完整调用图、模块退役清单与 A01–A22 对应入口索引。
+| 编号 | 验收主题 | 权威代码与测试入口 |
+|---|---|---|
+| **A01–A02** | 单一环境事实与按配方能力裁决 | `backend/shine/foundation/environment.py`、`backend/shine/comfyops/resource_resolver.py`、`backend/tests/manual4/test_p1_platform_routing_and_isolation.py` |
+| **A03–A04** | 跨线单卡 GPU 互斥、续期、对账与受管进程守护 | `backend/shine/platform_gpu.py`、`backend/shine/foundation/runtime.py`、`backend/shine/comfyops/isolated_stage.py` |
+| **A05–A08** | 公共素材中心统一入库、异步 Qwen 生图、晋升门禁与跨线隔离 | `backend/shine/foundation/materials.py`、`backend/shine/api_asset_center.py`、`backend/tests/manual4/test_p2_public_asset_center.py` |
+| **A09–A10** | 分镜长文本分块 LLM 抽取、SSRF 环回校验与全字段修订失效 | `backend/shine/manual4/storyboard/service.py`、`backend/shine/manual4/prompts/service.py`、`backend/tests/manual4/test_p4_defects_and_readiness.py` |
+| **A11–A18** | 公共 H3 Ref2VA 编译、提示词 SHA 校验、跨集连续性重置、事务外执行与崩溃对账 | `backend/shine/foundation/h3.py`、`backend/shine/manual4/production/service.py`、`backend/shine/manual4/worker.py`、`backend/tests/manual4/test_p3_unified_h3.py` |
+| **A19** | 成片新鲜度优选、去重保留验收、组装后技术质检与播放 SHA 校验 | `backend/shine/manual4/delivery/service.py`、`backend/shine/manual4/api/delivery_routes.py`、`backend/tests/manual4/test_p4_defects_and_readiness.py` |
+| **A20–A22** | 双线静态/动态隔离、前端防串线、全量回归与真实 RTX 5080 双产线出片 | `backend/tests/manual4/test_isolation_static.py`、`frontend/src/test/manual4Routing.test.tsx`、`docs/SHINE_FOUNDATION_DUAL_PIPELINE_FINAL_ACCEPTANCE.md` |
