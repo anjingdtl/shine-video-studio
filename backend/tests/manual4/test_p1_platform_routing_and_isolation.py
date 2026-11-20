@@ -251,7 +251,14 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
     adapter_dir = runtime_root / "custom_nodes" / "shine_managed_comfy_handoff"
     bootstrap = tmp_path / "bootstrap.py"
     sampling_node = runtime_root / "custom_nodes" / "shine_managed_h3_sampling_mode.py"
-    for p in (comfy_root / "main.py", py_exe, adapter_dir / "__init__.py", adapter_dir / "barrier.py", bootstrap, sampling_node):
+    for p in (
+        comfy_root / "main.py",
+        py_exe,
+        adapter_dir / "__init__.py",
+        adapter_dir / "barrier.py",
+        bootstrap,
+        sampling_node,
+    ):
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("# stub\n", encoding="utf-8")
     (runtime_root / "shine-node-paths.yaml").write_text("shine:\n  is_default: true\n", encoding="utf-8")
@@ -296,7 +303,14 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
     recipe_path.write_text(json.dumps(recipe_doc), encoding="utf-8")
 
     with factory.begin() as db:
-        db.add(ComfyInstance(id="inst-1", status="STOPPED", payload={"managed": True, "adopted": True, "is_mock": False, "port": 8188, "root": str(comfy_root)}, sha256="x"))
+        db.add(
+            ComfyInstance(
+                id="inst-1",
+                status="STOPPED",
+                payload={"managed": True, "adopted": True, "is_mock": False, "port": 8188, "root": str(comfy_root)},
+                sha256="x",
+            )
+        )
 
     with TestClient(app) as client:
         env = client.get("/api/v1/platform/environment")
@@ -305,14 +319,24 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
 
         cap = client.post(
             "/api/v1/platform/capabilities/check",
-            json={"capability": "h3", "variant_id": "h3-ref2va-int8-convrot", "accelerator_id": "pdd8", "source_line": "manual4"},
+            json={
+                "capability": "h3",
+                "variant_id": "h3-ref2va-int8-convrot",
+                "accelerator_id": "pdd8",
+                "source_line": "manual4",
+            },
         )
         assert cap.status_code == 200
         assert cap.json()["status"] in {"ready", "missing_required", "optional_missing"}
 
         turbo_cap = client.post(
             "/api/v1/platform/capabilities/check",
-            json={"capability": "h3", "variant_id": "h3-ref2va-int8-convrot", "accelerator_id": "turbo4", "source_line": "manual4"},
+            json={
+                "capability": "h3",
+                "variant_id": "h3-ref2va-int8-convrot",
+                "accelerator_id": "turbo4",
+                "source_line": "manual4",
+            },
         )
         assert turbo_cap.status_code == 200
         assert turbo_cap.json()["status"] == "unsupported"

@@ -60,7 +60,8 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
         entries = [f for f in component.get("files", []) if _name(str(f.get("relative_path") or "")) == name]
         entry = entries[0]
         declared = [item for item in binding.manifest.get("files", [])
-                    if item.get("component_id") == component.get("component_id")]
+                    if item.get("component_id") == component.get("component_id")
+                    and _name(str(item.get("relative_path") or "")) == name]
         if declared and any(
             item.get("sha256") != entry.get("sha256") or item.get("size") != entry.get("size")
             or item.get("url") != entry.get("url")
