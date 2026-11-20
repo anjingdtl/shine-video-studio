@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import os
+import hashlib
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -11,17 +11,21 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shine.foundation.materials import (
+    authorize_library_version_for_project,
+    backfill_m4_asset_to_library,
+    enqueue_library_image_generation,
+    get_library_task_status,
+    promote_library_version,
+    register_uploaded_media_to_library,
+    resolve_library_version_file,
+    search_library_assets,
+)
 from shine.manual4.comfy.image_workflow import (
-    DEFAULT_CFG,
     DEFAULT_RESOLUTION,
     DEFAULT_STEPS,
     MODEL_FAMILY,
-    OUTPUT_NODE,
-    REQUIRED_NODES,
-    build_qwen_t2i_graph,
 )
-from shine.manual4.comfy.managed_instance import managed_m4_comfyui
-from shine.manual4.comfy.workflow import graph_hash, validate_against_object_info, validate_graph
 from shine.manual4.materials.probe import probe_file
 from shine.manual4.status.readiness import evaluate_m4_readiness
 from shine.manual4.storage.files import (
@@ -99,6 +103,11 @@ def _serialize_asset(asset: M4AssetVersion) -> dict[str, Any]:
         "duration_s": asset.duration_s,
         "status": asset.status,
         "is_mock": bool(asset.is_mock),
+        "library_asset_id": asset.library_asset_id,
+        "library_version_id": asset.library_version_id,
+        "library_rights_id": asset.library_rights_id,
+        "rights_status": asset.rights_status,
+        "library_task_id": asset.library_task_id,
         "provenance": asset.provenance,
         "promoted_by": asset.promoted_by,
         "promoted_at": asset.promoted_at,
@@ -207,7 +216,136 @@ def _bind_asset_to_shots(
     return changed_shots
 
 
-def get_materials_state(m4_db: Session, project: M4Project) -> dict[str, Any]:
+def sync_m4_material_tasks(
+    m4_db: Session,
+    platform_db: Session | None,
+    settings: Any,
+    project: M4Project,
+    *,
+    task_id: str | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Sync LibraryRenderTask outcomes from the public Asset Center into M4 candidates idempotently."""
+    if platform_db is None or settings is None:
+        return {}
+    reqs = m4_db.scalars(
+        select(M4MaterialRequirement).where(
+            M4MaterialRequirement.project_id == project.id,
+            M4MaterialRequirement.pending_task_id.is_not(None),
+        )
+    ).all()
+    task_map: dict[str, dict[str, Any]] = {}
+    targets: list[tuple[M4MaterialRequirement | None, str]] = [
+        (r, str(r.pending_task_id)) for r in reqs if r.pending_task_id
+    ]
+    if task_id and all(tid != task_id for _, tid in targets):
+        matched_req = m4_db.scalar(
+            select(M4MaterialRequirement)
+            .where(
+                M4MaterialRequirement.project_id == project.id,
+                M4MaterialRequirement.pending_task_id == task_id,
+            )
+            .limit(1)
+        )
+        targets.append((matched_req, task_id))
+
+    for req, tid in targets:
+        try:
+            task_info = get_library_task_status(platform_db, settings, tid)
+        except HTTPException as exc:
+            if exc.status_code == 404 and req is not None:
+                req.pending_task_id = None
+                req.updated_at = m4_utcnow()
+            continue
+        task_map[tid] = task_info
+        status = task_info["status"]
+        vref = task_info.get("version_ref")
+        if status == "CANDIDATE_READY" and vref and req is not None:
+            existing = m4_db.scalar(
+                select(M4AssetVersion)
+                .where(
+                    M4AssetVersion.project_id == project.id,
+                    M4AssetVersion.library_version_id == vref["library_version_id"],
+                )
+                .limit(1)
+            )
+            if existing is None:
+                byte_size = 0
+                try:
+                    resolved_path, _ct, _sha = resolve_library_version_file(
+                        platform_db,
+                        settings,
+                        vref["library_version_id"],
+                        expected_sha256=vref["content_sha256"],
+                    )
+                    byte_size = resolved_path.stat().st_size
+                except Exception:
+                    byte_size = 0
+                existing = M4AssetVersion(
+                    project_id=project.id,
+                    requirement_id=req.id,
+                    family=req.family,
+                    entity_name=req.entity_name,
+                    variant_name=req.variant_name,
+                    source_kind="mock_t2i" if vref.get("is_mock") else "qwen_t2i",
+                    filename=vref["filename"],
+                    content_type=vref["content_type"],
+                    sha256=vref["content_sha256"],
+                    byte_size=byte_size,
+                    storage_path=f"library:{vref['library_version_id']}",
+                    width=vref.get("width"),
+                    height=vref.get("height"),
+                    duration_s=vref.get("duration_s"),
+                    status="candidate",
+                    is_mock=bool(vref.get("is_mock")),
+                    library_asset_id=vref["library_asset_id"],
+                    library_version_id=vref["library_version_id"],
+                    library_rights_id=vref["rights_id"],
+                    rights_status=vref["rights_status"],
+                    library_task_id=tid,
+                    provenance={
+                        **(vref.get("provenance") or {}),
+                        "library_version_id": vref["library_version_id"],
+                        "library_task_id": tid,
+                        "provider": "public-asset-center",
+                    },
+                )
+                m4_db.add(existing)
+                m4_db.flush()
+                m4_db.add(
+                    M4AuditEvent(
+                        project_id=project.id,
+                        actor="worker",
+                        stage="materials",
+                        event_type="M4_ASSET_GENERATED",
+                        entity_type="m4_asset_version",
+                        entity_id=existing.id,
+                        payload={
+                            "requirement_id": req.id,
+                            "library_version_id": vref["library_version_id"],
+                            "library_task_id": tid,
+                            "sha256": existing.sha256,
+                            "is_mock": bool(existing.is_mock),
+                        },
+                    )
+                )
+            req.pending_task_id = None
+            if not req.user_declined and req.status == "missing":
+                req.status = "candidate"
+            req.updated_at = m4_utcnow()
+        elif status in {"FAILED", "CANCELLED", "EXPIRED"} and req is not None:
+            req.pending_task_id = None
+            req.updated_at = m4_utcnow()
+    return task_map
+
+
+def get_materials_state(
+    m4_db: Session,
+    project: M4Project,
+    *,
+    platform_db: Session | None = None,
+    settings: Any = None,
+) -> dict[str, Any]:
+    task_map = sync_m4_material_tasks(m4_db, platform_db, settings, project)
     confirmed = m4_db.scalar(
         select(M4StoryboardRevision)
         .where(M4StoryboardRevision.project_id == project.id, M4StoryboardRevision.status == "CONFIRMED")
@@ -251,6 +389,8 @@ def get_materials_state(m4_db: Session, project: M4Project) -> dict[str, Any]:
                     "shot_ids": req.shot_ids,
                     "status": req.status,
                     "bound_asset_version_id": req.bound_asset_version_id,
+                    "pending_task_id": req.pending_task_id,
+                    "pending_task": task_map.get(req.pending_task_id) if req.pending_task_id else None,
                     "user_declined": bool(req.user_declined),
                     "bound_asset": asset_map.get(req.bound_asset_version_id) if req.bound_asset_version_id else None,
                     "candidates": candidates,
@@ -329,6 +469,8 @@ def upload_m4_asset(
     filename: str,
     content: bytes,
     kind: str | None = None,
+    platform_db: Session | None = None,
+    settings: Any = None,
 ) -> dict[str, Any]:
     fam = (family or "").strip().lower()
     if fam not in VALID_FAMILIES:
@@ -350,6 +492,27 @@ def upload_m4_asset(
     _ = m4_db_project_root
     info = probe_file(target, content_type=content_type)
 
+    lib_asset_id: str | None = None
+    lib_version_id: str | None = None
+    lib_rights_id: str | None = None
+    rights_status = "local_unlinked"
+    if platform_db is not None and settings is not None and media_kind in {"image", "audio"}:
+        lib_ref = register_uploaded_media_to_library(
+            platform_db,
+            settings,
+            project_id=project.id,
+            actor=actor,
+            content=content,
+            filename=safe_name,
+            media_kind=media_kind,
+            family=fam,
+            title=f"{clean_name}" + (f" ({variant_name.strip()})" if variant_name.strip() else ""),
+        )
+        lib_asset_id = lib_ref.library_asset_id
+        lib_version_id = lib_ref.library_version_id
+        lib_rights_id = lib_ref.rights_id
+        rights_status = lib_ref.rights_status
+
     asset = M4AssetVersion(
         project_id=project.id,
         requirement_id=req.id if req else None,
@@ -367,11 +530,16 @@ def upload_m4_asset(
         duration_s=info.duration_s,
         status="candidate",
         is_mock=False,
+        library_asset_id=lib_asset_id,
+        library_version_id=lib_version_id,
+        library_rights_id=lib_rights_id,
+        rights_status=rights_status,
         provenance={
             "upload_filename": safe_name,
             "media_kind": media_kind,
             "probe_tool": info.tool,
             "decoded": info.decoded,
+            **({"library_version_id": lib_version_id} if lib_version_id else {}),
         },
     )
     m4_db.add(asset)
@@ -418,6 +586,7 @@ def select_or_generate_material(
     seed: int = 1,
     steps: int = DEFAULT_STEPS,
     image_provider: Any = None,
+    platform_db: Session | None = None,
 ) -> dict[str, Any]:
     req = m4_db.get(M4MaterialRequirement, req_id)
     if req is None or req.project_id != project.id:
@@ -511,62 +680,68 @@ def select_or_generate_material(
             str(raw_out.get("provider", "test-provider")) if isinstance(raw_out, dict) else "test-provider"
         )
     else:
-        local_enabled = (
-            getattr(settings, "render_provider", "mock") == "comfyui"
-            or os.getenv("SHINE_ENABLE_LOCAL_EXECUTION", "").strip().lower() in {"1", "true", "yes"}
-        )
-        if not local_enabled:
-            raise HTTPException(
-                503,
-                {
-                    "code": "M4_LOCAL_COMFY_DISABLED",
-                    "message": "未启用本地 ComfyUI 执行（SHINE_ENABLE_LOCAL_EXECUTION=0），请直接上传参考图。",
-                },
+        req_hash = hashlib.sha256(
+            f"{project.id}|{req.id}|{effective_prompt}|{int(width)}|{int(height)}|{int(seed)}".encode()
+        ).hexdigest()[:24]
+        idem_key = f"m4-mat-{req.id[:12]}-{req_hash}"
+        title = f"{req.entity_name}" + (f" ({req.variant_name})" if req.variant_name else "")
+
+        def _queue_on(p_db: Session) -> dict[str, Any]:
+            t = enqueue_library_image_generation(
+                p_db,
+                settings,
+                project_id=project.id,
+                actor=actor,
+                family=req.family,
+                title=title,
+                prompt=effective_prompt,
+                width=width,
+                height=height,
+                seed=seed,
+                idempotency_key=idem_key,
             )
-        graph = build_qwen_t2i_graph(
-            prompt=effective_prompt,
-            seed=seed,
-            width=width,
-            height=height,
-            steps=steps,
-            cfg=DEFAULT_CFG,
-        )
-        validate_graph(graph, required_nodes=REQUIRED_NODES)
-        g_hash = graph_hash(graph)
-        with managed_m4_comfyui(
-            platform_factory,
-            m4_factory,
-            settings,
-            m4_root,
-            owner=f"m4-t2i-{project.id}",
-        ) as (client, _spec):
-            obj_info = client.object_info()
-            v_res = validate_against_object_info(graph, {}, obj_info)
-            if v_res["missing_nodes"] or v_res["missing_inputs"]:
-                raise HTTPException(
-                    422,
-                    {"code": "M4_T2I_NODES_UNAVAILABLE", "message": f"Qwen T2I 节点不满足：{v_res}"},
+            req.pending_task_id = t["task_id"]
+            req.updated_at = m4_utcnow()
+            task_map = sync_m4_material_tasks(m4_db, p_db, settings, project, task_id=t["task_id"])
+            latest_task = task_map.get(t["task_id"], t)
+            return latest_task
+
+        if platform_db is not None:
+            task = _queue_on(platform_db)
+        else:
+            with platform_factory() as own_p_db:
+                task = _queue_on(own_p_db)
+                own_p_db.commit()
+
+        synced_asset: M4AssetVersion | None = None
+        if task.get("result_version_id"):
+            synced_asset = m4_db.scalar(
+                select(M4AssetVersion)
+                .where(
+                    M4AssetVersion.project_id == project.id,
+                    M4AssetVersion.library_version_id == task["result_version_id"],
                 )
-            queued = client.queue_prompt(graph, extra_data={"shine_line": "manual4", "project_id": project.id})
-            prompt_id = str(queued.get("prompt_id") or "")
-            if not prompt_id:
-                raise HTTPException(502, {"code": "M4_COMFY_NO_PROMPT_ID", "message": "ComfyUI 未返回 prompt_id。"})
-            history = client.poll_until_done(prompt_id, timeout_s=300.0)
-            outputs = (history.get("outputs") or {}).get(OUTPUT_NODE) or {}
-            images = outputs.get("images") or []
-            if not images:
-                raise HTTPException(502, {"code": "M4_T2I_NO_IMAGE_OUTPUT", "message": "Qwen T2I 未输出图片文件。"})
-            img_ref = images[0]
-            out_name = safe_m4_filename(str(img_ref.get("filename") or filename))
-            filename = out_name
-            content_bytes = client.view(
-                out_name,
-                subfolder=str(img_ref.get("subfolder") or ""),
-                file_type=str(img_ref.get("type") or "output"),
+                .limit(1)
             )
-            provenance["provider"] = "comfyui-qwen-t2i"
-            provenance["prompt_id"] = prompt_id
-            provenance["graph_sha256"] = g_hash
+        m4_db.add(
+            M4AuditEvent(
+                project_id=project.id,
+                actor=actor,
+                stage="materials",
+                event_type="M4_ASSET_GENERATION_QUEUED",
+                entity_type="m4_material_requirement",
+                entity_id=req.id,
+                payload={"task_id": task["task_id"], "status": task["status"], "seed": seed},
+            )
+        )
+        return {
+            "mode": "generate",
+            "status": task["status"],
+            "task_id": task["task_id"],
+            "requirement_id": req.id,
+            "asset": _serialize_asset(synced_asset) if synced_asset else None,
+            "task": task,
+        }
 
     content_type = verify_m4_media_bytes("image", filename, content_bytes)
     rel_path, digest, target = store_m4_bytes(m4_root, project.id, "assets", filename, content_bytes)
@@ -619,10 +794,24 @@ def promote_m4_asset(
     *,
     actor: str,
     requirement_id: str | None = None,
+    platform_db: Session | None = None,
+    settings: Any = None,
 ) -> dict[str, Any]:
     asset = m4_db.get(M4AssetVersion, asset_id)
     if asset is None or asset.project_id != project.id:
         raise HTTPException(404, {"code": "M4_ASSET_NOT_FOUND", "message": "待晋升素材不存在。"})
+
+    if asset.library_version_id and platform_db is not None and settings is not None:
+        lib_ref = promote_library_version(
+            platform_db,
+            settings,
+            asset.library_version_id,
+            actor=actor,
+            project_id=project.id,
+        )
+        asset.library_asset_id = lib_ref.library_asset_id
+        asset.library_rights_id = lib_ref.rights_id
+        asset.rights_status = lib_ref.rights_status
 
     asset.status = "promoted"
     asset.promoted_by = actor
@@ -832,10 +1021,272 @@ def put_shot_bindings(
     return {"shot_id": shot.id, "shot_code": shot.shot_code, "bindings": created}
 
 
-def resolve_m4_asset_file(m4_db: Session, m4_root: Path, project: M4Project, asset_id: str) -> tuple[Path, str]:
+def search_m4_library_assets(
+    platform_db: Session,
+    settings: Any,
+    *,
+    project: M4Project,
+    kind: str | None = None,
+    category: str | None = None,
+    query: str = "",
+    limit: int = 60,
+) -> dict[str, Any]:
+    items = search_library_assets(
+        platform_db,
+        settings,
+        project_id=project.id,
+        kind=kind,
+        category=category,
+        query=query,
+        limit=limit,
+        include_other_projects=True,
+    )
+    return {"items": items, "total": len(items)}
+
+
+def adopt_library_version_for_m4(
+    m4_db: Session,
+    platform_db: Session,
+    settings: Any,
+    project: M4Project,
+    *,
+    actor: str,
+    version_id: str,
+    requirement_id: str | None = None,
+    shot_ids: list[str] | None = None,
+    role_label: str = "",
+    family: str | None = None,
+) -> dict[str, Any]:
+    """Explicitly adopt a PROMOTED non-mock Public Asset Center version into this M4 project.
+
+    Authorizes rights for this project on ``LibraryRights`` and creates an independent M4 asset
+    reference + M4 shot bindings without writing any director7 ``LibraryProjectLink`` or
+    ``shot_asset_bindings`` rows.
+    """
+    lib_ref = authorize_library_version_for_project(
+        platform_db,
+        settings,
+        version_id,
+        project_id=project.id,
+        actor=actor,
+    )
+    resolved_path, content_type, digest = resolve_library_version_file(
+        platform_db,
+        settings,
+        version_id,
+        expected_sha256=lib_ref.content_sha256,
+    )
+    req: M4MaterialRequirement | None = None
+    if requirement_id:
+        req = m4_db.get(M4MaterialRequirement, requirement_id)
+        if req is None or req.project_id != project.id:
+            raise HTTPException(404, {"code": "M4_REQUIREMENT_NOT_FOUND", "message": "目标素材需求不存在。"})
+
+    eff_family = (family or (req.family if req else None) or lib_ref.category or "character").strip().lower()
+    if eff_family not in VALID_FAMILIES:
+        eff_family = "voice" if lib_ref.media_kind == "audio" else "prop"
+    eff_name = (req.entity_name if req else "") or Path(lib_ref.filename).stem or "library-asset"
+
+    asset = m4_db.scalar(
+        select(M4AssetVersion)
+        .where(
+            M4AssetVersion.project_id == project.id,
+            M4AssetVersion.library_version_id == lib_ref.library_version_id,
+        )
+        .limit(1)
+    )
+    if asset is None:
+        asset = M4AssetVersion(
+            project_id=project.id,
+            requirement_id=req.id if req else None,
+            family=eff_family,
+            entity_name=eff_name,
+            variant_name=req.variant_name if req else "",
+            source_kind="library_adopt",
+            filename=lib_ref.filename,
+            content_type=content_type,
+            sha256=digest,
+            byte_size=resolved_path.stat().st_size,
+            storage_path=f"library:{lib_ref.library_version_id}",
+            width=lib_ref.width,
+            height=lib_ref.height,
+            duration_s=lib_ref.duration_s,
+            status="promoted",
+            is_mock=False,
+            library_asset_id=lib_ref.library_asset_id,
+            library_version_id=lib_ref.library_version_id,
+            library_rights_id=lib_ref.rights_id,
+            rights_status=lib_ref.rights_status,
+            promoted_by=actor,
+            promoted_at=m4_utcnow(),
+            provenance={
+                "adopted_from_library": True,
+                "library_asset_id": lib_ref.library_asset_id,
+                "library_version_id": lib_ref.library_version_id,
+                "rights_snapshot_hash": lib_ref.rights_snapshot_hash,
+            },
+        )
+        m4_db.add(asset)
+        m4_db.flush()
+    else:
+        asset.library_asset_id = lib_ref.library_asset_id
+        asset.library_rights_id = lib_ref.rights_id
+        asset.rights_status = lib_ref.rights_status
+        asset.status = "promoted"
+        if not asset.promoted_by:
+            asset.promoted_by = actor
+            asset.promoted_at = m4_utcnow()
+
+    bound_shots: list[str] = []
+    if req is not None:
+        old_bound = req.bound_asset_version_id
+        req.bound_asset_version_id = asset.id
+        req.status = "bound"
+        req.user_declined = False
+        req.updated_at = m4_utcnow()
+        confirmed = m4_db.scalar(
+            select(M4StoryboardRevision)
+            .where(M4StoryboardRevision.project_id == project.id, M4StoryboardRevision.status == "CONFIRMED")
+            .order_by(M4StoryboardRevision.revision.desc())
+            .limit(1)
+        )
+        if confirmed is not None and req.storyboard_revision_id == confirmed.id:
+            if old_bound and old_bound != asset.id and req.shot_ids:
+                for link in m4_db.scalars(
+                    select(M4ShotAssetBinding).where(
+                        M4ShotAssetBinding.shot_id.in_(req.shot_ids),
+                        M4ShotAssetBinding.asset_version_id == old_bound,
+                    )
+                ).all():
+                    m4_db.delete(link)
+                m4_db.flush()
+            rlabel = role_label.strip() or (
+                f"{req.entity_name}" + (f"（{req.variant_name}）" if req.variant_name else "")
+            )
+            bound_shots = _bind_asset_to_shots(
+                m4_db, project, asset, list(shot_ids or req.shot_ids or []), role_label=rlabel
+            )
+    elif shot_ids:
+        bound_shots = _bind_asset_to_shots(
+            m4_db,
+            project,
+            asset,
+            list(shot_ids),
+            role_label=role_label.strip() or eff_name,
+        )
+
+    m4_db.add(
+        M4AuditEvent(
+            project_id=project.id,
+            actor=actor,
+            stage="materials",
+            event_type="M4_LIBRARY_VERSION_ADOPTED",
+            entity_type="m4_asset_version",
+            entity_id=asset.id,
+            payload={
+                "library_version_id": lib_ref.library_version_id,
+                "library_asset_id": lib_ref.library_asset_id,
+                "rights_snapshot_hash": lib_ref.rights_snapshot_hash,
+                "requirement_id": req.id if req else None,
+                "bound_shots": bound_shots,
+            },
+        )
+    )
+    return {
+        "asset": _serialize_asset(asset),
+        "requirement_id": req.id if req else None,
+        "bound_shots": bound_shots,
+    }
+
+
+def backfill_m4_project_assets(
+    m4_db: Session,
+    platform_db: Session,
+    settings: Any,
+    m4_root: Path,
+    project: M4Project,
+    *,
+    actor: str = "migration",
+) -> dict[str, Any]:
+    """Losslessly backfill legacy M4AssetVersion files into the Public Asset Center."""
+    assets = m4_db.scalars(
+        select(M4AssetVersion)
+        .where(M4AssetVersion.project_id == project.id)
+        .order_by(M4AssetVersion.created_at.asc())
+    ).all()
+    migrated = 0
+    skipped_video = 0
+    items: list[dict[str, Any]] = []
+    for asset in assets:
+        if asset.storage_path.startswith("library:"):
+            continue
+        if asset.content_type.startswith("video/") or asset.family == "reference_video":
+            skipped_video += 1
+            continue
+        abs_path = safe_m4_path(m4_root, asset.storage_path)
+        ref = backfill_m4_asset_to_library(
+            platform_db,
+            settings,
+            m4_asset_id=asset.id,
+            project_id=project.id,
+            family=asset.family,
+            entity_name=asset.entity_name,
+            filename=asset.filename,
+            content_type=asset.content_type,
+            sha256=asset.sha256,
+            abs_file_path=abs_path,
+            status=asset.status,
+            is_mock=bool(asset.is_mock),
+            provenance=dict(asset.provenance or {}),
+            existing_library_version_id=asset.library_version_id,
+            actor=actor,
+        )
+        asset.library_asset_id = ref.library_asset_id
+        asset.library_version_id = ref.library_version_id
+        asset.library_rights_id = ref.rights_id
+        asset.rights_status = ref.rights_status
+        migrated += 1
+        items.append(
+            {
+                "m4_asset_version_id": asset.id,
+                "library_version_id": ref.library_version_id,
+                "library_status": ref.status,
+                "rights_status": ref.rights_status,
+                "sha256": asset.sha256,
+                "is_mock": bool(asset.is_mock),
+            }
+        )
+    return {
+        "total": len(assets),
+        "migrated": migrated,
+        "skipped_video": skipped_video,
+        "items": items,
+    }
+
+
+def resolve_m4_asset_file(
+    m4_db: Session,
+    m4_root: Path,
+    project: M4Project,
+    asset_id: str,
+    *,
+    platform_db: Session | None = None,
+    settings: Any = None,
+) -> tuple[Path, str]:
     asset = m4_db.get(M4AssetVersion, asset_id)
     if asset is None or asset.project_id != project.id:
         raise HTTPException(404, {"code": "M4_ASSET_NOT_FOUND", "message": "素材不存在。"})
+    if asset.storage_path.startswith("library:"):
+        version_id = asset.library_version_id or asset.storage_path.split(":", 1)[1]
+        if platform_db is None or settings is None:
+            raise HTTPException(503, {"code": "M4_LIBRARY_CONTEXT_MISSING", "message": "缺少公共素材库上下文。"})
+        path, content_type, _sha = resolve_library_version_file(
+            platform_db,
+            settings,
+            version_id,
+            expected_sha256=asset.sha256,
+        )
+        return path, content_type
     path = safe_m4_path(m4_root, asset.storage_path)
     if not path.is_file():
         raise HTTPException(404, {"code": "M4_ASSET_FILE_MISSING", "message": "素材文件缺失。"})

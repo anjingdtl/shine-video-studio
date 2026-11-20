@@ -27,7 +27,6 @@ from shine.comfyops.runtime_configuration import (
     service_evidence_status,
 )
 from shine.comfyops.setup_preparation import enqueue as enqueue_setup_preparation
-from shine.comfyops.setup_summary import capability_report
 from shine.comfyops.setup_summary import summary as setup_summary
 from shine.comfyops.storage import prepare_process_environment, storage_root
 from shine.models import WorkflowProfile, utcnow
@@ -274,10 +273,15 @@ def check_capability(
             "source_evidence": {},
         }
 
-    cap = capability_report(db, settings, capability, project_id=None)
+    snap = setup_summary(db, settings, project_id=None)
+    cap = (snap.get("capabilities") or {}).get(capability) or {}
     facts = cap.get("facts") or {}
     ready = bool(facts.get("PRODUCTION_READY")) or (
-        capability == "image" and bool(facts.get("FILES_VERIFIED") and facts.get("INSTANCE_BOUND"))
+        capability == "image"
+        and (
+            bool(facts.get("FILES_VERIFIED") and (facts.get("INSTANCE_BOUND") or facts.get("FILES_FOUND")))
+            or bool(facts.get("RUNTIME_SERVICES_VERIFIED"))
+        )
     )
     status = "ready" if ready else "missing_required"
     return {

@@ -3416,7 +3416,7 @@
   ],
   "digests": {
     "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
-    "api_schema": "baeac136a5347c631ca0983b9ef4e16f8e2dbba1556a0c20524eaa8b9548a316",
+    "api_schema": "240a9fb7e743e63fd4e8988d6563525f5a038235524522fc363d8fd29974f605",
     "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [
@@ -3837,7 +3837,19 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/materials/library",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/manual4/projects/{}/materials/requirements",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/materials/tasks/{}",
       "status": "DISCOVERED"
     },
     {
@@ -4942,6 +4954,18 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/manual4/projects/{}/jobs/{}/reconcile",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/materials/backfill-library",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/materials/library/adopt",
       "status": "DISCOVERED"
     },
     {

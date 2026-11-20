@@ -46,11 +46,26 @@ from shine.config import Settings
 from shine.materialprep import runtime as image_runtime
 from shine.media.artifacts import safe_asset_path
 from shine.models import Asset, Project, new_id, utcnow
+from shine.platform_projects import WORKFLOW_MANUAL4, get_workflow_kind_if_known
 from shine.security import probe_upload, require_loopback_url, safe_filename, verify_upload
 from shine.services import add_audit
 
 router = APIRouter(prefix="/api/v1", tags=["shine-assets-center"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
+
+
+def _require_director7_project_if_present(db: DBSession, project_id: str | None) -> None:
+    if not project_id:
+        return
+    if get_workflow_kind_if_known(db, project_id) == WORKFLOW_MANUAL4:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PROJECT_IS_MANUAL4_NOT_DIRECTOR7",
+                "message": "该项目属于四阶 H3 自主制片线，禁止通过七阶资产入口写入七阶业务表。",
+                "project_id": project_id,
+            },
+        )
 
 
 def _asset_root(db, settings):
@@ -974,6 +989,7 @@ def asset_visual_facts(project_id: Annotated[str, Query()], db: DBSession):
     """Read-only projection of the facts that govern a project's material images."""
     from shine.materialprep.prompt_source import project_visual_facts
 
+    _require_director7_project_if_present(db, project_id)
     project = db.get(Project, project_id)
     if project is None:
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND", "message": "作品不存在"})
@@ -989,6 +1005,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
     # world / era through the one composer, so the asset centre cannot render a
     # different film (photoreal / modern) than the project the user selected.
     facts_project = body.project_id or (body.requirement_context or {}).get("project_id")
+    _require_director7_project_if_present(db, facts_project)
     if facts_project and body.prompt.strip() and (
         body.mode == "T2I" or (body.mode == "RGBA" and not body.references)
     ):
@@ -1517,6 +1534,7 @@ def new_image_attempt(task_id: str, body: NewImageAttempt, settings: SettingsDep
 
 @router.post("/asset-center/assignments", status_code=201)
 def assign_library_version(body: Assignment, actor: Operator, settings: SettingsDep, db: DBSession):
+    _require_director7_project_if_present(db, body.project_id)
     version = db.get(LibraryVersion, body.library_version_id)
     if version is None:
         raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "素材版本不存在"})
@@ -1611,6 +1629,7 @@ def assign_library_version(body: Assignment, actor: Operator, settings: Settings
 
 @router.get("/asset-center/assignments")
 def list_assignments(db: DBSession, project_id: str | None = None, asset_id: str | None = None):
+    _require_director7_project_if_present(db, project_id)
     stmt = select(LibraryProjectLink)
     if project_id:
         stmt = stmt.where(LibraryProjectLink.project_id == project_id)
@@ -2102,6 +2121,7 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
     from shine.schemas import ShotSpec
     from shine.services import UNKNOWN_SUBMISSION_CODES
 
+    _require_director7_project_if_present(db, body.project_id)
     asset = _adoption_asset(db, body)
     from shine.comfyops.assets import rights_status
 
@@ -2214,6 +2234,7 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
     from shine.schemas import ShotBindingInput, ShotSpec
     from shine.services import revise_shot_record
 
+    _require_director7_project_if_present(db, body.project_id)
     project = db.get(Project, body.project_id)
     if project is None:
         raise HTTPException(404, {"code": "PROJECT_NOT_FOUND"})

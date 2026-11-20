@@ -148,6 +148,7 @@ class M4Shot(M4Base):
     source_span: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     aspect_ratio: Mapped[str] = mapped_column(String(16), default="16:9", nullable=False)
     continuity_mode: Mapped[str] = mapped_column(String(32), default="cut", nullable=False)
+    content_sha256: Mapped[str] = mapped_column(String(64), default="", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=m4_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=m4_utcnow, onupdate=m4_utcnow, nullable=False)
 
@@ -178,6 +179,7 @@ class M4MaterialRequirement(M4Base):
     bound_asset_version_id: Mapped[str | None] = mapped_column(
         ForeignKey("m4_asset_versions.id", ondelete="SET NULL"), nullable=True
     )
+    pending_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     user_declined: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=m4_utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=m4_utcnow, onupdate=m4_utcnow, nullable=False)
@@ -204,6 +206,11 @@ class M4AssetVersion(M4Base):
     status: Mapped[str] = mapped_column(String(24), default="candidate", nullable=False)
     is_mock: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     provenance: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
+    library_asset_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    library_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    library_rights_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    rights_status: Mapped[str] = mapped_column(String(24), default="approved", nullable=False)
+    library_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     promoted_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     promoted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=m4_utcnow, nullable=False)
@@ -269,6 +276,7 @@ class M4ProductionRun(M4Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=m4_new_id)
     project_id: Mapped[str] = mapped_column(ForeignKey("m4_projects.id", ondelete="CASCADE"), index=True)
+    storyboard_revision_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     execution_snapshot_id: Mapped[str] = mapped_column(
         ForeignKey("m4_execution_snapshots.id", ondelete="RESTRICT"), index=True
     )
@@ -276,6 +284,7 @@ class M4ProductionRun(M4Base):
     scope_kind: Mapped[str] = mapped_column(String(24), nullable=False)
     scope_target_ids: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
     provider: Mapped[str] = mapped_column(String(24), default="comfyui", nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
     worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -304,6 +313,7 @@ class M4Job(M4Base):
     continuity_mode: Mapped[str] = mapped_column(String(32), default="cut", nullable=False)
     previous_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     provider: Mapped[str] = mapped_column(String(24), default="comfyui", nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
     state_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
@@ -328,6 +338,7 @@ class M4JobAttempt(M4Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=m4_new_id)
     job_id: Mapped[str] = mapped_column(ForeignKey("m4_jobs.id", ondelete="CASCADE"), index=True)
     attempt_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    execution_generation: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="SUBMIT_INTENT", nullable=False)
     prompt_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
     prompt_graph_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
