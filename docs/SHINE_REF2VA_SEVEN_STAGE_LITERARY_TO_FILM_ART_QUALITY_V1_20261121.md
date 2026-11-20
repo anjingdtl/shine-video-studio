@@ -69,7 +69,7 @@
 
 **R6：静音镜头修复刚刚更新。** 最新 `main@6ca5eeb` 的 `compiler.py` 新增 `non_vocal_ambience_text()`、无对白的项目语言世界锚点；`api_film.apply_camera` 在无对白时清理导演风格 sound ambience；`crew_prompts.py` 同时增强“仅真实上镜角色/首次视觉出现顺序”约束。此修复是**受保护的既有成果**，不得按照旧 `f62e0b2` 基线重复修改。
 
-**R7：质检能力存在，但并非保证生效。** `quality/advisory_queue.py::unexpected_speech_finding` 已能标记无对白镜头意外人声和有对白镜头额外人声；`quality/semantic.py::dialogue_findings` 能提示台词不符。历史实测 ASR/VLM 有 `UNAVAILABLE` 或超时，不能把缺失评审当作已证实“无旁白”。
+**R6b：最新提交还暴露潜在版本回溯风险。** `main@6ca5eeb` 的无对白语言锚点和 `non_vocal_ambience_text` 改动了 `compiler.py` 的可输出提示词内容，但 `COMPILER_VERSION` 仍显示 `shine-h3-compiler/1.3.0`。因此不能不经核查就声称“既有 1.3.0 的历史 prompt 字节一定未变化”。**本地 Agent P0 的第一项工作应是对比 11-15 最初 1.3.0、`f62e0b2` 与最新 `6ca5eeb` 同一组镜头的实际输出 SHA，明确是否存在旧版 frozen request 被同版本重编译后不一致的情况**；若属实须建立旧版精确重放与新版编号，不允许通过篡改旧 hash 或重写数据库快照修复。\n\n**R7：质检能力存在，但并非保证生效。** `quality/advisory_queue.py::unexpected_speech_finding` 已能标记无对白镜头意外人声和有对白镜头额外人声；`quality/semantic.py::dialogue_findings` 能提示台词不符。历史实测 ASR/VLM 有 `UNAVAILABLE` 或超时，不能把缺失评审当作已证实“无旁白”。
 
 ---
 
@@ -304,6 +304,7 @@ T06 是社区 issue #100 报告的风险，不能以“代码映射正确”替�
 ### 6.2 测试层级
 
 **L0 基线与版本指纹**
+- **先复核 2026-11-20 最新 main 在未提高 `COMPILER_VERSION` 时对 1.3.0 无对白 prompt 文本的修改**，以冻结请求/金样重编译比较为证据，优先关闭同版本字节漂移风险；
 - 开工前记录 main SHA、文件 hash、既有风格/规则包/编译器版本、测试基线；绝不可直接覆盖 main 未提交改动；
 - 历史 1.2.x、1.3.0 的代表性 `CompiledPrompt.prompt` 字节/哈希回归；新版本对新镜头产生新文本；
 - 不改变 `manual4` 业务源码、原 ComfyUI 目录、基础环境设置和调度裁决。
