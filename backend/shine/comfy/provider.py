@@ -10,6 +10,7 @@ from shine.comfy.client import (
     ComfyError,
     ComfyNodeUnavailable,
     ComfyPromptRejected,
+    ComfyUIClient,
     ComfyUIError,
     ComfyUnavailable,
     ComfyWorkflowVersionMismatch,
@@ -73,6 +74,133 @@ class ComfyResult:
     content_type: str | None = None
     error: str | None = None
     error_code: str | None = None
+
+
+def submit_prepared_prompt(
+    client: ComfyUIClient,
+    prepared: PreparedSubmission,
+    *,
+    idempotency_key: str,
+    prompt_sha256: str,
+    extra_data: dict[str, Any] | None = None,
+) -> ComfySubmission:
+    """Submit exactly once after the caller has committed the graph intent."""
+    metadata = dict(extra_data or {})
+    metadata["shine"] = {
+        **(metadata.get("shine") or {}),
+        "idempotency_key": idempotency_key,
+        "prompt_sha256": prompt_sha256,
+        "prompt_graph_sha256": prepared.prompt_graph_sha256,
+        "provider": RenderProvider.COMFYUI.value,
+    }
+    body = client.queue_prompt(prepared.prompt, extra_data=metadata)
+    return ComfySubmission(
+        prompt_id=str(body["prompt_id"]),
+        workflow_hash=prepared.workflow_hash,
+        uploaded_references=prepared.uploaded_references,
+        prompt_graph_sha256=prepared.prompt_graph_sha256,
+        idempotency_key=idempotency_key,
+    )
+
+
+def find_output(
+    record: dict[str, Any],
+    families: tuple[str, ...] = ("gifs", "videos", "images", "audio"),
+) -> dict[str, Any] | None:
+    outputs = record.get("outputs")
+    if not isinstance(outputs, dict):
+        return None
+    for node_output in outputs.values():
+        if not isinstance(node_output, dict):
+            continue
+        for family in families:
+            items = node_output.get(family) or []
+            if items and isinstance(items[0], dict) and items[0].get("filename"):
+                return items[0]
+    return None
+
+
+def _history_outcome(record: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
+    status = record.get("status")
+    if isinstance(status, dict) and status.get("status_str") == "error":
+        return "failed", None
+    output = find_output(record)
+    return ("completed", output) if output else ("completed_without_output", None)
+
+
+def _queue_entries(queue):
+    if isinstance(queue, dict):
+        for key, state in (("queue_running", "running"), ("queue_pending", "pending")):
+            for item in queue.get(key) or []:
+                if isinstance(item, list | tuple) and len(item) > 1:
+                    yield item, state
+
+
+def reconcile_submission(
+    client: ComfyUIClient,
+    *,
+    prompt_id: str | None,
+    prompt_graph_sha256: str | None = None,
+    idempotency_key: str | None = None,
+    legacy_job_id: str | None = None,
+) -> tuple[str | None, str, dict[str, Any] | None]:
+    """Recover an ACK by identity using ComfyUI history and queue. Never submit."""
+    if not (prompt_id or prompt_graph_sha256):
+        return None, "not_found", None
+
+    def matches(graph, extra_data) -> bool:
+        if not isinstance(graph, dict) or graph_hash(graph) != prompt_graph_sha256:
+            return False
+        if not idempotency_key:
+            return True
+        metadata = extra_data if isinstance(extra_data, dict) else {}
+        shine = metadata.get("shine")
+        if isinstance(shine, dict) and shine.get("idempotency_key"):
+            return shine["idempotency_key"] == idempotency_key
+        # Pre-convergence Manual4 submissions carried the business job ID at top level.
+        return bool(
+            legacy_job_id and metadata.get("shine_line") == "manual4" and metadata.get("job_id") == legacy_job_id
+        )
+
+    try:
+        history = client.history(prompt_id) if prompt_id else client.history()
+        if not isinstance(history, dict):
+            return None, "unavailable:COMFY_PROVIDER_ERROR", None
+        if prompt_id:
+            record = history.get(prompt_id)
+            if isinstance(record, dict):
+                return prompt_id, _history_outcome(record)[0], record
+        else:
+            found = []
+            for candidate_id, record in history.items():
+                if not isinstance(record, dict):
+                    continue
+                graph, extra_data = record.get("prompt"), record.get("extra_data")
+                if isinstance(graph, list | tuple) and len(graph) >= 3:
+                    graph, extra_data = graph[2], graph[3] if len(graph) > 3 else extra_data
+                if matches(graph, extra_data):
+                    found.append((str(candidate_id), _history_outcome(record)[0], record))
+            if len(found) > 1:
+                return None, "ambiguous", None
+            if found:
+                return found[0]
+        queued = {}
+        for item, state in _queue_entries(client.queue()):
+            candidate_id = str(item[1])
+            if prompt_id:
+                matched = candidate_id == prompt_id
+            else:
+                matched = len(item) >= 3 and matches(item[2], item[3] if len(item) > 3 else None)
+            if matched:
+                queued.setdefault(candidate_id, state)
+        if len(queued) > 1:
+            return None, "ambiguous", None
+        if queued:
+            matched_id, state = next(iter(queued.items()))
+            return matched_id, state, None
+    except ComfyError as exc:
+        return None, f"unavailable:{exc.code}", None
+    return None, "not_found", None
 
 
 def graph_class_types(graph: dict[str, Any]) -> set[str]:
@@ -477,25 +605,17 @@ class ComfyUIRenderService:
         request: RenderRequest,
     ) -> ComfySubmission:
         """Queue a prepared prompt. The caller must persist the intent first."""
-        body = self.client.queue_prompt(
-            prepared.prompt,
+        return submit_prepared_prompt(
+            self.client,
+            prepared,
+            idempotency_key=request.idempotency_key,
+            prompt_sha256=request.prompt_sha256,
             extra_data={
                 "shine": {
                     "job_id": request.shot_id,
-                    "idempotency_key": request.idempotency_key,
-                    "prompt_sha256": request.prompt_sha256,
-                    "prompt_graph_sha256": prepared.prompt_graph_sha256,
                     "style_version_id": request.style_version_id,
-                    "provider": RenderProvider.COMFYUI.value,
                 }
             },
-        )
-        return ComfySubmission(
-            prompt_id=str(body["prompt_id"]),
-            workflow_hash=prepared.workflow_hash,
-            uploaded_references=prepared.uploaded_references,
-            prompt_graph_sha256=prepared.prompt_graph_sha256,
-            idempotency_key=request.idempotency_key,
         )
 
     def submit(
@@ -519,43 +639,34 @@ class ComfyUIRenderService:
         return self.submit_prepared(prepared, request)
 
     def _queue_state(self, prompt_id: str) -> str:
-        queue = self.client.queue()
-        for key in ("queue_running", "queue_pending"):
-            for item in queue.get(key) or []:
-                if isinstance(item, list) and len(item) > 1 and str(item[1]) == prompt_id:
-                    return "running" if key == "queue_running" else "pending"
+        for item, state in _queue_entries(self.client.queue()):
+            if str(item[1]) == prompt_id:
+                return state
         return "missing"
 
     def poll(self, prompt_id: str) -> ComfyResult:
         history = self.client.history(prompt_id)
         record = history.get(prompt_id) if isinstance(history, dict) else None
-        if record:
-            status = (record.get("status") or {})
-            if status.get("status_str") == "error":
+        if isinstance(record, dict):
+            state, output = _history_outcome(record)
+            if state == "failed":
                 return ComfyResult(
                     status="failed",
                     error="ComfyUI reported an execution error",
                     error_code="COMFY_EXECUTION_ERROR",
                 )
-            outputs = record.get("outputs") or {}
-            for _node_id, node_output in outputs.items():
-                for key in ("gifs", "videos", "images", "audio"):
-                    items = node_output.get(key) or []
-                    if items:
-                        first = items[0]
-                        filename = first.get("filename")
-                        if not filename:
-                            continue
-                        subfolder = first.get("subfolder") or ""
-                        file_type = first.get("type") or "output"
-                        content = self.client.view(filename, subfolder=subfolder, file_type=file_type)
-                        return ComfyResult(
-                            status="completed",
-                            output_filename=filename,
-                            subfolder=subfolder,
-                            content=content,
-                            content_type=content_type_for_name(filename),
-                        )
+            if output:
+                filename = output["filename"]
+                subfolder = output.get("subfolder") or ""
+                file_type = output.get("type") or "output"
+                content = self.client.view(filename, subfolder=subfolder, file_type=file_type)
+                return ComfyResult(
+                    status="completed",
+                    output_filename=filename,
+                    subfolder=subfolder,
+                    content=content,
+                    content_type=content_type_for_name(filename),
+                )
             return ComfyResult(
                 status="completed_without_output",
                 error="ComfyUI finished the prompt without producing an output file",
@@ -592,19 +703,14 @@ class ComfyUIRenderService:
         *,
         prompt_id: str | None,
         prompt_graph_sha256: str | None,
+        idempotency_key: str | None = None,
     ) -> tuple[str | None, str]:
-        """Look for an existing ComfyUI submission that matches this request.
-
-        Delegates to ``shine.foundation.h3.reconcile_submission`` so both
-        pipelines share one ``/history`` (dict and list formats) & ``/queue``
-        reconciliation judgment.
-        """
-        from shine.foundation.h3 import reconcile_submission
-
+        """Look for an existing ComfyUI submission that matches this request."""
         matched_id, status, _rec = reconcile_submission(
             self.client,
             prompt_id=prompt_id,
             prompt_graph_sha256=prompt_graph_sha256,
+            idempotency_key=idempotency_key,
         )
         return matched_id, status
 

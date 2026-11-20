@@ -4016,6 +4016,7 @@ def _recover_comfy_job(
     found_id, status = service.find_submission(
         prompt_id=prompt_id,
         prompt_graph_sha256=graph_hash,
+        idempotency_key=(job.request or {}).get("idempotency_key") or job.idempotency_key,
     )
     job.heartbeat_at = utcnow()
     if status in {"running", "pending"}:

@@ -35,6 +35,7 @@ from shine.comfy.graph_compiler import (
     SecondPassSpec,
     compile_ref2va_workflow,
 )
+from shine.comfy.provider import PreparedSubmission, find_output, reconcile_submission, submit_prepared_prompt
 from shine.comfy.workflow import apply_parameters, graph_hash, validate_against_object_info
 from shine.h3.mode_policy import REQUIRED_GENERATION_MODE, ModePolicyError, require_project_mode
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
@@ -81,6 +82,7 @@ class H3ExecutionRequest:
     accelerator_id: str = "pdd8"
     second_pass: SecondPassSpec | None = None
     extra_data: dict[str, Any] | None = None
+    idempotency_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -149,20 +151,10 @@ def compile_h3_ref2va_graph(
 
 def extract_video_output(history_record: dict[str, Any]) -> tuple[str, str, str]:
     """Extract ``(filename, subfolder, file_type)`` from a ComfyUI history record."""
-    outputs = history_record.get("outputs") or {}
-    for _node_id, node_output in outputs.items():
-        if not isinstance(node_output, dict):
-            continue
-        for key in ("videos", "gifs", "images"):
-            items = node_output.get(key) or []
-            if items and isinstance(items[0], dict) and items[0].get("filename"):
-                item = items[0]
-                return (
-                    str(item["filename"]),
-                    str(item.get("subfolder") or ""),
-                    str(item.get("type") or "output"),
-                )
-    raise H3ExecutionError("COMFY_VIDEO_OUTPUT_MISSING", "ComfyUI 已完成执行但未返回视频输出。")
+    output = find_output(history_record, ("videos", "gifs", "images"))
+    if output is None:
+        raise H3ExecutionError("COMFY_VIDEO_OUTPUT_MISSING", "ComfyUI 已完成执行但未返回视频输出。")
+    return str(output["filename"]), str(output.get("subfolder") or ""), str(output.get("type") or "output")
 
 
 def extract_last_frame_png(video_path: Path, out_png_path: Path, *, ffmpeg_path: str = "ffmpeg") -> Path:
@@ -215,102 +207,8 @@ def evaluate_h3_technical_qc(
     return result.model_dump(mode="json")
 
 
-def _extract_prompt_graph_from_history(record: dict[str, Any]) -> dict[str, Any] | None:
-    prompt_field = record.get("prompt")
-    if isinstance(prompt_field, dict):
-        return prompt_field
-    if isinstance(prompt_field, list | tuple) and len(prompt_field) >= 3 and isinstance(prompt_field[2], dict):
-        return prompt_field[2]
-    return None
-
-
-def _history_record_outcome(record: dict[str, Any]) -> str:
-    status = record.get("status") or {}
-    if isinstance(status, dict) and status.get("status_str") == "error":
-        return "failed"
-    outputs = record.get("outputs") or {}
-    has_output = any(
-        node_output.get(key)
-        for node_output in (outputs.values() if isinstance(outputs, dict) else [])
-        if isinstance(node_output, dict)
-        for key in ("gifs", "videos", "images", "audio")
-    )
-    return "completed" if has_output else "completed_without_output"
-
-
-def reconcile_submission(
-    client: ComfyUIClient,
-    *,
-    prompt_id: str | None,
-    prompt_graph_sha256: str | None,
-) -> tuple[str | None, str, dict[str, Any] | None]:
-    """Reconcile an existing or uncertain ComfyUI submission against ``/history`` and ``/queue``.
-
-    Supports both dict-shaped ``record["prompt"]`` and real ComfyUI list-shaped
-    ``[number, prompt_id, graph_dict, extra_data, outputs]`` payloads in ``/history``
-    and ``/queue``.
-    """
-    if prompt_id:
-        try:
-            hist = client.history(prompt_id)
-        except ComfyError as exc:
-            return None, f"unavailable:{exc.code}", None
-        if isinstance(hist, dict) and isinstance(hist.get(prompt_id), dict):
-            rec = hist[prompt_id]
-            return prompt_id, _history_record_outcome(rec), rec
-        try:
-            q = client.queue()
-        except ComfyError as exc:
-            return None, f"unavailable:{exc.code}", None
-        if isinstance(q, dict):
-            for key, state in (("queue_running", "running"), ("queue_pending", "pending")):
-                for item in q.get(key) or []:
-                    if isinstance(item, list | tuple) and len(item) > 1 and str(item[1]) == prompt_id:
-                        return prompt_id, state, None
-
-    if not prompt_graph_sha256:
-        return None, "not_found", None
-
-    try:
-        full_hist = client.history()
-    except TypeError:
-        full_hist = {}
-    except ComfyError as exc:
-        return None, f"unavailable:{exc.code}", None
-    except Exception as exc:
-        if "Unavailable" in type(exc).__name__:
-            return None, "unavailable:COMFY_UNAVAILABLE", None
-        full_hist = {}
-    if not isinstance(full_hist, dict):
-        return None, "unavailable:COMFY_PROVIDER_ERROR", None
-    for candidate_id, rec in full_hist.items():
-        if not isinstance(rec, dict):
-            continue
-        p_graph = _extract_prompt_graph_from_history(rec)
-        if p_graph is None:
-            continue
-        if graph_hash(p_graph) != prompt_graph_sha256:
-            continue
-        return str(candidate_id), _history_record_outcome(rec), rec
-
-    try:
-        full_queue = client.queue()
-    except ComfyError as exc:
-        return None, f"unavailable:{exc.code}", None
-    if isinstance(full_queue, dict):
-        for key, state in (("queue_running", "running"), ("queue_pending", "pending")):
-            for item in full_queue.get(key) or []:
-                if not isinstance(item, list | tuple) or len(item) < 2:
-                    continue
-                if prompt_id and str(item[1]) == prompt_id:
-                    return str(item[1]), state, None
-                if len(item) >= 3 and isinstance(item[2], dict) and graph_hash(item[2]) == prompt_graph_sha256:
-                    return str(item[1]), state, None
-    return None, "not_found", None
-
-
 class ComfyH3Executor:
-    """Single ComfyUI Ref2VA execution worker engine shared by pipelines."""
+    """Prepare a frozen prompt with the shared Ref2VA graph and ComfyUI submitter."""
 
     def execute(
         self,
@@ -319,6 +217,7 @@ class ComfyH3Executor:
         *,
         on_before_submit: Callable[[str, dict[str, Any]], None] | None = None,
         on_submitted: Callable[[str], None] | None = None,
+        object_info: dict[str, Any] | None = None,
         poll_timeout_s: float = 900.0,
         poll_interval_s: float = 0.25,
     ) -> H3ExecutionReceipt:
@@ -356,7 +255,8 @@ class ComfyH3Executor:
                 )
             loaded_refs.append((ref, raw))
 
-        object_info = client.object_info()
+        if object_info is None:
+            object_info = client.object_info()
         compiled = compile_h3_ref2va_graph(
             image_count=len(images),
             audio_count=len(audios),
@@ -424,18 +324,42 @@ class ComfyH3Executor:
             final_graph = apply_parameters(compiled.graph, compiled.parameter_map, param_values)
         except ComfyWorkflowError as exc:
             raise H3ExecutionError("WORKFLOW_PARAMETER_ERROR", str(exc), details=exc.details) from exc
-        final_graph_sha = graph_hash(final_graph)
+        prepared = PreparedSubmission(
+            prompt=final_graph,
+            prompt_graph_sha256=graph_hash(final_graph),
+            workflow_hash=compiled.graph_sha256,
+            uploaded_references=len(uploaded_names),
+        )
 
         if on_before_submit is not None:
-            on_before_submit(final_graph_sha, final_graph)
+            on_before_submit(prepared.prompt_graph_sha256, prepared.prompt)
 
-        queued = client.queue_prompt(final_graph, extra_data=request.extra_data)
-        prompt_id = str(queued.get("prompt_id") or "")
-        if not prompt_id:
-            raise ComfySubmissionUncertain("ComfyUI 未返回 prompt_id；提交状态不确定，需要人工核对。")
+        final_graph_sha = prepared.prompt_graph_sha256
+        try:
+            submission = submit_prepared_prompt(
+                client,
+                prepared,
+                idempotency_key=request.idempotency_key,
+                prompt_sha256=request.prompt_sha256,
+                extra_data=request.extra_data,
+            )
+            prompt_id = submission.prompt_id
+        except ComfySubmissionUncertain:
+            # The owned renderer is still alive. Recover its ACK before releasing it.
+            if not request.idempotency_key:
+                raise
+            prompt_id, _, _ = reconcile_submission(
+                client, prompt_id=None, prompt_graph_sha256=final_graph_sha,
+                idempotency_key=request.idempotency_key,
+            )
+            if prompt_id is None:
+                raise
 
         if on_submitted is not None:
-            on_submitted(prompt_id)
+            try:
+                on_submitted(prompt_id)
+            except Exception as exc:
+                raise ComfySubmissionUncertain("ComfyUI 已回执，但未能持久化 prompt_id；需要对账。") from exc
 
         deadline = time.monotonic() + max(1.0, poll_timeout_s)
         interval = max(0.05, poll_interval_s)
@@ -444,7 +368,6 @@ class ComfyH3Executor:
             matched_id, state, rec = reconcile_submission(
                 client,
                 prompt_id=prompt_id,
-                prompt_graph_sha256=final_graph_sha,
             )
             if state == "failed":
                 return H3ExecutionReceipt(

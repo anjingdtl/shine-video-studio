@@ -225,7 +225,7 @@ def managed_m4_comfyui(
         deadline = time.monotonic() + startup_timeout_s
         while time.monotonic() < deadline:
             try:
-                client.system_stats()
+                client.system_stats(timeout_s=3.0)
                 verify_loopback_listener_ownership(port, group, birth)
                 client.handoff_resume(token)
                 break

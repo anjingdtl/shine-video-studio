@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from shine.comfy.client import ComfySubmissionUncertain, ComfyUIClient, ComfyUIError, ComfyWorkflowError
@@ -104,6 +105,20 @@ def test_submission_timeout_is_uncertain_but_history_can_be_reconciled(fake_comf
         service.submit(render_request(), PROFILE, {})
     prompt_id = next(iter(fake_comfy.prompts))
     assert service.reconcile(prompt_id) == "completed"
+
+
+@pytest.mark.parametrize("body", [b"broken JSON", b"[]", b'{"unexpected":"shape"}'])
+def test_unreadable_post_prompt_ack_requires_reconciliation(body):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, content=body)
+
+    client = ComfyUIClient("http://127.0.0.1:8188", transport=httpx.MockTransport(respond))
+    with pytest.raises(ComfySubmissionUncertain):
+        client.queue_prompt(GRAPH)
+    assert [(req.method, req.url.path) for req in requests] == [("POST", "/prompt")]
     assert fake_comfy.prompt_count == 1
 
 

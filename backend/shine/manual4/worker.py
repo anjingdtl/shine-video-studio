@@ -40,7 +40,6 @@ from shine.foundation.h3 import (
     reconcile_submission,
 )
 from shine.foundation.materials import resolve_library_version_file
-from shine.manual4.comfy.client import M4ComfySubmissionUncertain
 from shine.manual4.comfy.managed_instance import managed_m4_comfyui, reconcile_m4_renderer
 from shine.manual4.delivery.technical_qc import M4TechnicalExpectations, run_m4_technical_qc
 from shine.manual4.prompts.service import validate_frozen_prompt_for_shot
@@ -129,6 +128,10 @@ def _qc_status_for(qc: dict[str, Any]) -> str:
     return "FAILED"
 
 
+def _attempt_idempotency_key(job_key: str, attempt_no: int) -> str:
+    return f"{job_key}:attempt:{attempt_no}"
+
+
 def reconcile_stalled_m4_runs(
     m4_factory: sessionmaker,
     *,
@@ -146,7 +149,7 @@ def reconcile_stalled_m4_runs(
     recovered = 0
     cutoff = m4_utcnow() - timedelta(seconds=stale_seconds)
     now = m4_utcnow()
-    pending_reconcile: list[tuple[str, str, str, str, str | None, str | None, float, bool]] = []
+    pending_reconcile: list[tuple[str, str, str, str, str | None, str | None, str, int, float, bool]] = []
 
     with m4_factory.begin() as db:
         active_runs = db.scalars(
@@ -166,6 +169,7 @@ def reconcile_stalled_m4_runs(
             jobs = db.scalars(
                 select(M4Job).where(M4Job.run_id == run.id).order_by(M4Job.ordinal)
             ).all()
+            pending_before = len(pending_reconcile)
             has_uncertain = False
             has_queued = False
             for job in jobs:
@@ -196,6 +200,8 @@ def reconcile_stalled_m4_runs(
                                 latest_att.id,
                                 latest_att.prompt_id,
                                 latest_att.prompt_graph_sha256,
+                                job.idempotency_key,
+                                latest_att.attempt_no,
                                 float(job.target_seconds),
                                 has_audio,
                             )
@@ -218,7 +224,7 @@ def reconcile_stalled_m4_runs(
                     has_uncertain = True
                 elif job.status == "QUEUED":
                     has_queued = True
-            if not pending_reconcile:
+            if len(pending_reconcile) == pending_before:
                 if has_uncertain:
                     run.status = "NEEDS_REVIEW"
                 elif has_queued:
@@ -233,12 +239,14 @@ def reconcile_stalled_m4_runs(
 
     # Reconcile in-flight submissions outside DB transaction against ComfyUI /history & /queue
     touched_runs: set[str] = set()
-    for run_id, proj_id, job_id, att_id, pid, gsha, dur_s, has_audio in pending_reconcile:
+    for run_id, proj_id, job_id, att_id, pid, gsha, job_key, attempt_no, dur_s, has_audio in pending_reconcile:
         touched_runs.add(run_id)
         matched_id, state, rec = reconcile_submission(
             comfy_client,
             prompt_id=pid,
             prompt_graph_sha256=gsha,
+            idempotency_key=_attempt_idempotency_key(job_key, attempt_no),
+            legacy_job_id=job_id if attempt_no == 1 else None,
         )
         if state == "completed" and rec is not None and m4_root is not None:
             try:
@@ -509,6 +517,7 @@ def _execute_single_job(
         aud_items = [r for r in ref_items if r["use_as"] == "audio"]
         vid_items = [r for r in ref_items if r["use_as"] == "video"]
         attempt_no_base = int(job.attempt_count)
+        idempotency_key = _attempt_idempotency_key(job.idempotency_key, attempt_no_base + 1)
         target_seconds = float(snap_item["target_seconds"])
         width = int(snap_item["width"])
         height = int(snap_item["height"])
@@ -621,15 +630,25 @@ def _execute_single_job(
                 (f"reference_audio_{idx + 1}", safe_m4_filename(p.name), raw_aud, item["content_type"])
             )
 
-        compiled = compile_h3_ref2va_graph(
-            variant_id=variant_id,
-            accelerator_id=accelerator_id,
-            second_pass=sp_spec,
-            image_count=len(img_items) + (1 if prev_video_rel is not None else 0),
-            audio_count=len(aud_items),
-            video_count=len(vid_items),
-            object_info=object_info,
-        )
+        for item in vid_items:
+            p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
+            h3_refs.append(
+                H3ReferenceInput(
+                    family="video", path=p, filename=safe_m4_filename(p.name),
+                    content_type=str(item.get("content_type") or "video/mp4"), sha256=str(item["sha256"]),
+                )
+            )
+
+        if video_stub is not None:
+            compiled = compile_h3_ref2va_graph(
+                variant_id=variant_id,
+                accelerator_id=accelerator_id,
+                second_pass=sp_spec,
+                image_count=len(img_items) + (1 if prev_video_rel is not None else 0),
+                audio_count=len(aud_items),
+                video_count=len(vid_items),
+                object_info=object_info,
+            )
     except (H3ExecutionError, GraphCompileError) as exc:
         return _fail_job_precheck(
             m4_factory,
@@ -646,7 +665,7 @@ def _execute_single_job(
     out_filename = f"{snap_item['shot_code']}.mp4"
     is_mock_run = video_stub is not None
     prompt_id = ""
-    submitted_graph_sha = compiled.graph_sha256
+    submitted_graph_sha = ""
 
     def _persist_submit_intent(graph_sha: str, _graph: dict[str, Any] | None = None) -> None:
         nonlocal attempt_id, expected_state_ver, submitted_graph_sha
@@ -725,6 +744,7 @@ def _execute_single_job(
                 variant_id=variant_id,
                 accelerator_id=accelerator_id,
                 second_pass=sp_spec,
+                idempotency_key=idempotency_key,
                 extra_data={"shine_line": "manual4", "job_id": job_id, "run_id": run_info["id"]},
             )
             receipt = ComfyH3Executor().execute(
@@ -732,6 +752,7 @@ def _execute_single_job(
                 h3_req,
                 on_before_submit=_persist_submit_intent,
                 on_submitted=_persist_submitted,
+                object_info=object_info,
                 poll_timeout_s=1800.0,
                 poll_interval_s=0.5,
             )
@@ -748,7 +769,7 @@ def _execute_single_job(
             prompt_id = receipt.prompt_id or prompt_id
             submitted_graph_sha = receipt.prompt_graph_sha256
 
-    except (M4ComfySubmissionUncertain, ComfySubmissionUncertain) as exc:
+    except ComfySubmissionUncertain as exc:
         with m4_factory.begin() as db:
             j_row = db.get(M4Job, job_id)
             a_row = db.get(M4JobAttempt, attempt_id) if attempt_id else None
@@ -997,6 +1018,7 @@ def serve_worker(*, once: bool = False, poll_interval: float = 2.0, worker_id: s
     register_m4_worker(m4_factory, wid, status="IDLE")
     reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
     reconcile_stalled_m4_runs(m4_factory, m4_root=m4_root, settings=settings)
+    next_reconciliation = time.monotonic() + 30.0
 
     stopping = False
 
@@ -1017,6 +1039,9 @@ def serve_worker(*, once: bool = False, poll_interval: float = 2.0, worker_id: s
                     reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
                 except Exception:
                     pass
+                if time.monotonic() >= next_reconciliation:
+                    reconcile_stalled_m4_runs(m4_factory, m4_root=m4_root, settings=settings)
+                    next_reconciliation = time.monotonic() + 30.0
                 heartbeat_m4_worker(m4_factory, wid, status="IDLE", current_run_id=None)
                 time.sleep(max(0.5, poll_interval))
     finally:

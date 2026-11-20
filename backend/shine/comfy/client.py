@@ -366,7 +366,16 @@ class ComfyUIClient:
                 "ComfyUI rejected the prompt before queueing it",
                 details={"status": response.status_code, "body": response.text[:500]},
             )
-        body = response.json()
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ComfySubmissionUncertain(
+                "ComfyUI returned an unreadable /prompt acknowledgement; reconcile before resubmitting"
+            ) from exc
+        if not isinstance(body, dict):
+            raise ComfySubmissionUncertain(
+                "ComfyUI returned an invalid /prompt acknowledgement; reconcile before resubmitting"
+            )
         if body.get("node_errors"):
             raise ComfyWorkflowError("ComfyUI reported node validation errors", details=body["node_errors"])
         if not body.get("prompt_id"):

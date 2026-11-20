@@ -109,17 +109,18 @@ class _FakeComfyClient:
         self.uploads.append((filename, content))
         return {"name": filename, "subfolder": "shine"}
 
-    def queue_prompt(self, prompt: dict[str, Any], **_kwargs) -> dict[str, Any]:
+    def queue_prompt(self, prompt: dict[str, Any], *, extra_data=None) -> dict[str, Any]:
         self.submitted_graphs.append(prompt)
         pid = f"pid-{len(self.submitted_graphs)}"
-        if self.uncertain_on_submit:
-            raise ComfySubmissionUncertain("simulated read timeout after ComfyUI queued")
-        prompt_field: Any = [len(self.submitted_graphs), pid, prompt, {}, []] if self.list_history else prompt
+        prompt_field: Any = [len(self.submitted_graphs), pid, prompt, extra_data, []] if self.list_history else prompt
         self.history_map[pid] = {
             "prompt": prompt_field,
+            "extra_data": extra_data,
             "status": {"status_str": "success", "completed": True},
             "outputs": {"57": {"videos": [{"filename": "out_0001.mp4", "subfolder": "", "type": "output"}]}},
         }
+        if self.uncertain_on_submit:
+            raise ComfySubmissionUncertain("simulated read timeout after ComfyUI queued")
         return {"prompt_id": pid}
 
     def history(self, prompt_id: str | None = None) -> dict[str, Any]:
@@ -258,7 +259,7 @@ def test_p3_a11_a17_utf8_prompt_pre_submit_sha_list_history_reconcile(tmp_path: 
     utf8_prompt = "subject_definitions:\n<Subject 1>: 雨夜林晚持伞伫立，霓虹灯映照青石板路。"
     utf8_prompt_sha = hashlib.sha256(utf8_prompt.encode()).hexdigest()
 
-    client_ok = _FakeComfyClient(uncertain_on_submit=False, list_history=True)
+    client_ok = _FakeComfyClient(uncertain_on_submit=True, list_history=True)
     recorded_before: list[str] = []
     recorded_after: list[str] = []
 
@@ -269,6 +270,7 @@ def test_p3_a11_a17_utf8_prompt_pre_submit_sha_list_history_reconcile(tmp_path: 
         width=1344,
         height=768,
         seed=42,
+        idempotency_key="m4:render:attempt:1",
         references=[
             H3ReferenceInput(
                 family="image",
@@ -292,6 +294,10 @@ def test_p3_a11_a17_utf8_prompt_pre_submit_sha_list_history_reconcile(tmp_path: 
     assert submitted["31"]["inputs"]["prompt"] == utf8_prompt
     assert recorded_before[0] == graph_hash(submitted)
     assert receipt.prompt_graph_sha256 == graph_hash(submitted)
+    metadata = client_ok.history_map[receipt.prompt_id]["prompt"][3]["shine"]
+    assert metadata["idempotency_key"] == req.idempotency_key
+    assert metadata["prompt_sha256"] == utf8_prompt_sha
+    assert metadata["prompt_graph_sha256"] == receipt.prompt_graph_sha256
 
     # Verify list-formatted ComfyUI /history AND /queue reconcile without prompt_id!
     mid, state, rec = reconcile_submission(client_ok, prompt_id=None, prompt_graph_sha256=receipt.prompt_graph_sha256)
@@ -299,9 +305,16 @@ def test_p3_a11_a17_utf8_prompt_pre_submit_sha_list_history_reconcile(tmp_path: 
 
     q_client = _FakeComfyClient()
     q_pid = "queued-list-pid-9"
-    q_client.queue_running.append([1, q_pid, submitted, {}, []])
-    q_mid, q_state, q_rec = reconcile_submission(q_client, prompt_id=None, prompt_graph_sha256=graph_hash(submitted))
+    q_client.queue_running.append([0, "decoy", submitted, {"shine": {"idempotency_key": "different"}}, []])
+    q_client.queue_running.append([1, q_pid, submitted, {"shine": metadata}, []])
+    q_mid, q_state, q_rec = reconcile_submission(
+        q_client, prompt_id=None, prompt_graph_sha256=graph_hash(submitted), idempotency_key=req.idempotency_key
+    )
     assert q_mid == q_pid and q_state == "running" and q_rec is None
+    assert reconcile_submission(
+        q_client, prompt_id="acknowledged-but-missing", prompt_graph_sha256=graph_hash(submitted),
+        idempotency_key=req.idempotency_key,
+    ) == (None, "not_found", None)
 
     # A11 + A20: Test reconcile_stalled_m4_runs for BOTH gen=1 legacy & gen=2 completed /history record!
     m4_factory = app.state.m4_session_factory
@@ -333,6 +346,8 @@ def test_p3_a11_a17_utf8_prompt_pre_submit_sha_list_history_reconcile(tmp_path: 
             run_row.worker_id = "dead-w-1"
             job_row.status = "SUBMITTING"
             job_row.attempt_count = 1
+            # This historical attempt predates the shared metadata; its job ID still proves lineage.
+            client_ok.history_map[receipt.prompt_id]["prompt"][3] = {"shine_line": "manual4", "job_id": job_id}
             att = M4JobAttempt(
                 job_id=job_id,
                 attempt_no=1,
