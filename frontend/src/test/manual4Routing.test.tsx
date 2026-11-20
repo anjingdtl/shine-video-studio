@@ -119,6 +119,17 @@ describe('P1 平台选线与四阶隔离挂载', () => {
           confirmed_shots: [],
         }),
       },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/requirements$`),
+        respond: () => jsonResponse({
+          confirmed_revision: null,
+          requirements: [],
+          assets: [],
+          shots: [],
+          readiness: makeM4Overview(m4Id, '四阶短片测试').readiness,
+        }),
+      },
     ]);
 
     render(<App />);

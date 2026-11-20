@@ -305,3 +305,67 @@
   gap: 10px;
   flex-wrap: wrap;
 }
+
+.m4-mat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.m4-mat-card {
+  border: 1px solid var(--ui-border-soft);
+  border-radius: var(--radius-control);
+  background: var(--glass-panel);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.m4-bound-preview,
+.m4-cand-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.m4-cand-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 4px;
+  border-top: 1px dashed var(--ui-border-soft);
+}
+
+.m4-thumb {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: 6px;
+  border: 1px solid var(--ui-border-soft);
+}
+
+.m4-thumb-sm {
+  width: 36px;
+  height: 36px;
+  object-fit: cover;
+  border-radius: 4px;
+  border: 1px solid var(--ui-border-soft);
+}
+
+.m4-file-btn {
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+
+.m4-chip-x {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  padding: 0 2px;
+  margin-left: 4px;
+  font-weight: 700;
+}

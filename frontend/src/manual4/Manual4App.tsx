@@ -145,8 +145,11 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
       )}
       {overview && activeStage === 'materials' && (
         <MaterialsStagePage
+          overview={overview}
           stage={stageByKey.materials}
+          onRefresh={refresh}
           onNextStage={() => selectStage('production')}
+          onMessage={onMessage}
         />
       )}
       {overview && activeStage === 'production' && (

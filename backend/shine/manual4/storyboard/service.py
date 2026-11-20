@@ -667,7 +667,7 @@ def confirm_storyboard_plan(
     for (family, ckey), req in merged_reqs.items():
         prior_req = prior_reqs_by_key.get((family, ckey))
         bound_id = None
-        req_status = "missing"
+        req_status = "declined" if (prior_req is not None and prior_req.user_declined) else "missing"
         if prior_req is not None and prior_req.bound_asset_version_id:
             av = db.get(M4AssetVersion, prior_req.bound_asset_version_id)
             if av is not None and av.status == "promoted":

@@ -160,6 +160,8 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
         )
     else:
         for req in reqs:
+            if req.user_declined or req.status == "declined":
+                continue
             if req.status not in {"promoted", "bound"} or not req.bound_asset_version_id:
                 mat_blockers.append(
                     {
@@ -343,7 +345,9 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             blockers=mat_blockers,
             facts={
                 "requirements_total": len(reqs),
-                "requirements_ready": sum(1 for r in reqs if r.status in {"promoted", "bound"}),
+                "requirements_ready": sum(
+                    1 for r in reqs if r.status in {"promoted", "bound", "declined"} or r.user_declined
+                ),
                 "promoted_assets": promoted_assets_count,
                 "total_assets": total_assets_count,
                 "shots_bound": sum(1 for s in shots if bindings_by_shot.get(s.id)),

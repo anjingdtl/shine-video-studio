@@ -1,0 +1,246 @@
+"""Manual4 Stage 2 HTTP endpoints (material requirements, generation, upload, promotion, shot bindings)."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
+
+from shine.manual4.materials.service import (
+    decline_m4_requirement,
+    get_materials_state,
+    promote_m4_asset,
+    put_shot_bindings,
+    resolve_m4_asset_file,
+    select_or_generate_material,
+    upload_m4_asset,
+)
+from shine.manual4.storage.models import M4Project
+from shine.platform_projects import require_manual4_project
+
+materials_router = APIRouter()
+
+
+def _m4_db(request: Request):
+    session: Session = request.app.state.m4_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _platform_db(request: Request):
+    session: Session = request.app.state.session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _require_m4_operator(request: Request) -> str:
+    from shine.manual4.api.router import m4_operator
+
+    return m4_operator(request)
+
+
+M4DB = Annotated[Session, Depends(_m4_db)]
+PlatformDB = Annotated[Session, Depends(_platform_db)]
+M4Operator = Annotated[str, Depends(_require_m4_operator)]
+
+
+def _project(project_id: str, platform_db: Session, m4_db: Session) -> M4Project:
+    from fastapi import HTTPException
+
+    require_manual4_project(platform_db, project_id)
+    row = m4_db.get(M4Project, project_id)
+    if row is None:
+        raise HTTPException(404, "M4_PROJECT_RECORD_MISSING")
+    return row
+
+
+class M4SelectOrGenerateBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = "generate"
+    asset_version_id: str | None = None
+    prompt: str = ""
+    width: int = Field(default=1024, ge=256, le=2048)
+    height: int = Field(default=1024, ge=256, le=2048)
+    seed: int = Field(default=1, ge=0)
+    steps: int = Field(default=25, ge=1, le=60)
+
+
+class M4DeclineBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = ""
+
+
+class M4PromoteBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    requirement_id: str | None = None
+
+
+class M4ShotBindingItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    asset_version_id: str
+    use_as: str | None = None
+    role_label: str = ""
+
+
+class M4ShotBindingsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    bindings: list[M4ShotBindingItem] = Field(default_factory=list)
+
+
+@materials_router.get("/projects/{project_id}/materials/requirements")
+def m4_materials_requirements(
+    project_id: str,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    return get_materials_state(m4_db, project)
+
+
+@materials_router.post("/projects/{project_id}/materials/{req_id}/select-or-generate")
+def m4_select_or_generate(
+    project_id: str,
+    req_id: str,
+    body: M4SelectOrGenerateBody,
+    request: Request,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    provider = getattr(request.app.state, "m4_image_provider", None)
+    result = select_or_generate_material(
+        m4_db,
+        request.app.state.session_factory,
+        request.app.state.m4_session_factory,
+        request.app.state.settings,
+        request.app.state.m4_root,
+        project,
+        req_id,
+        actor=actor,
+        mode=body.mode,
+        asset_version_id=body.asset_version_id,
+        prompt=body.prompt,
+        width=body.width,
+        height=body.height,
+        seed=body.seed,
+        steps=body.steps,
+        image_provider=provider,
+    )
+    m4_db.commit()
+    return {**result, "state": get_materials_state(m4_db, project)}
+
+
+@materials_router.post("/projects/{project_id}/materials/{req_id}/decline")
+def m4_decline_material(
+    project_id: str,
+    req_id: str,
+    body: M4DeclineBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    result = decline_m4_requirement(m4_db, project, req_id, actor=actor, reason=body.reason)
+    m4_db.commit()
+    return {**result, "state": get_materials_state(m4_db, project)}
+
+
+@materials_router.post("/projects/{project_id}/assets/upload")
+async def m4_upload_asset(
+    project_id: str,
+    request: Request,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+    family: str = Form("character"),
+    entity_name: str = Form(...),
+    variant_name: str = Form(""),
+    requirement_id: Annotated[str, Form()] = "",
+    kind: Annotated[str, Form()] = "",
+    file: UploadFile = File(),  # noqa: B008
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    content = await file.read()
+    asset = upload_m4_asset(
+        m4_db,
+        project,
+        request.app.state.m4_root,
+        actor=actor,
+        family=family,
+        entity_name=entity_name,
+        variant_name=variant_name,
+        requirement_id=requirement_id or None,
+        filename=file.filename or "asset.png",
+        content=content,
+        kind=kind or None,
+    )
+    m4_db.commit()
+    return {"asset": asset, "state": get_materials_state(m4_db, project)}
+
+
+@materials_router.post("/projects/{project_id}/assets/{asset_id}/promote")
+def m4_promote_asset(
+    project_id: str,
+    asset_id: str,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+    body: M4PromoteBody | None = None,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    result = promote_m4_asset(
+        m4_db,
+        project,
+        asset_id,
+        actor=actor,
+        requirement_id=body.requirement_id if body else None,
+    )
+    m4_db.commit()
+    return {**result, "state": get_materials_state(m4_db, project)}
+
+
+@materials_router.get("/projects/{project_id}/assets/{asset_id}/media")
+def m4_asset_media(
+    project_id: str,
+    asset_id: str,
+    request: Request,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> FileResponse:
+    project = _project(project_id, platform_db, m4_db)
+    path, content_type = resolve_m4_asset_file(m4_db, request.app.state.m4_root, project, asset_id)
+    return FileResponse(path, media_type=content_type)
+
+
+@materials_router.put("/projects/{project_id}/shots/{shot_id}/bindings")
+def m4_put_shot_bindings(
+    project_id: str,
+    shot_id: str,
+    body: M4ShotBindingsBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    result = put_shot_bindings(
+        m4_db,
+        project,
+        shot_id,
+        actor=actor,
+        bindings=[item.model_dump() for item in body.bindings],
+    )
+    m4_db.commit()
+    return {**result, "state": get_materials_state(m4_db, project)}
