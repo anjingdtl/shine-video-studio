@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, RefreshCw, X,
 } from 'lucide-react';
-import { api, json } from '../api';
+import { api, json, SETUP_CAPABILITY_LABEL } from '../api';
 import type { SetupCapabilityState, SetupVerdict } from '../api';
 import { describeBlocker } from '../errorActions';
 
@@ -117,16 +117,6 @@ export type MachineProgress = {
 };
 
 const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr', 'relayvsr'];
-
-const STATE_LABEL: Record<string, string> = {
-  MISSING: '未准备',
-  FOUND: '已找到',
-  VERIFIED: '已核验',
-  BOUND: '已就绪',
-  READY: '已就绪',
-  VERIFIED_RENDER: '已真实验证',
-  UNKNOWN: '未知',
-};
 
 function gib(bytes?: number | null): string {
   if (!bytes) return '0 GiB';
@@ -286,7 +276,7 @@ export function SetupEnvironmentStatus({
             <header>
               <b>{cap.label}</b>
               {cap.optional && <span className="setup-cap-optional">可选增强</span>}
-              <span className="setup-cap-state">{STATE_LABEL[cap.state] ?? cap.state}</span>
+              <span className="setup-cap-state">{SETUP_CAPABILITY_LABEL[cap.state] ?? cap.state}</span>
             </header>
             <p>{cap.summary}</p>
             {(cap.advisories ?? []).filter((row) => row.message).length > 0 && <ul className="setup-cap-advisories">

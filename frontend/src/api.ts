@@ -650,6 +650,16 @@ export type SetupVerdict = {
 export type SetupCapabilityState =
   | 'MISSING' | 'FOUND' | 'VERIFIED' | 'BOUND' | 'READY' | 'VERIFIED_RENDER' | 'UNKNOWN';
 
+export const SETUP_CAPABILITY_LABEL: Record<SetupCapabilityState, string> = {
+  MISSING: '待配置',
+  FOUND: '待核验',
+  VERIFIED: '待绑定',
+  BOUND: '待核对运行合同',
+  READY: '已就绪',
+  VERIFIED_RENDER: '已真实验证',
+  UNKNOWN: '状态未知',
+};
+
 export type EnvironmentSnapshot = {
   schema: 'shine.environment.v1';
   comfyui_root: string | null;

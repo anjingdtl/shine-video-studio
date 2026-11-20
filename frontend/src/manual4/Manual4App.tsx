@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Clapperboard, RefreshCw } from 'lucide-react';
-import type { SetupCapabilityState } from '../api';
+import { SETUP_CAPABILITY_LABEL } from '../api';
 import './styles/manual4.css';
 import {
   fetchM4Overview,
@@ -28,16 +28,6 @@ const STAGE_META_LABELS: Record<M4StageKey, string> = {
   materials: '候选/晋升/绑定',
   production: 'H3 原文/批量开拍',
   delivery: '装配/预览/验收',
-};
-
-const ENVIRONMENT_STATE_LABEL: Record<SetupCapabilityState, string> = {
-  MISSING: '待配置',
-  FOUND: '待核验',
-  VERIFIED: '待绑定',
-  BOUND: '待核对运行合同',
-  READY: '已就绪',
-  VERIFIED_RENDER: '已就绪',
-  UNKNOWN: '状态未知',
 };
 
 /** Independent four-stage H3 autonomous production line shell.
@@ -83,8 +73,8 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
   const stages = overview?.readiness.stages ?? [];
   const stageByKey = Object.fromEntries(stages.map((s) => [s.key, s]));
   const environment = sysStatus?.environment;
-  const h3 = environment?.capabilities.h3;
-  const image = environment?.capabilities.image;
+  const h3 = SETUP_CAPABILITY_LABEL[environment?.capabilities.h3?.state ?? 'UNKNOWN'];
+  const image = SETUP_CAPABILITY_LABEL[environment?.capabilities.image?.state ?? 'UNKNOWN'];
   const comfyUI = environment?.services_verified ? '已就绪' : environment?.comfyui_root ? '待核验' : '待配置';
 
   const selectStage = (key: M4StageKey) => {
@@ -104,7 +94,7 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
             <h1 className="m4-title">{overview?.project.title ?? '正在读取四阶作品…'}</h1>
             <p className="m4-subtitle">
               {environment
-                ? `ComfyUI ${comfyUI} · H3 ${ENVIRONMENT_STATE_LABEL[h3?.state ?? 'UNKNOWN']} · Qwen 出图 ${ENVIRONMENT_STATE_LABEL[image?.state ?? 'UNKNOWN']}`
+                ? `ComfyUI ${comfyUI} · H3 ${h3} · Qwen 出图${image}`
                 : loading ? '正在读取本机基础环境…' : '本机基础环境状态读取失败'}
               {' · '}Worker {overview ? (overview.worker_online ? '在线' : '待启动') : '状态未知'}
             </p>

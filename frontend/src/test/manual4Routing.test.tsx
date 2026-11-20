@@ -170,7 +170,7 @@ describe('P1 平台选线与四阶隔离挂载', () => {
     await user.click(screen.getByRole('button', { name: /新建作品/ }));
 
     await screen.findByTestId('manual4-workbench');
-    expect(await screen.findByText('ComfyUI 已就绪 · H3 已就绪 · Qwen 出图 已就绪 · Worker 在线')).toBeVisible();
+    expect(await screen.findByText('ComfyUI 已就绪 · H3 已就绪 · Qwen 出图已真实验证 · Worker 在线')).toBeVisible();
     expect(screen.getByRole('button', { name: /① 人工分镜书/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /② 素材生成/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /③ 排片生产/ })).toBeInTheDocument();
