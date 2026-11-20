@@ -162,7 +162,12 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
         />
       )}
       {overview && activeStage === 'delivery' && (
-        <DeliveryStagePage stage={stageByKey.delivery} />
+        <DeliveryStagePage
+          overview={overview}
+          stage={stageByKey.delivery}
+          onRefresh={refresh}
+          onMessage={onMessage}
+        />
       )}
     </div>
   );

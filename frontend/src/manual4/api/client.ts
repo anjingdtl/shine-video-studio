@@ -541,3 +541,87 @@ export function reconcileM4Job(
     body: JSON.stringify({ decision }),
   });
 }
+
+export type M4DeliveryAcceptance = {
+  id: string;
+  delivery_id: string;
+  decision: 'accepted' | 'rejected';
+  watched: boolean;
+  evidence: string;
+  delivery_sha256: string;
+  actor: string;
+  created_at: string;
+};
+
+export type M4Delivery = {
+  id: string;
+  project_id: string;
+  run_id: string | null;
+  episode_id: string;
+  version: number;
+  status: string;
+  shots_digest: string;
+  edl_json: Array<{ ordinal: number; shot_id: string; shot_code: string; job_id: string; sha256: string; in_s: number; out_s: number }>;
+  sha256: string;
+  byte_size: number | null;
+  duration_s: number | null;
+  width: number | null;
+  height: number | null;
+  fps: number | null;
+  is_mock: boolean;
+  has_subtitles: boolean;
+  media_url: string | null;
+  subtitle_url: string | null;
+  acceptance: M4DeliveryAcceptance | null;
+  created_at: string;
+};
+
+export type M4DeliveryEpisode = {
+  id: string;
+  episode_no: number;
+  episode_code: string;
+  title: string;
+  ready_to_assemble: boolean;
+  shots: Array<{
+    shot_id: string;
+    shot_code: string;
+    target_seconds: number;
+    passed_jobs: Array<{ id: string; output_sha256: string; measured_duration_s: number | null; provider: string; created_at: string }>;
+  }>;
+  deliveries: M4Delivery[];
+};
+
+export type M4DeliveryState = {
+  confirmed_revision: { id: string; revision: number } | null;
+  episodes: M4DeliveryEpisode[];
+  deliveries: M4Delivery[];
+  readiness: M4Overview['readiness'];
+};
+
+export function fetchM4DeliveryState(projectId: string): Promise<M4DeliveryState> {
+  return m4Request<M4DeliveryState>(`/manual4/projects/${projectId}/delivery/state`, { cache: 'no-store' });
+}
+
+export function assembleM4EpisodeDelivery(
+  projectId: string,
+  episodeId: string,
+  opts?: { job_overrides?: Record<string, string>; include_subtitles?: boolean; burn_subtitles?: boolean },
+): Promise<{ delivery: M4Delivery; state: M4DeliveryState }> {
+  return m4Request(`/manual4/projects/${projectId}/episodes/${episodeId}/deliveries/assemble`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts ?? {}),
+  });
+}
+
+export function acceptM4Delivery(
+  projectId: string,
+  deliveryId: string,
+  body: { decision: 'accepted' | 'rejected'; watched: boolean; evidence: string; expected_sha256: string },
+): Promise<{ acceptance: M4DeliveryAcceptance; state: M4DeliveryState }> {
+  return m4Request(`/manual4/projects/${projectId}/deliveries/${deliveryId}/accept`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
