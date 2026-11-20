@@ -3416,7 +3416,7 @@
   ],
   "digests": {
     "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
-    "api_schema": "28bb552248fce13589cb26e754e58d17c0244f767cda8ec41e0f7d1b9e461b94",
+    "api_schema": "7c62524fc6e7dd33a4d8b4add29eb845af7ee5f1ccc046379f898d55aa438be7",
     "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [
@@ -3795,6 +3795,84 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/assets/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/audit",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/deliveries/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/deliveries/{}/subtitles.srt",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/delivery/state",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/jobs/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/llm-options",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/materials/requirements",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/overview",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/production/state",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/readiness",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/projects/{}/storyboard/draft",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/manual4/system/status",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/operator/jobs/{}",
       "status": "DISCOVERED"
     },
@@ -3802,6 +3880,18 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "GET /api/v1/operator/jobs/{}/media",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/platform/projects",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "GET /api/v1/platform/projects/{}/workflow",
       "status": "DISCOVERED"
     },
     {
@@ -4821,6 +4911,90 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/assets/upload",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/assets/{}/promote",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/deliveries/{}/accept",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/episodes/{}/deliveries/assemble",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/jobs/{}/reconcile",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/materials/{}/decline",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/materials/{}/select-or-generate",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/production/runs",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/production/runs/{}/{}",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/production/snapshot/preview",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/shots/{}/prompt/freeze",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/shots/{}/retake",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/storyboard/confirm",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/manual4/projects/{}/storyboard/import",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/operator/jobs/{}/abandon",
       "status": "DISCOVERED"
     },
@@ -4834,6 +5008,18 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/operator/jobs/{}/review",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/platform/manual4-projects",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/platform/projects/{}/workflow",
       "status": "DISCOVERED"
     },
     {
@@ -5926,6 +6112,36 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "PUT /api/v1/agent-routes/bulk",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/manual4/projects/{}/settings",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/manual4/projects/{}/shots/{}/bindings",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/manual4/projects/{}/shots/{}/prompt/draft",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/manual4/projects/{}/shots/{}/render-options",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/manual4/projects/{}/storyboard/draft",
       "status": "DISCOVERED"
     },
     {
