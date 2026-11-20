@@ -27,7 +27,7 @@ from shine.manual4.comfy.image_workflow import (
     MODEL_FAMILY,
 )
 from shine.manual4.materials.probe import probe_file
-from shine.manual4.status.readiness import evaluate_m4_readiness
+from shine.manual4.status.readiness import evaluate_m4_readiness, evaluate_shot_ref2va_bindings
 from shine.manual4.storage.files import (
     ALLOWED_M4_EXTENSIONS,
     safe_m4_filename,
@@ -412,8 +412,10 @@ def get_materials_state(
                 .order_by(M4ShotAssetBinding.ordinal)
             ).all():
                 links_by_shot.setdefault(link.shot_id, []).append(link)
+        raw_asset_by_id = {a.id: a for a in assets}
         for sh in shots:
             sh_links = links_by_shot.get(sh.id, [])
+            ok_ref, ref_code, ref_msg = evaluate_shot_ref2va_bindings(sh_links, raw_asset_by_id)
             serialized_links = [
                 {
                     "id": link.id,
@@ -437,7 +439,8 @@ def get_materials_state(
                     "summary": sh.summary,
                     "requested_assets": sh.requested_assets,
                     "bindings": serialized_links,
-                    "ref2va_ready": len(serialized_links) > 0,
+                    "ref2va_ready": ok_ref,
+                    "ref2va_blocker": {"code": ref_code, "message": ref_msg} if not ok_ref else None,
                 }
             )
 
@@ -449,6 +452,11 @@ def get_materials_state(
         }
         if confirmed
         else None,
+        "slot_limits": {
+            "image": MAX_IMAGE_SLOTS,
+            "audio": MAX_AUDIO_SLOTS,
+            "video": MAX_VIDEO_SLOTS,
+        },
         "requirements": requirements_data,
         "assets": [asset_map[a.id] for a in assets],
         "shots": shots_data,

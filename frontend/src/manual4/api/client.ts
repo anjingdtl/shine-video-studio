@@ -206,6 +206,11 @@ export type M4AssetVersion = {
   duration_s: number | null;
   status: string;
   is_mock: boolean;
+  library_asset_id?: string | null;
+  library_version_id?: string | null;
+  library_rights_id?: string | null;
+  rights_status?: string | null;
+  library_task_id?: string | null;
   provenance: Record<string, unknown>;
   promoted_by: string | null;
   promoted_at: string | null;
@@ -225,6 +230,8 @@ export type M4MaterialRequirement = {
   shot_ids: string[];
   status: string;
   bound_asset_version_id: string | null;
+  pending_task_id?: string | null;
+  pending_task?: { task_id: string; status: string; error_code?: string | null } | null;
   user_declined: boolean;
   bound_asset: M4AssetVersion | null;
   candidates: M4AssetVersion[];
@@ -237,7 +244,7 @@ export type M4ShotBinding = {
   use_as: string;
   role_label: string;
   ordinal: number;
-  asset: M4AssetVersion;
+  asset: M4AssetVersion | null;
 };
 
 export type M4MaterialShot = {
@@ -250,15 +257,85 @@ export type M4MaterialShot = {
   summary: string;
   bindings: M4ShotBinding[];
   ref2va_ready: boolean;
+  ref2va_blocker?: { code: string; message: string } | null;
 };
 
 export type M4MaterialsState = {
   confirmed_revision: { id: string; revision: number } | null;
+  slot_limits?: { image: number; audio: number; video: number };
   requirements: M4MaterialRequirement[];
   assets: M4AssetVersion[];
   shots: M4MaterialShot[];
   readiness: M4Overview['readiness'];
 };
+
+export type M4LlmOption = {
+  id: string;
+  name: string;
+  provider: string;
+  model: string;
+  base_url: string;
+  is_local?: boolean;
+};
+
+export type M4LibraryItem = {
+  library_asset_id: string;
+  library_version_id: string;
+  content_sha256: string;
+  media_kind: string;
+  category: string;
+  rights_id: string;
+  rights_status: string;
+  filename: string;
+  title: string;
+  project_authorized: boolean;
+  media_url: string;
+};
+
+export type M4SystemStatus = {
+  runtime_version: string;
+  schema_version: string;
+  worker_online: boolean;
+  environment?: {
+    installation?: { root?: string; ready?: boolean };
+    capabilities?: Record<string, { status?: string; label?: string }>;
+  };
+};
+
+export function fetchM4SystemStatus(): Promise<M4SystemStatus> {
+  return m4Request<M4SystemStatus>('/manual4/system/status', { cache: 'no-store' });
+}
+
+export function fetchM4LlmOptions(projectId: string): Promise<M4LlmOption[]> {
+  return m4Request<M4LlmOption[]>(`/manual4/projects/${projectId}/llm-options`, { cache: 'no-store' });
+}
+
+export function fetchM4MaterialTask(projectId: string, taskId: string): Promise<{ task_id: string; status: string; error_code?: string | null }> {
+  return m4Request(`/manual4/projects/${projectId}/materials/tasks/${taskId}`, { cache: 'no-store' });
+}
+
+export function searchM4Library(
+  projectId: string,
+  params?: { kind?: string; category?: string; query?: string },
+): Promise<{ items: M4LibraryItem[]; total: number }> {
+  const qs = new URLSearchParams();
+  if (params?.kind) qs.set('kind', params.kind);
+  if (params?.category) qs.set('category', params.category);
+  if (params?.query) qs.set('query', params.query);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return m4Request(`/manual4/projects/${projectId}/materials/library${suffix}`, { cache: 'no-store' });
+}
+
+export function adoptM4LibraryVersion(
+  projectId: string,
+  body: { version_id: string; requirement_id?: string | null; shot_ids?: string[]; family?: string },
+): Promise<{ asset: M4AssetVersion; bound_shots: string[]; state: M4MaterialsState }> {
+  return m4Request(`/manual4/projects/${projectId}/materials/library/adopt`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
 
 export function fetchM4Materials(projectId: string): Promise<M4MaterialsState> {
   return m4Request<M4MaterialsState>(`/manual4/projects/${projectId}/materials/requirements`, { cache: 'no-store' });
@@ -276,7 +353,7 @@ export function selectOrGenerateM4Material(
     seed?: number;
     steps?: number;
   },
-): Promise<{ mode: string; asset: M4AssetVersion; state: M4MaterialsState }> {
+): Promise<{ mode: string; status?: string; task_id?: string | null; asset: M4AssetVersion | null; state: M4MaterialsState }> {
   return m4Request(`/manual4/projects/${projectId}/materials/${reqId}/select-or-generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },

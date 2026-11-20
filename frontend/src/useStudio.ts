@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  api, createManual4Project as apiCreateManual4Project, getPlatformProjects, json, noteSupervisorPort, timeoutSignal,
+  ApiError, api, createManual4Project as apiCreateManual4Project, getPlatformProjects, json, noteSupervisorPort, timeoutSignal,
   type AgentRoute, type Asset, type AuditPage, type Job, type Project,
   type PromptPreview, type ProviderProfile, type QCReport, type QualityGate, type RepairSuggestion,
   type Shot, type Style, type StyleVersion, type SystemStatus, type WorkflowKind, type WorkflowProfile,
@@ -19,6 +19,7 @@ export function useStudio() {
   const [projectId, setProjectId] = useState('');
   const [projectsLoaded, setProjectsLoaded] = useState(false);
   const [projectsLoadError, setProjectsLoadError] = useState('');
+  const [workflowKindError, setWorkflowKindError] = useState('');
   const activeProjectId = useRef(projectId);
   activeProjectId.current = projectId;
   const projectsRequest = useRef(0);
@@ -206,11 +207,23 @@ export function useStudio() {
     // for an empty workspace. A later manual refresh supersedes this request.
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       try {
-        const [rows, platformRows] = await Promise.all([
-          api<Project[]>('/projects', { signal: timeoutSignal(3000), cache: 'no-store' }),
-          getPlatformProjects().catch(() => null),
-        ]);
+        const rowsPromise = api<Project[]>('/projects', { signal: timeoutSignal(3000), cache: 'no-store' });
+        let platformRows: Awaited<ReturnType<typeof getPlatformProjects>> | null = null;
+        let platformFailed = '';
+        const platformPromise = getPlatformProjects().catch((err: unknown) => {
+          if (!(err instanceof ApiError && err.status === 404)) {
+            platformFailed = err instanceof Error ? err.message : '读取项目产线类型失败';
+          }
+          return null;
+        });
+        const [rows, resolvedPlatformRows] = await Promise.all([rowsPromise, platformPromise]);
+        platformRows = resolvedPlatformRows;
         if (requestId !== projectsRequest.current) return null;
+        if (platformFailed) {
+          setWorkflowKindError(platformFailed);
+        } else {
+          setWorkflowKindError('');
+        }
         if (platformRows) {
           const nextKinds: Record<string, WorkflowKind> = {};
           for (const item of platformRows) {
@@ -709,7 +722,7 @@ export function useStudio() {
 
   return {
     // data
-    projects, workflowKinds, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, workflowKinds, workflowKindError, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, notice, report, dismissNotice, busy, dataEpoch, apiOnline,

@@ -15,6 +15,7 @@ from shine.manual4.api.deps import (
 from shine.manual4.api.deps import (
     require_m4_project as _project,
 )
+from shine.manual4.comfy.client import is_loopback_url
 from shine.manual4.storage.models import m4_utcnow
 from shine.manual4.storyboard.service import (
     confirm_storyboard_plan,
@@ -130,7 +131,7 @@ async def m4_import_storyboard(
     if use_llm and llm_profile_id:
         llm_conn = resolve_platform_llm_connection(platform_db, request.app.state.settings, llm_profile_id)
         base_url = str(llm_conn.get("base_url") or "")
-        is_local = base_url.startswith(("http://127.0.0.1", "http://localhost"))
+        is_local = is_loopback_url(base_url)
         if not is_local and not remote_consent:
             raise HTTPException(
                 409,

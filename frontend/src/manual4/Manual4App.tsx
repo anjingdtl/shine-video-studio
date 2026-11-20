@@ -1,7 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Clapperboard, RefreshCw } from 'lucide-react';
 import './styles/manual4.css';
-import { fetchM4Overview, type M4Overview, type M4StageKey } from './api/client';
+import {
+  fetchM4Overview,
+  fetchM4SystemStatus,
+  type M4Overview,
+  type M4StageKey,
+  type M4SystemStatus,
+} from './api/client';
 import { StoryboardStagePage } from './pages/StoryboardStagePage';
 import { MaterialsStagePage } from './pages/MaterialsStagePage';
 import { ScheduleProduceStagePage } from './pages/ScheduleProduceStagePage';
@@ -27,6 +33,7 @@ const STAGE_META_LABELS: Record<M4StageKey, string> = {
  *  Reads ONLY `/api/v1/manual4/*` projections and never invokes seven-stage APIs. */
 export function Manual4App({ projectId, initialStage, onBackToProjects, onMessage }: Props) {
   const [overview, setOverview] = useState<M4Overview | null>(null);
+  const [sysStatus, setSysStatus] = useState<M4SystemStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [activeStage, setActiveStage] = useState<M4StageKey>(initialStage ?? 'storyboard');
@@ -35,10 +42,15 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
     setLoading(true);
     setLoadError('');
     try {
-      const data = await fetchM4Overview(projectId);
+      const [data, status] = await Promise.all([
+        fetchM4Overview(projectId),
+        fetchM4SystemStatus().catch(() => null),
+      ]);
       setOverview(data);
+      if (status) setSysStatus(status);
       if (!initialStage) {
         setActiveStage(data.readiness.next_stage);
+        window.history.replaceState(null, '', `#m4/${data.readiness.next_stage}`);
       }
     } catch (error) {
       const msg = error instanceof Error ? error.message : '读取四阶概览失败';
@@ -59,6 +71,7 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
 
   const stages = overview?.readiness.stages ?? [];
   const stageByKey = Object.fromEntries(stages.map((s) => [s.key, s]));
+  const envCaps = sysStatus?.environment?.capabilities ?? {};
 
   const selectStage = (key: M4StageKey) => {
     setActiveStage(key);
@@ -76,7 +89,10 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
             </span>
             <h1 className="m4-title">{overview?.project.title ?? '正在读取四阶作品…'}</h1>
             <p className="m4-subtitle">
-              独立数据库与执行链路 · 人工分镜与 H3 原文为权威 · 最小单卡互斥协调
+              独立数据库与执行链路 · 共用本机基础环境（
+              {envCaps.h3?.status === 'ready' ? 'H3 已就绪' : envCaps.h3?.status ?? '检测中'} ·{' '}
+              {envCaps.image?.status === 'ready' ? 'Qwen出图就绪' : '出图可选'} ·{' '}
+              Worker {sysStatus?.worker_online || overview?.worker_online ? '在线' : '待启动'}）
             </p>
           </div>
           <div className="m4-header-actions">

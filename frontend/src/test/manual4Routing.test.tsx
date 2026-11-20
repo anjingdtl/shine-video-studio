@@ -100,8 +100,26 @@ describe('P1 平台选线与四阶隔离挂载', () => {
       },
       {
         method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/system/status$`),
+        respond: () => jsonResponse({
+          runtime_version: '2.0.0',
+          schema_version: 'm4.1',
+          worker_online: true,
+          environment: {
+            installation: { root: 'F:/ComfyUI', ready: true },
+            capabilities: { h3: { status: 'ready', label: 'H3 就绪' } },
+          },
+        }),
+      },
+      {
+        method: 'GET',
         pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/overview$`),
         respond: () => jsonResponse(makeM4Overview(m4Id, '四阶短片测试')),
+      },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/llm-options$`),
+        respond: () => jsonResponse([]),
       },
       {
         method: 'GET',
@@ -121,9 +139,15 @@ describe('P1 平台选线与四阶隔离挂载', () => {
       },
       {
         method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/library`),
+        respond: () => jsonResponse({ items: [], total: 0 }),
+      },
+      {
+        method: 'GET',
         pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/requirements$`),
         respond: () => jsonResponse({
           confirmed_revision: null,
+          slot_limits: { image: 6, audio: 2, video: 2 },
           requirements: [],
           assets: [],
           shots: [],
@@ -162,5 +186,90 @@ describe('P1 平台选线与四阶隔离挂载', () => {
       new RegExp(`/api/v1/projects/${m4Id}/`).test(call.url),
     );
     expect(forbiddenSevenCalls).toEqual([]);
+  });
+
+  it('P4 顶栏切换至四阶作品自动续接阶段、隐藏七阶导航并保留动态槽位与非 404 状态', async () => {
+    const user = userEvent.setup();
+    const d7Id = 'proj-d7-a';
+    const m4Id = 'proj-m4-b';
+    const projects = [
+      { id: d7Id, title: '七阶老项目', description: '', language: 'Chinese', created_at: '2026-11-20T00:00:00Z', frozen_style_version_id: null, style_draft: null, allow_remote_review: false, auto_repair_enabled: false, quality_policy: null },
+      { id: m4Id, title: '四阶续接项目', description: '', language: 'Chinese', created_at: '2026-11-20T00:01:00Z', frozen_style_version_id: null, style_draft: null, allow_remote_review: false, auto_repair_enabled: false, quality_policy: null },
+    ];
+    let failPlatform = false;
+    const m4OverviewMaterials = makeM4Overview(m4Id, '四阶续接项目');
+    m4OverviewMaterials.readiness.next_stage = 'materials';
+    m4OverviewMaterials.readiness.stages[0].done = true;
+
+    new StudioStub([
+      { method: 'GET', pattern: /^\/api\/v1\/system\/status$/, respond: () => jsonResponse(SYSTEM_STATUS) },
+      { method: 'GET', pattern: /^\/api\/v1\/projects$/, respond: () => jsonResponse(projects) },
+      {
+        method: 'GET',
+        pattern: /^\/api\/v1\/platform\/projects$/,
+        respond: () =>
+          failPlatform
+            ? { status: 500, body: { detail: 'platform temporarily down' } }
+            : jsonResponse([
+                { id: d7Id, title: '七阶老项目', description: '', language: 'Chinese', workflow_kind: 'director7', selection_revision: 1, created_at: '2026-11-20T00:00:00Z' },
+                { id: m4Id, title: '四阶续接项目', description: '', language: 'Chinese', workflow_kind: 'manual4', selection_revision: 1, created_at: '2026-11-20T00:01:00Z' },
+              ]),
+      },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/projects/${d7Id}$`), respond: () => jsonResponse(projects[0]) },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/projects/${d7Id}/(assets|styles|shots|jobs|deliveries)$`), respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/projects/${d7Id}/events`), respond: () => jsonResponse({ items: [], total: 0 }) },
+      { method: 'GET', pattern: /^\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /^\/api\/v1\/agent-routes$/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /^\/api\/v1\/workflow-profiles/, respond: () => jsonResponse([]) },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/projects/${d7Id}/journey$`),
+        respond: () => jsonResponse({ project_id: d7Id, next_stage: 'script', stages: [{ id: 'script', done: false, blockers: [], facts: {} }] }),
+      },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/projects/${d7Id}/director/overview`), respond: () => jsonResponse({ project_id: d7Id, run: null, episodes: [] }) },
+      { method: 'GET', pattern: /^\/api\/v1\/manual4\/system\/status$/, respond: () => jsonResponse({ runtime_version: '2.0.0', schema_version: 'm4.1', worker_online: true, environment: { installation: { ready: true }, capabilities: {} } }) },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/overview$`), respond: () => jsonResponse(m4OverviewMaterials) },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/library`),
+        respond: () => jsonResponse({ items: [], total: 0 }),
+      },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/requirements$`),
+        respond: () => jsonResponse({
+          confirmed_revision: { id: 'rev-1', revision: 1 },
+          slot_limits: { image: 9, audio: 3, video: 3 },
+          requirements: [],
+          assets: [],
+          shots: [],
+          readiness: m4OverviewMaterials.readiness,
+        }),
+      },
+    ]);
+
+    render(<App />);
+    await screen.findAllByText('七阶老项目');
+
+    // 先进入七阶作品详情（或从项目管理页进入），使当前处于作品工作流页
+    await user.click(screen.getByRole('button', { name: '打开当前作品' }));
+    expect(screen.getByRole('button', { name: /^成片库$/ })).toBeInTheDocument();
+
+    // 从顶栏切换到四阶作品 -> 不应停在 #m4/storyboard，而应自动续接到 next_stage='materials' 且隐藏七阶成片库导航
+    const projectSelect = screen.getByLabelText('快速切换作品');
+    await user.selectOptions(projectSelect, m4Id);
+
+    await screen.findByTestId('manual4-workbench');
+    await screen.findByRole('heading', { name: '② 素材生成' });
+    expect(window.location.hash).toBe('#m4/materials');
+    expect(screen.queryByRole('button', { name: /^成片库$/ })).toBeNull();
+    expect(screen.getByText(/最多 9 图 \+ 3 音频 \+ 3 视频/)).toBeInTheDocument();
+
+    // 若 /platform/projects 偶发 500，不得把已知四阶项目抹回七阶，应保留工作台与错误提示
+    failPlatform = true;
+    await user.click(screen.getByRole('button', { name: '刷新全部数据' }));
+    await waitFor(() => {
+      expect(screen.getByTestId('manual4-workbench')).toBeInTheDocument();
+    });
   });
 });

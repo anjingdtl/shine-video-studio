@@ -27,9 +27,31 @@ from shine.manual4.storage.models import (
 )
 from shine.manual4.storyboard.parser import (
     M4ParseError,
+    chunk_storyboard_text,
     extract_storyboard_from_text,
     parse_m4_document,
 )
+
+
+def _shot_content_sha(
+    *,
+    target_seconds: float,
+    summary: str,
+    dialogue: list[Any],
+    requested_assets: list[Any],
+    aspect_ratio: str,
+    continuity_mode: str,
+) -> str:
+    return canonical_digest(
+        {
+            "target_seconds": round(float(target_seconds), 4),
+            "summary": str(summary or ""),
+            "dialogue": list(dialogue or []),
+            "requested_assets": list(requested_assets or []),
+            "aspect_ratio": str(aspect_ratio or "16:9"),
+            "continuity_mode": str(continuity_mode or "cut"),
+        }
+    )
 
 
 def _canonical_entity_key(name: str, variant: str) -> str:
@@ -278,15 +300,14 @@ def save_storyboard_draft(
     return _revision_public(draft, project)
 
 
-def _llm_extract_unstructured(
-    text: str,
+def _llm_extract_chunk(
+    chunk_text: str,
     *,
     llm_connection: dict[str, Any] | None,
     mock_responder: Any = None,
 ) -> dict[str, Any] | None:
-    """Optional structured extractor for unstructured text (never rewrites user prose)."""
     if mock_responder is not None:
-        return mock_responder(text)
+        return mock_responder(chunk_text)
     if llm_connection is None:
         return None
     import httpx
@@ -308,26 +329,97 @@ def _llm_extract_unstructured(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    resp = httpx.post(
-        f"{base_url}/chat/completions",
-        headers=headers,
-        json={
-            "model": model,
-            "temperature": 0,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": text[:12000]},
-            ],
-        },
-        timeout=timeout_s,
-    )
-    resp.raise_for_status()
+    try:
+        resp = httpx.post(
+            f"{base_url}/chat/completions",
+            headers=headers,
+            json={
+                "model": model,
+                "temperature": 0,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": chunk_text},
+                ],
+            },
+            timeout=timeout_s,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            502,
+            {"code": "M4_LLM_EXTRACT_FAILED", "message": f"辅助分镜解析模型调用失败：{type(exc).__name__}"},
+        ) from exc
     content = resp.json()["choices"][0]["message"]["content"]
     match = content[content.find("{") : content.rfind("}") + 1] if "{" in content else ""
     if not match:
         return None
     parsed = json.loads(match)
     return parsed if isinstance(parsed, dict) and isinstance(parsed.get("episodes"), list) else None
+
+
+def _llm_extract_unstructured(
+    text: str,
+    *,
+    llm_connection: dict[str, Any] | None,
+    mock_responder: Any = None,
+    source_sha256: str = "",
+    document_id: str = "",
+) -> dict[str, Any] | None:
+    """Chunked structured extractor for unstructured or >12k texts (never truncates silently)."""
+    chunks = chunk_storyboard_text(text)
+    if not chunks:
+        return None
+    merged_by_ep: dict[int, dict[str, Any]] = {}
+    ambiguities: list[dict[str, Any]] = []
+    any_hit = False
+    for ch in chunks:
+        res = _llm_extract_chunk(ch.text, llm_connection=llm_connection, mock_responder=mock_responder)
+        if not res or not res.get("episodes"):
+            continue
+        any_hit = True
+        for amb in res.get("ambiguities") or []:
+            if isinstance(amb, dict):
+                ambiguities.append({**amb, "chunk_index": ch.chunk_index})
+        for raw_ep in res.get("episodes") or []:
+            ep_no = int(raw_ep.get("episode_no") or (len(merged_by_ep) + 1))
+            bucket = merged_by_ep.setdefault(
+                ep_no,
+                {
+                    "episode_no": ep_no,
+                    "episode_code": str(raw_ep.get("episode_code") or f"ep{ep_no:02d}"),
+                    "title": str(raw_ep.get("title") or f"第{ep_no}集"),
+                    "target_total_seconds": raw_ep.get("target_total_seconds"),
+                    "shots": [],
+                },
+            )
+            if not bucket.get("target_total_seconds") and raw_ep.get("target_total_seconds"):
+                bucket["target_total_seconds"] = raw_ep.get("target_total_seconds")
+            for raw_sh in raw_ep.get("shots") or []:
+                sh_copy = dict(raw_sh)
+                existing_span = sh_copy.get("source_span") if isinstance(sh_copy.get("source_span"), dict) else {}
+                sh_copy["source_span"] = {
+                    "document_id": document_id,
+                    "source_sha256": source_sha256,
+                    "chunk_index": ch.chunk_index,
+                    "start_offset": ch.start_offset,
+                    "end_offset": ch.end_offset,
+                    **existing_span,
+                }
+                if sh_copy.get("target_seconds") is None:
+                    ambiguities.append(
+                        {
+                            "code": "M4_MISSING_EXPLICIT_DURATION",
+                            "episode_no": ep_no,
+                            "shot_no": sh_copy.get("shot_no"),
+                            "message": f"第{ep_no}集镜头缺少明确时长，请手工填写。",
+                            "source_span": sh_copy["source_span"],
+                        }
+                    )
+                bucket["shots"].append(sh_copy)
+    if not any_hit:
+        return None
+    episodes = [merged_by_ep[k] for k in sorted(merged_by_ep)]
+    return {"episodes": episodes, "ambiguities": ambiguities}
 
 
 def import_storyboard_source(
@@ -364,14 +456,19 @@ def import_storyboard_source(
     db.flush()
 
     extracted = extract_storyboard_from_text(parsed.text, source_sha256=digest, document_id=doc.id)
-    if use_llm and not extracted["episodes"]:
+    needs_llm_assist = not extracted["episodes"] or any(not ep.get("shots") for ep in extracted["episodes"])
+    if use_llm and needs_llm_assist:
         llm_data = _llm_extract_unstructured(
-            parsed.text, llm_connection=llm_connection, mock_responder=mock_responder
+            parsed.text,
+            llm_connection=llm_connection,
+            mock_responder=mock_responder,
+            source_sha256=digest,
+            document_id=doc.id,
         )
         if llm_data and llm_data.get("episodes"):
             extracted = {
                 "episodes": llm_data["episodes"],
-                "ambiguities": [],
+                "ambiguities": llm_data.get("ambiguities") or [],
                 "chunks": extracted["chunks"],
                 "extractor": "llm_assisted",
             }
@@ -563,17 +660,38 @@ def confirm_storyboard_plan(
         for sh in ep["shots"]:
             old_sh = prior_shots_by_code.get(sh["shot_code"])
             new_rev = 1
-            duration_changed = False
+            changed = False
+            invalidation_reason: str | None = None
+            sh_content_sha = _shot_content_sha(
+                target_seconds=float(sh["target_seconds"]),
+                summary=sh["summary"],
+                dialogue=sh["dialogue"],
+                requested_assets=sh["requested_assets"],
+                aspect_ratio=sh["aspect_ratio"],
+                continuity_mode=sh["continuity_mode"],
+            )
             if old_sh is not None:
                 duration_changed = abs(float(old_sh.target_seconds) - float(sh["target_seconds"])) > 1e-6
-                changed = (
-                    duration_changed
-                    or old_sh.summary != sh["summary"]
-                    or old_sh.dialogue != sh["dialogue"]
-                    or old_sh.requested_assets != sh["requested_assets"]
+                options_changed = (
+                    old_sh.aspect_ratio != sh["aspect_ratio"]
+                    or old_sh.continuity_mode != sh["continuity_mode"]
                 )
+                old_sha = getattr(old_sh, "content_sha256", None) or _shot_content_sha(
+                    target_seconds=float(old_sh.target_seconds),
+                    summary=old_sh.summary,
+                    dialogue=old_sh.dialogue,
+                    requested_assets=old_sh.requested_assets,
+                    aspect_ratio=old_sh.aspect_ratio,
+                    continuity_mode=old_sh.continuity_mode,
+                )
+                changed = old_sha != sh_content_sha
                 new_rev = old_sh.revision + 1 if changed else old_sh.revision
-                if duration_changed:
+                if changed:
+                    invalidation_reason = (
+                        "M4_DURATION_CHANGED"
+                        if duration_changed
+                        else ("M4_SHOT_OPTIONS_CHANGED" if options_changed else "M4_STORYBOARD_SHOT_CHANGED")
+                    )
                     for pr in db.scalars(
                         select(M4ManualPromptRevision).where(
                             M4ManualPromptRevision.shot_id == old_sh.id,
@@ -581,7 +699,7 @@ def confirm_storyboard_plan(
                         )
                     ).all():
                         pr.status = "INVALIDATED"
-                        pr.invalidated_reason = "M4_DURATION_CHANGED"
+                        pr.invalidated_reason = invalidation_reason
                         invalidated_prompts.append(sh["shot_code"])
 
             sh_row = M4Shot(
@@ -591,6 +709,7 @@ def confirm_storyboard_plan(
                 shot_no=sh["shot_no"],
                 shot_code=sh["shot_code"],
                 revision=new_rev,
+                content_sha256=sh_content_sha,
                 target_seconds=float(sh["target_seconds"]),
                 summary=sh["summary"],
                 dialogue=sh["dialogue"],
@@ -602,7 +721,8 @@ def confirm_storyboard_plan(
             db.add(sh_row)
             db.flush()
 
-            # Carry forward bindings and valid frozen prompts when shot duration did not change
+            # Carry forward bindings, and preserve FROZEN only when shot semantics/options are unchanged;
+            # otherwise preserve the prior text as INVALIDATED with explicit reason so history isn't lost.
             if old_sh is not None:
                 for old_link in db.scalars(
                     select(M4ShotAssetBinding)
@@ -619,35 +739,39 @@ def confirm_storyboard_plan(
                             ordinal=old_link.ordinal,
                         )
                     )
-                if not duration_changed:
-                    old_prompt = db.scalar(
-                        select(M4ManualPromptRevision)
-                        .where(
-                            M4ManualPromptRevision.shot_id == old_sh.id,
-                            M4ManualPromptRevision.status == "FROZEN",
-                        )
-                        .order_by(M4ManualPromptRevision.revision.desc())
-                        .limit(1)
+                old_prompt = db.scalar(
+                    select(M4ManualPromptRevision)
+                    .where(
+                        M4ManualPromptRevision.shot_id == old_sh.id,
+                        M4ManualPromptRevision.status.in_(["FROZEN", "INVALIDATED"]),
                     )
-                    if old_prompt is not None:
-                        db.add(
-                            M4ManualPromptRevision(
-                                project_id=project.id,
-                                shot_id=sh_row.id,
-                                revision=1,
-                                status="FROZEN",
-                                prompt_text=old_prompt.prompt_text,
-                                prompt_sha256=old_prompt.prompt_sha256,
-                                shot_revision=sh_row.revision,
-                                target_seconds=sh_row.target_seconds,
-                                generation_mode=old_prompt.generation_mode,
-                                reference_manifest=old_prompt.reference_manifest,
-                                reference_manifest_sha256=old_prompt.reference_manifest_sha256,
-                                warnings=old_prompt.warnings,
-                                frozen_by=old_prompt.frozen_by,
-                                frozen_at=old_prompt.frozen_at,
-                            )
+                    .order_by(M4ManualPromptRevision.revision.desc())
+                    .limit(1)
+                )
+                if old_prompt is not None:
+                    db.add(
+                        M4ManualPromptRevision(
+                            project_id=project.id,
+                            shot_id=sh_row.id,
+                            revision=1,
+                            status="FROZEN" if (not changed and old_prompt.status == "FROZEN") else "DRAFT",
+                            invalidated_reason=(
+                                None
+                                if (not changed and old_prompt.status == "FROZEN")
+                                else (invalidation_reason or old_prompt.invalidated_reason)
+                            ),
+                            prompt_text=old_prompt.prompt_text,
+                            prompt_sha256=old_prompt.prompt_sha256,
+                            shot_revision=sh_row.revision,
+                            target_seconds=sh_row.target_seconds,
+                            generation_mode=old_prompt.generation_mode,
+                            reference_manifest=old_prompt.reference_manifest,
+                            reference_manifest_sha256=old_prompt.reference_manifest_sha256,
+                            warnings=old_prompt.warnings,
+                            frozen_by=old_prompt.frozen_by,
+                            frozen_at=old_prompt.frozen_at,
                         )
+                    )
 
             for asset_ref in sh["requested_assets"]:
                 ckey = _canonical_entity_key(asset_ref["name"], asset_ref.get("variant", ""))

@@ -1093,10 +1093,13 @@ function LibraryPage() {
 }
 
 function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Project[]; projectId: string; projectAssets: Asset[] }) {
+  const safeProjects = projects.filter((p) => (p as Project & { workflow_kind?: string }).workflow_kind !== 'manual4');
   const [query, setQuery] = useState('');
   const { assets, loading, error: loadError, refresh } = useFreshList(query);
   const [selectedVersion, setSelectedVersion] = useState('');
-  const [targetProject, setTargetProject] = useState(projectId || projects[0]?.id || '');
+  const [targetProject, setTargetProject] = useState(
+    (projectId && safeProjects.some((p) => p.id === projectId) ? projectId : '') || safeProjects[0]?.id || '',
+  );
   const [role, setRole] = useState('character');
   const [entity, setEntity] = useState('');
   const [assignments, setAssignments] = useState<Array<Record<string, any>>>([]);
@@ -1110,8 +1113,8 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
   // 匹配 option 时会显示浏览器回落的第一项、state 仍是空串——用户看着「已选」却
   // 永远分配失败。这里在作品到达后回填，控件与 state 保持一致。
   useEffect(() => {
-    if (!projects.length) { setTargetProject(''); return; }
-    setTargetProject((current) => (current && projects.some((row) => row.id === current) ? current : projects[0].id));
+    if (!safeProjects.length) { setTargetProject(''); return; }
+    setTargetProject((current) => (current && safeProjects.some((row) => row.id === current) ? current : safeProjects[0].id));
   }, [projects]);
   const choices = assets.filter((asset) => asset.current_version?.status === 'PROMOTED' && !asset.current_version.is_mock);
   async function assign() {
@@ -1143,10 +1146,10 @@ function AssignmentsPage({ projects, projectId, projectAssets }: { projects: Pro
   return <div className="asset-assignment-layout">
     <div className="asset-card"><div className="asset-eyebrow">全局素材 → 作品</div><h2>分配一个已晋升版本</h2><p className="asset-muted">每个作品会得到独立 Asset 身份；旧项目冻结引用保持原样。</p>
       {loading && <div className="asset-empty-small">正在读取全局素材…</div>}
-      {projects.length ? <>
+      {safeProjects.length ? <>
         <label className="asset-field"><span>目标作品</span><select value={targetProject} onChange={(event) => setTargetProject(event.target.value)}>
           {!targetProject && <option value="">请选择作品</option>}
-          {projects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
+          {safeProjects.map((project) => <option key={project.id} value={project.id}>{project.title}</option>)}
         </select></label>
         <label className="asset-field"><span>搜索素材</span><input value={query} onChange={(event) => {
           setQuery(event.target.value);

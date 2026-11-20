@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shine.manual4.delivery.assembler import M4ClipSpec, assemble_m4_episode_reel, build_episode_srt
+from shine.manual4.delivery.technical_qc import M4TechnicalExpectations, run_m4_technical_qc
 from shine.manual4.status.readiness import evaluate_m4_readiness
 from shine.manual4.storage.files import safe_m4_path, sha256_file, store_m4_bytes
 from shine.manual4.storage.models import (
@@ -20,10 +21,66 @@ from shine.manual4.storage.models import (
     M4DeliveryAcceptance,
     M4EpisodePlan,
     M4Job,
+    M4ManualPromptRevision,
     M4Project,
     M4Shot,
     M4StoryboardRevision,
 )
+
+
+def _fresh_passed_jobs_by_shot(
+    m4_db: Session,
+    project_id: str,
+    shots: list[M4Shot],
+) -> tuple[dict[str, list[M4Job]], dict[str, M4ManualPromptRevision]]:
+    """Select only current-revision, non-stale passed jobs preferring real renders over mock."""
+    shot_ids = [s.id for s in shots]
+    if not shot_ids:
+        return {}, {}
+    shot_by_id = {s.id: s for s in shots}
+    frozen_by_shot: dict[str, M4ManualPromptRevision] = {}
+    for pr in m4_db.scalars(
+        select(M4ManualPromptRevision)
+        .where(
+            M4ManualPromptRevision.shot_id.in_(shot_ids),
+            M4ManualPromptRevision.status == "FROZEN",
+        )
+        .order_by(M4ManualPromptRevision.revision.desc())
+    ).all():
+        frozen_by_shot.setdefault(pr.shot_id, pr)
+
+    grouped: dict[str, list[M4Job]] = {}
+    for job in m4_db.scalars(
+        select(M4Job)
+        .where(
+            M4Job.project_id == project_id,
+            M4Job.shot_id.in_(shot_ids),
+            M4Job.status == "PASSED",
+        )
+        .order_by(M4Job.created_at.desc())
+    ).all():
+        if not job.output_storage_path:
+            continue
+        sh = shot_by_id.get(job.shot_id)
+        if sh is None or job.shot_revision != sh.revision:
+            continue
+        frozen = frozen_by_shot.get(job.shot_id)
+        if frozen is None:
+            continue
+        if (
+            job.prompt_sha256 != frozen.prompt_sha256
+            or job.reference_manifest_sha256 != frozen.reference_manifest_sha256
+        ):
+            continue
+        grouped.setdefault(job.shot_id, []).append(job)
+
+    for sid, jobs in grouped.items():
+        grouped[sid] = sorted(
+            jobs,
+            key=lambda j: (1 if j.provider != "mock" else 0, j.created_at),
+            reverse=True,
+        )
+    return grouped, frozen_by_shot
 
 ACCEPTANCE_DECISIONS = {"accepted", "rejected"}
 
@@ -113,19 +170,7 @@ def get_delivery_state(m4_db: Session, project: M4Project) -> dict[str, Any]:
             .where(M4Shot.storyboard_revision_id == confirmed.id)
             .order_by(M4Shot.episode_id, M4Shot.shot_no)
         ).all()
-        shot_ids = [s.id for s in shots]
-        passed_jobs_by_shot: dict[str, list[M4Job]] = {}
-        if shot_ids:
-            for job in m4_db.scalars(
-                select(M4Job)
-                .where(
-                    M4Job.project_id == project.id,
-                    M4Job.shot_id.in_(shot_ids),
-                    M4Job.status == "PASSED",
-                )
-                .order_by(M4Job.created_at.desc())
-            ).all():
-                passed_jobs_by_shot.setdefault(job.shot_id, []).append(job)
+        passed_jobs_by_shot, _frozen = _fresh_passed_jobs_by_shot(m4_db, project.id, shots)
 
         for ep in episodes:
             ep_shots = [s for s in shots if s.episode_id == ep.id]
@@ -206,29 +251,31 @@ def assemble_episode_delivery(
 
     overrides = dict(job_overrides or {})
     clips_with_dialogue: list[tuple[M4ClipSpec, list[dict[str, Any]], M4Job]] = []
+    fresh_by_shot, frozen_by_shot = _fresh_passed_jobs_by_shot(m4_db, project.id, shots)
     for sh in shots:
         chosen: M4Job | None = None
         if sh.id in overrides:
             chosen = m4_db.get(M4Job, overrides[sh.id])
-            if chosen is None or chosen.shot_id != sh.id or chosen.status != "PASSED":
+            frozen = frozen_by_shot.get(sh.id)
+            if (
+                chosen is None
+                or chosen.shot_id != sh.id
+                or chosen.status != "PASSED"
+                or chosen.shot_revision != sh.revision
+                or frozen is None
+                or chosen.prompt_sha256 != frozen.prompt_sha256
+                or chosen.reference_manifest_sha256 != frozen.reference_manifest_sha256
+            ):
                 raise HTTPException(
                     409,
                     {
                         "code": "M4_OVERRIDE_JOB_NOT_PASSED",
-                        "message": f"镜头 {sh.shot_code} 指定的替代任务未通过质检。",
+                        "message": f"镜头 {sh.shot_code} 指定的替代任务未通过或已过期。",
                     },
                 )
         else:
-            chosen = m4_db.scalar(
-                select(M4Job)
-                .where(
-                    M4Job.project_id == project.id,
-                    M4Job.shot_id == sh.id,
-                    M4Job.status == "PASSED",
-                )
-                .order_by(M4Job.created_at.desc(), M4Job.ordinal.desc())
-                .limit(1)
-            )
+            cands = fresh_by_shot.get(sh.id, [])
+            chosen = cands[0] if cands else None
         if chosen is None or not chosen.output_storage_path:
             raise HTTPException(
                 409,
@@ -279,8 +326,16 @@ def assemble_episode_delivery(
         .order_by(M4Delivery.version.desc())
         .limit(1)
     )
-    if existing_same is not None:
-        return _serialize_delivery(existing_same)
+    if existing_same is not None and existing_same.storage_path and existing_same.sha256:
+        cached_file = safe_m4_path(m4_root, existing_same.storage_path)
+        if cached_file.is_file() and sha256_file(cached_file) == existing_same.sha256:
+            latest_acc = m4_db.scalar(
+                select(M4DeliveryAcceptance)
+                .where(M4DeliveryAcceptance.delivery_id == existing_same.id)
+                .order_by(M4DeliveryAcceptance.created_at.desc())
+                .limit(1)
+            )
+            return _serialize_delivery(existing_same, latest_acc)
 
     latest_ver = m4_db.scalar(
         select(M4Delivery.version)
@@ -318,6 +373,25 @@ def assemble_episode_delivery(
             subtitle_srt=srt_text,
             burn_subtitles=burn_subtitles,
         )
+        deliv_qc = run_m4_technical_qc(
+            safe_m4_path(m4_root, out_meta["storage_path"]),
+            expectations=M4TechnicalExpectations(
+                duration_s=float(out_meta["duration_s"]),
+                duration_tolerance_s=2.0,
+                expect_audio=False,
+                expected_fps=24.0,
+                require_decodable=True,
+            ),
+        )
+        if deliv_qc["result"] == "failed":
+            raise HTTPException(
+                409,
+                {
+                    "code": "M4_DELIVERY_QC_FAILED",
+                    "message": "合轨成片未通过技术质检（请检查时长或音视频编码流）。",
+                    "qc": deliv_qc,
+                },
+            )
 
     delivery = M4Delivery(
         project_id=project.id,

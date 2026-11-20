@@ -22,7 +22,7 @@ from shine.manual4.delivery.service import (
     get_delivery_state,
     record_delivery_acceptance,
 )
-from shine.manual4.storage.files import safe_m4_path
+from shine.manual4.storage.files import safe_m4_path, sha256_file
 from shine.manual4.storage.models import M4Delivery
 
 delivery_router = APIRouter()
@@ -126,6 +126,11 @@ def m4_delivery_media(
     path = safe_m4_path(request.app.state.m4_root, deliv.storage_path)
     if not path.is_file():
         raise HTTPException(404, {"code": "M4_DELIVERY_FILE_MISSING", "message": "磁盘成片文件缺失。"})
+    if deliv.sha256 and sha256_file(path) != deliv.sha256:
+        raise HTTPException(
+            409,
+            {"code": "M4_DELIVERY_SHA_MISMATCH", "message": "成片文件校验和与台账不一致，已拒绝播放。"},
+        )
     return FileResponse(path, media_type="video/mp4")
 
 

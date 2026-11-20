@@ -20,7 +20,7 @@ type Props = {
   stage?: M4StageSummary;
   onRefresh: () => Promise<void>;
   onNextStage: () => void;
-  onMessage?: (msg: string) => void;
+  onMessage?: (msg: string, kind?: 'success' | 'error') => void;
 };
 
 export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextStage, onMessage }: Props) {
@@ -115,7 +115,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       await applyState(res.state);
       onMessage?.(`已保存 H3 提示词草稿（版本 ${res.prompt.revision}）。`);
     } catch (err) {
-      onMessage?.(`保存草稿失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`保存草稿失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -128,7 +128,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       await applyState(res.state);
       onMessage?.(`已冻结 H3 原文提示词（版本 ${res.prompt.revision}）。`);
     } catch (err) {
-      onMessage?.(`冻结失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`冻结失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -140,7 +140,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       const res = await updateM4ShotOptions(projectId, shotId, opts);
       await applyState(res.state);
     } catch (err) {
-      onMessage?.(`修改镜头配置失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`修改镜头配置失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -154,7 +154,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       onMessage?.(`快照校验通过（共 ${snap.items.length} 镜，SHA ${snap.snapshot_sha256.slice(0, 10)}）。`);
     } catch (err) {
       setSnapshotPreview(null);
-      onMessage?.(`快照校验阻滞：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`快照校验阻滞：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -168,7 +168,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       setSnapshotPreview(null);
       onMessage?.(`已建立四阶排片批次 ${res.run.id.slice(0, 8)}，等待或正在由四阶 Worker 连续出片。`);
     } catch (err) {
-      onMessage?.(`开拍提交失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`开拍提交失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -181,7 +181,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       await applyState(res.state);
       onMessage?.(`批次状态已更新为 ${res.run.status}。`);
     } catch (err) {
-      onMessage?.(`操作失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`操作失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -194,7 +194,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       await applyState(res.state);
       onMessage?.('已建立单镜重拍任务，历史成片产物均完整保留。');
     } catch (err) {
-      onMessage?.(`单镜重拍失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`单镜重拍失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -207,7 +207,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       await applyState(res.state);
       onMessage?.(`任务已完成人工对账（${decision}）。`);
     } catch (err) {
-      onMessage?.(`对账失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`对账失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -277,14 +277,32 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
           <label>
             模型变体：
             <select className="m4-input" value={variantId} onChange={(e) => setVariantId(e.target.value)}>
-              <option value="h3-ref2va-int8-convrot">H3 Ref2VA INT8 ConvRot（本机基线）</option>
+              {(state?.options.variants?.length
+                ? state.options.variants
+                : [{ variant_id: 'h3-ref2va-int8-convrot', label: 'H3 Ref2VA INT8 ConvRot（本机基线）', verified: true, accelerators: ['pdd8', 'native20'] }]
+              ).map((v) => (
+                <option key={v.variant_id} value={v.variant_id}>
+                  {v.label}{v.verified ? '' : '（未验收）'}
+                </option>
+              ))}
             </select>
           </label>
           <label>
             加速配方：
             <select className="m4-input" value={acceleratorId} onChange={(e) => setAcceleratorId(e.target.value)}>
-              <option value="pdd8">PDD 8 步（推荐）</option>
-              <option value="native20">原生 20 步</option>
+              {(state?.options.accelerators?.length
+                ? state.options.accelerators
+                : [
+                    { id: 'pdd8', steps: 8, requires_pdd: true, label: 'PDD 8 步（推荐）' },
+                    { id: 'native20', steps: 20, requires_pdd: false, label: '原生 20 步' },
+                  ]
+              )
+                .filter((a) => a.requires_pdd !== null)
+                .map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.label} ({a.steps} 步)
+                  </option>
+                ))}
             </select>
           </label>
           <label>
@@ -294,10 +312,25 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
               value={resolutionScale}
               onChange={(e) => setResolutionScale(Number(e.target.value))}
             >
-              <option value={0.3}>0.3× 快速验通</option>
-              <option value={0.5}>0.5× 中等预览</option>
-              <option value={0.7}>0.7× 高清</option>
-              <option value={1.0}>1.0× 原生（1344×768 / 768×1344）</option>
+              {(state?.options.frames?.length
+                ? Array.from(
+                    new Map(
+                      state.options.frames
+                        .filter((f) => f.aspect_ratio === '16:9')
+                        .map((f) => [f.scale, f]),
+                    ).values(),
+                  )
+                : [
+                    { scale: 0.3, width: 416, height: 240 },
+                    { scale: 0.5, width: 672, height: 384 },
+                    { scale: 0.7, width: 960, height: 544 },
+                    { scale: 1.0, width: 1344, height: 768 },
+                  ]
+              ).map((f) => (
+                <option key={f.scale} value={f.scale}>
+                  {f.scale}× ({f.width}×{f.height})
+                </option>
+              ))}
             </select>
           </label>
           <label>

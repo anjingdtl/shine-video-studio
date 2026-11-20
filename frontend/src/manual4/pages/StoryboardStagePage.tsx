@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
   confirmM4Storyboard,
+  fetchM4LlmOptions,
   fetchM4StoryboardDraft,
   importM4Storyboard,
   saveM4StoryboardDraft,
   type M4DraftEpisode,
   type M4DraftShot,
+  type M4LlmOption,
   type M4Overview,
   type M4RequestedAsset,
   type M4StageSummary,
@@ -55,14 +57,34 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
   const [ackDeviation, setAckDeviation] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errorText, setErrorText] = useState('');
+  const [llmOptions, setLlmOptions] = useState<M4LlmOption[]>([]);
+  const [useLlm, setUseLlm] = useState(false);
+  const [llmProfileId, setLlmProfileId] = useState('');
+  const [remoteConsent, setRemoteConsent] = useState(false);
+
+  const selectedLlm = llmOptions.find((o) => o.id === llmProfileId) ?? null;
+  const needsRemoteConsent = Boolean(
+    useLlm &&
+      selectedLlm &&
+      selectedLlm.is_local === false &&
+      selectedLlm.base_url &&
+      !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(selectedLlm.base_url),
+  );
 
   const loadDraft = useCallback(async () => {
     try {
-      const state = await fetchM4StoryboardDraft(overview.project.id);
+      const [state, options] = await Promise.all([
+        fetchM4StoryboardDraft(overview.project.id),
+        fetchM4LlmOptions(overview.project.id).catch(() => [] as M4LlmOption[]),
+      ]);
       setPayload(state.draft.payload);
       setRevision(state.draft.revision);
       setDraftStatus(state.draft.status);
       setSourceSha(state.draft.source_sha256);
+      setLlmOptions(options);
+      if (options.length > 0) {
+        setLlmProfileId((prev) => prev || options[0].id);
+      }
     } catch (error) {
       setErrorText(error instanceof Error ? error.message : '读取分镜草稿失败');
     }
@@ -77,7 +99,13 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
     setBusy(true);
     setErrorText('');
     try {
-      const res = await importM4Storyboard(overview.project.id, { text: pasteText, filename: 'manual_paste.txt' });
+      const res = await importM4Storyboard(overview.project.id, {
+        text: pasteText,
+        filename: 'manual_paste.txt',
+        useLlm,
+        llmProfileId: useLlm ? llmProfileId || undefined : undefined,
+        remoteConsent: useLlm ? remoteConsent : false,
+      });
       setPayload(res.draft.payload);
       setRevision(res.draft.revision);
       setDraftStatus(res.draft.status);
@@ -97,7 +125,12 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
     setBusy(true);
     setErrorText('');
     try {
-      const res = await importM4Storyboard(overview.project.id, { file });
+      const res = await importM4Storyboard(overview.project.id, {
+        file,
+        useLlm,
+        llmProfileId: useLlm ? llmProfileId || undefined : undefined,
+        remoteConsent: useLlm ? remoteConsent : false,
+      });
       setPayload(res.draft.payload);
       setRevision(res.draft.revision);
       setDraftStatus(res.draft.status);
@@ -255,6 +288,47 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
           placeholder={'例：\n第1集：雨夜重逢\n第1镜（6s）：雨夜窄巷中林晚撑伞回头。\n人物：林晚（雨衣版）\n场景：雨夜窄巷'}
         />
         <div className="m4-toolbar" style={{ flexDirection: 'column', alignItems: 'stretch' }}>
+          <label className="m4-footer-note" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <input
+              type="checkbox"
+              checked={useLlm}
+              disabled={busy}
+              onChange={(e) => setUseLlm(e.target.checked)}
+            />
+            使用辅助模型解析非结构化文本
+          </label>
+          {useLlm && (
+            <>
+              <select
+                className="m4-input"
+                aria-label="辅助模型配置"
+                value={llmProfileId}
+                disabled={busy || llmOptions.length === 0}
+                onChange={(e) => setLlmProfileId(e.target.value)}
+              >
+                {llmOptions.length === 0 ? (
+                  <option value="">暂无可用 LLM 配置</option>
+                ) : (
+                  llmOptions.map((opt) => (
+                    <option key={opt.id} value={opt.id}>
+                      {opt.name} ({opt.model})
+                    </option>
+                  ))
+                )}
+              </select>
+              {needsRemoteConsent && (
+                <label className="m4-footer-note" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    type="checkbox"
+                    checked={remoteConsent}
+                    disabled={busy}
+                    onChange={(e) => setRemoteConsent(e.target.checked)}
+                  />
+                  确认允许将分镜文本发送至远程 LLM 接口
+                </label>
+              )}
+            </>
+          )}
           <button type="button" className="btn-secondary" disabled={busy || !pasteText.trim()} onClick={() => void handleImportText()}>
             解析粘贴文本
           </button>

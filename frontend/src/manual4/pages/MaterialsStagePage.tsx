@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
+  adoptM4LibraryVersion,
   declineM4Material,
   fetchM4Materials,
+  fetchM4MaterialTask,
   promoteM4Asset,
   putM4ShotBindings,
+  searchM4Library,
   selectOrGenerateM4Material,
   uploadM4Asset,
   type M4AssetVersion,
+  type M4LibraryItem,
   type M4MaterialsState,
   type M4Overview,
   type M4StageSummary,
@@ -17,7 +21,7 @@ type Props = {
   stage?: M4StageSummary;
   onRefresh: () => Promise<void>;
   onNextStage: () => void;
-  onMessage?: (msg: string) => void;
+  onMessage?: (msg: string, kind?: 'success' | 'error') => void;
 };
 
 const FAMILY_LABELS: Record<string, string> = {
@@ -41,13 +45,23 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
   const [extraName, setExtraName] = useState('');
   const [extraFile, setExtraFile] = useState<File | null>(null);
 
+  // Public Asset Center cross-pipeline search & adopt state
+  const [libQuery, setLibQuery] = useState('');
+  const [libItems, setLibItems] = useState<M4LibraryItem[]>([]);
+  const [libTargetReq, setLibTargetReq] = useState('');
+  const [libBusy, setLibBusy] = useState(false);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await fetchM4Materials(projectId);
+      const [data, lib] = await Promise.all([
+        fetchM4Materials(projectId),
+        searchM4Library(projectId).catch(() => ({ items: [] as M4LibraryItem[], total: 0 })),
+      ]);
       setState(data);
+      setLibItems(lib.items ?? []);
     } catch (err) {
-      onMessage?.(`读取四阶素材状态失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`读取四阶素材状态失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -65,6 +79,35 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
     [onRefresh],
   );
 
+  const pendingTaskIds = (state?.requirements ?? [])
+    .map((r) => r.pending_task_id)
+    .filter((id): id is string => Boolean(id));
+
+  useEffect(() => {
+    if (pendingTaskIds.length === 0) return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        try {
+          let settled = false;
+          for (const taskId of pendingTaskIds) {
+            const res = await fetchM4MaterialTask(projectId, taskId);
+            if (res.status === 'CANDIDATE_READY' || res.status === 'FAILED') {
+              settled = true;
+            }
+          }
+          const latest = await fetchM4Materials(projectId);
+          setState(latest);
+          if (settled) {
+            await onRefresh();
+          }
+        } catch {
+          // Next poll tick retries quietly
+        }
+      })();
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [projectId, pendingTaskIds.join(','), onRefresh]);
+
   const handleGenerate = async (reqId: string) => {
     setBusyKey(`gen:${reqId}`);
     try {
@@ -73,9 +116,13 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         prompt: promptsByReq[reqId] ?? '',
       });
       await applyNewState(res.state);
-      onMessage?.('已生成候选参考图，请核对后晋升为主素材。');
+      if (res.status === 'QUEUED' || res.task_id) {
+        onMessage?.('已加入公共素材中心 Qwen 生图队列，完成后自动刷新候选图。', 'success');
+      } else {
+        onMessage?.('已生成候选参考图，请核对后晋升为主素材。', 'success');
+      }
     } catch (err) {
-      onMessage?.(`生成失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`生成失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -91,9 +138,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         asset_version_id: assetId,
       });
       await applyNewState(res.state);
-      onMessage?.('已复用并绑定已有主素材。');
+      onMessage?.('已复用并绑定已有主素材。', 'success');
     } catch (err) {
-      onMessage?.(`复用失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`复用失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -104,9 +151,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
     try {
       const res = await declineM4Material(projectId, reqId, '用户明确跳过该素材需求');
       await applyNewState(res.state);
-      onMessage?.('已标记明确放弃该素材需求；缺少参考的镜头仍会被 Ref2VA 门禁单独提示。');
+      onMessage?.('已标记明确放弃该素材需求；缺少参考的镜头仍会被 Ref2VA 门禁单独提示。', 'success');
     } catch (err) {
-      onMessage?.(`操作失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`操作失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -127,9 +174,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         file,
       });
       await applyNewState(res.state);
-      onMessage?.(`已上传候选素材「${res.asset.filename}」，请点击晋升启用。`);
+      onMessage?.(`已上传候选素材「${res.asset.filename}」，请点击晋升启用。`, 'success');
     } catch (err) {
-      onMessage?.(`上传失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`上传失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -137,7 +184,7 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
 
   const handleStandaloneUpload = async () => {
     if (!extraFile || !extraName.trim()) {
-      onMessage?.('请填写实体名称并选择素材文件。');
+      onMessage?.('请填写实体名称并选择素材文件。', 'error');
       return;
     }
     setBusyKey('upload:standalone');
@@ -150,9 +197,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
       setExtraName('');
       setExtraFile(null);
       await applyNewState(res.state);
-      onMessage?.(`已上传独立候选素材「${res.asset.filename}」，请晋升后绑定至镜头。`);
+      onMessage?.(`已上传独立候选素材「${res.asset.filename}」，请晋升后绑定至镜头。`, 'success');
     } catch (err) {
-      onMessage?.(`上传失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`上传失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -163,9 +210,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
     try {
       const res = await promoteM4Asset(projectId, assetId, requirementId);
       await applyNewState(res.state);
-      onMessage?.('已晋升为主素材并更新镜头绑定。');
+      onMessage?.('已晋升为主素材并更新镜头绑定。', 'success');
     } catch (err) {
-      onMessage?.(`晋升失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`晋升失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -181,9 +228,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
       ];
       const res = await putM4ShotBindings(projectId, shotId, next);
       await applyNewState(res.state);
-      onMessage?.('已绑定参考素材到镜头。');
+      onMessage?.('已绑定参考素材到镜头。', 'success');
     } catch (err) {
-      onMessage?.(`绑定失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`绑定失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -201,9 +248,37 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         .map((b) => ({ asset_version_id: b.asset_version_id, use_as: b.use_as, role_label: b.role_label }));
       const res = await putM4ShotBindings(projectId, shotId, next);
       await applyNewState(res.state);
-      onMessage?.('已解除镜头素材绑定。');
+      onMessage?.('已解除镜头素材绑定。', 'success');
     } catch (err) {
-      onMessage?.(`解绑失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`解绑失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
+  const handleSearchLibrary = async () => {
+    setLibBusy(true);
+    try {
+      const res = await searchM4Library(projectId, { query: libQuery.trim() || undefined });
+      setLibItems(res.items ?? []);
+    } catch (err) {
+      onMessage?.(`检索公共素材库失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setLibBusy(false);
+    }
+  };
+
+  const handleAdoptLibrary = async (item: M4LibraryItem) => {
+    setBusyKey(`adopt:${item.library_version_id}`);
+    try {
+      const res = await adoptM4LibraryVersion(projectId, {
+        version_id: item.library_version_id,
+        requirement_id: libTargetReq || undefined,
+      });
+      await applyNewState(res.state);
+      onMessage?.(`已从公共素材中心采纳「${item.filename}」为四阶主素材。`, 'success');
+    } catch (err) {
+      onMessage?.(`采纳失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -288,7 +363,14 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                         <div className="m4-footer-note">
                           已绑定主素材：{req.bound_asset.filename}
                           {req.bound_asset.is_mock ? '（Mock）' : ''}
+                          {req.bound_asset.rights_status ? ` · 权属:${req.bound_asset.rights_status}` : ''}
                         </div>
+                      </div>
+                    )}
+
+                    {req.pending_task_id && (
+                      <div className="m4-footer-note">
+                        公共素材中心生图任务 {req.pending_task_id.slice(0, 8)}… · 状态：{req.pending_task?.status ?? 'QUEUED'}
                       </div>
                     )}
 
@@ -305,10 +387,19 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                       <button
                         type="button"
                         className="btn-secondary"
-                        disabled={busyKey !== null || req.family === 'voice' || req.family === 'reference_video'}
+                        disabled={
+                          busyKey !== null ||
+                          Boolean(req.pending_task_id) ||
+                          req.family === 'voice' ||
+                          req.family === 'reference_video'
+                        }
                         onClick={() => void handleGenerate(req.id)}
                       >
-                        {busyKey === `gen:${req.id}` ? '生成中...' : 'Qwen 生成'}
+                        {busyKey === `gen:${req.id}`
+                          ? '提交中...'
+                          : req.pending_task_id
+                            ? '排队生成中...'
+                            : 'Qwen 生成'}
                       </button>
                       <label className="btn-secondary m4-file-btn">
                         本地上传
@@ -453,6 +544,72 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
 
           <div className="m4-ep-card">
             <div className="m4-ep-head">
+              <strong>公共素材中心检索与跨线复用</strong>
+              <span className="m4-footer-note">支持检索全局素材库已登记/授权资产并采纳为四阶主素材</span>
+            </div>
+            <div className="m4-toolbar">
+              <input
+                className="m4-input"
+                style={{ maxWidth: 220 }}
+                placeholder="按实体名/文件名检索公共库…"
+                value={libQuery}
+                onChange={(e) => setLibQuery(e.target.value)}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={libBusy}
+                onClick={() => void handleSearchLibrary()}
+              >
+                {libBusy ? '检索中...' : '检索公共库'}
+              </button>
+              {(state?.requirements ?? []).length > 0 && (
+                <select
+                  className="m4-input"
+                  style={{ maxWidth: 220 }}
+                  value={libTargetReq}
+                  onChange={(e) => setLibTargetReq(e.target.value)}
+                >
+                  <option value="">仅采纳至本作品主素材库…</option>
+                  {(state?.requirements ?? []).map((req) => (
+                    <option key={req.id} value={req.id}>
+                      并满足需求：[{FAMILY_LABELS[req.family] ?? req.family}] {req.entity_name}
+                    </option>
+                  ))}
+                </select>
+              )}
+            </div>
+            {libItems.length === 0 ? (
+              <div className="m4-footer-note" style={{ marginTop: 8 }}>
+                当前检索条件下暂无可复用公共库版本（生成或上传后会自动同步入库）。
+              </div>
+            ) : (
+              <div className="m4-cand-list" style={{ marginTop: 8 }}>
+                {libItems.slice(0, 8).map((item) => (
+                  <div key={item.library_version_id} className="m4-cand-row">
+                    {item.media_kind === 'image' && (
+                      <img src={item.media_url} alt={item.filename} className="m4-thumb-sm" />
+                    )}
+                    <span className="m4-footer-note">
+                      {item.title || item.filename} ({item.media_kind} · {item.rights_status}
+                      {item.project_authorized ? ' · 已授权' : ''})
+                    </span>
+                    <button
+                      type="button"
+                      className="btn-secondary"
+                      disabled={busyKey !== null}
+                      onClick={() => void handleAdoptLibrary(item)}
+                    >
+                      {busyKey === `adopt:${item.library_version_id}` ? '采纳中...' : '采纳为主素材'}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="m4-ep-card">
+            <div className="m4-ep-head">
               <strong>逐镜 Ref2VA 参考绑定检查</strong>
             </div>
             <div className="m4-table-wrap">
@@ -460,7 +617,10 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                 <thead>
                   <tr>
                     <th>镜号</th>
-                    <th>已绑定参考（最多 6 图 + 2 音频 + 2 视频）</th>
+                    <th>
+                      已绑定参考（最多 {state?.slot_limits?.image ?? 6} 图 + {state?.slot_limits?.audio ?? 2} 音频 +{' '}
+                      {state?.slot_limits?.video ?? 2} 视频）
+                    </th>
                     <th>添加主素材</th>
                     <th>Ref2VA 状态</th>
                   </tr>
@@ -511,7 +671,7 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                       </td>
                       <td>
                         <span className={`m4-badge ${sh.ref2va_ready ? 'ok' : 'warn'}`}>
-                          {sh.ref2va_ready ? 'Ref2VA 就绪' : '缺参考阻滞'}
+                          {sh.ref2va_ready ? 'Ref2VA 就绪' : sh.ref2va_blocker?.message ?? '缺参考阻滞'}
                         </span>
                       </td>
                     </tr>

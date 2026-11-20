@@ -42,6 +42,7 @@ type ImageState = { configured: boolean; layer: string; renderer: { state: strin
 type Props = {
   focusTab?: Tab;
   project?: Project;
+  isManual4?: boolean;
   projectId: string;
   projectTitle: string;
   setProjectTitle: (value: string) => void;
@@ -80,7 +81,7 @@ function gib(bytes?: number | null): string {
  * 工作流登记、运行配置、服务核验与激活都是自动的：这一页不再要求人选。
  */
 export default function DirectorSetupPanel({
-  focusTab = 'env', projectId, project, projectTitle, setProjectTitle, createProject,
+  focusTab = 'env', projectId, project, isManual4 = false, projectTitle, setProjectTitle, createProject,
   system, refreshEpoch, onRefresh, workflowProfiles, busy, onProjectSettings,
   onRegisterWorkflow, onValidateWorkflow, onDeleteWorkflow, onBindStandardParameters,
 }: Props) {
@@ -126,7 +127,7 @@ export default function DirectorSetupPanel({
     const tick = async () => {
       await load();
       const summary = await api<{ preparation?: { status?: string } }>(
-        `/setup/summary${projectId ? `?project_id=${projectId}` : ''}`).catch(() => null);
+        `/setup/summary${projectId && !isManual4 ? `?project_id=${projectId}` : ''}`).catch(() => null);
       const status = summary?.preparation?.status;
       if (!cancelled && status !== 'QUEUED' && status !== 'RUNNING') setPrepRunning(false);
     };
@@ -245,12 +246,12 @@ export default function DirectorSetupPanel({
         下载、实例创建、登记、核验与激活，与专家层共用同一服务端事实，
         不建第二套安装器，也不重复渲染状态区。
       */}
-      <SetupCenter projectId={projectId} refreshEpoch={refreshEpoch + storageTick}
+      <SetupCenter projectId={isManual4 ? '' : projectId} refreshEpoch={refreshEpoch + storageTick}
         onPrepSubmitted={() => setPrepTick((n) => n + 1)}
         onNeedProject={createProject} />
       <OutputDirectoryPanel />
       <StorageSettings />
-      <details className="setup-details">
+      {!isManual4 && <details className="setup-details">
         <summary><ShieldCheck size={12} /> 专业细调：工作流映射 · 项目策略</summary>
         <div className="setup-detail-body">
           <WorkflowProfileManager
@@ -277,7 +278,7 @@ export default function DirectorSetupPanel({
             </> : <div className="empty-inline">创建项目后可配置。</div>}
           </div>
         </div>
-      </details>
+      </details>}
     </div>}
 
     {tab === 'models' && <div className="setup-tab-body">
@@ -314,7 +315,7 @@ export default function DirectorSetupPanel({
           {vlm?.code ? ' · 只影响建议，不影响出片' : ''}
         </p>
         {vlm?.status !== 'READY' && <button type="button" className="btn-secondary"
-          disabled={!projectId || !!extraBusy} onClick={() => void installAdvisory('VLM')}>
+          disabled={!projectId || isManual4 || !!extraBusy} onClick={() => void installAdvisory('VLM')}>
           {extraBusy === 'VLM' ? <Loader2 size={13} className="spin" /> : <MonitorCheck size={13} />}
           下载并启用画面审片
         </button>}
@@ -337,7 +338,7 @@ export default function DirectorSetupPanel({
           {asr?.code ? ' · 只影响建议，不影响出片' : ''}
         </p>
         {asr?.status !== 'READY' && <button type="button" className="btn-secondary"
-          disabled={!projectId || !!extraBusy} onClick={() => void installAdvisory('ASR')}>
+          disabled={!projectId || isManual4 || !!extraBusy} onClick={() => void installAdvisory('ASR')}>
           {extraBusy === 'ASR' ? <Loader2 size={13} className="spin" /> : <Mic size={13} />}
           下载并启用语音核对
         </button>}

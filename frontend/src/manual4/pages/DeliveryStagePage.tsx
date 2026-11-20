@@ -12,7 +12,7 @@ type Props = {
   overview: M4Overview;
   stage?: M4StageSummary;
   onRefresh: () => Promise<void>;
-  onMessage?: (msg: string) => void;
+  onMessage?: (msg: string, kind?: 'success' | 'error') => void;
 };
 
 export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Props) {
@@ -32,7 +32,7 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
       const data = await fetchM4DeliveryState(projectId);
       setState(data);
     } catch (err) {
-      onMessage?.(`读取四阶成片状态失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`读取四阶成片状态失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setLoading(false);
     }
@@ -57,9 +57,9 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
         burn_subtitles: burnSubtitles,
       });
       await applyState(res.state);
-      onMessage?.(`已合成成片版本 v${res.delivery.version}（SHA ${res.delivery.sha256.slice(0, 10)}）。`);
+      onMessage?.(`已合成成片版本 v${res.delivery.version}（SHA ${res.delivery.sha256.slice(0, 10)}）。`, 'success');
     } catch (err) {
-      onMessage?.(`合成失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`合成失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -79,9 +79,9 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
         setState(res.state);
       }
       await onRefresh();
-      onMessage?.(`已完成 ${eps.length} 集成片装配。`);
+      onMessage?.(`已完成 ${eps.length} 集成片装配。`, 'success');
     } catch (err) {
-      onMessage?.(`批量合成失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`批量合成失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -97,9 +97,9 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
         expected_sha256: sha256,
       });
       await applyState(res.state);
-      onMessage?.(decision === 'accepted' ? '已记录正式人工验收通过。' : '已记录驳回意见。');
+      onMessage?.(decision === 'accepted' ? '已记录正式人工验收通过。' : '已记录驳回意见。', 'success');
     } catch (err) {
-      onMessage?.(`验收提交失败：${err instanceof Error ? err.message : String(err)}`);
+      onMessage?.(`验收提交失败：${err instanceof Error ? err.message : String(err)}`, 'error');
     } finally {
       setBusyKey(null);
     }
@@ -309,7 +309,15 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
 
       <div className="m4-footer-bar">
         <span className="m4-footer-note">仅接受来自四阶本轮已通过真实产物的 FFmpeg 装配结果，每次重装不覆盖历史版本。</span>
-        <button type="button" className="btn-primary" disabled={!stage?.done}>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={!stage?.done}
+          onClick={() => {
+            void onRefresh();
+            onMessage?.('已核对并确认本集四阶成片验收完成。', 'success');
+          }}
+        >
           成片验收完成
         </button>
       </div>

@@ -107,8 +107,29 @@ def validate_frozen_prompt_for_shot(
     if abs(float(prompt_row.target_seconds) - float(shot.target_seconds)) > 1e-6:
         return False, "M4_DURATION_CHANGED"
     manifest = build_shot_reference_manifest(m4_db, shot)
-    if not any(m["use_as"] == "image" for m in manifest):
-        return False, "M4_PROJECT_REQUIRES_REF2VA"
+    links = m4_db.scalars(
+        select(M4ShotAssetBinding)
+        .where(M4ShotAssetBinding.shot_id == shot.id)
+        .order_by(M4ShotAssetBinding.ordinal)
+    ).all()
+    asset_ids = [link.asset_version_id for link in links]
+    assets_by_id = (
+        {
+            a.id: a
+            for a in m4_db.scalars(select(M4AssetVersion).where(M4AssetVersion.id.in_(asset_ids))).all()
+        }
+        if asset_ids
+        else {}
+    )
+    from shine.manual4.status.readiness import evaluate_shot_ref2va_bindings
+
+    ok_ref, ref_code, _ = evaluate_shot_ref2va_bindings(links, assets_by_id)
+    if not ok_ref:
+        return False, (
+            "M4_PROJECT_REQUIRES_REF2VA"
+            if ref_code in {"PROJECT_REQUIRES_REF2VA", "M4_SHOT_REQUIRES_REF2VA_REFERENCE"}
+            else (ref_code or "M4_PROJECT_REQUIRES_REF2VA")
+        )
     if prompt_row.reference_manifest_sha256 != manifest_digest(manifest):
         return False, "M4_REFERENCE_MANIFEST_CHANGED"
     return True, None
@@ -313,6 +334,8 @@ def update_shot_render_options(
     continuity_mode: str | None = None,
 ) -> dict[str, Any]:
     _confirmed, shot = _get_confirmed_shot(m4_db, project, shot_id)
+    prev_ar = shot.aspect_ratio
+    prev_cm = shot.continuity_mode
     if aspect_ratio is not None:
         ar = aspect_ratio.strip()
         if ar not in {"16:9", "9:16"}:
@@ -323,6 +346,32 @@ def update_shot_render_options(
         if cm not in {"cut", "last_frame"}:
             raise HTTPException(422, {"code": "M4_CONTINUITY_MODE_INVALID", "message": f"不支持的衔接方式：{cm}"})
         shot.continuity_mode = cm
+
+    changed = (shot.aspect_ratio != prev_ar) or (shot.continuity_mode != prev_cm)
+    invalidated_count = 0
+    if changed:
+        shot.revision += 1
+        shot.content_sha256 = _canonical_sha(
+            {
+                "target_seconds": round(float(shot.target_seconds), 4),
+                "summary": str(shot.summary or ""),
+                "dialogue": list(shot.dialogue or []),
+                "requested_assets": list(shot.requested_assets or []),
+                "aspect_ratio": str(shot.aspect_ratio or "16:9"),
+                "continuity_mode": str(shot.continuity_mode or "cut"),
+            }
+        )
+        for pr in m4_db.scalars(
+            select(M4ManualPromptRevision).where(
+                M4ManualPromptRevision.shot_id == shot.id,
+                M4ManualPromptRevision.status == "FROZEN",
+            )
+        ).all():
+            pr.status = "INVALIDATED"
+            pr.invalidated_reason = "M4_SHOT_OPTIONS_CHANGED"
+            pr.updated_at = m4_utcnow()
+            invalidated_count += 1
+
     shot.updated_at = m4_utcnow()
     m4_db.add(
         M4AuditEvent(
@@ -332,12 +381,18 @@ def update_shot_render_options(
             event_type="M4_SHOT_OPTIONS_UPDATED",
             entity_type="m4_shot",
             entity_id=shot.id,
-            payload={"aspect_ratio": shot.aspect_ratio, "continuity_mode": shot.continuity_mode},
+            payload={
+                "aspect_ratio": shot.aspect_ratio,
+                "continuity_mode": shot.continuity_mode,
+                "shot_revision": shot.revision,
+                "invalidated_prompts": invalidated_count,
+            },
         )
     )
     return {
         "shot_id": shot.id,
         "shot_code": shot.shot_code,
+        "shot_revision": shot.revision,
         "aspect_ratio": shot.aspect_ratio,
         "continuity_mode": shot.continuity_mode,
     }

@@ -15,6 +15,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from shine.foundation.h3 import MAX_AUDIO_SLOTS, MAX_IMAGE_SLOTS, MAX_TOTAL_SLOTS, MAX_VIDEO_SLOTS
 from shine.manual4.contracts.schemas import M4ReadinessVerdict, M4StageKey, M4StageSummary
 from shine.manual4.storage.migrations import MANUAL4_RUNTIME_VERSION, MANUAL4_SCHEMA_VERSION
 from shine.manual4.storage.models import (
@@ -35,6 +36,52 @@ from shine.manual4.storage.models import (
     M4WorkerInstance,
     m4_utcnow,
 )
+
+
+def evaluate_shot_ref2va_bindings(
+    links: list[M4ShotAssetBinding],
+    assets_by_id: dict[str, M4AssetVersion],
+) -> tuple[bool, str | None, str]:
+    """Single authoritative Ref2VA verdict for one shot's bound references."""
+    if not links:
+        return False, "M4_SHOT_REQUIRES_REF2VA_REFERENCE", "缺少合法 Ref2VA 参考素材绑定。"
+
+    img_count = 0
+    aud_count = 0
+    vid_count = 0
+    for link in links:
+        asset = assets_by_id.get(link.asset_version_id)
+        if asset is None or asset.status != "promoted":
+            return False, "M4_SHOT_BINDING_NOT_PROMOTED", "包含未晋升为主素材的绑定版本。"
+        if str(getattr(asset, "rights_status", "local_unlinked") or "") == "REVOKED":
+            return False, "M4_SHOT_BINDING_RIGHTS_REVOKED", "绑定的公共素材授权已撤销。"
+        if link.use_as == "image":
+            img_count += 1
+        elif link.use_as == "audio":
+            aud_count += 1
+        elif link.use_as == "video":
+            vid_count += 1
+
+    if img_count < 1:
+        return (
+            False,
+            "PROJECT_REQUIRES_REF2VA",
+            "Ref2VA 生产要求至少绑定 1 张有效图片参考；仅有音频或视频参考不能通过。",
+        )
+    total = img_count + aud_count + vid_count
+    if (
+        img_count > MAX_IMAGE_SLOTS
+        or aud_count > MAX_AUDIO_SLOTS
+        or vid_count > MAX_VIDEO_SLOTS
+        or total > MAX_TOTAL_SLOTS
+    ):
+        return (
+            False,
+            "M4_SHOT_REF2VA_SLOT_LIMIT_EXCEEDED",
+            f"参考数量超出 H3 上限（图 {img_count}/{MAX_IMAGE_SLOTS}、音 {aud_count}/{MAX_AUDIO_SLOTS}、"
+            f"总 {total}/{MAX_TOTAL_SLOTS}）。",
+        )
+    return True, None, ""
 
 
 def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict:
@@ -174,15 +221,34 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                         "action": "prepare_material",
                     }
                 )
+        asset_ids = {
+            link.asset_version_id
+            for links in bindings_by_shot.values()
+            for link in links
+        }
+        assets_by_id = (
+            {
+                a.id: a
+                for a in db.scalars(
+                    select(M4AssetVersion).where(M4AssetVersion.id.in_(asset_ids))
+                ).all()
+            }
+            if asset_ids
+            else {}
+        )
         for shot in shots:
-            if not bindings_by_shot.get(shot.id):
+            ok_ref, ref_code, ref_msg = evaluate_shot_ref2va_bindings(
+                bindings_by_shot.get(shot.id, []),
+                assets_by_id,
+            )
+            if not ok_ref:
                 mat_blockers.append(
                     {
-                        "code": "M4_SHOT_REQUIRES_REF2VA_REFERENCE",
+                        "code": ref_code or "M4_SHOT_REQUIRES_REF2VA_REFERENCE",
                         "stage": "materials",
                         "shot_id": shot.id,
                         "shot_code": shot.shot_code,
-                        "message": f"镜头 {shot.shot_code} 至少需要 1 项合法 Ref2VA 参考素材。",
+                        "message": f"镜头 {shot.shot_code}：{ref_msg}",
                         "action": "bind_shot_material",
                     }
                 )
@@ -258,7 +324,10 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                     "action": "confirm_and_run",
                 }
             )
-        elif latest_run.status in {"PENDING", "CLAIMED", "RUNNING", "PAUSED"} or passed_jobs_count < len(shots):
+        elif (
+            latest_run.status in {"PENDING", "CLAIMED", "RUNNING", "PAUSED", "PAUSE_REQUESTED"}
+            or passed_jobs_count < len(shots)
+        ):
             prod_blockers.append(
                 {
                     "code": f"M4_RUN_{latest_run.status}",
@@ -273,13 +342,22 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             )
     stage3_done = stage2_done and not prod_blockers
 
-    # Stage 4: Delivery
-    deliveries = db.scalars(
-        select(M4Delivery)
-        .where(M4Delivery.project_id == project.id, M4Delivery.status == "DELIVERED")
-        .order_by(M4Delivery.created_at.desc())
-    ).all()
-    accepted_count = 0
+    # Stage 4: Delivery (counted per confirmed episode)
+    confirmed_ep_ids = {e.id for e in episodes}
+    deliveries = (
+        db.scalars(
+            select(M4Delivery)
+            .where(
+                M4Delivery.project_id == project.id,
+                M4Delivery.status == "DELIVERED",
+                M4Delivery.episode_id.in_(confirmed_ep_ids),
+            )
+            .order_by(M4Delivery.created_at.desc())
+        ).all()
+        if confirmed_ep_ids
+        else []
+    )
+    accepted_episode_ids: set[str] = set()
     if deliveries:
         delivery_ids = [d.id for d in deliveries]
         acc_rows = db.scalars(
@@ -290,7 +368,13 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
         latest_acc: dict[str, M4DeliveryAcceptance] = {}
         for acc in acc_rows:
             latest_acc[acc.delivery_id] = acc
-        accepted_count = sum(1 for d in deliveries if latest_acc.get(d.id) and latest_acc[d.id].decision == "accepted")
+        accepted_episode_ids = {
+            d.episode_id
+            for d in deliveries
+            if latest_acc.get(d.id) and latest_acc[d.id].decision == "accepted"
+        }
+    accepted_count = len(accepted_episode_ids)
+    delivered_episodes_count = len({d.episode_id for d in deliveries})
 
     deliv_blockers: list[dict[str, Any]] = []
     if not stage3_done:
@@ -316,7 +400,10 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             {
                 "code": "M4_DELIVERY_PENDING_ACCEPTANCE",
                 "stage": "delivery",
-                "message": f"已合成 {len(deliveries)} 个成片，已验收 {accepted_count}/{len(episodes)} 集。",
+                "message": (
+                    f"已合成 {delivered_episodes_count}/{len(episodes)} 集（共 {len(deliveries)} 个版本），"
+                    f"已验收 {accepted_count}/{len(episodes)} 集。"
+                ),
                 "action": "accept_delivery",
             }
         )
@@ -436,7 +523,9 @@ def build_m4_overview(
     now = m4_utcnow()
     workers = db.scalars(select(M4WorkerInstance).order_by(M4WorkerInstance.started_at.desc())).all()
     online_workers = [
-        w for w in workers if w.status != "stopped" and w.last_heartbeat_at >= now - timedelta(seconds=30)
+        w
+        for w in workers
+        if w.status not in {"OFFLINE", "stopped"} and w.last_heartbeat_at >= now - timedelta(seconds=60)
     ]
     recent_events = db.scalars(
         select(M4AuditEvent)

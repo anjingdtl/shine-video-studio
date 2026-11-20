@@ -156,7 +156,7 @@ function StageDock({ id, title, children }: { id: string; title: string; childre
 function App() {
   const studio = useStudio();
   const {
-    projects, workflowKinds, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
+    projects, workflowKinds, workflowKindError, projectsLoaded, projectsLoadError, projectId, setProjectId, project, assets, styles, shots, jobs, style, setStyle,
     currentStyle, approvedAssets, projectTitle, setProjectTitle, mockScenario, setMockScenario,
     system, systemChecked, apiOnline, checkConnection, refreshWorkspace, production, profiles, routes, workflowProfiles, audit, preview, setPreview,
     notices, report, dismissNotice, busy, dataEpoch,
@@ -189,10 +189,27 @@ function App() {
   const [assetPage, setAssetPage] = useState<AssetCenterPage>(() => resolveHash(window.location.hash).assetPage ?? 'home');
   const [assetReturnHash, setAssetReturnHash] = useState(() => window.location.hash.startsWith('#a/') ? '#d/projects' : (window.location.hash || '#d/projects'));
   const [directorPage, setDirectorPage] = useState<DirectorPage>(() => resolveHash(window.location.hash).page);
-  const [m4Stage, setM4Stage] = useState<M4StageKey>(() => resolveHash(window.location.hash).m4Stage ?? 'storyboard');
+  const [m4Stage, setM4Stage] = useState<M4StageKey | undefined>(() => resolveHash(window.location.hash).m4Stage);
   const [newWorkflowKind, setNewWorkflowKind] = useState<WorkflowKind>('director7');
   const currentWorkflowKind: WorkflowKind = projectId ? (workflowKinds[projectId] ?? 'director7') : 'director7';
   const isManual4 = currentWorkflowKind === 'manual4';
+  const director7Projects = (projects as Project[]).filter((row) => (workflowKinds[row.id] ?? 'director7') !== 'manual4');
+  const handleSwitchProject = (nextId: string) => {
+    setProjectId(nextId);
+    const targetKind: WorkflowKind = nextId ? (workflowKinds[nextId] ?? 'director7') : 'director7';
+    if (directorPage === 'projects' || directorPage === 'setup' || directorPage === 'advanced' || directorPage === 'copilot') {
+      return;
+    }
+    if (targetKind === 'manual4') {
+      setM4Stage(undefined);
+      setUi('director');
+      setDirectorPage('creative');
+      window.history.pushState(null, '', '#m4');
+    } else {
+      setUi('director');
+      window.history.pushState(null, '', `#d/${directorPage}`);
+    }
+  };
   /** The exact package a deep link named, so the workbench opens that one. */
   const [directorPackageId, setDirectorPackageId] = useState<string | undefined>(
     () => resolveHash(window.location.hash).packageId);
@@ -594,14 +611,14 @@ function App() {
           goToDirectorSetup();
           window.setTimeout(() => document.getElementById('image-capability')?.scrollIntoView({ block: 'start' }), 60);
         }}
-        projects={projects as Project[]}
-        projectId={projectId}
-        projectAssets={assets as Asset[]}
+        projects={director7Projects}
+        projectId={isManual4 ? '' : projectId}
+        projectAssets={isManual4 ? [] : (assets as Asset[])}
       />
       <ShineCopilot
         pageId={`assets-${assetPage}`}
         pageLabel="素材中心"
-        projectId={projectId || undefined}
+        projectId={isManual4 ? undefined : (projectId || undefined)}
         needsSetup={needsSetup}
       />
     </>;
@@ -634,10 +651,10 @@ function App() {
           <button type="button" onClick={() => goToAssets('home')}>
             <Images size={15} /><span>素材中心</span>
           </button>
-          <button type="button" className={directorPage === 'library' ? 'active' : ''}
+          {!isManual4 && <button type="button" className={directorPage === 'library' ? 'active' : ''}
             onClick={() => goToDirectorPage('library')}>
             <Film size={15} /><span>成片库</span>
-          </button>
+          </button>}
           <button type="button"
             className={`${directorPage === 'setup' ? 'active' : ''} ${needsSetup ? 'needs-setup' : ''}`}
             onClick={() => goToDirectorSetup('env')}>
@@ -674,7 +691,7 @@ function App() {
               ? <label className="project-switch">
                 <span className="visually-hidden">快速切换作品</span>
                 <Clapperboard size={12} aria-hidden="true" />
-                <select aria-label="快速切换作品" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+                <select aria-label="快速切换作品" value={projectId} onChange={(event) => handleSwitchProject(event.target.value)}>
                   {projects.map((row) => <option key={row.id} value={row.id}>{row.title}</option>)}
                 </select>
                 <ChevronDown size={12} aria-hidden="true" />
@@ -711,6 +728,7 @@ function App() {
           {directorPage === 'setup' && <DirectorSetupPanel
             focusTab={setupFocusTab}
             project={project}
+            isManual4={isManual4}
             projectId={projectId}
             projectTitle={projectTitle}
             setProjectTitle={setProjectTitle}
@@ -744,7 +762,7 @@ function App() {
               </button>,
             )}
             <PreferencesPanel />
-            {project && <>
+            {project && !isManual4 && <>
               <StageDock id="film-crew" title="影视制片团队与 H3 官方规范(高级)">
                 <FilmCrewPanel key={projectId} projectId={projectId} profiles={profiles} shots={shots} onRefresh={refreshAll} />
               </StageDock>
@@ -757,6 +775,7 @@ function App() {
                 />
               </StageDock>
             </>}
+            {project && isManual4 && <div className="notice"><span>当前为四阶 H3 自主制片作品；制作审计与进度请查看四阶工作台。</span></div>}
           </div>}
 
           {directorPage === 'copilot' && <>
@@ -860,10 +879,10 @@ function App() {
                 <button className="btn-primary" disabled={!isManual4 && journeyState === 'loading' && !journey}
                   onClick={() => {
                     if (isManual4) {
-                      setM4Stage('storyboard');
+                      setM4Stage(undefined);
                       setUi('director');
                       setDirectorPage('creative');
-                      window.history.pushState(null, '', '#m4/storyboard');
+                      window.history.pushState(null, '', '#m4');
                       return;
                     }
                     if (journeyState === 'error') setJourneyRetry((n) => n + 1);
@@ -873,6 +892,11 @@ function App() {
                 </button>
                 <GuideTip>接着上次停下的那一步继续</GuideTip>
               </section>
+              {workflowKindError && (
+                <div className="notice" role="alert">
+                  <span>未能读取产线归属清单（{workflowKindError}）；请点顶部刷新避免误判产线类型。</span>
+                </div>
+              )}
               <ProjectPortfolio
                 projects={projects as Project[]}
                 workflowKinds={workflowKinds}
@@ -888,10 +912,10 @@ function App() {
                 onOpen={(id) => {
                   if (id !== projectId) setProjectId(id);
                   if ((workflowKinds[id] ?? 'director7') === 'manual4') {
-                    setM4Stage('storyboard');
+                    setM4Stage(undefined);
                     setUi('director');
                     setDirectorPage('creative');
-                    window.history.pushState(null, '', '#m4/storyboard');
+                    window.history.pushState(null, '', '#m4');
                     return;
                   }
                   goToDirectorPage(nextStage?.page ?? 'creative');
@@ -1185,7 +1209,7 @@ function App() {
       <ShineCopilot
         pageId={directorPage}
         pageLabel={DIRECTOR_PAGE_LABELS[directorPage]}
-        projectId={projectId || undefined}
+        projectId={isManual4 ? undefined : (projectId || undefined)}
         needsSetup={needsSetup}
       />
 
