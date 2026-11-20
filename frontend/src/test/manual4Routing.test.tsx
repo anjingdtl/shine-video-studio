@@ -2,6 +2,7 @@ import { cleanup, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import App from '../App';
+import type { M4SystemStatus } from '../manual4/api/client';
 import { StudioStub, SYSTEM_STATUS, jsonResponse } from './studioStub';
 
 afterEach(() => {
@@ -102,14 +103,19 @@ describe('P1 平台选线与四阶隔离挂载', () => {
         method: 'GET',
         pattern: new RegExp(`^/api/v1/manual4/system/status$`),
         respond: () => jsonResponse({
+          line: 'manual4',
           runtime_version: '2.0.0',
           schema_version: 'm4.1',
-          worker_online: true,
           environment: {
-            installation: { root: 'F:/ComfyUI', ready: true },
-            capabilities: { h3: { status: 'ready', label: 'H3 就绪' } },
+            schema: 'shine.environment.v1',
+            comfyui_root: 'F:/ComfyUI',
+            services_verified: true,
+            capabilities: {
+              h3: { state: 'READY', label: 'H3 制片' },
+              image: { state: 'VERIFIED_RENDER', label: 'Qwen 出图' },
+            },
           },
-        }),
+        } satisfies M4SystemStatus),
       },
       {
         method: 'GET',
@@ -164,6 +170,7 @@ describe('P1 平台选线与四阶隔离挂载', () => {
     await user.click(screen.getByRole('button', { name: /新建作品/ }));
 
     await screen.findByTestId('manual4-workbench');
+    expect(await screen.findByText('ComfyUI 已就绪 · H3 已就绪 · Qwen 出图 已就绪 · Worker 在线')).toBeVisible();
     expect(screen.getByRole('button', { name: /① 人工分镜书/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /② 素材生成/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /③ 排片生产/ })).toBeInTheDocument();

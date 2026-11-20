@@ -3,7 +3,7 @@ import {
   AlertTriangle, Check, ChevronRight, Copy, Download, FolderOpen, Loader2, RefreshCw, X,
 } from 'lucide-react';
 import { api, json } from '../api';
-import type { SetupVerdict } from '../api';
+import type { SetupCapabilityState, SetupVerdict } from '../api';
 import { describeBlocker } from '../errorActions';
 
 /**
@@ -41,7 +41,7 @@ export type SetupCapability = {
   key: CapabilityKey;
   label: string;
   catalog?: string;
-  state: string;
+  state: SetupCapabilityState;
   /** 审片等可选增强：不占机器级「下一步」，卡片如实标注。 */
   optional?: boolean;
   facts: CapabilityFacts;

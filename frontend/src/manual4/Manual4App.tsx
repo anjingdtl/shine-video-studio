@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Clapperboard, RefreshCw } from 'lucide-react';
+import type { SetupCapabilityState } from '../api';
 import './styles/manual4.css';
 import {
   fetchM4Overview,
@@ -29,6 +30,16 @@ const STAGE_META_LABELS: Record<M4StageKey, string> = {
   delivery: '装配/预览/验收',
 };
 
+const ENVIRONMENT_STATE_LABEL: Record<SetupCapabilityState, string> = {
+  MISSING: '待配置',
+  FOUND: '待核验',
+  VERIFIED: '待绑定',
+  BOUND: '待核对运行合同',
+  READY: '已就绪',
+  VERIFIED_RENDER: '已就绪',
+  UNKNOWN: '状态未知',
+};
+
 /** Independent four-stage H3 autonomous production line shell.
  *  Reads ONLY `/api/v1/manual4/*` projections and never invokes seven-stage APIs. */
 export function Manual4App({ projectId, initialStage, onBackToProjects, onMessage }: Props) {
@@ -47,7 +58,7 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
         fetchM4SystemStatus().catch(() => null),
       ]);
       setOverview(data);
-      if (status) setSysStatus(status);
+      setSysStatus(status);
       if (!initialStage) {
         setActiveStage(data.readiness.next_stage);
         window.history.replaceState(null, '', `#m4/${data.readiness.next_stage}`);
@@ -71,7 +82,10 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
 
   const stages = overview?.readiness.stages ?? [];
   const stageByKey = Object.fromEntries(stages.map((s) => [s.key, s]));
-  const envCaps = sysStatus?.environment?.capabilities ?? {};
+  const environment = sysStatus?.environment;
+  const h3 = environment?.capabilities.h3;
+  const image = environment?.capabilities.image;
+  const comfyUI = environment?.services_verified ? '已就绪' : environment?.comfyui_root ? '待核验' : '待配置';
 
   const selectStage = (key: M4StageKey) => {
     setActiveStage(key);
@@ -89,10 +103,10 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
             </span>
             <h1 className="m4-title">{overview?.project.title ?? '正在读取四阶作品…'}</h1>
             <p className="m4-subtitle">
-              独立数据库与执行链路 · 共用本机基础环境（
-              {envCaps.h3?.status === 'ready' ? 'H3 已就绪' : envCaps.h3?.status ?? '检测中'} ·{' '}
-              {envCaps.image?.status === 'ready' ? 'Qwen出图就绪' : '出图可选'} ·{' '}
-              Worker {sysStatus?.worker_online || overview?.worker_online ? '在线' : '待启动'}）
+              {environment
+                ? `ComfyUI ${comfyUI} · H3 ${ENVIRONMENT_STATE_LABEL[h3?.state ?? 'UNKNOWN']} · Qwen 出图 ${ENVIRONMENT_STATE_LABEL[image?.state ?? 'UNKNOWN']}`
+                : loading ? '正在读取本机基础环境…' : '本机基础环境状态读取失败'}
+              {' · '}Worker {overview ? (overview.worker_online ? '在线' : '待启动') : '状态未知'}
             </p>
           </div>
           <div className="m4-header-actions">

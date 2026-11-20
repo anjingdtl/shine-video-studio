@@ -232,13 +232,15 @@ def test_p1_corrupt_manual4_db_degrades_gracefully_without_blocking_director7(tm
         app.state.engine.dispose()
 
 
-def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
+def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path, monkeypatch):
     """A01/A10/A22: Unified environment facts, adopted recipe reuse & GPU epoch advance."""
     import hashlib
     import json
 
+    from shine.comfyops import setup_summary
     from shine.comfyops.handoff_startup import reconcile_dead_renderer_leases
     from shine.comfyops.models import ComfyInstance
+    from shine.foundation import environment
     from shine.foundation.environment import resolve_shared_comfy_launch
     from shine.models import AppSetting
 
@@ -313,9 +315,36 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path):
         )
 
     with TestClient(app) as client:
-        env = client.get("/api/v1/platform/environment")
-        assert env.status_code == 200
-        assert env.json()["schema"] == "shine.environment.v1"
+        with monkeypatch.context() as patch:
+            report = setup_summary.capability_report
+
+            def configured_capability(db, settings, key, **kwargs):
+                row = report(db, settings, key, **kwargs)
+                if key in {"h3", "image"}:
+                    row["state"] = "READY" if key == "h3" else "VERIFIED_RENDER"
+                    row["next_step"] = None
+                return row
+
+            patch.setattr(setup_summary, "capability_report", configured_capability)
+            patch.setattr(environment, "runtime_report", lambda *_: {
+                "status": "ACTIVE",
+                "render_provider": "comfyui",
+                "services_verified": True,
+                "service_validation": {"status": "READY"},
+            })
+            platform_response = client.get("/api/v1/platform/environment")
+            m4_response = client.get("/api/v1/manual4/system/status")
+            assert platform_response.status_code == m4_response.status_code == 200
+            platform_environment = platform_response.json()
+            m4_environment = m4_response.json()["environment"]
+            for field in ("schema", "comfyui_root", "services_verified", "recipe", "capabilities"):
+                assert m4_environment[field] == platform_environment[field]
+            assert m4_environment["schema"] == "shine.environment.v1"
+            assert m4_environment["comfyui_root"] == str(comfy_root.resolve())
+            assert m4_environment["services_verified"] is True
+            assert m4_environment["capabilities"]["h3"]["state"] == "READY"
+            assert m4_environment["capabilities"]["image"]["state"] == "VERIFIED_RENDER"
+            assert all("status" not in row for row in m4_environment["capabilities"].values())
 
         cap = client.post(
             "/api/v1/platform/capabilities/check",

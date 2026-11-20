@@ -293,13 +293,10 @@ export type M4LibraryItem = {
 };
 
 export type M4SystemStatus = {
+  line: 'manual4';
   runtime_version: string;
   schema_version: string;
-  worker_online: boolean;
-  environment?: {
-    installation?: { root?: string; ready?: boolean };
-    capabilities?: Record<string, { status?: string; label?: string }>;
-  };
+  environment: import('../../api').EnvironmentSnapshot;
 };
 
 export function fetchM4SystemStatus(): Promise<M4SystemStatus> {

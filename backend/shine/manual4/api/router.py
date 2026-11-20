@@ -43,6 +43,7 @@ __all__ = ["M4DB", "M4Operator", "PlatformDB", "m4_operator", "router"]
 
 @router.get("/system/status")
 def m4_system_status(request: Request, platform_db: PlatformDB, m4_db: M4DB) -> dict[str, Any]:
+    """Embed the platform environment snapshot without reinterpreting its capability states."""
     settings = request.app.state.settings
     meta = read_m4_schema_meta(m4_db)
     gpu = inspect_gpu_status(request.app.state.session_factory, settings.data_dir)

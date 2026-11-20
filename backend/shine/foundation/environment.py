@@ -39,13 +39,18 @@ def environment_snapshot(
     variant_id: str | None = None,
 ) -> dict[str, Any]:
     """Return the unified read-only machine environment snapshot (shared across lines)."""
-    snap = setup_summary(db, settings, project_id=None, variant_id=variant_id)
-    selected = (snap.get("installation") or {}).get("selected") or {}
-    report = runtime_report(db, settings)
     try:
-        evidence = service_evidence_status(db, settings)
+        report = runtime_report(db, settings)
     except Exception:
-        evidence = {"status": "PENDING", "blockers": ["SERVICE_VALIDATION_UNAVAILABLE"]}
+        report = {}
+    snap = setup_summary(db, settings, project_id=None, variant_id=variant_id, report=report)
+    selected = (snap.get("installation") or {}).get("selected") or {}
+    evidence = report.get("service_validation")
+    if evidence is None:
+        try:
+            evidence = service_evidence_status(db, settings)
+        except Exception:
+            evidence = {"status": "PENDING", "blockers": ["SERVICE_VALIDATION_UNAVAILABLE"]}
 
     recipe_meta: dict[str, Any] = {}
     try:
@@ -88,7 +93,7 @@ def environment_snapshot(
             key: {
                 "key": key,
                 "label": row.get("label"),
-                "state": row.get("state"),
+                "state": row["state"],
                 "optional": bool(row.get("optional")),
                 "facts": row.get("facts") or {},
                 "summary": row.get("summary"),

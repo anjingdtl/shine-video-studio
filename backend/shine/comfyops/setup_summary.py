@@ -900,7 +900,8 @@ def _progress(capabilities: dict[str, dict]) -> list[dict[str, str]]:
 
 def summary(db, settings, *, project_id: str | None = None,
             discovered: list[str] | None = None,
-            variant_id: str | None = None) -> dict[str, Any]:
+            variant_id: str | None = None,
+            report: dict[str, Any] | None = None) -> dict[str, Any]:
     """The one read-only snapshot every entry point shares.
 
     ``variant_id`` is the H3 stack the person chose; the h3 capability then
@@ -915,10 +916,11 @@ def summary(db, settings, *, project_id: str | None = None,
     # 出互相矛盾的结论（裁决说已就绪、卡片却说跑不通）。
     from shine.comfyops.runtime_configuration import runtime_report
 
-    try:
-        report = runtime_report(db, settings)
-    except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
-        report = {}
+    if report is None:
+        try:
+            report = runtime_report(db, settings)
+        except Exception:  # noqa: BLE001 - 读不到的运行配置保持未证明，不冒充已核验
+            report = {}
     runtime_verified = bool(report.get("services_verified") and selected
                             and selected.get("instance_id") == _runtime_instance_id(db, settings))
     preparation = preparation_state(db)

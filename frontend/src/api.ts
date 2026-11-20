@@ -647,6 +647,16 @@ export type SetupVerdict = {
   has_candidate_runtime: boolean;
 };
 
+export type SetupCapabilityState =
+  | 'MISSING' | 'FOUND' | 'VERIFIED' | 'BOUND' | 'READY' | 'VERIFIED_RENDER' | 'UNKNOWN';
+
+export type EnvironmentSnapshot = {
+  schema: 'shine.environment.v1';
+  comfyui_root: string | null;
+  services_verified: boolean;
+  capabilities: Record<string, { state: SetupCapabilityState; label: string }>;
+};
+
 export type QCReport = {
   id: string; result: string; is_mock: boolean; reviewer: string;
   report: {
