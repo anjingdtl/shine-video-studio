@@ -728,6 +728,7 @@ try {
         }
         if (-not $NoWorker) {
             Start-ShineProcess 'worker' $venvPython @('-m', 'shine.worker') $repoRoot
+            Start-ShineProcess 'worker-m4' $venvPython @('-m', 'shine.manual4.worker') $repoRoot
         }
         Start-ShineProcess 'web' (Get-Command node).Source $viteArgs (Join-Path $repoRoot 'frontend')
 

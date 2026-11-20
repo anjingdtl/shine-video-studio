@@ -332,3 +332,212 @@ export function putM4ShotBindings(
     body: JSON.stringify({ bindings }),
   });
 }
+
+export type M4PromptRevision = {
+  id: string;
+  shot_id: string;
+  revision: number;
+  status: string;
+  prompt_text: string;
+  prompt_sha256: string;
+  shot_revision: number;
+  target_seconds: number;
+  generation_mode: string;
+  reference_manifest: Array<{
+    asset_version_id: string;
+    h3_label: string;
+    role_label: string;
+    use_as: string;
+    sha256: string;
+  }>;
+  reference_manifest_sha256: string;
+  warnings: Array<{ code: string; severity: string; message: string }>;
+  frozen_by: string | null;
+  frozen_at: string | null;
+  invalidated_reason: string | null;
+  updated_at: string;
+};
+
+export type M4Job = {
+  id: string;
+  run_id: string;
+  episode_id: string;
+  shot_id: string;
+  shot_revision: number;
+  ordinal: number;
+  status: string;
+  attempt_count: number;
+  target_seconds: number;
+  continuity_mode: string;
+  provider: string;
+  output_sha256: string;
+  output_bytes: number;
+  measured_duration_s: number | null;
+  measured_width: number | null;
+  measured_height: number | null;
+  measured_fps: number | null;
+  qc_result: Record<string, unknown>;
+  failure_code: string | null;
+  failure_detail: string;
+  media_url: string | null;
+};
+
+export type M4ProductionRun = {
+  id: string;
+  project_id: string;
+  execution_snapshot_id: string;
+  scope_kind: string;
+  provider: string;
+  status: string;
+  worker_id: string | null;
+  error_code: string | null;
+  error_detail: string;
+  jobs: M4Job[];
+  created_at: string;
+};
+
+export type M4ProductionShot = {
+  id: string;
+  episode_id: string;
+  shot_no: number;
+  shot_code: string;
+  revision: number;
+  target_seconds: number;
+  summary: string;
+  dialogue: Array<{ speaker: string; text: string }>;
+  aspect_ratio: string;
+  continuity_mode: string;
+  reference_manifest: M4PromptRevision['reference_manifest'];
+  frozen_prompt: M4PromptRevision | null;
+  draft_prompt: M4PromptRevision | null;
+  active_prompt: M4PromptRevision | null;
+  prompt_valid_for_run: boolean;
+  prompt_invalid_reason: string | null;
+  latest_job: M4Job | null;
+};
+
+export type M4ProductionState = {
+  confirmed_revision: { id: string; revision: number } | null;
+  episodes: Array<{
+    id: string;
+    episode_no: number;
+    episode_code: string;
+    title: string;
+    planned_total_seconds: number;
+    shots: M4ProductionShot[];
+  }>;
+  runs: M4ProductionRun[];
+  options: {
+    variants: Array<{ variant_id: string; label: string; verified: boolean; accelerators: string[] }>;
+    accelerators: Array<{ id: string; steps: number; requires_pdd: boolean | null; label: string }>;
+    frames: Array<{ orientation: string; aspect_ratio: string; scale: number; width: number; height: number }>;
+  };
+  readiness: M4Overview['readiness'];
+};
+
+export type M4RunConfigInput = {
+  scope_kind: string;
+  scope_target_ids: string[];
+  variant_id: string;
+  accelerator_id: string;
+  resolution_scale: number;
+  second_pass?: { enabled: boolean; denoise: number; latent_scale: number; nfe: string } | null;
+  seed: number;
+  provider?: string;
+};
+
+export function fetchM4ProductionState(projectId: string): Promise<M4ProductionState> {
+  return m4Request<M4ProductionState>(`/manual4/projects/${projectId}/production/state`, { cache: 'no-store' });
+}
+
+export function updateM4ShotOptions(
+  projectId: string,
+  shotId: string,
+  opts: { aspect_ratio?: string; continuity_mode?: string },
+): Promise<{ shot_id: string; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/shots/${shotId}/render-options`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(opts),
+  });
+}
+
+export function saveM4PromptDraft(
+  projectId: string,
+  shotId: string,
+  promptText: string,
+): Promise<{ prompt: M4PromptRevision; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/shots/${shotId}/prompt/draft`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt_text: promptText }),
+  });
+}
+
+export function freezeM4Prompt(
+  projectId: string,
+  shotId: string,
+  promptText?: string,
+): Promise<{ prompt: M4PromptRevision; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/shots/${shotId}/prompt/freeze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt_text: promptText ?? null }),
+  });
+}
+
+export function previewM4Snapshot(
+  projectId: string,
+  config: M4RunConfigInput,
+): Promise<{ snapshot_sha256: string; items: Array<Record<string, unknown>> }> {
+  return m4Request(`/manual4/projects/${projectId}/production/snapshot/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+export function createM4Run(
+  projectId: string,
+  config: M4RunConfigInput,
+): Promise<{ run: M4ProductionRun; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/production/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+export function controlM4Run(
+  projectId: string,
+  runId: string,
+  action: 'pause' | 'resume' | 'cancel',
+): Promise<{ run: M4ProductionRun; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/production/runs/${runId}/${action}`, {
+    method: 'POST',
+  });
+}
+
+export function retakeM4Shot(
+  projectId: string,
+  shotId: string,
+  config: M4RunConfigInput,
+): Promise<{ run: M4ProductionRun; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/shots/${shotId}/retake`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+export function reconcileM4Job(
+  projectId: string,
+  jobId: string,
+  decision: 'requeue' | 'mark_failed',
+): Promise<{ job: M4Job; state: M4ProductionState }> {
+  return m4Request(`/manual4/projects/${projectId}/jobs/${jobId}/reconcile`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision }),
+  });
+}

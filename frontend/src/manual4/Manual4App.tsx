@@ -156,7 +156,9 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
         <ScheduleProduceStagePage
           overview={overview}
           stage={stageByKey.production}
+          onRefresh={refresh}
           onNextStage={() => selectStage('delivery')}
+          onMessage={onMessage}
         />
       )}
       {overview && activeStage === 'delivery' && (

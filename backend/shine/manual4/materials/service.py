@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -510,7 +511,11 @@ def select_or_generate_material(
             str(raw_out.get("provider", "test-provider")) if isinstance(raw_out, dict) else "test-provider"
         )
     else:
-        if not getattr(settings, "enable_local_execution", False):
+        local_enabled = (
+            getattr(settings, "render_provider", "mock") == "comfyui"
+            or os.getenv("SHINE_ENABLE_LOCAL_EXECUTION", "").strip().lower() in {"1", "true", "yes"}
+        )
+        if not local_enabled:
             raise HTTPException(
                 503,
                 {

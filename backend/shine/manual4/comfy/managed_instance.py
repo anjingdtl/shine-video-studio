@@ -189,6 +189,7 @@ def managed_m4_comfyui(
     startup_timeout_s: float = 300.0,
 ):
     """Acquire platform GPU lease, launch Manual4's isolated ComfyUI, yield client, then stop."""
+    owner = owner if owner.startswith("m4:") else f"m4:{owner}"
     spec = resolve_m4_comfy_spec(settings, m4_root)
     lease = acquire_m4_gpu_lease(platform_factory, settings.data_dir, owner=owner, budget_mb=16384)
     lease_id = lease["lease_id"]

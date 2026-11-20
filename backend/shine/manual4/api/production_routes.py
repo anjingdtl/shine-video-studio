@@ -1,0 +1,303 @@
+"""Manual4 Stage 3 HTTP endpoints (manual H3 prompts, snapshot preview, runs & worker controls)."""
+
+from __future__ import annotations
+
+from typing import Annotated, Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.orm import Session
+
+from shine.manual4.production.service import (
+    control_production_run,
+    create_production_run,
+    create_retake_job_run,
+    get_production_state,
+    preview_execution_snapshot,
+    reconcile_m4_job,
+)
+from shine.manual4.prompts.service import (
+    freeze_prompt,
+    save_prompt_draft,
+    update_shot_render_options,
+)
+from shine.manual4.storage.files import safe_m4_path
+from shine.manual4.storage.models import M4Job, M4Project
+from shine.platform_projects import require_manual4_project
+
+production_router = APIRouter()
+
+
+def _m4_db(request: Request):
+    session: Session = request.app.state.m4_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _platform_db(request: Request):
+    session: Session = request.app.state.session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
+
+
+def _require_m4_operator(request: Request) -> str:
+    from shine.manual4.api.router import m4_operator
+
+    return m4_operator(request)
+
+
+M4DB = Annotated[Session, Depends(_m4_db)]
+PlatformDB = Annotated[Session, Depends(_platform_db)]
+M4Operator = Annotated[str, Depends(_require_m4_operator)]
+
+
+def _project(project_id: str, platform_db: Session, m4_db: Session) -> M4Project:
+    require_manual4_project(platform_db, project_id)
+    row = m4_db.get(M4Project, project_id)
+    if row is None:
+        raise HTTPException(404, "M4_PROJECT_RECORD_MISSING")
+    return row
+
+
+class M4ShotOptionsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    aspect_ratio: str | None = None
+    continuity_mode: str | None = None
+
+
+class M4PromptDraftBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str
+
+
+class M4PromptFreezeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prompt_text: str | None = None
+
+
+class M4SecondPassBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    denoise: float = Field(default=0.25, gt=0.0, le=1.0)
+    latent_scale: float = Field(default=1.0, ge=1.0, le=2.0)
+    nfe: str = "8"
+
+
+class M4SnapshotConfigBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    scope_kind: str = "project"
+    scope_target_ids: list[str] = Field(default_factory=list)
+    variant_id: str = "h3-ref2va-int8-convrot"
+    accelerator_id: str = "pdd8"
+    resolution_scale: float = Field(default=1.0, ge=0.3, le=1.0)
+    second_pass: M4SecondPassBody | None = None
+    seed: int = Field(default=77, ge=0)
+    provider: str = "comfyui"
+    idempotency_key: str | None = None
+
+
+class M4ReconcileBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: str
+
+
+@production_router.get("/projects/{project_id}/production/state")
+def m4_production_state(
+    project_id: str,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    return get_production_state(m4_db, project)
+
+
+@production_router.put("/projects/{project_id}/shots/{shot_id}/render-options")
+def m4_update_shot_options(
+    project_id: str,
+    shot_id: str,
+    body: M4ShotOptionsBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    res = update_shot_render_options(
+        m4_db,
+        project,
+        shot_id,
+        actor=actor,
+        aspect_ratio=body.aspect_ratio,
+        continuity_mode=body.continuity_mode,
+    )
+    m4_db.commit()
+    return {**res, "state": get_production_state(m4_db, project)}
+
+
+@production_router.put("/projects/{project_id}/shots/{shot_id}/prompt/draft")
+def m4_save_prompt_draft(
+    project_id: str,
+    shot_id: str,
+    body: M4PromptDraftBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    prompt = save_prompt_draft(m4_db, project, shot_id, actor=actor, prompt_text=body.prompt_text)
+    m4_db.commit()
+    return {"prompt": prompt, "state": get_production_state(m4_db, project)}
+
+
+@production_router.post("/projects/{project_id}/shots/{shot_id}/prompt/freeze")
+def m4_freeze_prompt(
+    project_id: str,
+    shot_id: str,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+    body: M4PromptFreezeBody | None = None,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    prompt = freeze_prompt(
+        m4_db,
+        project,
+        shot_id,
+        actor=actor,
+        prompt_text=body.prompt_text if body else None,
+    )
+    m4_db.commit()
+    return {"prompt": prompt, "state": get_production_state(m4_db, project)}
+
+
+@production_router.post("/projects/{project_id}/production/snapshot/preview")
+def m4_preview_snapshot(
+    project_id: str,
+    body: M4SnapshotConfigBody,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    return preview_execution_snapshot(
+        m4_db,
+        project,
+        scope_kind=body.scope_kind,
+        scope_target_ids=body.scope_target_ids,
+        variant_id=body.variant_id,
+        accelerator_id=body.accelerator_id,
+        resolution_scale=body.resolution_scale,
+        second_pass=body.second_pass.model_dump() if body.second_pass else None,
+        seed=body.seed,
+        provider=body.provider,
+    )
+
+
+@production_router.post("/projects/{project_id}/production/runs", status_code=201)
+def m4_create_run(
+    project_id: str,
+    body: M4SnapshotConfigBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    run = create_production_run(
+        m4_db,
+        project,
+        actor=actor,
+        scope_kind=body.scope_kind,
+        scope_target_ids=body.scope_target_ids,
+        variant_id=body.variant_id,
+        accelerator_id=body.accelerator_id,
+        resolution_scale=body.resolution_scale,
+        second_pass=body.second_pass.model_dump() if body.second_pass else None,
+        seed=body.seed,
+        provider=body.provider,
+        idempotency_key=body.idempotency_key,
+    )
+    m4_db.commit()
+    return {"run": run, "state": get_production_state(m4_db, project)}
+
+
+@production_router.post("/projects/{project_id}/production/runs/{run_id}/{action}")
+def m4_control_run(
+    project_id: str,
+    run_id: str,
+    action: str,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    run = control_production_run(m4_db, project, run_id, actor=actor, action=action)
+    m4_db.commit()
+    return {"run": run, "state": get_production_state(m4_db, project)}
+
+
+@production_router.post("/projects/{project_id}/shots/{shot_id}/retake", status_code=201)
+def m4_retake_shot(
+    project_id: str,
+    shot_id: str,
+    body: M4SnapshotConfigBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    run = create_retake_job_run(
+        m4_db,
+        project,
+        shot_id,
+        actor=actor,
+        variant_id=body.variant_id,
+        accelerator_id=body.accelerator_id,
+        resolution_scale=body.resolution_scale,
+        second_pass=body.second_pass.model_dump() if body.second_pass else None,
+        seed=body.seed,
+        provider=body.provider,
+    )
+    m4_db.commit()
+    return {"run": run, "state": get_production_state(m4_db, project)}
+
+
+@production_router.post("/projects/{project_id}/jobs/{job_id}/reconcile")
+def m4_reconcile_job(
+    project_id: str,
+    job_id: str,
+    body: M4ReconcileBody,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    job = reconcile_m4_job(m4_db, project, job_id, actor=actor, decision=body.decision)
+    m4_db.commit()
+    return {"job": job, "state": get_production_state(m4_db, project)}
+
+
+@production_router.get("/projects/{project_id}/jobs/{job_id}/media")
+def m4_job_media(
+    project_id: str,
+    job_id: str,
+    request: Request,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> FileResponse:
+    project = _project(project_id, platform_db, m4_db)
+    job = m4_db.get(M4Job, job_id)
+    if job is None or job.project_id != project.id or not job.output_storage_path:
+        raise HTTPException(404, {"code": "M4_JOB_MEDIA_MISSING", "message": "该镜头尚无视频输出。"})
+    path = safe_m4_path(request.app.state.m4_root, job.output_storage_path)
+    if not path.is_file():
+        raise HTTPException(404, {"code": "M4_JOB_FILE_MISSING", "message": "视频文件缺失。"})
+    return FileResponse(path, media_type="video/mp4")

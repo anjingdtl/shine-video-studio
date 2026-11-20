@@ -208,6 +208,19 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             }
         )
     else:
+        latest_job_by_shot: dict[str, M4Job] = {}
+        all_jobs = db.scalars(
+            select(M4Job)
+            .where(M4Job.project_id == project.id, M4Job.shot_id.in_([s.id for s in shots]))
+            .order_by(M4Job.created_at.desc(), M4Job.ordinal.desc())
+        ).all()
+        for job in all_jobs:
+            latest_job_by_shot.setdefault(job.shot_id, job)
+
+        passed_jobs_count = 0
+        active_jobs_count = sum(
+            1 for job in all_jobs if job.status in {"QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING"}
+        )
         for shot in shots:
             frozen = frozen_prompts_by_shot.get(shot.id)
             if (
@@ -225,6 +238,17 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                         "action": "freeze_prompt",
                     }
                 )
+                continue
+            lj = latest_job_by_shot.get(shot.id)
+            if (
+                lj is not None
+                and lj.status == "PASSED"
+                and lj.shot_revision == shot.revision
+                and lj.prompt_sha256 == frozen.prompt_sha256
+                and lj.reference_manifest_sha256 == frozen.reference_manifest_sha256
+            ):
+                passed_jobs_count += 1
+
         if latest_run is None:
             prod_blockers.append(
                 {
@@ -234,25 +258,19 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                     "action": "confirm_and_run",
                 }
             )
-        else:
-            run_jobs = db.scalars(select(M4Job).where(M4Job.run_id == latest_run.id)).all()
-            passed_jobs_count = sum(1 for j in run_jobs if j.status == "PASSED")
-            active_jobs_count = sum(
-                1 for j in run_jobs if j.status in {"QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING"}
+        elif latest_run.status in {"PENDING", "CLAIMED", "RUNNING", "PAUSED"} or passed_jobs_count < len(shots):
+            prod_blockers.append(
+                {
+                    "code": f"M4_RUN_{latest_run.status}",
+                    "stage": "production",
+                    "run_id": latest_run.id,
+                    "message": (
+                        f"当前排片批次状态：{latest_run.status}"
+                        f"（当前版本已通过 {passed_jobs_count}/{len(shots)} 镜）。"
+                    ),
+                    "action": "inspect_run",
+                }
             )
-            if latest_run.status != "COMPLETED" or passed_jobs_count < len(shots):
-                prod_blockers.append(
-                    {
-                        "code": f"M4_RUN_{latest_run.status}",
-                        "stage": "production",
-                        "run_id": latest_run.id,
-                        "message": (
-                            f"当前排片批次状态：{latest_run.status}"
-                            f"（已通过 {passed_jobs_count}/{len(shots)} 镜）。"
-                        ),
-                        "action": "inspect_run",
-                    }
-                )
     stage3_done = stage2_done and not prod_blockers
 
     # Stage 4: Delivery
