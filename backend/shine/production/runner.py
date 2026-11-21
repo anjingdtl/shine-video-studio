@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from shine.comfyops.models import ResourceLease
-from shine.director.contracts import digest_of
+from shine.director.contracts import digest_of, episode_video_seconds
 from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
 from shine.director.package import (
     episode_manifest,
@@ -1866,7 +1866,10 @@ def episode_public(
             "shot_ids": list(episode.shot_ids),
             "post_contract": episode.post_contract,
             "passed_shot_count": len([shot_id for shot_id in episode.shot_ids if shot_id in passed]),
-            "planned_seconds": episode.planned_seconds,
+            "planned_seconds": episode_video_seconds(
+                [shot for shot in (db.get(Shot, shot_id) for shot_id in episode.shot_ids or [])
+                 if shot is not None],
+                target_seconds=episode.planned_seconds),
             "actual_seconds": episode.actual_seconds,
             "delivery_order_id": episode.delivery_order_id,
             "delivered_artifact_id": episode.delivered_artifact_id,

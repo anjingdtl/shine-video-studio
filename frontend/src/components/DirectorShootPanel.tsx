@@ -21,6 +21,7 @@ import {
   type DirectorEpisodeOverview,
   type DirectorOverview,
   type DirectorPackage,
+  type Job,
   type ProductionRun,
   type ProductionStrategy,
   type StrategyOptions,
@@ -159,7 +160,7 @@ const FALLBACK_OPTIONS: StrategyOptions = {
   upscale: [],
 };
 
-export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, activeJob, onMessage, onRefresh, onNavigate, onGoSetup }: {
+export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, activeJob, attentionJobs, onMessage, onRefresh, onNavigate, onGoSetup, onAbandon }: {
   projectId: string;
   overview: DirectorOverview | null;
   demo: boolean;
@@ -169,11 +170,15 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   refreshEpoch?: number;
   /**  job 台账里正在渲染的任务（同一事实，App 透传）：进度条「第几镜」用它。 */
   activeJob?: { shot_id: string; shot_name: string; status: string; attempts?: { progress: number }[] } | null;
+  /** 本次运行范围内等待人工决定的镜头（未知结果 / 已放弃）：同一份 job 台账。 */
+  attentionJobs?: Job[];
   onMessage?: (message: string, tone?: 'success' | 'error') => void;
   onRefresh?: () => void;
-  onNavigate?: (page: 'package' | 'run') => void;
+  onNavigate?: (page: 'package' | 'run' | 'deliver') => void;
   /** 模型下载统一在基础配置完成；本页只把未就绪的变体导航过去，不另设下载入口。 */
   onGoSetup?: () => void;
+  /** 既有唯一放弃执行者（与任务明细同一入口），不另起执行链。 */
+  onAbandon?: (jobId: string) => void;
 }) {
   const railPresent = useRailPresent();
   // 切页回来组件重挂载：从项目级存储恢复上次选的拍摄方案，不回默认。
@@ -299,6 +304,16 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     ? (activeJob.status === 'PASSED' ? 100
       : activeJob.attempts?.[activeJob.attempts.length - 1]?.progress ?? 0)
     : 0;
+  // 运行范围内等待人工决定的镜头：未知结果→放弃+重拍；已放弃→重拍。
+  // 事实读同一份 job 台账，动作复用既有执行者，不另起链路。
+  const scopeShotIds = useMemo(
+    () => new Set((run?.episodes ?? []).flatMap((episode) => episode.shot_ids ?? [])),
+    [run],
+  );
+  const decisionJobs = useMemo(
+    () => (attentionJobs ?? []).filter((job) => scopeShotIds.has(job.shot_id)),
+    [attentionJobs, scopeShotIds],
+  );
 
   const toggle = (episodeId: string) => {
     setTouched(true);
@@ -635,7 +650,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       <p className="run-progress-note">
         {productionDone
           ? `${totalShots} 镜全部通过。到「后期成片」逐集播放并确认。`
-          : `已通过 ${passedShots} / ${totalShots} 镜${activeJob ? `，正在渲染「${activeJob.shot_name}」` : ''}。后台 Worker 持续推进，页面跟读同一份台账。`}
+          : decisionJobs.length > 0
+            ? `已通过 ${passedShots} / ${totalShots} 镜；有镜头的结果未知，等待你的决定，其余已通过镜头不受影响。`
+            : `已通过 ${passedShots} / ${totalShots} 镜${activeJob ? `，正在渲染「${activeJob.shot_name}」` : ''}。后台 Worker 持续推进，页面跟读同一份台账。`}
       </p>
     </section>}
     {activeJob && (!run || !['QUEUED', 'RUNNING'].includes(run.status)) && <section className="card section-card run-progress" aria-label="单镜重拍进度">
@@ -658,7 +675,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         <div>
           <div className="section-kicker">第 6 阶段 · 真实拍摄</div>
           <h2>{running ? '后台正在逐镜生成'
-          : run ? (run.status === 'COMPLETED' ? '这次运行已经完成' : `运行${run.status === 'CANCELLED' ? '已取消' : '已停止'}`)
+          : run ? (run.status === 'COMPLETED' ? '这次运行已经完成'
+            : run.status === 'NEEDS_REVIEW' ? '运行等待人工核对'
+              : `运行${run.status === 'CANCELLED' ? '已取消' : '已停止'}`)
             : '还没有在拍的运行'}</h2>
           <p>拍摄由常驻 Worker 推进，关掉浏览器也会继续；每一镜的产物、质检和成片都落在这台电脑上。</p>
         </div>
@@ -679,6 +698,25 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         {run.blocker_count > 0 && <p className="run-hint">
           <AlertTriangle size={12} /> 有 {run.blocker_count} 处阻塞，见下方集卡与⑦成片页。
         </p>}
+        {decisionJobs.length > 0 && !['COMPLETED', 'CANCELLED'].includes(run.status) && (
+          <div className="required-action">
+            <b><AlertTriangle size={13} /> 拍摄停在等待你决定的镜头</b>
+            <p>渲染器已不在，系统不会自动重投。放弃只结束这一次任务（产物保留）；之后到⑦重拍该镜并选用，整集继续。</p>
+            {decisionJobs.map((job) => (
+              <div key={job.id} className="repair-actions">
+                <span>「{job.shot_name}」{job.status === 'NEEDS_REVIEW' ? '结果未知' : '已放弃未知结果'}</span>
+                {job.status === 'NEEDS_REVIEW' && onAbandon && (
+                  <button type="button" className="must-button" disabled={busy !== ''}
+                    onClick={() => onAbandon(job.id)}>放弃未知结果（保留产物，不重投）</button>
+                )}
+                {onNavigate && (
+                  <button type="button" className="btn-secondary" disabled={busy !== ''}
+                    onClick={() => onNavigate('deliver')}>去⑦重拍此镜</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
         <div className="shoot-controls">
           {run.status === 'RUNNING' || run.status === 'QUEUED'
             ? <button type="button" className="btn-secondary" disabled={busy !== ''}

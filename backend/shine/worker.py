@@ -3558,7 +3558,13 @@ def recover_expired_jobs(
 
 
 def _block_interrupted_handoff(session_factory, job_id):
-    """Preserve unresolved process side effects before any renderer recovery call."""
+    """Preserve unresolved process side effects before any renderer recovery call.
+
+    Returns True only when this call really recorded a new conclusion (journal
+    stage, lease state or job state changed).  Re-asserting an already-recorded
+    block is a check, not progress: counting it as recovery would let one
+    human-pending job own every tick and starve the series executor forever.
+    """
     from sqlalchemy import text
 
     from shine.comfyops.models import ResourceLease
@@ -3595,11 +3601,15 @@ def _block_interrupted_handoff(session_factory, job_id):
         lease_mismatch = reservation and value.get("lease_id") != (lease.id if lease else None)
         if reservation and not lease_mismatch and _live_handoff_reservation(db, job, lease, utcnow()):
             return False
+        changed = False
         if lease is None:
             lease = ResourceScheduler().enqueue(db, "h3:" + job_id, 16384, True, 100)
+            changed = True
         if lease.status != "RELEASED":
             # A lease that was already released cannot be un-released: the GPU
             # it protected is free, and the job is blocked for the human only.
+            if lease.status != "RECONCILE_REQUIRED":
+                changed = True
             lease.status = "RECONCILE_REQUIRED"
         if value.get("stage") != "RECONCILE_REQUIRED" or binding_mismatch or lease_mismatch:
             journal.value = {**value, "stage": "RECONCILE_REQUIRED", "last_confirmed_stage": value.get("stage"),
@@ -3608,16 +3618,69 @@ def _block_interrupted_handoff(session_factory, job_id):
                                         "WORKER_LEASE_EXPIRED_DURING_HANDOFF"),
                              **({"recovery_job_id": job_id} if binding_mismatch else {}),
                              **({"recovery_lease_id": lease.id} if lease_mismatch else {})}
+            changed = True
+        failure_code = ("COMFY_ACTIVATION_RECONCILIATION_REQUIRED" if activation
+                        else "COMFY_HANDOFF_RECONCILIATION_REQUIRED")
         if job.status != "NEEDS_REVIEW":
             try_transition(job, "NEEDS_REVIEW")
-        job.failure_code = ("COMFY_ACTIVATION_RECONCILIATION_REQUIRED" if activation
-                            else "COMFY_HANDOFF_RECONCILIATION_REQUIRED")
+            changed = True
+        if job.failure_code != failure_code or job.lease_owner is not None or job.lease_expires_at is not None:
+            changed = True
+        job.failure_code = failure_code
         job.lease_owner = None
         job.lease_expires_at = None
-        add_audit(db, "orchestrator", "COMFY_HANDOFF_RECOVERY_BLOCKED", "job", job.id,
-                  {"attempt_id": attempt.id if attempt else None, "last_stage": value.get("stage"),
-                   "resubmitted": False},
-                  project_id=job.project_id)
+        if changed:
+            add_audit(db, "orchestrator", "COMFY_HANDOFF_RECOVERY_BLOCKED", "job", job.id,
+                      {"attempt_id": attempt.id if attempt else None, "last_stage": value.get("stage"),
+                       "resubmitted": False},
+                      project_id=job.project_id)
+        return changed
+
+
+def _handoff_decision_pending(session_factory, job_id) -> bool:
+    """Whether the interrupted-handoff block is already the recorded conclusion.
+
+    Such a job waits for the human decision (abandon / retake), not for another
+    recovery pass.  This only reads what ``_block_interrupted_handoff`` wrote;
+    it never decides a new state.  A renderer that is still the same live owned
+    process is NOT pending: recovery may still read its history and adopt.
+    """
+    from shine.comfyops.models import ResourceLease
+    from shine.models import AppSetting
+
+    with session_factory() as db:
+        job = db.get(Job, job_id)
+        if job is None or job.status != "NEEDS_REVIEW":
+            return False
+        if job.failure_code not in ("COMFY_ACTIVATION_RECONCILIATION_REQUIRED",
+                                    "COMFY_HANDOFF_RECONCILIATION_REQUIRED"):
+            return False
+        if job.lease_expires_at and job.lease_expires_at > utcnow():
+            return False
+        attempt = _latest_attempt(db, job_id)
+        journal = db.get(AppSetting, "handoff:" + attempt.id) if attempt else None
+        activation, reservation = False, False
+        if not journal and attempt:
+            journal = db.get(AppSetting, "renderer-activation:" + attempt.id)
+            activation = journal is not None
+        if not journal:
+            journal = db.get(AppSetting, "handoff-reservation:" + job_id)
+            reservation = journal is not None
+        if journal is None or not isinstance(journal.value, dict):
+            return False
+        value = journal.value
+        if value.get("stage") != "RECONCILE_REQUIRED" or value.get("job_id") != job_id:
+            return False
+        if not reservation and (not attempt or value.get("attempt_id") != attempt.id):
+            return False
+        lease = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + job_id))
+        if reservation:
+            if value.get("lease_id") != (lease.id if lease else None):
+                return False
+            if _live_handoff_reservation(db, job, lease, utcnow()):
+                return False
+        if activation and attempt and _activation_owned_alive(db, job, attempt, value):
+            return False
         return True
 
 
@@ -3669,6 +3732,11 @@ def _recover_one_job(
         # human may resolve.  A render whose bytes are already stored is not
         # such a case: its outcome is known, so the quality gates continue.
         return 1
+    if persisted is None and _handoff_decision_pending(session_factory, job_id):
+        # The block is already the recorded conclusion; the job waits for the
+        # human, not for another recovery pass.  Counting a re-check as progress
+        # would starve the series/run executors on every tick.
+        return 0
     finalize: dict[str, Any] | None = None
     with session_factory.begin() as db:
         job = db.get(Job, job_id)

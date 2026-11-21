@@ -2416,3 +2416,69 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   清单）。回归：后端 8 分片全量在最终代码 `b839c97` 上完整一轮全绿（一次 `WinError 10053` 本地连接
   中止偶发：同用例隔离复跑通过后完整重跑 8/8 干净）+ `backend/tests/manual4` 专项 + 前端 vitest
   全量 + `tsc`/Vite build + Ruff。
+
+## 2026-11-21 中断拍摄恢复解阻轮（用户报障：待核对无直达、⑥无续拍入口）
+
+- **根因是恢复路径的活锁**：工作栈中途关闭后重启，`recover_expired_jobs` 每拍把
+  「重新阻塞一个已阻塞的 job」记成进展（同一 job 实测 6827 条重复
+  `COMFY_HANDOFF_RECOVERY_BLOCKED` 审计，约 100ms 一条），tick 永远停在
+  `reconciled`，series/run 执行器拿不到拍子：run 永远 RUNNING，⑥ 页假装在跑，
+  人工决定面永远不露出。修复收敛为「检查过 ≠ 有进展」：
+  `_block_interrupted_handoff` 仅在真实写入新结论（日志/租约/job 状态变化）时
+  返回 True 并写审计；`_handoff_decision_pending` 只读已记录的阻塞结论，
+  `_recover_one_job` 对其返回 0。状态机照常推进：series → NEEDS_REVIEW、
+  run → NEEDS_REVIEW，既有⑥按钮与⑦重拍链路随之可见。不新增状态、不新增执行者。
+- **唯一裁决携带导航事实**：`summarize_production_mode` 在
+  `LEASE_RECONCILE_REQUIRED` 时从同一份租约事实推导 `focus{project_id,run_id}`
+  （租约 owner → job → series item → run batch）；顶栏「去处理」直达该作品的
+  ⑥ 视频生产页，不再一律送进基础配置。
+- **⑥ 运行卡就地挂载既有执行者**：范围内「结果未知」镜头显示
+  「放弃未知结果（保留产物，不重投）」（复用 `abandonJob`，与任务明细同一执行者）
+  与「去⑦重拍此镜」；「已放弃」镜头只指去重拍。NEEDS_REVIEW 的 run 标题如实为
+  「运行等待人工核对」。放弃是产品的人类决策点：监督进程重启安全门
+  （`RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK`）要求先无待核对
+  租约，故后端修复的真机生效需用户先放弃未知结果；未经用户授权不得代为放弃。
+- 回归：`backend/tests/test_stuck_run_recovery.py`（3 例：活锁反例、真实
+  `_run_configured_once` tick 推进到 NEEDS_REVIEW + focus、无租约无 focus）；
+  前端 `stuckRunRecovery.test.tsx`（4 例：顶栏直达、放弃/重拍入口、已放弃只指重拍、
+  范围外不显示）；定向批次（handoff/recovery/scheduling/production_mode/
+  offline_e2e/production_series/long_form 等）与 8 分片全量、前端全量 469 例、
+  tsc/build/Ruff。
+- **本轮改了 `worker.py`**（`client_review_identity` 钉住）：旧 VLM revision 按设计
+  失效，真实正负校准仍未完成，不得声称已校准。真机边界：⑥ 新决定面已在当前栈
+  浏览器实测可见；后端活锁修复的真机生效待用户授权放弃后重启验证。
+- **恢复链后三段同样收敛到既有执行者**（真机穿测发现放弃后仍无处续拍）：
+  ① 重拍唯一裁决 `api_segments._blocker` 承认「用户已放弃、结论已结清」
+  （`USER_ABANDONED_UNRECONCILED`）的 FAILED 源——重拍是新请求，不是旧提示词重投；
+  未结清的 UNKNOWN/NEEDS_REVIEW 仍具名拒绝。② `select_replacement` 在根序列
+  NEEDS_REVIEW 且全镜选用通过时把选用写回根序列 items（旧 job 留作历史），不新建
+  状态。③ `reconcile_abandoned_series` 读「租约已 RELEASED」事实合并结论：全镜通过
+  即 COMPLETED，批次/分集/交付单/Run 由既有 advance 链路收敛。NEEDS_REVIEW 的 Run
+  仍由⑥「继续安全可恢复批次」既有入口恢复，不新增入口。
+- **响应契约同步**：`schemas.ProductionModeStatus` 登记 `focus`（新增
+  `ProductionModeFocus`），/system/status 严格模型不再 ValidationError。
+- 整链回归 `test_stuck_run_recovery.py` 第 4 例：放弃→⑦重拍→选用→序列 COMPLETED→
+  恢复→分集交付单创建，全部经既有 API/执行者。定向批次含
+  test_generation_segments/test_production_series/test_video_library。
+
+## 2026-11-21 每集秒数唯一裁决轮（用户报障：②/⑥ 把场景覆盖秒数当每集计划）
+
+- **根因**：`derive_episode_plan_from_sections` 的 `planned_seconds` 是场景覆盖估计
+  （原文秒数），② 预览、⑥ overview、⑦ 运行集卡与 EDL provenance 都把它当每集视频
+  计划读，一份事实两种语义。用户裁定：每集行只展示该集计划秒数；总剧本超出只在
+  头部标识。
+- **唯一裁决** `director/contracts.py::episode_video_seconds`：有落镜=落镜时长之和，
+  未拆镜=目标秒数。消费点（streamline 预览、overview、runner.episode_public、
+  episode_delivery EDL rules）全部改读它；头部 `total_planned_seconds` 改为各集视频
+  计划之和，`covered_scope` 覆盖标识保留头部。前端②行删除「与目标差」与每集覆盖
+  边界警告渲染。确认门禁（duration_target_verdict 等）不变。
+- 历史冻结快照/旧交付存储值不重写；新显示与新交付读裁决。
+- 回归：`test_episode_seconds_verdict.py`、前端 `episodeSecondsDisplay.test.tsx`、
+  `test_duration_target_chain.py` 显示契约更新；定向 7 模块 144 例、前端 470 例、
+  tsc/build/Ruff、8 分片全量。真机：⑥ 集卡 75/107 秒、② 预览只读复核一致。
+- **测试隔离修复**：新增测试文件改变 8 分片后暴露既有泄漏——
+  `test_director_setup_contract.py` 在 local 首次导入前 patch `installer.LocalInstaller`，
+  同分片后续测试导入 local 永久捕获假类。改为先导入 local 并同时 patch 两处绑定
+  （不弱化断言）；共分片复跑 0 失败。
+- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
+  证据 `docs/ACCEPTANCE_20261121_EPISODE_SECONDS_VERDICT.md`。

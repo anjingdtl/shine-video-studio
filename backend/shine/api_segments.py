@@ -145,7 +145,11 @@ def _blocker(db, job, shot):
     )
     if not shot or ((job.shot_revision != shot.revision or job.stale) and not revision_retired):
         return "SHOT_REVISION_REPLACED"
-    if job.status != "PASSED" and not revision_retired:
+    # A user-closed abandon settles the external question: the shot may be
+    # retaken with a fresh request, never a resubmission of the old prompt.
+    abandoned_settled = (job.status == "FAILED"
+                         and job.failure_code == "USER_ABANDONED_UNRECONCILED")
+    if job.status != "PASSED" and not revision_retired and not abandoned_settled:
         return "GENERATION_RUNNING_OR_RECONCILIATION_REQUIRED"
     unresolved = db.scalars(select(Job).where(
         Job.shot_id == job.shot_id,
@@ -448,6 +452,16 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
         ready = all(accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
         assembly_id = None
         if ready:
+            # A run-owned root that waits for the human (NEEDS_REVIEW) is
+            # resolved by the explicit complete selection: point its items at
+            # the chosen takes so the existing resume/reconcile executors can
+            # finish the series, its batch and the run.  The old jobs stay in
+            # the ledger as history; nothing is resubmitted.
+            if root.status == "NEEDS_REVIEW":
+                for original in root.items:
+                    original.job_id = chosen[original.shot_id]
+                    original.status = "PASSED"
+                    original.failure_code = None
             assembled = ProductionSeries(project_id=project_id, status="COMPLETED", provider="comfyui",
                 shot_count=len(root.items), completed_count=len(root.items), finalization_state="RELEASED",
                 workflow_profile_id=root.workflow_profile_id, generation_mode=root.generation_mode,

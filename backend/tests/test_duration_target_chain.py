@@ -83,7 +83,11 @@ def test_book_confirm_refuses_duration_deviation_until_acknowledged(api):
     prepared = _prepare_project(client, sections=4, section_seconds=120)
     project = prepared["project"]
     book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
-    assert book["preview"]["episodes"][0]["deviation_seconds"] > 30
+    # 每集展示的是视频计划：未拆镜时等于目标秒数，不冒充场景覆盖秒数。
+    # 覆盖超出只进头部覆盖标识，并由确认门禁具名拒绝（下方断言）。
+    assert book["preview"]["episodes"][0]["planned_seconds"] == 60
+    assert book["preview"]["episodes"][0]["deviation_seconds"] == 0
+    assert book["preview"]["covered_scope"]["covered_seconds"] > 120
 
     refused = client.post(
         f"/api/v1/projects/{project}/director/storyboard-book/confirm",

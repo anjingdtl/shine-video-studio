@@ -256,7 +256,12 @@ def _section_beats_view(db, project_id: str, section: dict[str, Any]) -> dict[st
 
 def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -> dict[str, Any]:
     """The readable storyboard book: episodes -> sections -> beats/dialogue."""
-    from shine.director.contracts import EpisodePlanPayload, derive_episode_plan_from_sections
+    from shine.director.contracts import (
+        EpisodePlanPayload,
+        derive_episode_plan_from_sections,
+        episode_video_seconds,
+    )
+    from shine.materialprep.story import section_storyboard_shot_ids
 
     payload = EpisodePlanPayload.model_validate(plan_payload)
     outline = _confirmed_outline_for_plan(db, project_id, payload)
@@ -273,18 +278,26 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
     covered_rows: list[dict[str, Any]] = []
     for episode in payload.episodes:
         section_views = []
+        landed_ids: list[str] = []
         for sid in episode.section_ids:
             if sid in sections_by_id:
                 covered_rows.append(sections_by_id[sid])
                 section_views.append(_section_beats_view(db, project_id, sections_by_id[sid]))
-        planned = float(episode.planned_seconds)
-        total += planned
+            resolved = section_storyboard_shot_ids(db, project_id, sid)
+            if not resolved.get("merged_into"):
+                landed_ids.extend(str(shot_id) for shot_id in resolved["shot_ids"])
+        landed_shots = [shot for shot in (db.get(Shot, sid) for sid in dict.fromkeys(landed_ids))
+                        if shot is not None]
+        # 每集展示的是视频计划（落镜时长之和；未拆镜时为目标秒数）。
+        # 场景覆盖秒数只进头部总时长/覆盖标识，不再冒充每集计划。
+        video_seconds = episode_video_seconds(landed_shots, target_seconds=payload.target_seconds)
+        total += video_seconds
         episodes.append({
             "episode_id": episode.episode_id,
             "order": episode.order,
             "title": episode.title,
-            "planned_seconds": planned,
-            "deviation_seconds": round(planned - payload.target_seconds, 3),
+            "planned_seconds": video_seconds,
+            "deviation_seconds": round(video_seconds - payload.target_seconds, 3),
             "boundary_note": episode.boundary_note,
             "section_count": len(episode.section_ids),
             "sections": section_views,

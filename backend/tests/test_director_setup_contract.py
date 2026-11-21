@@ -72,7 +72,13 @@ def test_shipped_service_uses_real_install_contract(prep, monkeypatch):
         def install(self, spec):
             return {'status': 'AVAILABLE', 'files': [f.model_dump() for f in spec.files]}
 
+    # local.py binds LocalInstaller by name at import time.  If it is first
+    # imported WHILE this patch is active (same shard, later test), it would
+    # capture the fake permanently.  Import it first and patch both bindings so
+    # teardown restores them and no later import captures the fake.
+    import shine.comfyops.local as local_module
     monkeypatch.setattr('shine.comfyops.installer.LocalInstaller', lambda *args: IsolatedInstaller())
+    monkeypatch.setattr(local_module, 'LocalInstaller', lambda *args: IsolatedInstaller())
     plan = install_plan(prep)
     result, requests = bridge(client, plan)
     # The installation is a persistent task: the shipped TypeScript queues it

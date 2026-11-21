@@ -23,7 +23,7 @@ from shine.comfyops.runtime_configuration import (
     CANDIDATE_KEY,
     service_evidence_status,
 )
-from shine.models import AppSetting, Job, ProductionSeries
+from shine.models import AppSetting, Job, ProductionSeries, ProductionSeriesItem
 
 REAL_RUNNING_STATUSES = ("SUBMITTING", "RUNNING", "QC_PENDING")
 LIVE_SERIES_STATUSES = ("QUEUED", "RUNNING")
@@ -46,6 +46,35 @@ def _blocked_detail(code: str) -> str:
     return _CODE_ZH.get(code, f"真实制作环境暂时不可用（{code}），请运行环境检查定位原因。")
 
 
+def _reconcile_focus(db) -> dict | None:
+    """The work the unreconciled lease belongs to, so the badge can lead there.
+
+    Reads the same lease fact the mode is derived from: lease owner -> job ->
+    series item -> run batch.  Navigation is a projection of the one verdict,
+    not a second decision.
+    """
+    from shine.production.models import ProductionRunBatch
+
+    owners = db.scalars(
+        select(ResourceLease.owner).where(ResourceLease.status == "RECONCILE_REQUIRED")
+    ).all()
+    for owner in owners:
+        if not owner.startswith("h3:"):
+            continue
+        job = db.get(Job, owner.removeprefix("h3:"))
+        if job is None:
+            continue
+        run_id = db.scalar(
+            select(ProductionRunBatch.run_id)
+            .join(ProductionSeriesItem,
+                  ProductionSeriesItem.series_id == ProductionRunBatch.series_id)
+            .where(ProductionSeriesItem.job_id == job.id)
+            .limit(1)
+        )
+        return {"project_id": job.project_id, "run_id": run_id}
+    return None
+
+
 def summarize_production_mode(db, settings, *, effective, runtime_error, worker_online, renderer_online):
     """Return the single production-mode dict for /api/v1/system/status."""
     active = db.get(AppSetting, ACTIVE_KEY)
@@ -61,6 +90,7 @@ def summarize_production_mode(db, settings, *, effective, runtime_error, worker_
     reconcile_leases = db.scalar(
         select(func.count(ResourceLease.id)).where(ResourceLease.status == "RECONCILE_REQUIRED")
     ) or 0
+    focus = _reconcile_focus(db) if reconcile_leases else None
 
     if active is not None:
         runtime_status = "ACTIVE"
@@ -142,6 +172,7 @@ def summarize_production_mode(db, settings, *, effective, runtime_error, worker_
         "worker_online": bool(worker_online),
         "running_jobs": int(running_real),
         "series_active": int(series_active),
+        "focus": focus,
     }
 
 

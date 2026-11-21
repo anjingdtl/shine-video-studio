@@ -32,6 +32,7 @@ import { WorkStackMonitor } from './components/WorkStackMonitor';
 import { GuideTip } from './components/GuideTip';
 import type { RailBlocker } from './components/ActionRail';
 import { describeBlocker, type ErrorActionTarget } from './errorActions';
+import { ABANDONED_RENDER_FAILURE_CODE, UNCERTAIN_RENDER_FAILURE_CODES } from './constants';
 import { ProjectPortfolio } from './components/ProjectPortfolio';
 import { getDirectorOverview, getJourney, presencePing, restartStack, restartStatus, supervisorPort, type DirectorOverview, type Journey, type JourneyStage } from './api';
 import { AssetsWorkspace, type AssetCenterPage } from './asset-center/AssetsWorkspace';
@@ -168,6 +169,11 @@ function App() {
     setProfileKey, deleteProfile, routeProfile, registerWorkflow, validateWorkflow, deleteWorkflow,
     bindStandardParameters, abandonJob,
   } = studio;
+
+  // 等待人工决定的镜头（结果未知 / 已放弃）：运行卡与任务明细读同一份台账。
+  const attentionJobs = useMemo(() => jobs.filter((job) =>
+    (job.status === 'NEEDS_REVIEW' && UNCERTAIN_RENDER_FAILURE_CODES.includes(job.failure_code ?? ''))
+    || (job.status === 'FAILED' && job.failure_code === ABANDONED_RENDER_FAILURE_CODE)), [jobs]);
 
   // 旧深链落到导演工作台后,地址栏统一成规范 #d/… 形式:刷新、前进后退
   // 与分享链接都落在同一套入口上,不再保留第二套地址。
@@ -498,6 +504,13 @@ function App() {
   /** 顶部状态入口只做跳转:环境缺项去基础配置,生产中去看实际进度。
    *  不再打开第二套整备向导——整备只有一个入口。 */
   function handleModeAction(action: 'enable_real' | 'start_making' | 'view_progress' | 'check_fix') {
+    // 待核对的是某部作品的拍摄：直达它的视频生产页，而不是把人送进基础配置。
+    if (action === 'check_fix' && production?.code === 'LEASE_RECONCILE_REQUIRED'
+        && production.focus?.project_id) {
+      setProjectId(production.focus.project_id);
+      goToDirectorPage('run');
+      return;
+    }
     if (action === 'enable_real' || action === 'check_fix') goToDirectorSetup('env');
     else if (action === 'view_progress') goToDirectorPage('run');
     else goToDirectorPage('produce');
@@ -1117,11 +1130,13 @@ function App() {
                 refreshEpoch={dataEpoch + projectionEpoch}
                 activeJob={jobs.find((job) => ['SUBMITTING', 'RUNNING', 'QC_PENDING']
                   .includes(job.status)) ?? null}
+                attentionJobs={attentionJobs}
                 demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}
                 onNavigate={(page) => goToDirectorPage(page)}
                 onGoSetup={() => goToDirectorSetup('models')}
+                onAbandon={abandonJob}
               />}
               <details className="stage-dock" id="production-monitor" open={false}>
                 <summary className="produce-focus-summary">

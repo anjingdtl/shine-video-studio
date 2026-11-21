@@ -1452,6 +1452,36 @@ def reconcile_abandoned_series(session_factory) -> int:
                     completed_without_lease += 1
                 continue
             lease = db.get(ResourceLease, series.lease_id)
+            if lease is not None and lease.status == "RELEASED":
+                # The exclusive lease was already released (e.g. a user abandon
+                # of an uncertain take, then an explicit complete selection):
+                # the outcome may be merged without touching any renderer.
+                _sync_items(db, series)
+                item, _job = _next_runnable_item(db, series.id)
+                blocked = [row for row in _items(db, series.id) if row.status == "BLOCKED"]
+                if item is None and not blocked:
+                    series.status = "COMPLETED"
+                    series.failure_code = None
+                    series.finished_at = now
+                    series.lease_id = None
+                    series.finalization_state = "RELEASED"
+                    series.completed_count = series.shot_count
+                    series.state_version += 1
+                    from shine.services import add_audit
+
+                    add_audit(
+                        db, "comfy-worker", "SERIES_OUTCOME_RECONCILED", "production_series", series.id,
+                        {"lease_id": lease.id, "reason": "LEASE_RELEASED_OUTCOME_MERGED"},
+                        project_id=series.project_id,
+                    )
+                    try:
+                        enqueue_auto_delivery(db, series)
+                    except DeliveryBlock as exc:
+                        logger.error(
+                            "auto_delivery_enqueue_blocked series_id=%s code=%s", series.id, exc.code
+                        )
+                    completed_without_lease += 1
+                continue
             if lease is None or lease.status not in {"RECONCILE_REQUIRED", "ACTIVE"}:
                 continue
             if lease.status == "ACTIVE" and lease.expires_at and lease.expires_at > now:

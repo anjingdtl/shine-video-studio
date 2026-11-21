@@ -181,6 +181,21 @@ def planned_seconds(shot: Any) -> float:
         return 0.0
 
 
+def episode_video_seconds(shots: Iterable[Any], *, target_seconds: float) -> float:
+    """The one per-episode video-plan verdict.
+
+    Once shots exist, the episode's planned video length is the sum of its
+    landed shot durations; before any shot exists the plan is the person's
+    target.  The scene-coverage estimate (original-text seconds) is a separate
+    fact that only feeds the header coverage note — never the per-episode plan
+    shown on the book, the production cards or the run summary.
+    """
+    landed = list(shots)
+    if not landed:
+        return round(float(target_seconds), 3)
+    return round(sum(planned_seconds(shot) for shot in landed), 3)
+
+
 def duration_target_verdict(actual_seconds: float, target_seconds: float,
                             tolerance_seconds: float) -> dict | None:
     """The one duration-goal verdict shared by plan and episode confirmation.

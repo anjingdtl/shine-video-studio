@@ -280,6 +280,7 @@ def _episode_node(
     project: Project,
     *,
     plan_row: dict[str, Any],
+    target_seconds: float,
     confirmed: bool,
     section_cache: dict[str, dict],
     storyboard: dict[str, Any],
@@ -292,6 +293,7 @@ def _episode_node(
     delivery_cache: dict[str, Any],
     run_episode_cache: dict[str, Any],
 ) -> dict[str, Any]:
+    from shine.director.contracts import episode_video_seconds
     from shine.director.journey import _passed_shots
 
     episode_id = str(plan_row.get("episode_id"))
@@ -399,7 +401,7 @@ def _episode_node(
         "episode_id": episode_id,
         "order": plan_row.get("order"),
         "title": plan_row.get("title") or "",
-        "planned_seconds": float(plan_row.get("planned_seconds") or 0.0),
+        "planned_seconds": episode_video_seconds(shots, target_seconds=target_seconds),
         "state": state,
         "state_label": _STATE_LABELS.get(state, state),
         "storyboard": {
@@ -602,6 +604,7 @@ def build_overview(
         episodes.append(_episode_node(
             db, project,
             plan_row=plan_row,
+            target_seconds=float((plan.payload or {}).get("target_seconds") or 60),
             confirmed=bool(confirmed_plan is not None and confirmed_plan.id == (plan.id if plan else None)),
             section_cache=section_cache,
             storyboard=storyboard,

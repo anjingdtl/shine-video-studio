@@ -21,6 +21,7 @@ from pydantic import Field, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from shine.director.contracts import episode_video_seconds
 from shine.media.assembly import DeliveryAssembler, DeliveryClip, DeliveryError
 from shine.media.delivery_engine import (
     ASSEMBLY_LEASE_SECONDS,
@@ -30,7 +31,7 @@ from shine.media.delivery_engine import (
     _write_back,
 )
 from shine.media.delivery_models import DeliveryOrder
-from shine.models import Job, MediaArtifact, SubtitleTrack, utcnow
+from shine.models import Job, MediaArtifact, Shot, SubtitleTrack, utcnow
 from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode
 from shine.schemas import APIModel
 from shine.security import sha256_bytes
@@ -286,7 +287,10 @@ def build_episode_edl(
         "post_contract_sha256": post_contract_digest(episode),
         "subtitle_revision": (episode.post_contract or {}).get("subtitle_revision"),
         "episode_id": episode.episode_id,
-        "planned_seconds": episode.planned_seconds,
+        "planned_seconds": episode_video_seconds(
+            [shot for shot in (db.get(Shot, shot_id) for shot_id in episode.shot_ids or [])
+             if shot is not None],
+            target_seconds=episode.planned_seconds),
         "edited_seconds": round(sum(clip["out_s"] - clip["in_s"] for clip in clips), 3),
     }
     return {"schema_version": "1.1", "clips": clips}, "run_episode_plan", rules

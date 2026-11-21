@@ -616,6 +616,8 @@ export type ProductionModeStatus = {
   worker_online: boolean;
   running_jobs: number;
   series_active: number;
+  /** 待核对租约所属的作品与运行：顶栏「去处理」直达卡住的生产页。 */
+  focus?: { project_id: string; run_id: string | null } | null;
 };
 
 export type SystemStatus = {

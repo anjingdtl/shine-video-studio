@@ -114,6 +114,17 @@ export const failureLabels: Record<string, string> = {
   DELIVERY_ASSEMBLY_LEASE_LOST: '成片合成被打断，待恢复',
 };
 
+/** 外部结果未知的渲染失败码：系统不自动重投，由人决定放弃或重拍。 */
+export const UNCERTAIN_RENDER_FAILURE_CODES = [
+  'COMFY_SUBMISSION_OUTCOME_UNKNOWN',
+  'COMFY_WORKER_EXCEPTION_WITH_EXTERNAL',
+  'COMFY_ACTIVATION_RECONCILIATION_REQUIRED',
+  'COMFY_HANDOFF_RECONCILIATION_REQUIRED',
+  'COMFY_JOB_NOT_FOUND',
+];
+/** 用户已放弃未知结果的失败码：下一步是重拍，不是再核对。 */
+export const ABANDONED_RENDER_FAILURE_CODE = 'USER_ABANDONED_UNRECONCILED';
+
 export const gateLabels: Record<string, string> = {
   technical: '技术校验（完整性与规格）', semantic: '画面建议',
   audio: '对白识别建议', style: '风格建议', final: '综合状态',

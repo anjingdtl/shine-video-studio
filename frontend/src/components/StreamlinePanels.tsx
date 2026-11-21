@@ -641,9 +641,7 @@ export function StoryboardBookPanel({
             <span className="run-ep-no">{episode.order}</span>
             <div>
               <b>{episode.title}</b>
-              <span>{episode.section_count} 场 · 计划 {Math.round(episode.planned_seconds)} 秒
-                （与目标差 {episode.deviation_seconds > 0 ? '+' : ''}{Math.round(episode.deviation_seconds)} 秒）</span>
-              {episode.boundary_note && <em>{episode.boundary_note}</em>}
+              <span>{episode.section_count} 场 · 计划 {Math.round(episode.planned_seconds)} 秒</span>
               <details><summary>{episode.section_count} 场的节拍与对白</summary>
                 {episode.sections.map((section) => <div key={section.production_section_id} className="book-section">
                   <b>{section.title} · 约 {Math.round(section.estimated_seconds)} 秒</b>

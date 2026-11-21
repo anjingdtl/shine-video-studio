@@ -688,6 +688,13 @@ class WorkerStatus(APIModel):
     processed_count: int
 
 
+class ProductionModeFocus(APIModel):
+    """The work an unreconciled lease belongs to, so the badge can lead there."""
+
+    project_id: str
+    run_id: str | None
+
+
 class ProductionModeStatus(APIModel):
     """The one authoritative demo/real production state the UI shows.
 
@@ -706,6 +713,7 @@ class ProductionModeStatus(APIModel):
     worker_online: bool
     running_jobs: int
     series_active: int
+    focus: ProductionModeFocus | None = None
 
 
 class SystemStatus(APIModel):
