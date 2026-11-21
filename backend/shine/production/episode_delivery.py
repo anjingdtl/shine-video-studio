@@ -143,10 +143,20 @@ def episode_input_digest(
     run's own series items produced are part of the identity: an unrelated
     newer take never re-identifies somebody else's reel.
     """
+    from shine.comfyops.relay_stage import relay_artifact_for_job
     from shine.media.subtitles import subtitle_font_size
     from shine.production.runner import episode_current_jobs
 
     passed = episode_current_jobs(db, run, episode)
+    clips: list[list[str]] = []
+    for shot_id in episode.shot_ids:
+        job = passed.get(shot_id)
+        entry = [shot_id, (job.id if job else ""), (job.artifact_id if job else "")]
+        if job is not None:
+            relay = relay_artifact_for_job(db, job.id)
+            if relay is not None:
+                entry.append(relay.id)
+        clips.append(entry)
     payload = {
         "run_id": run.id,
         "episode_id": episode.episode_id,
@@ -160,14 +170,7 @@ def episode_input_digest(
             [batch.batch_key, batch.input_digest, batch.series_id]
             for batch in sorted(batches, key=lambda row: row.batch_key)
         ],
-        "clips": [
-            [
-                shot_id,
-                (job.id if job else ""),
-                (job.artifact_id if job else ""),
-            ]
-            for shot_id, job in ((shot_id, passed.get(shot_id)) for shot_id in episode.shot_ids)
-        ],
+        "clips": clips,
     }
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 

@@ -101,6 +101,17 @@ def profile_metadata(graph, mode, parameter_map, media_transfers):
     weights = _weight_names(graph)
     identity = resolve_variant(graph, weights)
     verified = identity["verified"]
+    has_soft = (
+        mode == "Ref2VA"
+        and any(k.startswith(("reference_subject_", "reference_picture_", "reference_image_"))
+                for k in parameter_map)
+    )
+    has_video_ref = (
+        mode == "Ref2VA"
+        and any(k.startswith("reference_video_") for k in parameter_map)
+        and isinstance((media_transfers or {}).get("video"), dict)
+    )
+    continuity_modes = ([SOFT] if has_soft else []) + ([VIDEO] if has_video_ref else [])
     return {
         "model_family": "MiniMax-H3",
         "generation_mode": mode,
@@ -114,13 +125,13 @@ def profile_metadata(graph, mode, parameter_map, media_transfers):
         "graph_sha256": identity["graph_sha256"],
         "graph_version": "registered-api-v1",
         "source": "registered_graph_and_explicit_mapping",
-        "continuity_modes": [SOFT]
-        if mode == "Ref2VA"
-        and any(k.startswith(("reference_subject_", "reference_picture_", "reference_image_"))
-                for k in parameter_map)
-        else [],
+        "continuity_modes": continuity_modes,
         "hard_continuity": "PENDING_HARD_CONTINUITY_TEST",
-        "video_reference": "SUPPORTED_NODE_UNVERIFIED_TRANSFER" if mode == "Ref2VA" else "unverified",
+        "video_reference": (
+            "VERIFIED_TRANSFER" if has_video_ref
+            else "SUPPORTED_NODE_UNVERIFIED_TRANSFER" if mode == "Ref2VA"
+            else "unverified"
+        ),
         "reference_slots": sorted(k for k in parameter_map if k.startswith("reference_")),
         "media_transfer_families": sorted(media_transfers or {}),
         "dynamic_autogrow": False,

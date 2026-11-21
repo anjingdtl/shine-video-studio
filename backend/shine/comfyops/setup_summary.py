@@ -498,25 +498,64 @@ def _effective_models_root(settings, capability: str, installation: dict | None)
 _RELAYVSR_INSTALLATION_UNSET = object()
 
 
+def sealed_optional_capabilities(db, settings=None) -> dict[str, Any] | None:
+    """Optional capability snapshot from the sealed live object_info, if READY."""
+    if db is None:
+        return None
+    from shine.comfyops.runtime_configuration import ACTIVE_KEY, SERVICE_EVIDENCE_KEY, service_evidence_status
+    from shine.models import AppSetting
+
+    identity = None
+    if settings is None:
+        act = db.get(AppSetting, ACTIVE_KEY)
+        if act is not None and isinstance(act.value, dict) and isinstance(act.value.get("identity"), dict):
+            identity = act.value["identity"]
+    try:
+        evidence_status = service_evidence_status(db, settings, identity=identity)
+    except Exception:  # noqa: BLE001 - unconfigured or unreadable setup stays none
+        return None
+    if evidence_status.get("status") != "READY":
+        return None
+    row = db.get(AppSetting, SERVICE_EVIDENCE_KEY)
+    value = row.value if row and isinstance(row.value, dict) else {}
+    optional = value.get("optional_capabilities")
+    return dict(optional) if isinstance(optional, dict) else None
+
+
 def relayvsr_machine_readiness(db, settings=None, *, installation=_RELAYVSR_INSTALLATION_UNSET) -> dict:
     """The one RelayVSR readiness verdict every surface reads.
 
     The capability card, the strategy option matrix and the production gates
     all hang off this single reader: a machine whose weights are verified and
     placed must not be told "not ready" by one surface and "ready" by another.
-    ``settings`` only sharpens the installation ordering (active runtime first);
-    the resolution itself is the same single function with or without it.
-    An explicit ``installation=None`` means "no installation known" and stays
-    unproven; only an omitted argument resolves the machine's installation.
+    When sealed live ``object_info`` evidence exists for this installation,
+    its RelayVSR node check is enforced too so missing ComfyUI core nodes
+    never hide behind present weight files.
     """
     from shine.comfyops import relayvsr
 
     if installation is _RELAYVSR_INSTALLATION_UNSET:
         installation = resolve_installation(db, settings)["selected"]
     models_root = _effective_models_root(settings, "relayvsr", installation)
-    return relayvsr.relayvsr_readiness(
+    report = relayvsr.relayvsr_readiness(
         model_root=Path(models_root) / "diffusion_models" if models_root else None,
         vae_root=Path(models_root) / "vae" if models_root else None)
+    sealed = sealed_optional_capabilities(db, settings)
+    live_relay = (sealed or {}).get("relayvsr") if isinstance(sealed, dict) else None
+    if isinstance(live_relay, dict) and live_relay.get("available") is False:
+        blockers = list(report.get("blockers") or [])
+        seen_codes = {row.get("code") for row in blockers if isinstance(row, dict)}
+        for blocker in live_relay.get("blockers") or []:
+            if isinstance(blocker, dict) and blocker.get("code") not in seen_codes:
+                blockers.append(blocker)
+                seen_codes.add(blocker.get("code"))
+        report = {
+            **report,
+            "available": False,
+            "status": "BLOCKED",
+            "blockers": blockers,
+        }
+    return report
 
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,

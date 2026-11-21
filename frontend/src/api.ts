@@ -2071,8 +2071,13 @@ export type StrategyOptions = {
     steps: number;
     verified: boolean;
     unverified_reason?: string | null;
+    blockers?: Array<{ code: string; detail?: string }>;
   }>;
-  second_pass: { supported: boolean; recipes: string[] };
+  second_pass: {
+    supported: boolean;
+    recipes: string[];
+    blockers?: Array<{ code: string; detail?: string }>;
+  };
   upscale: Array<{
     engine: string;
     variant: string;

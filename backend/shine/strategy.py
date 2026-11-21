@@ -20,7 +20,14 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shine.comfy.graph_compiler import ACCELERATORS, BASELINE_ACCELERATOR_ID, VARIANT_ACCELERATORS, SecondPassSpec
+from shine.comfy.graph_compiler import (
+    ACCELERATORS,
+    BASELINE_ACCELERATOR_ID,
+    LATENT_UPSCALER,
+    PDD_FILE,
+    VARIANT_ACCELERATORS,
+    SecondPassSpec,
+)
 from shine.comfy.workflow import graph_hash as _dict_hash
 
 
@@ -109,18 +116,93 @@ def model_variant_options() -> list[dict]:
     return options
 
 
-def accelerator_options() -> list[dict]:
+def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
+    """Check one optional capability (pdd / second_pass) against sealed evidence.
+
+    When sealed live ``object_info`` evidence exists (from ``validate_services``),
+    both the recorded node/weight probe and current on-disk weights are checked
+    so missing optional dependencies are named explicitly without silent fallback.
+    Before live validation runs (e.g. unconfigured machines or offline unit
+    tests), recipe-verified options stay selectable.
+    """
+    if db is None:
+        return []
+    from pathlib import Path
+
+    from shine.comfyops.existing_installation import declared_model_family_roots, model_family_directories
+    from shine.comfyops.setup_summary import resolve_installation, sealed_optional_capabilities
+
+    code = "PDD_BACKEND_UNAVAILABLE" if capability == "pdd" else "SECOND_PASS_BACKEND_UNAVAILABLE"
+    sealed = sealed_optional_capabilities(db, settings)
+    if sealed is None:
+        return []
+    live = sealed.get(capability)
+    if isinstance(live, dict) and live.get("available") is False:
+        missing_nodes = list(live.get("missing_nodes") or [])
+        missing_weights = list(live.get("missing_weights") or [])
+        return [{
+            "code": code,
+            "missing_nodes": missing_nodes,
+            "missing_weights": missing_weights,
+            "detail": (
+                f"本机运行环境缺少 {capability} 依赖："
+                + ("、".join(missing_nodes + missing_weights) or "未就绪")
+            ),
+        }]
+
+    installation = resolve_installation(db, settings)["selected"]
+    root_value = (installation or {}).get("root") if isinstance(installation, dict) else None
+    if not root_value or (installation or {}).get("is_mock"):
+        return []
+    root = Path(str(root_value))
+    models_root = root / "models"
+    if not models_root.is_dir():
+        return []
+    declared = declared_model_family_roots(root)
+
+    def _has_weight(family: str, filename: str) -> bool:
+        leaf = filename.replace("\\", "/").split("/")[-1]
+        dirs = model_family_directories(models_root, family, declared)
+        return any((directory / leaf).is_file() for directory in dirs)
+
+    missing_weights: list[str] = []
+    if not _has_weight("pdd_acc", PDD_FILE):
+        missing_weights.append(PDD_FILE)
+    if capability == "second_pass" and not _has_weight("latent_upscale_models", LATENT_UPSCALER):
+        missing_weights.append(LATENT_UPSCALER)
+    if missing_weights:
+        return [{
+            "code": code,
+            "missing_nodes": [],
+            "missing_weights": missing_weights,
+            "detail": f"本机缺少可选权重：{', '.join(missing_weights)}",
+        }]
+    return []
+
+
+def accelerator_options(db=None, settings=None) -> list[dict]:
     """Available acceleration recipes derived from the compiler's table."""
-    return [
-        {
+    rows: list[dict] = []
+    for accelerator_id, spec in ACCELERATORS.items():
+        recipe_verified = spec["requires_pdd"] is not None
+        blockers = (
+            _optional_capability_blockers(db, settings, "pdd")
+            if (recipe_verified and spec["requires_pdd"])
+            else []
+        )
+        verified = recipe_verified and not blockers
+        unverified_reason = (
+            None if verified
+            else (blockers[0]["code"] if blockers else "ACCELERATOR_UNVERIFIED")
+        )
+        rows.append({
             "accelerator_id": accelerator_id,
             "steps": int(spec["steps"] or 0),
-            "verified": spec["requires_pdd"] is not None,
-            "unverified_reason": (None if spec["requires_pdd"] is not None
-                                  else "ACCELERATOR_UNVERIFIED"),
-        }
-        for accelerator_id, spec in ACCELERATORS.items()
-    ]
+            "verified": verified,
+            "unverified_reason": unverified_reason,
+            "blockers": blockers,
+        })
+    return rows
 
 
 def upscale_options(db, settings=None) -> list[dict]:
@@ -143,10 +225,15 @@ def upscale_options(db, settings=None) -> list[dict]:
 
 def strategy_options(db, settings=None) -> dict:
     """The full option matrix the director UI renders."""
+    sp_blockers = _optional_capability_blockers(db, settings, "second_pass")
     return {
         "model_variants": model_variant_options(),
-        "accelerators": accelerator_options(),
-        "second_pass": {"supported": True, "recipes": ["h3-tail-refine-v1"]},
+        "accelerators": accelerator_options(db, settings),
+        "second_pass": {
+            "supported": not sp_blockers,
+            "recipes": ["h3-tail-refine-v1"],
+            "blockers": sp_blockers,
+        },
         "upscale": upscale_options(db, settings),
     }
 
@@ -183,6 +270,10 @@ def strategy_blockers(strategy: GenerationStrategy, db, settings=None) -> list[d
             "code": "ACCELERATOR_UNVERIFIED",
             "accelerator_id": strategy.accelerator_id,
         })
+    elif spec["requires_pdd"]:
+        blockers.extend(_optional_capability_blockers(db, settings, "pdd"))
+    if strategy.second_pass.enabled:
+        blockers.extend(_optional_capability_blockers(db, settings, "second_pass"))
     if strategy.upscale.enabled:
         from shine.comfyops.setup_summary import relayvsr_machine_readiness
 

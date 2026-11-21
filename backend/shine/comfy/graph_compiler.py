@@ -66,6 +66,13 @@ AUDIO_TRANSFER = {
     "style": "multipart",
     "required_node_classes": ["VHS_LoadAudioUpload"],
 }
+VIDEO_TRANSFER = {
+    "upload_path": "/upload/image",
+    "field_name": "image",
+    "subfolder": "shine",
+    "style": "multipart",
+    "required_node_classes": ["VHS_LoadVideo"],
+}
 
 #: Accelerator recipes the compiler can legally build today.  ``turbo4`` is a
 #: declared-but-unverified recipe: it stays listed so the UI can name it, but
@@ -336,15 +343,6 @@ def compile_ref2va_workflow(
             f"参考素材总数超过官方上限 {TOTAL_REFERENCE_LIMIT}。",
             {"total": image_count + audio_count + video_count, "limit": TOTAL_REFERENCE_LIMIT},
         )
-    if video_count:
-        # No audited loader recipe exists for the ref_videos group in this
-        # installation yet.  Building one would mean inventing a node name -
-        # refused by name until a live object_info proves the contract.
-        raise GraphCompileError(
-            "VIDEO_REFERENCE_LOADER_UNVERIFIED",
-            "视频参考的装载节点还没有在本机 object_info 上核验，不能编译。",
-            {"video_count": video_count},
-        )
     if second_pass is not None:
         if not 0.0 < float(second_pass.denoise) <= 1.0:
             raise GraphCompileError(
@@ -409,6 +407,25 @@ def compile_ref2va_workflow(
         }
         reference_inputs[f"ref_audios.ref_audio_{index}"] = [node_id, 0]
         parameter_map[f"reference_audio_{index + 1}"] = f"{node_id}.inputs.audio"
+    for index in range(video_count):
+        node_id = str(26 + index)
+        # Visual frames only at 24 fps; ref_video_audio_N is intentionally not
+        # wired so unauthorized soundtracks never leak or shift <Audio j> tags.
+        graph[node_id] = {
+            "class_type": "VHS_LoadVideo",
+            "inputs": {
+                "video": f"shine-video-{index + 1}.mp4",
+                "force_rate": FPS,
+                "custom_width": 0,
+                "custom_height": 0,
+                "frame_load_cap": 0,
+                "skip_first_frames": 0,
+                "select_every_nth": 1,
+                "format": "None",
+            },
+        }
+        reference_inputs[f"ref_videos.ref_video_{index}"] = [node_id, 0]
+        parameter_map[f"reference_video_{index + 1}"] = f"{node_id}.inputs.video"
 
     graph["31"] = {
         "class_type": "MiniMaxH3ReferenceToVideo",
@@ -549,6 +566,8 @@ def compile_ref2va_workflow(
     media_transfers: dict[str, Any] = {"image": dict(IMAGE_TRANSFER)}
     if audio_count:
         media_transfers["audio"] = dict(AUDIO_TRANSFER)
+    if video_count:
+        media_transfers["video"] = dict(VIDEO_TRANSFER)
 
     recipe_payload = {
         "compiler": _recipe_version(variant),
@@ -560,6 +579,8 @@ def compile_ref2va_workflow(
         "image_count": image_count,
         "audio_count": audio_count,
     }
+    if video_count:
+        recipe_payload["video_count"] = video_count
     if candidate_digest:
         recipe_payload["variant_recipe_sha256"] = candidate_digest
     recipe_sha256 = graph_hash(recipe_payload)
@@ -579,7 +600,11 @@ def compile_ref2va_workflow(
         "second_pass": bool(second_pass),
         "graph_version": "dynamic-compiler-v2" if candidate else "dynamic-compiler-v1",
         "source": "per_shot_compiled_recipe",
-        "continuity_modes": ["soft_reference_continuity"],
+        "continuity_modes": (
+            ["soft_reference_continuity", "video_reference_continuity"]
+            if video_count
+            else ["soft_reference_continuity"]
+        ),
         "reference_slots": sorted(k for k in parameter_map if k.startswith("reference_")),
         "media_transfer_families": sorted(media_transfers),
         "dynamic_autogrow": True,

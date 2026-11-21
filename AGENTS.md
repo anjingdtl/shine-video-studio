@@ -2493,3 +2493,17 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 - `config/workflows` 和数据库 profile 用于显式兼容及历史回放。常规整备不自动登记旧模板，
   真实提交校验冻结图或配方 SHA，历史提示词与配方 SHA 继续可复现。
 - 验收记录见 `docs/ACCEPTANCE_20261121_V3_P1_SINGLE_REF2VA.md`。
+
+## 2026-11-22 V3 P2 按需可选节点与多模态 Ref2VA
+
+- PDD 8 步、二次采样、`VHS_LoadVideo`（最多 3 路、仅接 `ref_videos.ref_video_i`、严禁接
+  `ref_video_audio_i` 破坏静音/音轨序号）及 9 图/3 音/3 视频合计 <= 12 的按需执行图均由
+  `comfy/graph_compiler.py` 唯一编译，禁用能力不生成对应节点也不加载多余权重。
+- `mode_capabilities.probe_optional_capabilities` 在服务核验写入 `optional_capabilities`，
+  `setup_summary.sealed_optional_capabilities` 与 `strategy.py` 作为唯一裁决口同时供给
+  `/director/strategy-options` 与 `services.make_render_request`（含 DB-only 路径对
+  `ACTIVE_KEY` 的复用）；选中缺失能力显式 `409 STRATEGY_BLOCKED`，拒绝静默降级。
+- 本机 ComfyUI `b0b743566` 缺少 `RelayVSRConditioning`/`VSRDecode`，RelayVSR 2X 在实机上诚实
+  阻塞为 `RELAYVSR_NODES_MISSING_IN_LIVE`（离线单测与 EDL `episode_input_digest` 已验证，真机
+  RelayVSR 未验证）。其余实机已出 `pdd8 + second_pass + VHS_LoadVideo` 与 `native20 + audio`
+  真实视频。验收记录见 `docs/ACCEPTANCE_20261121_V3_P2_OPTIONAL_MULTIMODAL.md`。

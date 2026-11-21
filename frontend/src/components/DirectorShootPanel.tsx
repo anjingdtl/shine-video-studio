@@ -327,13 +327,21 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     submitting.current = true;
     setBusy('start'); setProblem(''); setStyleGap(false);
     try {
+      const secondPassReady = options.second_pass.supported;
+      const upscaleReady = options.upscale.some((row) => row.enabled);
       const strategy: ProductionStrategy = {
         schema_version: '1',
         generation_mode: 'Ref2VA',
         model_variant_id: variantId,
         accelerator_id: acceleratorId,
-        second_pass: { enabled: secondPass, recipe_id: 'h3-tail-refine-v1', denoise: 0.25, latent_scale: 1.0 },
-        upscale: upscale ? { enabled: true, engine: 'relayvsr', variant: 'x2', quality_preset: 'balanced' }
+        second_pass: {
+          enabled: secondPass && secondPassReady,
+          recipe_id: 'h3-tail-refine-v1',
+          denoise: 0.25,
+          latent_scale: 1.0,
+        },
+        upscale: upscale && upscaleReady
+          ? { enabled: true, engine: 'relayvsr', variant: 'x2', quality_preset: 'balanced' }
           : { enabled: false },
       };
       const frame = frameSize(orientation, resolutionScale);
@@ -362,7 +370,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       submitting.current = false;
       setBusy('');
     }
-  }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh, orientation,
+  }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh,
+    options.second_pass.supported, options.upscale, orientation,
     projectId, resolutionScale, secondPass, selected, upscale, variantId]);
 
   const applyStyle = async () => {
@@ -583,7 +592,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
                 aria-checked={acceleratorId === row.accelerator_id}
                 className={`strategy-option${acceleratorId === row.accelerator_id ? ' active' : ''}`}
                 disabled={!row.verified || running || busy !== ''}
-                title={row.verified ? undefined : '这个加速配方本机还没就绪'}
+                title={row.verified ? undefined : (row.blockers?.[0]?.detail || row.unverified_reason || '这个加速配方本机还没就绪')}
                 onClick={() => setAcceleratorId(row.accelerator_id)}>
                 {describeAccelerator(row.accelerator_id, row.steps)}
                 {!row.verified && <em className="strategy-flag">本机未就绪</em>}
@@ -593,9 +602,13 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
           <div className="strategy-row">
             <span className="strategy-label">二次精修</span>
             <label className="strategy-toggle">
-              <input type="checkbox" checked={secondPass} disabled={running || busy !== ''}
-                onChange={(event) => setSecondPass(event.target.checked)} />
-              <span>启用（第二次采样精修画面，成片更细）</span>
+              <input type="checkbox" checked={secondPass && options.second_pass.supported}
+                disabled={!options.second_pass.supported || running || busy !== ''}
+                title={options.second_pass.supported
+                  ? undefined
+                  : (options.second_pass.blockers?.[0]?.detail || options.second_pass.blockers?.[0]?.code || '本机还没就绪')}
+                onChange={(event) => setSecondPass(event.target.checked && options.second_pass.supported)} />
+              <span>启用（第二次采样精修画面，成片更细）{options.second_pass.supported ? '' : '（本机还没就绪）'}</span>
             </label>
           </div>
           <div className="strategy-row">

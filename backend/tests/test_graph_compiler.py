@@ -100,10 +100,22 @@ def test_four_audio_is_a_named_refusal():
     assert exc.value.code == "AUDIO_REFERENCE_LIMIT_EXCEEDED"
 
 
-def test_video_reference_is_refused_by_name_until_verified():
-    with pytest.raises(GraphCompileError) as exc:
-        compile_ref2va_workflow(image_count=2, video_count=1)
-    assert exc.value.code == "VIDEO_REFERENCE_LOADER_UNVERIFIED"
+def test_video_references_compile_vhs_loaders_and_transfer():
+    compiled = compile_ref2va_workflow(image_count=2, video_count=2, audio_count=1)
+    assert "video" in compiled.media_transfers
+    assert compiled.media_transfers["video"]["required_node_classes"] == ["VHS_LoadVideo"]
+    assert "VHS_LoadVideo" in compiled.required_nodes
+    ref_inputs = compiled.graph["31"]["inputs"]
+    for idx in range(2):
+        assert ref_inputs[f"ref_videos.ref_video_{idx}"] == [str(26 + idx), 0]
+        assert f"ref_video_audios.ref_video_audio_{idx}" not in ref_inputs
+        assert compiled.parameter_map[f"reference_video_{idx + 1}"] == f"{26 + idx}.inputs.video"
+        assert compiled.graph[str(26 + idx)]["inputs"]["force_rate"] == 24.0
+    assert compiled.reference_counts == {"image": 2, "audio": 1, "video": 2}
+    # Video-free graphs must not declare video transfer or VHS_LoadVideo.
+    no_vid = compile_ref2va_workflow(image_count=2, audio_count=1)
+    assert "video" not in no_vid.media_transfers
+    assert "VHS_LoadVideo" not in no_vid.required_nodes
 
 
 def test_compilation_is_deterministic():
@@ -319,7 +331,7 @@ def test_p1_refusals_do_not_substitute_or_drop_references():
     assert missing.value.code == "PROJECT_REQUIRES_REF2VA"
     for shape, code in (
         (dict(image_count=9, audio_count=3, video_count=1), "TOTAL_REFERENCE_LIMIT_EXCEEDED"),
-        (dict(image_count=1, video_count=1), "VIDEO_REFERENCE_LOADER_UNVERIFIED"),
+        (dict(image_count=1, video_count=4), "VIDEO_REFERENCE_LIMIT_EXCEEDED"),
         (dict(image_count=1, variant_id="ref2va-nvfp4-lowend", accelerator_id="native20"),
          "VARIANT_RECIPE_UNVERIFIED"),
     ):

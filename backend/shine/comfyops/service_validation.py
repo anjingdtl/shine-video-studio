@@ -29,7 +29,7 @@ from shine.comfyops.managed_recipe import (
     build_review_launch,
     recipe_path,
 )
-from shine.comfyops.mode_capabilities import core_mode_node_types, mode_workflows
+from shine.comfyops.mode_capabilities import core_mode_node_types, mode_workflows, probe_optional_capabilities
 from shine.comfyops.models import ComfyInstance
 from shine.comfyops.owned_process import OwnedProcessGroup
 from shine.comfyops.runtime_configuration import (
@@ -692,6 +692,7 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
             "capabilities_sha256": graph_hash(probe["capabilities"]),
         }
     object_info_payload = json.dumps(object_info, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    optional_capabilities = probe_optional_capabilities(object_info)
     evidence = record_service_evidence(db, identity, {
         "project_id": project_id,
         "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -699,6 +700,7 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
         "node_inventory_sha256": hashlib.sha256(object_info_payload.encode("utf-8")).hexdigest(),
         "workflow_profiles": {},
         "mode_capabilities": mode,
+        "optional_capabilities": optional_capabilities,
         "review_profiles": profiles,
         "advisory_reviews": advisory_reviews,
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
@@ -710,6 +712,7 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
         "recipe_sha256": recipe_sha256,
         "node_count": len(object_info),
         "mode_capabilities": mode,
+        "optional_capabilities": optional_capabilities,
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
         "advisory_reviews": advisory_reviews,
         "services_stopped": True,
@@ -722,6 +725,7 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
         "node_count": len(object_info),
         "workflow_profiles": [],
         "mode_capabilities": mode,
+        "optional_capabilities": optional_capabilities,
         "auto_registered_profiles": [],
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},

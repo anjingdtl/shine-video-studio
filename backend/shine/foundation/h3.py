@@ -303,6 +303,7 @@ class ComfyH3Executor:
         uploaded_names: dict[str, str] = {}
         img_idx = 0
         aud_idx = 0
+        vid_idx = 0
         for ref, raw in loaded_refs:
             transfer = compiled.media_transfers.get(ref.family)
             if not isinstance(transfer, dict):
@@ -335,6 +336,9 @@ class ComfyH3Executor:
             elif ref.family == "audio":
                 aud_idx += 1
                 uploaded_names[f"reference_audio_{aud_idx}"] = remote_name
+            elif ref.family == "video":
+                vid_idx += 1
+                uploaded_names[f"reference_video_{vid_idx}"] = remote_name
 
         try:
             prepared = prepare_workflow_submission(

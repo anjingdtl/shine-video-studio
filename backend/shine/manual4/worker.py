@@ -630,13 +630,36 @@ def _execute_single_job(
                 (f"reference_audio_{idx + 1}", safe_m4_filename(p.name), raw_aud, item["content_type"])
             )
 
-        for item in vid_items:
+        for idx, item in enumerate(vid_items):
             p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
+            if not p.is_file():
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_FILE_MISSING",
+                    detail=f"参考视频文件丢失：{item.get('role_label')}",
+                )
+            raw_vid = p.read_bytes()
+            if sha256_bytes(raw_vid) != item["sha256"]:
+                return _fail_job_precheck(
+                    m4_factory,
+                    job_id,
+                    expected_state_ver=expected_state_ver,
+                    status="FAILED",
+                    code="M4_REFERENCE_SHA_MISMATCH",
+                    detail=f"参考视频字节校验不一致：{item.get('role_label')}",
+                )
             h3_refs.append(
                 H3ReferenceInput(
                     family="video", path=p, filename=safe_m4_filename(p.name),
                     content_type=str(item.get("content_type") or "video/mp4"), sha256=str(item["sha256"]),
+                    role_label=str(item.get("role_label") or ""),
                 )
+            )
+            ref_files_to_upload.append(
+                (f"reference_video_{idx + 1}", safe_m4_filename(p.name), raw_vid, item["content_type"])
             )
 
         if video_stub is not None:

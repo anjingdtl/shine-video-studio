@@ -895,6 +895,7 @@ def make_render_request(
     idempotency_key: str | None = None,
     ignore_manual_prompt: bool = False,
     require_ref2va: bool | None = None,
+    settings: Any = None,
 ) -> tuple[RenderRequest, list[Asset], dict[str, Any]]:
     if not project.frozen_style_version_id:
         raise HTTPException(status_code=409, detail="Freeze the Style Bible before creating a render job")
@@ -917,7 +918,7 @@ def make_render_request(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
-        blockers = strategy_blockers(strategy, db)
+        blockers = strategy_blockers(strategy, db, settings)
         if blockers:
             raise HTTPException(409, detail={
                 "code": "STRATEGY_BLOCKED",
@@ -1222,6 +1223,11 @@ def make_render_request(
                 "message": exc.message,
                 "details": exc.details,
             }) from exc
+        if spec.continuity.mode.value == "hard_frame_anchor":
+            raise HTTPException(422, detail={
+                "code": "PENDING_HARD_CONTINUITY_TEST",
+                "requested_continuity": "HARD_FRAME_ANCHOR_CONTINUITY",
+            })
         workflow_hash = compiled_strategy_graph.graph_sha256
 
     render_request = RenderRequest(
@@ -1660,7 +1666,7 @@ def create_render_job(
 
     request_data, _assets, compiler_meta = make_render_request(
         db, project, shot, body, spec=spec, continuity_artifact_id=continuity_artifact_id, offline=offline,
-        idempotency_key=idempotency_key,
+        idempotency_key=idempotency_key, settings=settings,
     )
     if body.provider == RenderProvider.COMFYUI:
         from shine.quality.input_assessment import assessment_for_request
