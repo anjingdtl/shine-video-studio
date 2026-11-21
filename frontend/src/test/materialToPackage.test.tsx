@@ -220,6 +220,31 @@ describe('素材准备页内候选选定与晋升（不引去素材中心）', (
       .toMatchObject({ grant_id: 'g1', snapshot: 's1', offline: false });
   });
 
+  it('候选可批量勾选晋升，逐个复用同一晋升执行者', async () => {
+    const promoted = vi.fn();
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [{
+        run_id: 'run-1', status: 'SUCCEEDED', kind: 'production',
+        counts: { total: 2, candidate_ready: 2, failed: 0, needs_review: 0, queued: 0, running: 0 },
+        items: [
+          { item_id: 'i1', requirement_id: 'r1', entity_id: '沈砚', family: 'character', status: 'CANDIDATE_READY', error_code: null,
+            candidates: [{ candidate_id: 'cand-1', status: 'READY_FOR_REVIEW', content_sha256: 'x', is_mock: false, formal_asset_id: null, attempt_no: 1 }] },
+          { item_id: 'i2', requirement_id: 'r2', entity_id: '码头', family: 'scene', status: 'CANDIDATE_READY', error_code: null,
+            candidates: [{ candidate_id: 'cand-2', status: 'READY_FOR_REVIEW', content_sha256: 'y', is_mock: false, formal_asset_id: null, attempt_no: 1 }] },
+        ],
+      }] }) });
+    stub.add({ method: 'POST', pattern: /preparation\/approval-grants$/, respond: () => jsonResponse({ grant_id: 'g1', snapshot: 's1' }) });
+    stub.add({ method: 'POST', pattern: /candidate-assets\/cand-1\/promote$/, respond: () => jsonResponse({ formal_asset_id: 'a1' }) });
+    stub.add({ method: 'POST', pattern: /candidate-assets\/cand-2\/promote$/, respond: () => jsonResponse({ formal_asset_id: 'a2' }) });
+    render(<MaterialGenerationProgress projectId="p1" onPromoted={promoted} />);
+    const user = userEvent.setup();
+    await user.click(await screen.findByLabelText('全选候选'));
+    await user.click(screen.getByRole('button', { name: '批量晋升所选' }));
+    await waitFor(() => expect(stub.callsOf('POST', /candidate-assets\/cand-1\/promote$/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /candidate-assets\/cand-2\/promote$/)).toHaveLength(1);
+    await waitFor(() => expect(promoted).toHaveBeenCalled());
+  });
+
   it('已采用的主素材可「取消采用」，回调同一决策执行者', async () => {
     const unadopt = vi.fn();
     stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
@@ -491,5 +516,42 @@ describe('上传主素材后其他项选 AI 制作不丢失已上传图片', () 
     await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(commitBodies[commitBodies.length - 1]?.queue_generation).toBe(false);
+  });
+});
+
+describe('④ 素材来源从素材中心导入与生成中锁定', () => {
+  it('来源下拉「从素材中心导入」弹窗选素材并走分配+采纳执行者', async () => {
+    stubMaterials();
+    stub.add({ method: 'GET', pattern: /projects\/p1\/asset-center\/search/,
+      respond: () => jsonResponse({ items: [{ asset: { id: 'la1', title: '沈砚 · 长风衣', category: 'character', kind: 'image' },
+        version: { id: 'lv1', ordinal: 1, content_sha256: 'e'.repeat(64), media_url: '/api/v1/asset-center/versions/lv1/media' } }] }) });
+    stub.add({ method: 'POST', pattern: /asset-center\/assignments$/, respond: () => jsonResponse({ project_asset_id: 'pa-1' }) });
+    stub.add({ method: 'POST', pattern: /projects\/p1\/director\/materials\/commit$/, respond: () => jsonResponse({ replayed: false, generate_count: 0 }) });
+    const user = userEvent.setup();
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+    await screen.findByText('沈砚');
+    const rows = screen.getAllByLabelText(/处理方式：/) as HTMLSelectElement[];
+    await user.selectOptions(rows[0], 'import_center');
+    const dialog = await screen.findByRole('dialog', { name: /从素材中心导入 · 沈砚/ });
+    expect(dialog).toBeInTheDocument();
+    await user.click(await screen.findByRole('option', { name: /沈砚 · 长风衣/ }));
+    await waitFor(() => expect(stub.callsOf('POST', /asset-center\/assignments$/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /asset-center\/assignments$/)[0].body).toMatchObject({
+      project_id: 'p1', library_version_id: 'lv1', role: 'character', entity_id: '沈砚' });
+    await waitFor(() => expect(stub.callsOf('POST', /projects\/p1\/director\/materials\/commit$/)).toHaveLength(1));
+  });
+
+  it('后台在途出图时主操作锁定为「素材生成中…」', async () => {
+    stub.add({ method: 'GET', pattern: /projects\/p1\/director\/materials\/requirements$/, respond: () => jsonResponse(REQUIREMENTS) });
+    stub.add({ method: 'GET', pattern: /projects\/p1\/material-preparation\/generation-progress$/,
+      respond: () => jsonResponse({ project_id: 'p1', runs: [{ run_id: 'run-1',
+        counts: { total: 2, candidate_ready: 0, failed: 0, needs_review: 0, queued: 1, running: 1 }, items: [] }] }) });
+    render(<StageRailProvider stageId="assets" stageLabel="第④步 · 拍摄素材准备">
+      <ShotMaterialsPanel projectId="p1" />
+    </StageRailProvider>);
+    const btn = await screen.findByRole('button', { name: /素材生成中/ });
+    expect(btn).toBeDisabled();
   });
 });

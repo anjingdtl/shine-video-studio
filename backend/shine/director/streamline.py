@@ -1282,6 +1282,12 @@ _REFUSAL_LABELS = {
     "CHARACTER_MASTER_BINDING_REQUIRED": "人物还没有绑定已确认的主素材",
     "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE": "画面描述里混入了中文，需要按提示词语言重写",
     "DIALOGUE_NOT_IN_USER_SCRIPT": "对白不是剧本原文，需要按原文重写",
+    "ARBITRATION_ISSUE_COVERAGE": "导演裁定没有对场记提出的每个问题逐一作答，重试会要求覆盖全部问题",
+    "ARBITRATION_UNKNOWN_RULE": "导演裁定引用了规则包里不存在的规则",
+    "NARRATOR_NOT_LISTED_IN_BEAT": "旁白说话方没有列入该情节拍的人物",
+    "SHOT_DURATION_OVER_LIMIT": "镜头时长超出 H3 单镜上限",
+    "UNAPPROVED_VOICE": "镜头引用了未批准的音色",
+    "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE": "剪辑引用的源镜头未通过或入出点无效",
 }
 
 
@@ -1368,10 +1374,14 @@ def _episode_blocker_view(db, project_id: str, episode: dict, entry: dict) -> di
             " 不会自动重发；重试只复用这一场已完成的工种结果重新落镜，已落镜的场次保留。" if landing else
             " 不会自动重发；重试只从这一场重新发起一次模型请求，已落镜的场次保留。")
     holder_id = (rejection.get("blocking_task") or {}).get("task_id")
-    if not holder_id and code in RECONCILIATION_CODES:
-        # The pre-check rejection names the holder directly; older traces may
-        # only carry the role.  Name the open record so the reconcile click
-        # targets it; the reconcile endpoint re-verdicts before any release.
+    if not holder_id and uncertain:
+        # Any uncertain refusal names the record that holds the unknown outcome:
+        # the pre-check reconciliation codes AND a plain provider failure
+        # (LLM_CONNECTION/LLM_TIMEOUT with an unknown outcome).  Without this a
+        # dropped-stream block left reconcile_task_id unset, so the rail button
+        # fell back to the failed task with version 0 and the reconcile endpoint
+        # refused it as FILM_AGENT_TASK_STATE_CHANGED (live 2026-11-21).  The
+        # reconcile endpoint re-verdicts before any release.
         holder_id = rejection.get("task_id")
         if not holder_id:
             holder = db.scalars(select(AgentTaskRecord).where(

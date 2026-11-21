@@ -21,7 +21,7 @@ from shine.llm.base import (
     parse_json_object,
 )
 from shine.llm.output_budget import ANTHROPIC_DEFAULT_MAX_TOKENS
-from shine.llm.transport import build_client
+from shine.llm.transport import build_text_client
 
 
 def _max_tokens_for(config) -> int:
@@ -65,7 +65,7 @@ class AnthropicMessagesProvider:
         attempts = max(0, self.config.max_retries) + 1
         for attempt in range(attempts):
             try:
-                with build_client(self._url(), self.config.timeout_s) as client:
+                with build_text_client(self._url(), self.config.timeout_s) as client:
                     response = client.post(self._url(), headers=self._headers(), json=payload)
             except (httpx.ConnectTimeout, httpx.PoolTimeout) as exc:
                 # The connection was never established, so the provider never
@@ -214,7 +214,7 @@ class AnthropicMessagesProvider:
         base = self.config.base_url.rstrip("/")
         url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
         try:
-            with build_client(url, self.config.timeout_s) as client:
+            with build_text_client(url, self.config.timeout_s) as client:
                 response = client.get(url, headers=self._headers())
         except httpx.TimeoutException as exc:
             raise LLMTimeout("Anthropic capability probe timed out", details={

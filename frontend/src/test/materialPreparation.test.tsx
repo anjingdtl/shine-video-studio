@@ -107,6 +107,31 @@ it('素材页读取服务器的需求清单，刷新不会重新提交分析', a
   expect(stub.callsOf('GET', /material-preparation$/)).toHaveLength(1);
 });
 
+it('来源下拉「从素材中心导入」弹窗选素材并走既有分配执行者', async () => {
+  const libraryItem = {
+    asset: { id: 'lib-asset-1', title: '林知远 · 长风衣', category: 'character', kind: 'image' },
+    version: { id: 'lib-ver-1', ordinal: 2, content_sha256: 'e'.repeat(64), media_url: '/api/v1/asset-center/versions/lib-ver-1/media' },
+  };
+  stub.add({ method: 'GET', pattern: /projects\/p1\/asset-center\/search/, respond: () => jsonResponse({ items: [libraryItem] }) });
+  stub.add({ method: 'POST', pattern: /asset-center\/assignments$/, respond: () => jsonResponse({ project_asset_id: 'proj-asset-9' }) });
+  const user = userEvent.setup();
+  render(<MaterialPreparationPanel projectId="p1" />);
+  const source = await screen.findByLabelText('素材来源');
+  await user.selectOptions(source, 'import_center');
+  const dialog = await screen.findByRole('dialog', { name: /从素材中心导入 · 林知远/ });
+  expect(dialog).toBeInTheDocument();
+  await user.click(await screen.findByRole('option', { name: /林知远 · 长风衣/ }));
+  await waitFor(() => expect(stub.callsOf('POST', /asset-center\/assignments$/)).toHaveLength(1));
+  expect(stub.callsOf('POST', /asset-center\/assignments$/)[0].body).toMatchObject({
+    project_id: 'p1',
+    library_version_id: 'lib-ver-1',
+    role: 'character',
+    entity_id: '林知远',
+    requirement_context: { project_id: 'p1', requirement_id: 'req-1' },
+  });
+  await waitFor(() => expect(screen.getByLabelText('素材来源')).toHaveValue('reuse_master'));
+});
+
 it('普通陈设默认随场景生成，核心道具才加入出图批次', async () => {
   const prop = { ...STATE.requirements[0], family: 'prop', strategy: null, description: '' };
   stub.add({

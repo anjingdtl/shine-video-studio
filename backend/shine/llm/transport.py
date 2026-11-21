@@ -5,6 +5,6 @@ traps the renderer client; this module keeps the provider-side names.
 """
 from __future__ import annotations
 
-from shine.http_env import build_client, is_local_endpoint, sanitize_no_proxy
+from shine.http_env import build_client, build_text_client, is_local_endpoint, sanitize_no_proxy
 
-__all__ = ["build_client", "is_local_endpoint", "sanitize_no_proxy"]
+__all__ = ["build_client", "build_text_client", "is_local_endpoint", "sanitize_no_proxy"]

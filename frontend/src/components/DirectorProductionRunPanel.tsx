@@ -10,7 +10,7 @@ import {
   type DeliveryAcceptance, type DirectorEpisodeOverview, type DirectorPackage, type EpisodePlan, type Journey,
   type PackageReadiness, type ProductionRun, type RunEpisode, type RunEvent, type WorkflowProfile,
 } from '../api';
-import { rememberProductionProfile, storedProductionProfile } from '../productionProfile';
+import { rememberProductionProfile, storedProductionProfile, rememberDirectorPackage, storedDirectorPackage } from '../productionProfile';
 import { EpisodeAcceptance } from './EpisodeAcceptance';
 import { EpisodeSubtitleFold } from './EpisodeSubtitleFold';
 import GenerationSegmentsPanel from './GenerationSegmentsPanel';
@@ -86,6 +86,16 @@ function since(iso: string | null | undefined): string {
   return `${Math.floor(delta / 3600)} 小时前`;
 }
 
+/** 版本历史的绝对时间（本地时区）：每一版生成的时刻是可核对的记录。 */
+function versionTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const value = Date.parse(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
+  if (Number.isNaN(value)) return '—';
+  const d = new Date(value);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 type Props = {
   projectId: string;
   mode: Mode;
@@ -130,9 +140,14 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId, profileKey]);
-  const [selectedPackageId, setSelectedPackageId] = useState<string>(packageId ?? '');
-  // A deep link names one exact package; the selection follows it.
-  useEffect(() => { setSelectedPackageId(packageId ?? ''); }, [packageId]);
+  const [selectedPackageId, setSelectedPackageId] = useState<string>(packageId || storedDirectorPackage(projectId));
+  // A deep link names one exact package; otherwise the person's last viewed
+  // version is restored (per project), so switching pages keeps the record.
+  useEffect(() => { setSelectedPackageId(packageId || storedDirectorPackage(projectId)); }, [projectId, packageId]);
+  const selectPackage = (id: string) => {
+    setSelectedPackageId(id);
+    rememberDirectorPackage(projectId, id);
+  };
   const [episodePage, setEpisodePage] = useState(0);
   /** ⑦ 单一选集：预览/验收/字幕/镜网格都只作用于手动选中的这一集。 */
   const [selectedEp, setSelectedEp] = useState('');
@@ -603,14 +618,27 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
         </div>
 
         <div className="run-binding-row">
-          {packages.length > 1 && <label>选择导演包
-            <select value={latestPackage?.id ?? ''}
-              onChange={(event) => setSelectedPackageId(event.target.value)}>
-              {packages.map((row) => <option key={row.id} value={row.id}>
-                第 {row.revision} 版 · {statusText(row.status)} · {row.episode_count} 集 · {row.shot_count} 镜
-              </option>)}
-            </select>
-          </label>}
+          {packages.length > 0 && <div className="package-version-history" aria-label="导演包版本历史">
+            <span className="pvh-title">版本历史（每次生成/重拍递增一版，点击切换查看该版配置）</span>
+            <div className="pvh-list">
+              {packages.map((row) => <button type="button" key={row.id}
+                className={`pvh-item${latestPackage?.id === row.id ? ' active' : ''}${row.stale ? ' stale' : ''}`}
+                aria-pressed={latestPackage?.id === row.id}
+                onClick={() => selectPackage(row.id)}>
+                <span className="pvh-rev">第 {row.revision} 版</span>
+                <span className={`head-chip ${row.status === 'CONFIRMED' ? 'ok' : row.stale ? 'warn' : ''}`}>
+                  {statusText(row.status)}{row.stale ? ' · 失效' : ''}</span>
+                <span className="pvh-config">
+                  {row.style ? `风格 v${row.style.version}` : '风格未冻结'}
+                  {' · '}{row.binding ? row.binding.mode : '方案未绑定'}
+                  {row.binding?.output?.width && row.binding?.output?.height
+                    ? ` · ${row.binding.output.width}×${row.binding.output.height}` : ''}
+                  {' · '}{row.episode_count} 集 {row.shot_count} 镜
+                </span>
+                <span className="pvh-time">{versionTime(row.created_at)}{row.confirmed_at ? ' · 已确认' : ' · 待确认'}</span>
+              </button>)}
+            </div>
+          </div>}
           <label>本机生成方案
             <select value={profileId} onChange={(event) => {
               setProfileId(event.target.value);

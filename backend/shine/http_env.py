@@ -64,3 +64,34 @@ def build_client(url: str, timeout: float, **kwargs) -> httpx.Client:
         # entry would make httpx refuse to build the client at all.
         sanitize_no_proxy()
     return httpx.Client(timeout=timeout, **kwargs)
+
+
+def proxy_is_loopback() -> bool:
+    """True when the configured HTTP(S) proxy is a forwarder on this machine."""
+    for key in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"):
+        value = os.environ.get(key)
+        if not value:
+            continue
+        try:
+            host = (urlparse(value).hostname or "").lower()
+        except ValueError:
+            continue
+        if host in _LOCAL_HOSTS or host.startswith("127."):
+            return True
+    return False
+
+
+def build_text_client(url: str, timeout: float, **kwargs) -> httpx.Client:
+    """Text-model transport: bypass a loopback forward proxy and connect direct.
+
+    A local forward proxy (a dev-environment proxy on 127.0.0.1) cuts idle SSE
+    connections while a reasoning model thinks silently between events; the
+    stream then dies mid-answer as LLM_CONNECTION/UNKNOWN (live 2026-11-21, the
+    crew scriptwriter after a partial answer).  The public text API is directly
+    reachable, so when the only configured proxy is loopback we connect direct.
+    A real remote proxy, or no proxy at all, keeps the existing behavior — this
+    only removes a local hop that breaks streaming, never the cloud-consent gate.
+    """
+    if kwargs.get("trust_env") is None and not is_local_endpoint(url) and proxy_is_loopback():
+        kwargs["trust_env"] = False
+    return build_client(url, timeout, **kwargs)

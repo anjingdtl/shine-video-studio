@@ -16,9 +16,11 @@ import {
   getProductionRun,
   getStrategyOptions,
   getVariantAvailability,
+  listDirectorPackages,
   startDirectorProduction,
   type DirectorEpisodeOverview,
   type DirectorOverview,
+  type DirectorPackage,
   type ProductionRun,
   type ProductionStrategy,
   type StrategyOptions,
@@ -28,10 +30,25 @@ import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orie
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { GuideTip } from './GuideTip';
+import { rememberShootStrategy, storedShootStrategy } from '../productionProfile';
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) return error.message;
   return String(error);
+}
+
+const PACKAGE_STATUS_TEXT: Record<string, string> = {
+  DRAFT: '待确认', CONFIRMED: '已确认', STALE: '已失效', SUPERSEDED: '已被新版取代',
+};
+
+/** 版本历史的绝对时间（本地时区）：每一版生成的时刻是可核对的记录。 */
+function versionTime(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const value = Date.parse(iso.endsWith('Z') || iso.includes('+') ? iso : `${iso}Z`);
+  if (Number.isNaN(value)) return '—';
+  const d = new Date(value);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 const STATE_TONE: Record<string, string> = {
@@ -159,20 +176,28 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   onGoSetup?: () => void;
 }) {
   const railPresent = useRailPresent();
+  // 切页回来组件重挂载：从项目级存储恢复上次选的拍摄方案，不回默认。
+  const stored = storedShootStrategy(projectId);
   const [selected, setSelected] = useState<string[]>([]);
   const [options, setOptions] = useState<StrategyOptions>(FALLBACK_OPTIONS);
-  const [variantId, setVariantId] = useState('h3-ref2va-int8-convrot');
-  const [acceleratorId, setAcceleratorId] = useState('pdd8');
+  const [variantId, setVariantId] = useState(typeof stored?.variantId === 'string' ? stored.variantId : 'h3-ref2va-int8-convrot');
+  const [acceleratorId, setAcceleratorId] = useState(typeof stored?.acceleratorId === 'string' ? stored.acceleratorId : 'pdd8');
   // 画幅/分辨率在七阶段里只有这一个控制节点：产出 OutputSpec 宽高，
   // 随开拍冻结进导演包，派发读同一份 binding.output。
-  const [orientation, setOrientation] = useState<Orientation>('landscape');
-  const [resolutionScale, setResolutionScale] = useState(1.0);
-  const [secondPass, setSecondPass] = useState(false);
-  const [upscale, setUpscale] = useState(false);
+  const [orientation, setOrientation] = useState<Orientation>(stored?.orientation === 'portrait' ? 'portrait' : 'landscape');
+  const [resolutionScale, setResolutionScale] = useState(typeof stored?.resolutionScale === 'number' ? stored.resolutionScale : 1.0);
+  const [secondPass, setSecondPass] = useState(typeof stored?.secondPass === 'boolean' ? stored.secondPass : false);
+  const [upscale, setUpscale] = useState(typeof stored?.upscale === 'boolean' ? stored.upscale : false);
+  useEffect(() => {
+    rememberShootStrategy(projectId, { variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale });
+  }, [projectId, variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale]);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const [styleGap, setStyleGap] = useState(false);
   const [run, setRun] = useState<ProductionRun | null>(null);
+  /** 导演包版本台账（服务端 director_package_versions 唯一事实）：每次生成/重拍
+   *  递增一版，这里只读展示每一版的配置，供人核对与管理。 */
+  const [packages, setPackages] = useState<DirectorPackage[]>([]);
   const [touched, setTouched] = useState(false);
   /** 基础配置里已经准备好的方案：有就点亮，没有就灰色。但「未就绪」不等于
    *  「不可选择」——候选模型可以被选中进入资源准备，只是不能开拍。 */
@@ -219,6 +244,14 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       .catch(() => { if (!cancelled) setRun(null); });
     return () => { cancelled = true; };
   }, [activeRunId, refreshEpoch]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listDirectorPackages(projectId)
+      .then((rows) => { if (!cancelled) setPackages(rows); })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [projectId, refreshEpoch]);
 
   // 模型版本状态直接来自基础配置的台账：不在这里另算一套「验收」。
   useEffect(() => {
@@ -400,6 +433,32 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
           <button type="button" className="btn-secondary" onClick={() => onNavigate?.('run')}>
             去视频生产看进度
           </button>
+        </div>
+      </section>}
+
+      {packages.length > 0 && <section className="card section-card">
+        <div className="section-heading">
+          <div>
+            <div className="section-kicker">第 5 阶段 · 导演包版本历史</div>
+            <h2>每一版拍摄方案的配置记录</h2>
+            <p>每次开拍冻结一版导演包；重拍递增新版，旧版保留可核对。版本台账在服务端，切页回来不丢。</p>
+          </div>
+          <span className="head-chip">{packages.length} 版</span>
+        </div>
+        <div className="pvh-list" aria-label="导演包版本历史">
+          {packages.map((row) => <div key={row.id} className={`pvh-item${row.stale ? ' stale' : ''}`}>
+            <span className="pvh-rev">第 {row.revision} 版</span>
+            <span className={`head-chip ${row.status === 'CONFIRMED' ? 'ok' : row.stale ? 'warn' : ''}`}>
+              {PACKAGE_STATUS_TEXT[row.status] ?? row.status}{row.stale ? ' · 失效' : ''}</span>
+            <span className="pvh-config">
+              {row.style ? `风格 v${row.style.version}` : '风格未冻结'}
+              {' · '}{row.binding ? row.binding.mode : '方案未绑定'}
+              {row.binding?.output?.width && row.binding?.output?.height
+                ? ` · ${row.binding.output.width}×${row.binding.output.height}` : ''}
+              {' · '}{row.episode_count} 集 {row.shot_count} 镜
+            </span>
+            <span className="pvh-time">{versionTime(row.created_at)}{row.confirmed_at ? ' · 已确认' : ' · 待确认'}</span>
+          </div>)}
         </div>
       </section>}
 

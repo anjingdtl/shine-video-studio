@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AssetCenterPicker } from '../../shared/AssetCenterPicker';
 import {
   adoptM4LibraryVersion,
   declineM4Material,
@@ -11,6 +12,7 @@ import {
   uploadM4Asset,
   type M4AssetVersion,
   type M4LibraryItem,
+  type M4MaterialRequirement,
   type M4MaterialsState,
   type M4Overview,
   type M4StageSummary,
@@ -50,6 +52,9 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
   const [libItems, setLibItems] = useState<M4LibraryItem[]>([]);
   const [libTargetReq, setLibTargetReq] = useState('');
   const [libBusy, setLibBusy] = useState(false);
+  /** 「从素材中心导入」弹窗当前服务的需求；点选后走既有 adoptM4LibraryVersion 执行者。 */
+  const [centerPickerReq, setCenterPickerReq] = useState<M4MaterialRequirement | null>(null);
+  const uploadInputRefs = useRef<Record<string, HTMLInputElement | null>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -284,6 +289,26 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
     }
   };
 
+  const handlePickFromCenter = async (item: M4LibraryItem) => {
+    const req = centerPickerReq;
+    setCenterPickerReq(null);
+    if (!req) return;
+    setBusyKey(`adopt:${item.library_version_id}`);
+    try {
+      const res = await adoptM4LibraryVersion(projectId, {
+        version_id: item.library_version_id,
+        requirement_id: req.id,
+        family: req.family,
+      });
+      await applyNewState(res.state);
+      onMessage?.(`已从素材中心导入「${item.title}」并绑定到该素材需求。`, 'success');
+    } catch (err) {
+      onMessage?.(`导入失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const facts = stage?.facts ?? {};
   const promotedAssets: M4AssetVersion[] = (state?.assets ?? []).filter((a) => a.status === 'promoted');
   const shotCodeMap = new Map((state?.shots ?? []).map((s) => [s.id, s.shot_code]));
@@ -380,6 +405,37 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                         placeholder="可选：Qwen-Image-2.1 提示词"
                         value={promptsByReq[req.id] ?? ''}
                         onChange={(e) => setPromptsByReq((prev) => ({ ...prev, [req.id]: e.target.value }))}
+                      />
+                    </div>
+
+                    <div className="m4-toolbar">
+                      <label className="m4-source-field">素材来源
+                        <select
+                          className="m4-input"
+                          value=""
+                          disabled={busyKey !== null}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            e.target.value = '';
+                            if (v === 'import_center') setCenterPickerReq(req);
+                            else if (v === 'generate') void handleGenerate(req.id);
+                            else if (v === 'decline') void handleDecline(req.id);
+                            else if (v === 'upload') uploadInputRefs.current[req.id]?.click();
+                          }}
+                        >
+                          <option value="" disabled>选择来源…</option>
+                          <option value="import_center">从素材中心导入…</option>
+                          <option value="generate">Qwen 生成</option>
+                          <option value="upload">本地上传</option>
+                          <option value="decline">明确放弃</option>
+                        </select>
+                      </label>
+                      <input
+                        type="file"
+                        hidden
+                        accept="image/*,audio/*,video/*"
+                        ref={(el) => { uploadInputRefs.current[req.id] = el; }}
+                        onChange={(e) => { void handleUploadForReq(req, e.target.files?.[0] ?? null); e.target.value = ''; }}
                       />
                     </div>
 
@@ -689,6 +745,20 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
           下一步：排片生产
         </button>
       </div>
+      {centerPickerReq && <AssetCenterPicker
+        title={`从素材中心导入 · ${centerPickerReq.entity_name}`}
+        kicker="素材来源"
+        emptyHint="素材中心还没有可分配的已晋升素材。先在素材中心生成、审核并晋升，再回来导入。"
+        fetchItems={async (q) => (await searchM4Library(projectId, { query: q })).items}
+        display={(item) => ({
+          key: item.library_version_id,
+          title: item.title,
+          subtitle: `${item.content_sha256.slice(0, 8)} · ${item.category}`,
+          mediaUrl: item.media_url,
+        })}
+        onPick={(item) => void handlePickFromCenter(item)}
+        onClose={() => setCenterPickerReq(null)}
+      />}
     </section>
   );
 }

@@ -12,8 +12,9 @@ import json
 import httpx
 import pytest
 
+from shine.literary.governor import classify_external_outcome
 from shine.llm import openai_compatible
-from shine.llm.base import ChatMessage, LLMConnectionError, ProviderConfig
+from shine.llm.base import ChatMessage, LLMConnectionError, LLMFormatError, ProviderConfig
 from shine.llm.transport_policy import streaming_enabled
 
 
@@ -58,7 +59,7 @@ def test_complete_uses_the_stream_when_it_answers(monkeypatch):
                                   headers={"content-type": "text/event-stream"})
         raise AssertionError("plain request must not follow a answered stream")
 
-    monkeypatch.setattr(openai_compatible, "build_client",
+    monkeypatch.setattr(openai_compatible, "build_text_client",
                         lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
     provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
     response = provider.complete([ChatMessage(role="user", content="hi")])
@@ -77,7 +78,7 @@ def test_a_refused_stream_falls_back_to_exactly_one_plain_request(monkeypatch):
             return httpx.Response(400, json={"error": "stream unsupported"})
         return httpx.Response(200, json={"choices": [{"message": {"content": '{"ok": true}'}}]})
 
-    monkeypatch.setattr(openai_compatible, "build_client",
+    monkeypatch.setattr(openai_compatible, "build_text_client",
                         lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
     provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
     response = provider.complete([ChatMessage(role="user", content="hi")])
@@ -101,7 +102,7 @@ def test_a_stream_cut_after_events_is_unknown_and_never_replayed(monkeypatch):
         return httpx.Response(200, stream=CutStream(),
                               headers={"content-type": "text/event-stream"})
 
-    monkeypatch.setattr(openai_compatible, "build_client",
+    monkeypatch.setattr(openai_compatible, "build_text_client",
                         lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
     provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
     with pytest.raises(LLMConnectionError) as excinfo:
@@ -128,7 +129,7 @@ def test_a_stream_silent_after_acknowledgement_is_unknown_and_never_replayed(mon
         return httpx.Response(200, stream=SilentStream(),
                               headers={"content-type": "text/event-stream"})
 
-    monkeypatch.setattr(openai_compatible, "build_client",
+    monkeypatch.setattr(openai_compatible, "build_text_client",
                         lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
     provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
     with pytest.raises(LLMConnectionError) as excinfo:
@@ -136,3 +137,90 @@ def test_a_stream_silent_after_acknowledgement_is_unknown_and_never_replayed(mon
     assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
     assert excinfo.value.details.get("headers_received") is True
     assert calls == [True]
+
+
+def _sse_answer(text: str, finish_reason: str, *, completion_tokens: int = 320,
+                reasoning_tokens: int = 96) -> str:
+    events = [json.dumps({"choices": [{"delta": {"content": text}}]}),
+              json.dumps({"choices": [{"delta": {}, "finish_reason": finish_reason}]}),
+              json.dumps({"usage": {"completion_tokens": completion_tokens,
+                                  "completion_tokens_details": {"reasoning_tokens": reasoning_tokens}}}),
+              "[DONE]"]
+    return "".join(f"data: {e}\n\n" for e in events)
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_a_streamed_format_failure_is_answered_not_unknown(monkeypatch, finish_reason):
+    # 穿测活缺陷（2026-11-21，大纲 S1）：流式传输把格式失败的证据写成 http_status，
+    # 而唯一裁决 classify_external_outcome 读 status——服务商明明已答复（200 +
+    # 终止 finish_reason），却被判 UNKNOWN，场景卡在「服务商结果未知」的人工重发门，
+    # 既不走 governor 的一次有界纠错，也不走 RESPONSE_RECEIVED 的自动断点续跑。
+    # 修复收敛证据键：流式与非流式写同一份事实，裁决口不变。
+    calls = []
+    answer = "这不是一个 JSON 对象" if finish_reason == "stop" else '{"scene_key": "S1"'
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append(bool(body.get("stream")))
+        if not body.get("stream"):
+            raise AssertionError("an answered stream must not fall back to a second request")
+        return httpx.Response(200, text=_sse_answer(answer, finish_reason),
+                              headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    with pytest.raises(LLMFormatError) as excinfo:
+        provider.complete([ChatMessage(role="user", content="hi")])
+    details = excinfo.value.details
+    assert details.get("status") == 200, "the classifier reads status, not http_status"
+    assert details.get("finish_reason") == finish_reason
+    assert details.get("completion_tokens") == 320
+    assert details.get("reasoning_tokens") == 96
+    assert classify_external_outcome(excinfo.value) == "RESPONSE_RECEIVED"
+    assert calls == [True]
+
+
+def test_the_stream_read_ceiling_honors_the_idle_deadline(monkeypatch):
+    # 穿测活缺陷（2026-11-21，镜头拆解导演/场记）：流式客户端曾把整条流的读超时
+    # 设成首事件上限 first_event_s（180s），声明的 idle_s（300s，「已在流式、
+    # 服务商还活着」的间隔上限）是死代码——模型中途思考静默 >180s 就被切成
+    # UNKNOWN。修复把读上限接到 max(first_event_s, idle_s)，连接超时用 connect_s。
+    from shine.llm.transport_policy import policy_for
+    seen = {}
+
+    def capture(url, timeout, **kwargs):
+        seen["timeout"] = timeout
+        return httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, text=_sse_body('{"ok": true}'),
+                                           headers={"content-type": "text/event-stream"})))
+
+    monkeypatch.setattr(openai_compatible, "build_text_client", capture)
+    cfg = _config(streaming=True)
+    provider = openai_compatible.OpenAICompatibleProvider(cfg)
+    assert provider.complete([ChatMessage(role="user", content="hi")]).parsed == {"ok": True}
+    policy = policy_for(cfg, streaming=True)
+    timeout = seen["timeout"]
+    assert isinstance(timeout, httpx.Timeout)
+    assert timeout.read == max(policy.first_event_s, policy.idle_s) == 300
+    assert timeout.connect == policy.connect_s == 30
+
+
+def test_a_broken_stream_records_the_underlying_error_type(monkeypatch):
+    # 取证：断流 UNKNOWN 必须留下底层异常类名，才能把「读上限切断」
+    # （ReadTimeout）与「对端/代理关闭」（ReadError/RemoteProtocolError）区分开。
+    class CutStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'data: {"choices": [{"delta": {"content": "{\\"ok\\": true}"}}]}\n\n'
+            raise httpx.ReadError("connection cut mid-answer")
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, stream=CutStream(),
+                                                           headers={"content-type": "text/event-stream"}))))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    with pytest.raises(LLMConnectionError) as excinfo:
+        provider.complete([ChatMessage(role="user", content="hi")])
+    assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
+    assert excinfo.value.details.get("error_type") == "ReadError"
+    assert excinfo.value.details.get("streamed") is True

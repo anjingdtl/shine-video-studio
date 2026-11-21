@@ -131,6 +131,77 @@ def test_blocked_projection_one_fact_for_table_rail_and_reconcile(api):
     assert all(row["status"] == "APPLIED" for row in final["episodes"])
 
 
+def _unknown_provider_holder_and_rejection(factory, project, episode_id):
+    """The live 2026-11-21 incident shape: a settled NEEDS_REVIEW crew call whose
+    stream broke mid-answer (LLM_CONNECTION, unknown outcome), and a rejection
+    that names the task but is NOT a pre-check reconciliation code."""
+    with factory.begin() as db:
+        run = db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project,
+            AgentTaskRecord.role_id == streamline.DIRECTOR_STORYBOARD_RUN,
+        ).order_by(AgentTaskRecord.created_at.desc())).first()
+        entry = run.trace["blocked_episodes"][episode_id]
+        holder_id = entry["failed_task_id"]
+        holder = db.get(AgentTaskRecord, holder_id)
+        holder.status = "NEEDS_REVIEW"
+        holder.error_code = "LLM_CONNECTION"
+        holder.lease_owner = None
+        holder.lease_expires_at = None
+        holder.trace = {**holder.trace, "phase": "WAITING_PROVIDER",
+                        "external_outcome": "UNKNOWN", "reconciliation": None,
+                        "network_timeout_s": 300.0}
+        entry = {**entry, "rejections": [{
+            "role": holder.role_id, "code": "LLM_CONNECTION",
+            "rejection_reason_code": "LLM_CONNECTION", "task_id": holder_id,
+            "state_version": holder.state_version, "external_outcome": "UNKNOWN",
+            "network_timeout_s": 300.0, "phase": "WAITING_PROVIDER"}]}
+        run.trace = {**run.trace, "blocked_episodes": {
+            **run.trace["blocked_episodes"], episode_id: entry}}
+        return holder_id, holder.state_version
+
+
+def test_a_plain_unknown_stream_block_names_its_reconcile_target(api):
+    """穿测活缺陷（2026-11-21）：普通断流 UNKNOWN（LLM_CONNECTION，非预检核对码）
+    的阻塞集，投影曾把 reconcile_task_id 留空、版本留 0；顶栏「核对并重试被阻塞
+    的集」拿 failed_task_id 凑目标却配版本 0，被 reconcile 的版本门拒成
+    FILM_AGENT_TASK_STATE_CHANGED，按钮看着能点实则必拒。修复落在唯一投影口：
+    凡 uncertain 的拒绝都解析核对目标（rejection.task_id + 数据库活版本）。"""
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    fail_section = prepared["outline"]["sections"][2]["production_section_id"]
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project, fail_section=fail_section)
+
+    holder_id, holder_version = _unknown_provider_holder_and_rejection(factory, project, "ep-02")
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    blocked = next(row for row in state["episodes"] if row["episode_id"] == "ep-02")
+    blocker = blocked["blocker"]
+    assert blocker["uncertain"] is True
+    # 核对目标与活版本必须被解析出来，顶栏按钮才不会被版本门再拒。
+    assert blocker["reconcile_task_id"] == holder_id
+    assert blocker["reconcile_state_version"] == holder_version
+
+    # 核对 → 授权一次重发 → 重试：真解阻。
+    checked = client.post(f"/api/v1/projects/{project}/film-runs/{holder_id}/reconcile",
+                          json={"expected_state_version": blocker["reconcile_state_version"]},
+                          headers=LOCAL)
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["outcome"] == "UNKNOWN_REQUIRES_NEW_ATTEMPT"
+    resent = client.post(f"/api/v1/projects/{project}/film-runs/{holder_id}/resend-unknown",
+                         json={"expected_state_version": checked.json()["state_version"]},
+                         headers=LOCAL)
+    assert resent.status_code == 200, resent.text
+    retry = client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-02/retry",
+                        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project)
+    final = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert final["status"] == "SUCCEEDED", final
+
+
 def test_book_scope_is_governed_by_the_confirmed_target(api):
     """2026-11-19 用户裁定：1 集 60 秒只覆盖前几场；超范围显式声明，run 不越界。"""
     client, factory, settings = api

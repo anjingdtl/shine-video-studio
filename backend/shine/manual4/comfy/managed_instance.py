@@ -89,12 +89,32 @@ def _renderer_is_gone(state: M4RendererState) -> bool:
 
 
 def reconcile_m4_renderer(platform_factory, m4_factory, data_dir: Path) -> dict[str, Any]:
-    """Release an expired Manual4 renderer/lease only after proving its process is gone."""
+    """Reconcile the Manual4 renderer and its GPU lease as the single executor.
+
+    A renderer proven gone has its lease released.  A renderer that lingers alive
+    while **no run is active** is an idle orphan this installation owns (a post-run
+    terminate that did not take): stop it through its named Job Object and release
+    the lease, so an idle worker never keeps holding the GPU against a stop request
+    (remote report 2026-11-21: ``runtime-orchestrator/stop`` refused 409
+    ``RUNTIME_WORK_IN_FLIGHT`` on an idle ``m4:`` lease).  A renderer serving an
+    active run is never touched — that is real in-flight work.
+    """
+    from sqlalchemy import select
+
+    from shine.manual4.storage.models import M4ProductionRun
+
     with m4_factory.begin() as db:
         state = db.get(M4RendererState, "comfyui-m4")
         if state is None or state.status == "STOPPED":
             return {"reconciled": False, "status": "STOPPED"}
-        if not _renderer_is_gone(state):
+        active_run = db.scalar(select(M4ProductionRun).where(
+            M4ProductionRun.status.in_(("CLAIMED", "RUNNING", "PAUSE_REQUESTED"))))
+        job_name = state.job_name
+        lease_id, lease_owner = state.lease_id, state.lease_owner
+        gone = _renderer_is_gone(state)
+
+    if not gone:
+        if active_run is not None:
             raise HTTPException(
                 409,
                 {
@@ -102,17 +122,37 @@ def reconcile_m4_renderer(platform_factory, m4_factory, data_dir: Path) -> dict[
                     "message": f"四阶 ComfyUI 渲染器仍在运行（PID {state.pid}），请先停止或等待其结束。",
                 },
             )
-        if state.lease_id and state.lease_owner:
-            release_m4_gpu_lease(
-                platform_factory, data_dir, lease_id=state.lease_id, owner=state.lease_owner, reconciled=True
-            )
-        state.status = "STOPPED"
-        state.pid = None
-        state.birth = None
-        state.lease_id = None
-        state.lease_owner = None
-        state.updated_at = m4_utcnow()
-        return {"reconciled": True, "status": "STOPPED"}
+        # Idle orphan: stop the renderer this installation owns, then re-prove gone.
+        if job_name:
+            try:
+                terminate_named_group(str(job_name), timeout=15)
+            except Exception:  # noqa: BLE001 - re-proven below; never blind-release
+                logger.warning("m4_idle_renderer_terminate_failed job_name=%s", job_name)
+        with m4_factory() as db:
+            state = db.get(M4RendererState, "comfyui-m4")
+            if state is None or not _renderer_is_gone(state):
+                raise HTTPException(
+                    409,
+                    {
+                        "code": "M4_RENDERER_STILL_RUNNING",
+                        "message": "四阶 ComfyUI 渲染器仍在运行，无法证明已停止；租约保留待核对。",
+                    },
+                )
+
+    if lease_id and lease_owner:
+        release_m4_gpu_lease(
+            platform_factory, data_dir, lease_id=lease_id, owner=lease_owner, reconciled=True
+        )
+    with m4_factory.begin() as db:
+        state = db.get(M4RendererState, "comfyui-m4")
+        if state is not None:
+            state.status = "STOPPED"
+            state.pid = None
+            state.birth = None
+            state.lease_id = None
+            state.lease_owner = None
+            state.updated_at = m4_utcnow()
+    return {"reconciled": True, "status": "STOPPED"}
 
 
 @contextmanager

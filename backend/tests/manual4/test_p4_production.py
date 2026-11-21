@@ -339,3 +339,94 @@ def test_p4_worker_crash_reconciliation_and_cross_line_gpu_lease_exclusion(tmp_p
         )
         assert rec.status_code == 200
         assert rec.json()["job"]["status"] == "QUEUED"
+
+
+def _m4_renderer_state(mf, lease_id, owner, *, status="RECONCILE_REQUIRED"):
+    from shine.manual4.storage.models import M4RendererState
+    with mf.begin() as db:
+        db.add(M4RendererState(
+            id="comfyui-m4", status=status, port=8198,
+            job_name=r"Local\ShineM4Handoff-test", pid=999999, birth="birth-x",
+            lease_id=lease_id, lease_owner=owner,
+        ))
+
+
+def test_idle_m4_renderer_orphan_is_stopped_and_lease_released(tmp_path, monkeypatch):
+    """远端报障（2026-11-21）：四阶工人空闲无任务时仍持 ACTIVE GPU 租约（一次运行后
+    渲染器 terminate 未生效而 linger），runtime-orchestrator/stop 被 409
+    RUNTIME_WORK_IN_FLIGHT 拒。reconcile_m4_renderer 作为唯一执行者，须停止无活跃
+    运行的归属渲染器并释放租约。"""
+    from shine.manual4.comfy import managed_instance
+    from shine.manual4.storage.models import M4RendererState
+
+    app, data_dir = _setup_m4_client(tmp_path)
+    pf, mf = app.state.session_factory, app.state.m4_session_factory
+    lease = acquire_m4_gpu_lease(pf, data_dir, owner="m4:worker-1")
+    lease_id = lease["lease_id"]
+    _m4_renderer_state(mf, lease_id, "m4:worker-1")
+
+    alive = {"value": True}
+    monkeypatch.setattr(managed_instance, "_renderer_is_gone", lambda state: not alive["value"])
+    terminated = []
+
+    def fake_terminate(job_name, timeout=15):
+        terminated.append(job_name)
+        alive["value"] = False
+        return {"active_processes": 0}
+
+    monkeypatch.setattr(managed_instance, "terminate_named_group", fake_terminate)
+    result = managed_instance.reconcile_m4_renderer(pf, mf, data_dir)
+    assert result["reconciled"] is True
+    assert terminated == [r"Local\ShineM4Handoff-test"]
+    with mf() as db:
+        state = db.get(M4RendererState, "comfyui-m4")
+        assert state.status == "STOPPED" and state.lease_id is None
+    with pf() as db:
+        assert db.get(ResourceLease, lease_id).status == "RELEASED"
+
+
+def test_reconcile_never_stops_a_renderer_serving_an_active_run(tmp_path, monkeypatch):
+    """有活跃运行时渲染器是真在途工作，reconcile 不得停止它，租约保留。"""
+    from shine.manual4.comfy import managed_instance
+    from shine.manual4.storage.models import (
+        M4ExecutionSnapshot,
+        M4ProductionRun,
+        M4Project,
+        M4RendererState,
+        M4StoryboardRevision,
+    )
+
+    app, data_dir = _setup_m4_client(tmp_path)
+    pf, mf = app.state.session_factory, app.state.m4_session_factory
+    lease = acquire_m4_gpu_lease(pf, data_dir, owner="m4:worker-1")
+    lease_id = lease["lease_id"]
+    _m4_renderer_state(mf, lease_id, "m4:worker-1")
+    with mf.begin() as db:
+        project = M4Project(title="活跃运行保护")
+        db.add(project)
+        db.flush()
+        revision = M4StoryboardRevision(project_id=project.id, revision=1)
+        db.add(revision)
+        db.flush()
+        snapshot = M4ExecutionSnapshot(
+            project_id=project.id, storyboard_revision_id=revision.id, snapshot_sha256="0" * 64)
+        db.add(snapshot)
+        db.flush()
+        db.add(M4ProductionRun(
+            project_id=project.id, execution_snapshot_id=snapshot.id,
+            idempotency_key="active-run-1", scope_kind="project", status="RUNNING"))
+
+    monkeypatch.setattr(managed_instance, "_renderer_is_gone", lambda state: False)
+
+    def forbidden_terminate(job_name, timeout=15):
+        raise AssertionError("an active run's renderer must never be stopped")
+
+    monkeypatch.setattr(managed_instance, "terminate_named_group", forbidden_terminate)
+    with pytest.raises(HTTPException) as exc:
+        managed_instance.reconcile_m4_renderer(pf, mf, data_dir)
+    assert exc.value.status_code == 409
+    assert exc.value.detail["code"] == "M4_RENDERER_STILL_RUNNING"
+    with pf() as db:
+        assert db.get(ResourceLease, lease_id).status == "ACTIVE"
+    with mf() as db:
+        assert db.get(M4RendererState, "comfyui-m4").status == "RECONCILE_REQUIRED"

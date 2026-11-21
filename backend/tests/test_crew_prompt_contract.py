@@ -402,3 +402,15 @@ def test_a_provider_format_failure_keeps_its_diagnostic_in_the_task_record(studi
         assert task.error_code == "LLM_FORMAT"
         assert task.trace["provider_schema_path"] == "shots/0/duration_s"
         assert task.trace["provider_schema_validator"] == "maximum"
+
+
+def test_every_named_contract_refusal_surfaces_as_itself():
+    """拒绝必须具名（2026-11-21）：validate_output 抛出的具名合同拒绝不能被压成
+    不透明的 SCHEMA_OR_POLICY_REJECTED，否则面板与重试修注都拿不到真实原因。"""
+    from shine.agents.execution import rejection_reason
+    for code in ("ARBITRATION_ISSUE_COVERAGE", "ARBITRATION_UNKNOWN_RULE",
+                 "NARRATOR_NOT_LISTED_IN_BEAT", "SHOT_DURATION_OVER_LIMIT",
+                 "UNAPPROVED_VOICE", "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE",
+                 "VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE", "EDITORIAL_TIMING_CONFLICT"):
+        assert rejection_reason(ValueError(code)) == code
+    assert rejection_reason(ValueError("SOME_UNLISTED_FAULT")) == "SCHEMA_OR_POLICY_REJECTED"

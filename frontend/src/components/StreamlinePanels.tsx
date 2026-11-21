@@ -50,6 +50,8 @@ import {
   type StyleVersion,
 } from '../api';
 import { emptyStyle, styleFields } from '../constants';
+import { AssetCenterPicker } from '../shared/AssetCenterPicker';
+import { assignLibraryVersion, searchLibraryForProject, type LibraryAsset, type LibraryVersion } from '../asset-center/api';
 import {
   matchStyleOption, presetForStyle, STYLE_DIMENSION_OPTIONS, STYLE_PRESETS,
 } from '../styleCatalog';
@@ -1303,6 +1305,10 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [batchTarget, setBatchTarget] = useState<Decision>('generate');
   const [progressKey, setProgressKey] = useState(0);
+  /** 「从素材中心导入」弹窗当前服务的需求行；点选后走既有分配+采纳执行者。 */
+  const [centerPickerRow, setCenterPickerRow] = useState<DirectorMaterialRequirement | null>(null);
+  /** 后台是否有在途出图：据此锁定主操作并给出「生成中」反馈（进度条同一事实）。 */
+  const [generating, setGenerating] = useState(false);
   const submitting = useRef(false);
   const knownMasters = useRef<Record<string, string | null>>({});
 
@@ -1527,6 +1533,28 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     }
   }
 
+  /** 从素材中心导入：分配为本项目主素材（既有 assignLibraryVersion 执行者），
+   *  再走同一 commitOne 采纳执行者回绑镜头，不另起平行链路。 */
+  async function importFromCenter(row: DirectorMaterialRequirement, item: { asset: LibraryAsset; version: LibraryVersion }) {
+    setCenterPickerRow(null);
+    setBusy(`row-${row.requirement_id}`); setProblem(''); setResult(null);
+    let assignment: Record<string, any>;
+    try {
+      assignment = await assignLibraryVersion({
+        project_id: projectId,
+        library_version_id: item.version.id,
+        role: row.family,
+        entity_id: row.entity_id ?? row.name ?? undefined,
+        idempotency_key: crypto.randomUUID(),
+        confirmed: true,
+      });
+    } catch (error) {
+      setProblem(describeError(error)); setBusy(''); return;
+    }
+    await commitOne(row, 'reuse_master', assignment.project_asset_id);
+    setResult(`已从素材中心导入「${item.asset.title}」并绑定到该需求。`);
+  }
+
   const requirements = view?.requirements ?? [];
   const selectedIds = requirements.filter((row) => selected[row.requirement_id]).map((row) => row.requirement_id);
   const allSelected = requirements.length > 0 && selectedIds.length === requirements.length;
@@ -1583,18 +1611,20 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     ? { label: '按已确认镜头生成素材清单', onClick: () => void derive(),
         loading: busy === 'derive', icon: <Film size={14} /> }
     : { label: busy === 'commit' ? '正在提交…'
-        : readyToAdvance ? '确认并进入下一步' : '确认决策并开始准备素材',
+        : readyToAdvance ? '确认并进入下一步'
+        : generating ? '素材生成中…' : '确认决策并开始准备素材',
         onClick: () => (readyToAdvance ? void commitThenAdvance() : void commit()),
-        loading: busy === 'commit',
-        disabled: busy !== '' || pendingChoice,
+        loading: busy === 'commit' || (generating && !readyToAdvance),
+        disabled: busy !== '' || pendingChoice || (generating && !readyToAdvance),
         icon: <ListChecks size={14} />,
-        disabledReason: pendingChoice ? '每一项都要选一个处理方式（可选项可选「跳过」）' : undefined };
+        disabledReason: pendingChoice ? '每一项都要选一个处理方式（可选项可选「跳过」）'
+          : (generating && !readyToAdvance) ? '后台正在出图，完成后可继续确认或进入下一步' : undefined };
   const secondary: RailAction[] = requirements.length
     ? [{ label: '重新生成素材', onClick: () => void regenerateAll(),
         loading: busy === 'commit', disabled: busy !== '', icon: <RefreshCw size={14} /> }]
     : [];
   useStageRail('shot-materials', { priority: 1, primary, secondary },
-    [view, decisions, busy, assetsDone, onAdvance]);
+    [view, decisions, busy, assetsDone, onAdvance, generating]);
 
   return <section className="card section-card" id="shot-materials">
     <div className="section-heading">
@@ -1622,6 +1652,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     {result && <p className="run-hint ok-hint"><Check size={12} /> {result}</p>}
 
     <MaterialGenerationProgress projectId={projectId} refreshKey={progressKey}
+      onInFlightChange={setGenerating}
       masters={requirements.filter((row) => row.strategy === 'reuse_master' && row.matched_master)
         .map((row) => ({
           requirement_id: row.requirement_id, entity_id: row.entity_id, family: row.family,
@@ -1733,11 +1764,15 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             <td>
               <select value={decisions[row.requirement_id] ?? ''} disabled={busy !== ''}
                 aria-label={`处理方式：${row.name ?? row.entity_id}`}
-                onChange={(event) => setDecisions((current) => (
-                  { ...current, [row.requirement_id]: event.target.value as Decision }))}>
+                onChange={(event) => {
+                  const value = event.target.value;
+                  if (value === 'import_center') { setCenterPickerRow(row); return; }
+                  setDecisions((current) => ({ ...current, [row.requirement_id]: value as Decision }));
+                }}>
                 {row.matched_master && <option value="reuse_master">复用现有主素材</option>}
                 <option value="generate">AI 制作</option>
                 <option value="upload">我自己上传</option>
+                <option value="import_center">从素材中心导入…</option>
                 {!row.critical && <option value="skip">跳过（可选项，不影响生成）</option>}
                 {row.critical && !row.matched_master && <option value="">请选择…</option>}
               </select>
@@ -1777,6 +1812,21 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       }}
       onClose={() => setPromptTarget(null)}
       onChanged={(message) => { onMessage?.(message); void load(); }}
+    />}
+
+    {centerPickerRow && <AssetCenterPicker
+      title={`从素材中心导入 · ${centerPickerRow.name ?? centerPickerRow.entity_id ?? '素材'}`}
+      kicker="素材来源"
+      emptyHint="素材中心还没有可分配的已晋升素材。先在素材中心生成、审核并晋升，再回来导入。"
+      fetchItems={async (q) => (await searchLibraryForProject(projectId, q, undefined, 'library')).items}
+      display={(item) => ({
+        key: item.version.id,
+        title: item.asset.title,
+        subtitle: `V${item.version.ordinal} · ${item.version.content_sha256.slice(0, 8)} · ${item.asset.category}`,
+        mediaUrl: item.version.media_url,
+      })}
+      onPick={(item) => void importFromCenter(centerPickerRow, item)}
+      onClose={() => setCenterPickerRow(null)}
     />}
   </section>;
 }

@@ -4,7 +4,7 @@
  * Run 引擎；没准备好的集是具名拒绝，不会拖住已就绪的集。这里用 stub 的
  * 服务端形状验证界面按真实事实行事，不是生产证据。
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import userEvent from '@testing-library/user-event';
 
@@ -428,5 +428,33 @@ describe('⑤ 模型版本选择与资源准备解耦', () => {
     const strategy = posted?.['strategy'] as unknown as Record<string, unknown>;
     // 用户显式选定的候选就是最终身份，服务端门禁另行裁决，前端不偷换。
     expect(strategy?.['model_variant_id']).toBe('ref2va-lowend-candidate');
+  });
+});
+
+describe('⑤ 导演包版本历史持久化', () => {
+  it('导演包页稳定列出每一版的配置记录（重拍递增、旧版保留）', async () => {
+    stubOverview(overviewBody([episode({})]));
+    stubRef2vaProfile();
+    stubStrategyOptions();
+    const pkg = (id: string, revision: number, status: string, stale: boolean) => ({
+      id, project_id: 'proj-1', revision, status, stale, stale_reason: null,
+      scope_digest: 'c'.repeat(64), manifest_sha256: 'd'.repeat(64), policy_hash: 'e'.repeat(64),
+      episode_count: 1, shot_count: 4, episode_plan: null, script: null,
+      style: { style_version_id: 'style-1', version: 1, sha256: 'a'.repeat(64) },
+      binding: { workflow_profile_id: 'p1', mode: 'Ref2VA', graph_sha256: 'g'.repeat(64),
+        checkpoint_id: 'ck', generation_mode: null, output: { width: 1344, height: 768 } },
+      policy: {}, episodes: [], created_at: '2026-11-20T00:00:00',
+      confirmed_at: status === 'CONFIRMED' ? '2026-11-20T01:00:00' : null,
+    });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director-packages$/,
+      respond: () => jsonResponse([pkg('package-2', 2, 'DRAFT', false), pkg('package-1', 1, 'CONFIRMED', true)]) });
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 5 阶段：导演包/);
+    const history = await screen.findByLabelText('导演包版本历史');
+    expect(within(history).getByText('第 2 版')).toBeInTheDocument();
+    expect(within(history).getByText('第 1 版')).toBeInTheDocument();
+    expect(within(history).getAllByText(/1344×768/).length).toBeGreaterThanOrEqual(2);
+    expect(within(history).getAllByText(/风格 v1/).length).toBeGreaterThanOrEqual(2);
   });
 });

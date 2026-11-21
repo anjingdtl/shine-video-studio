@@ -1013,6 +1013,16 @@ CONTRACT_REPAIR_NOTES = {
         "prompt_story_facts with exactly one faithful English translation per locked fact, in the "
         "same order."
     ),
+    "ARBITRATION_ISSUE_COVERAGE": (
+        " The previous arbitration did not rule on every issue. Return exactly one ruling per issue "
+        "in arbitration_subject.issues: issue_index must run from 0 to the last issue index with no "
+        "index missing and none repeated. Rule on every issue even when you judge it not_a_conflict; "
+        "an issue you skip makes the whole arbitration unusable."
+    ),
+    "ARBITRATION_UNKNOWN_RULE": (
+        " The previous arbitration cited a rule_id that is not in arbitration_subject.rule_ids. Every "
+        "ruling must cite exactly one rule_id copied verbatim from that list."
+    ),
 }
 """What a bounded retry may add when the server refused the answer.
 
@@ -1363,7 +1373,7 @@ def generate_storyboard(
     # older belongs to an earlier run and its reason is not this one's.
     request_started_at = utcnow()
 
-    def _run(role: str, *, attempts: int = 2, repair_director: bool = False, **kwargs) -> dict:
+    def _run(role: str, *, attempts: int = 3, repair_director: bool = False, **kwargs) -> dict:
         nonlocal calls_in_request
         # The named refusal this retry replaces (if any) travels with the
         # request so the first call starts already knowing it.
@@ -1512,6 +1522,13 @@ def generate_storyboard(
                 " The previous answer did not satisfy the JSON contract" + where + ". Return every "
                 "required field of the contract with the right type and no extra keys; do not omit "
                 "any required field, and return one JSON object only."
+            )
+        if reason == "SHOT_DURATION_OVER_LIMIT":
+            return (
+                " The previous answer gave a shot longer than the per-shot ceiling. Every shot's "
+                "duration_s must be at most the max_shot_seconds stated in the context (the H3 hard "
+                "ceiling is 15 seconds). Split a longer beat into several shots or internal cuts, each "
+                "within the ceiling, with cut start times strictly increasing inside the shot."
             )
         note = CONTRACT_REPAIR_NOTES.get(reason or "")
         if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):

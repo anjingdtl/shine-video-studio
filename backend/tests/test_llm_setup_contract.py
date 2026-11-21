@@ -311,7 +311,7 @@ def test_minimax_flash_catalog_and_generation_handle_provider_casing(
             "choices": [{"message": {"content": '{"ok":true}'}}],
         })
 
-    monkeypatch.setattr(openai_compatible, "build_client", lambda *args, **kwargs: httpx.Client(
+    monkeypatch.setattr(openai_compatible, "build_text_client", lambda *args, **kwargs: httpx.Client(
         transport=httpx.MockTransport(respond),
     ))
     profile = create_profile(client, fake_openai, base_url=f"https://{host}/v1", model=configured)
@@ -512,6 +512,47 @@ def test_a_loopback_provider_still_ignores_the_host_proxy(monkeypatch):
         client.close()
 
 
+def test_text_transport_bypasses_a_loopback_forward_proxy(monkeypatch):
+    """穿测活缺陷（2026-11-21）：环回本地转发代理会切空闲 SSE，模型静默思考时
+    流被切成 LLM_CONNECTION/UNKNOWN。文本调用绕开环回代理直连（公网文本 API 已证
+    可达）；远端代理或无代理保持原行为；渲染器等非文本传输不受影响。"""
+    from shine import http_env
+
+    monkeypatch.setattr(http_env, "_no_proxy_sanitized", False)
+    remote = "https://api.minimax.cn/v1/chat/completions"
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:19255")
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:19255")
+    assert http_env.proxy_is_loopback() is True
+    text = http_env.build_text_client(remote, 5)
+    generic = http_env.build_client(remote, 5)
+    try:
+        assert text.trust_env is False, "text bypasses the loopback forward proxy (direct)"
+        assert generic.trust_env is True, "non-text transport keeps the existing proxy rule"
+    finally:
+        text.close()
+        generic.close()
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.corp.example:8080")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.corp.example:8080")
+    assert http_env.proxy_is_loopback() is False
+    remote_proxy = http_env.build_text_client(remote, 5)
+    try:
+        assert remote_proxy.trust_env is True, "a real remote proxy is kept"
+    finally:
+        remote_proxy.close()
+
+    monkeypatch.delenv("HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("HTTP_PROXY", raising=False)
+    monkeypatch.delenv("https_proxy", raising=False)
+    monkeypatch.delenv("http_proxy", raising=False)
+    no_proxy = http_env.build_text_client(remote, 5)
+    try:
+        assert no_proxy.trust_env is True, "no proxy means direct already"
+    finally:
+        no_proxy.close()
+
+
 def test_a_client_construction_failure_is_reported_as_not_sent(monkeypatch):
     """Construction precedes any socket, so nothing can have been sent."""
     from shine.llm.base import ChatMessage, LLMConnectionError, ProviderConfig
@@ -519,7 +560,7 @@ def test_a_client_construction_failure_is_reported_as_not_sent(monkeypatch):
     def explode(*args, **kwargs):
         raise httpx.InvalidURL("Invalid port: ':1]'")
 
-    monkeypatch.setattr(openai_compatible, "build_client", explode)
+    monkeypatch.setattr(openai_compatible, "build_text_client", explode)
     provider = openai_compatible.OpenAICompatibleProvider(ProviderConfig(
         profile_id="p", name="remote", kind="openai_compatible",
         base_url="https://api.minimax.cn/v1", model="m", api_key="k", timeout_s=5))

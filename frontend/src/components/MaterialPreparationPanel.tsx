@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
+import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { ScriptTextConsent } from './ScriptTextConsent';
 import { API, api, ApiError, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
@@ -214,6 +215,8 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [librarySearchResults, setLibrarySearchResults] = useState<Array<{ asset: LibraryAsset; version: LibraryVersion }>>([]);
   const [librarySearchError, setLibrarySearchError] = useState('');
   const [librarySearchBusy, setLibrarySearchBusy] = useState(false);
+  /** 「从素材中心导入」弹窗当前服务的需求；点选后走既有 assignGlobalMaterial 执行者。 */
+  const [centerPickerReq, setCenterPickerReq] = useState<MaterialRequirement | null>(null);
   /** The assignment receipt that can be turned into a per-shot adoption. */
   const [adoptionReceipt, setAdoptionReceipt] = useState<null | {
     requirementId: string; projectAssetId: string; libraryVersionId?: string;
@@ -1116,14 +1119,19 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
                     <span>素材来源</span>
                     <select
                       value={defaultStrategy(requirement)}
-                      onChange={(event) => setStrategy({
-                        ...strategy,
-                        [requirement.requirement_id]: event.target.value as MaterialStrategy,
-                      })}
+                      onChange={(event) => {
+                        const value = event.target.value;
+                        if (value === 'import_center') { setCenterPickerReq(requirement); return; }
+                        setStrategy({
+                          ...strategy,
+                          [requirement.requirement_id]: value as MaterialStrategy,
+                        });
+                      }}
                     >
                       <option value="generate">生成候选（AI 出图）</option>
                       <option value="upload">我会上传</option>
                       <option value="reuse_master">已有主素材</option>
+                      <option value="import_center">从素材中心导入…</option>
                       {requirement.family === 'prop' && <option value="omit_prop">随场景生成（无需独立道具图）</option>}
                     </select>
                   </label>
@@ -1378,6 +1386,20 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
           )}
         </div>
       </details>
+      {centerPickerReq && <AssetCenterPicker
+        title={`从素材中心导入 · ${centerPickerReq.entity_id}`}
+        kicker="素材来源"
+        emptyHint="素材中心还没有可分配的已晋升素材。先在素材中心生成、审核并晋升，再回来导入。"
+        fetchItems={async (q) => (await searchLibraryForProject(projectId, q, undefined, 'library')).items}
+        display={(item) => ({
+          key: item.version.id,
+          title: item.asset.title,
+          subtitle: `V${item.version.ordinal} · ${item.version.content_sha256.slice(0, 8)} · ${item.asset.category}`,
+          mediaUrl: item.version.media_url,
+        })}
+        onPick={(item) => { const req = centerPickerReq; setCenterPickerReq(null); void assignGlobalMaterial(req, item); }}
+        onClose={() => setCenterPickerReq(null)}
+      />}
     </section>
   );
 }

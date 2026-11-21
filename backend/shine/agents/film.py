@@ -1054,11 +1054,20 @@ class FilmAgentDispatcher:
                 unit_target_seconds=context.get("unit_target_seconds"),
             )
 
+        from shine.llm.transport_policy import policy_for
+        _transport_policy = policy_for(bounded_config)
+        # The number the workbench shows as "模型超过 N 秒无回应" must be the
+        # deadline that actually governs this call, not the profile's nominal
+        # timeout: a streaming call is cut at the transport read ceiling, so
+        # reporting 600s for a 300s ceiling misnames the failure.
+        _effective_timeout_s = (max(_transport_policy.first_event_s, _transport_policy.idle_s)
+                                if _transport_policy.streaming else profile.timeout_s)
+
         def record_progress(phase: str) -> None:
             # Commit diagnostic state before waiting externally; never hold
             # SQLite's writer across resource admission or a provider call.
             task.trace = {**task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
-                          "network_timeout_s": profile.timeout_s}
+                          "network_timeout_s": _effective_timeout_s}
             db.commit()
 
         if repair_visual_language:
@@ -1296,8 +1305,18 @@ class FilmAgentDispatcher:
                      "type": err.get("type")}
                     for err in exc.errors()[:20]
                 ]
+            # Durable transport evidence (no provider text, no secret): the
+            # underlying error class and the event timings tell a read-ceiling
+            # cut apart from a peer/proxy close, so the next occurrence is
+            # diagnosable from the ledger instead of guesswork.
+            _transport_evidence = {}
+            if isinstance(exc, LLMError):
+                _transport_evidence = {key: exc.details[key] for key in (
+                    "error_type", "streamed", "first_event_ms", "last_event_ms",
+                    "partial", "headers_received") if key in exc.details}
             task.trace = {**task.trace, "automatic_replay": False,
                           "diagnostic_category": diagnostic,
+                          **({"transport": _transport_evidence} if _transport_evidence else {}),
                           **({"schema_errors": schema_errors} if schema_errors else {}),
                           **({"http_status": exc.details["status"]}
                              if isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int) else {}),

@@ -65,7 +65,7 @@ function selectable(candidate: CandidateInfo): boolean {
   return candidate.status === 'READY_FOR_REVIEW' && !candidate.formal_asset_id;
 }
 
-export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromoted, onUnadopt, refreshKey = 0, masters = [] }: {
+export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromoted, onUnadopt, refreshKey = 0, masters = [], onInFlightChange }: {
   projectId: string;
   onOpenLibrary?: () => void;
   /** 提供时在本页展示候选并晋升；晋升后回调父组件刷新需求清单。 */
@@ -76,12 +76,16 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
   refreshKey?: number;
   /** 已上传/已采用的主素材，与生成候选同列展示，避免两套选图面。 */
   masters?: AdoptedMaster[];
+  /** 在途出图变化时通知父组件（同一份 generation-progress 事实），据此锁定主操作。 */
+  onInFlightChange?: (inFlight: boolean) => void;
 }) {
   const [runs, setRuns] = useState<GenerationRun[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [promoting, setPromoting] = useState('');
   const [promoError, setPromoError] = useState('');
   const [promoNote, setPromoNote] = useState('');
+  /** 批量勾选晋升：候选 id → 是否勾选。晋升仍逐个走唯一执行者 promoteMaterialCandidate。 */
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     try {
@@ -103,6 +107,8 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     const timer = window.setInterval(() => { void load(); }, 5000);
     return () => window.clearInterval(timer);
   }, [active.length, load]);
+  const inFlight = active.length > 0;
+  useEffect(() => { onInFlightChange?.(inFlight); }, [inFlight, onInFlightChange]);
 
   async function promote(candidate: CandidateInfo) {
     if (promoting) return;
@@ -117,6 +123,31 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     } finally {
       setPromoting('');
     }
+  }
+
+  /** 批量晋升：对勾选候选逐个复用同一晋升执行者（串行，避免并发授权/回绑竞争），
+   *  单项失败不中断其余；结束后统一刷新需求清单。不另起批量晋升链路。 */
+  async function promoteBatch() {
+    const targets = pendingTiles.filter(({ candidate }) => selected[candidate.candidate_id]);
+    if (targets.length === 0 || promoting) return;
+    setPromoting('batch'); setPromoError(''); setPromoNote('');
+    let ok = 0; let firstError = '';
+    for (const { candidate } of targets) {
+      try {
+        await promoteMaterialCandidate(candidate.candidate_id, candidate.is_mock);
+        ok += 1;
+      } catch (error) {
+        if (!firstError) firstError = describeError(error);
+      }
+    }
+    setSelected({});
+    setPromoting('');
+    if (ok > 0) {
+      setPromoNote(`已批量晋升 ${ok} 项为主素材，并回绑到需要它们的镜头。`);
+      onPromoted?.();
+    }
+    if (firstError) setPromoError(`部分候选晋升失败：${firstError}`);
+    await load();
   }
 
   async function unadopt(requirementId: string) {
@@ -155,8 +186,30 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     {promoError && <p role="alert" className="form-error">{promoError}</p>}
     {showSelection && <div className="mgp-candidates">
       <p className="mgp-candidates-title">选定并采用（晋升为主素材后自动回绑镜头；已采用的可取消）：</p>
+      {pendingTiles.length > 0 && <div className="mgp-batch-bar">
+        <label className="mgp-batch-select">
+          <input type="checkbox" disabled={!!promoting}
+            checked={pendingTiles.every(({ candidate }) => selected[candidate.candidate_id])}
+            aria-label="全选候选"
+            onChange={(event) => setSelected(event.target.checked
+              ? Object.fromEntries(pendingTiles.map(({ candidate }) => [candidate.candidate_id, true]))
+              : {})} />
+          全选
+        </label>
+        <span className="mgp-counts">已选 {pendingTiles.filter(({ candidate }) => selected[candidate.candidate_id]).length} 项</span>
+        <button type="button" className="btn-secondary" disabled={!!promoting
+          || !pendingTiles.some(({ candidate }) => selected[candidate.candidate_id])}
+          onClick={() => void promoteBatch()}>
+          {promoting === 'batch' ? '批量晋升中…' : '批量晋升所选'}
+        </button>
+      </div>}
       <div className="mgp-candidate-grid">
         {pendingTiles.map(({ candidate, item }) => <figure className="mgp-candidate" key={candidate.candidate_id}>
+          <label className="mgp-candidate-check">
+            <input type="checkbox" disabled={!!promoting} checked={!!selected[candidate.candidate_id]}
+              aria-label={`勾选候选 ${item.entity_id ?? '素材'} ${candidate.attempt_no}`}
+              onChange={(event) => setSelected((current) => ({ ...current, [candidate.candidate_id]: event.target.checked }))} />
+          </label>
           <img src={`${API}/candidate-assets/${candidate.candidate_id}/thumbnail`}
             alt={`${item.entity_id ?? '素材'} 候选 ${candidate.attempt_no}`} loading="lazy" />
           <span className="mgp-candidate-entity">{FAMILY_LABEL[item.family ?? ''] ?? item.family} · {item.entity_id ?? '素材'}</span>

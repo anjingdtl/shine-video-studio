@@ -26,7 +26,7 @@ from shine.llm.base import (
     parse_json_object,
 )
 from shine.llm.context_window import model_context_from_capabilities, provider_model_matches
-from shine.llm.transport import build_client
+from shine.llm.transport import build_text_client
 
 
 def _api_root(base_url: str) -> str:
@@ -115,6 +115,33 @@ def _retry_after_seconds(response: httpx.Response) -> float | None:
     return value if value >= 0 else None
 
 
+def _format_failure_details(status: int, finish_reason: str | None, usage: dict[str, Any],
+                            *, provider_code: int | None = None) -> dict[str, Any]:
+    """The one evidence shape a format failure carries, for every transport.
+
+    ``status`` is the key the single outcome classifier
+    (:func:`shine.literary.governor.classify_external_outcome`) reads.  A
+    streaming failure that only carried ``http_status`` was filed as UNKNOWN
+    even though the provider had answered (200 + a terminal finish_reason),
+    which stranded the scene behind the unknown-outcome gate instead of the
+    bounded "answered but unusable" retry path.  Both transports must write the
+    same fact under the same key, and carry the token evidence that tells a
+    starved output budget apart from a genuinely broken answer.
+    """
+    usage = usage if isinstance(usage, dict) else {}
+    details = usage.get("completion_tokens_details")
+    details = details if isinstance(details, dict) else {}
+    reasoning = details.get("reasoning_tokens")
+    return {
+        "status": status,
+        **({"provider_code": provider_code} if isinstance(provider_code, int) else {}),
+        "finish_reason": finish_reason,
+        "completion_tokens": usage.get("completion_tokens"),
+        **({"reasoning_tokens": reasoning}
+           if isinstance(reasoning, int) and not isinstance(reasoning, bool) else {}),
+    }
+
+
 class OpenAICompatibleProvider:
     """OpenAI-compatible chat completions with retries, timeouts, and JSON validation."""
 
@@ -133,7 +160,7 @@ class OpenAICompatibleProvider:
         for attempt in range(attempts):
             wait_for_rate_limit(self.config.base_url)
             try:
-                client = build_client(url, self.config.timeout_s)
+                client = build_text_client(url, self.config.timeout_s)
             except Exception as exc:  # noqa: BLE001 - construction precedes any socket
                 # The client was never built, so no connection was opened and the
                 # request provably never left this machine.  httpx.InvalidURL is
@@ -226,8 +253,19 @@ class OpenAICompatibleProvider:
         usage: dict[str, Any] = {}
         body = {**payload, "stream": True, "stream_options": {"include_usage": True}}
         headers_received = False
+        # The socket read ceiling honors the policy's idle deadline, not just the
+        # first-event ceiling: a reasoning model that pauses between SSE events
+        # mid-answer is alive, not hung, and cutting it at the shorter
+        # first-event wait filed a live stream as UNKNOWN (live 2026-11-21, the
+        # crew's director/continuity steps broke after a partial answer).  The
+        # larger of the two ceilings is used so a short-timeout profile is never
+        # cut sooner than its first-event wait; a genuinely stuck stream still
+        # fails at this ceiling and stays UNKNOWN.
+        stream_read_s = max(policy.first_event_s, policy.idle_s)
         try:
-            client = build_client(url, policy.first_event_s)
+            client = build_text_client(url, httpx.Timeout(
+                connect=policy.connect_s, read=stream_read_s,
+                write=stream_read_s, pool=policy.connect_s))
         except Exception:
             return None
         try:
@@ -280,7 +318,7 @@ class OpenAICompatibleProvider:
                                 saw_done = True
         except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError):
             return None
-        except httpx.HTTPError:
+        except httpx.HTTPError as exc:
             if not chunks:
                 if headers_received:
                     # 200 arrived but no event did before the deadline: the
@@ -289,11 +327,13 @@ class OpenAICompatibleProvider:
                     raise LLMConnectionError("Provider stream silent after acknowledgement", details={
                         "external_outcome": "UNKNOWN", "streamed": True,
                         "first_event_ms": first_event_ms, "headers_received": True,
+                        "error_type": type(exc).__name__,
                     }) from None
                 return None
             raise LLMConnectionError("Provider stream broke", details={
                 "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
                 "streamed": True, "first_event_ms": first_event_ms,
+                "last_event_ms": last_event_ms, "error_type": type(exc).__name__,
             }) from None
         text = "".join(chunks)
         if not text:
@@ -309,18 +349,23 @@ class OpenAICompatibleProvider:
                 "external_outcome": "UNKNOWN", "provider_text": text,
                 "streamed": True, "first_event_ms": first_event_ms,
                 "last_event_ms": last_event_ms, "partial": True,
+                "error_type": "StreamEndedWithoutTerminalEvent",
             })
         meta = {"http_status": 200, "streamed": True, "finish_reason": finish_reason,
                 "first_event_ms": first_event_ms, "last_event_ms": last_event_ms}
+        failure_details = {
+            **_format_failure_details(200, finish_reason, usage),
+            "streamed": True, "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
+        }
         if finish_reason in {"length", "max_tokens", "content_filter"}:
             raise LLMFormatError("Provider completion is truncated or filtered",
-                                 details={**meta, "provider_text": text})
+                                 details={**failure_details, "provider_text": text})
         parsed = None
         if json_mode:
             try:
                 parsed = parse_json_object(text)
             except LLMFormatError as exc:
-                exc.details.update({**meta, "provider_text": text})
+                exc.details.update({**failure_details, "provider_text": text})
                 raise
         return LLMResponse(
             text=text, parsed=parsed, model=self.config.model,
@@ -417,21 +462,14 @@ class OpenAICompatibleProvider:
             raise LLMError("Provider returned an error status", details=response_details)
         choices = body.get("choices") or []
         usage = body.get("usage") or {}
-        usage_details = usage.get("completion_tokens_details")
-        usage_details = usage_details if isinstance(usage_details, dict) else {}
-        reasoning_tokens = usage_details.get("reasoning_tokens")
         # A reasoning model bills its thinking as completion. When the ceiling
         # is spent on reasoning, the visible answer is empty and only
         # finish_reason=length tells the two cases apart. Carry that evidence
         # with the error so the workbench can name a starved output budget
         # instead of reporting a generic format problem.
-        format_details = {
-            **response_details,
-            "finish_reason": choices[0].get("finish_reason") if choices else None,
-            "completion_tokens": usage.get("completion_tokens"),
-            **({"reasoning_tokens": reasoning_tokens}
-               if isinstance(reasoning_tokens, int) and not isinstance(reasoning_tokens, bool) else {}),
-        }
+        format_details = _format_failure_details(
+            response.status_code, choices[0].get("finish_reason") if choices else None,
+            usage, provider_code=provider_code)
         if not choices:
             raise LLMFormatError("Provider returned no completions", details=format_details)
         if choices[0].get("finish_reason") in {"length", "max_tokens", "content_filter"}:

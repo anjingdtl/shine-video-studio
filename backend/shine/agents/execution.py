@@ -31,6 +31,12 @@ SAFE_REJECTIONS = {
     "REPAIR_CHANGED_LOCKED_SHOT_STRUCTURE", "REPAIR_DID_NOT_CHANGE_PLAN",
     "H3_LOCKED_FACT_TRANSLATION_REQUIRED",
     "H3_STYLE_TRANSLATION_REQUIRED",
+    # Every named contract refusal validate_output can raise must surface as
+    # itself, not collapse into the opaque SCHEMA_OR_POLICY_REJECTED fallback
+    # (live 2026-11-21: an arbitration coverage refusal showed no reason).
+    "ARBITRATION_ISSUE_COVERAGE", "ARBITRATION_UNKNOWN_RULE",
+    "NARRATOR_NOT_LISTED_IN_BEAT", "SHOT_DURATION_OVER_LIMIT",
+    "UNAPPROVED_VOICE", "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE",
     # A request the literary budget refused before it was sent (streamline
     # §6.3): the named reason tells the person to split the unit, not that the
     # model misbehaved.
