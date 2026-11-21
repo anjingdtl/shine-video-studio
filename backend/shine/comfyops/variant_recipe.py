@@ -15,7 +15,8 @@ from __future__ import annotations
 from typing import Any
 
 from shine.comfy.workflow import graph_hash
-from shine.comfyops.variant_binding import load_binding
+from shine.comfyops.mode_capabilities import mode_workflows
+from shine.comfyops.variant_binding import load_binding, profile_files
 from shine.comfyops.variants import THRESHOLD_FIELDS, UNKNOWN, variant_requirements
 
 #: The floors a managed start actually measures: render-time *available*
@@ -99,8 +100,12 @@ def build_startup_contract(variant_id: str) -> dict[str, Any]:
         for item in manifest.get("files", [])
     ]
 
-    graphs = []
-    for profile in binding.profiles:
+    graphs = [
+        {**workflow.execution_identity(), "required_nodes": workflow.required_nodes}
+        for workflow in mode_workflows(variant_id)
+    ] if binding.is_accepted else []
+    # Candidate startup diagnostics retain their pinned legacy profile evidence.
+    for profile in (() if binding.is_accepted else profile_files(binding.profile_names)):
         name = str(profile.get("name") or "")
         digest = graph_hash(profile["graph"])
         declared = (manifest.get("graph_sha256") or {}).get(name)
@@ -130,7 +135,7 @@ def build_startup_contract(variant_id: str) -> dict[str, Any]:
     if violations:
         blockers.append({"code": "VARIANT_LAUNCH_PARAMETERS_INVALID", "violations": violations})
     for graph in graphs:
-        if not graph["graph_matches_manifest"]:
+        if graph.get("graph_matches_manifest") is False:
             blockers.append({"code": "VARIANT_RECIPE_DRIFT", "profile_id": graph["profile_id"]})
 
     determined = not blockers

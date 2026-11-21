@@ -53,18 +53,26 @@ def _shot_with_references(client: TestClient, project_id: str, style_id: str,
     return create_referenced_shot(client, project_id, style_id, character="主角")
 
 
-def test_strategy_series_carries_strategy_and_compiled_graph_hash(studio):
+def test_partial_historical_strategy_keeps_its_sampler_default():
+    assert GenerationStrategy.model_validate({"schema_version": "1"}).accelerator_id == "pdd8"
+    assert DEFAULT_STRATEGY.accelerator_id == "native20"
+
+
+@pytest.mark.parametrize("explicit_strategy", [True, False])
+def test_strategy_series_carries_strategy_and_compiled_graph_hash(studio, explicit_strategy):
     """T01/T04: the series freezes the strategy; each job compiles its own graph."""
     client, factory, _settings = studio
     project_id, style_id, _shots = _project_with_shots(client, shot_count=1)
     shot = _shot_with_references(client, project_id, style_id, image_refs=1)
 
     strategy = DEFAULT_STRATEGY.model_dump(mode="json")
-    response = client.post(f"/api/v1/projects/{project_id}/production-series", json={
+    body = {
         "shot_ids": [shot["id"]],
         "provider": "comfyui",
-        "strategy": strategy,
-    })
+    }
+    if explicit_strategy:
+        body["strategy"] = strategy
+    response = client.post(f"/api/v1/projects/{project_id}/production-series", json=body)
     assert response.status_code == 201, response.text
     series = response.json()
 
@@ -81,8 +89,13 @@ def test_strategy_series_carries_strategy_and_compiled_graph_hash(studio):
         # The request carries this shot's real compiled graph identity, which
         # a one-image shot distinguishes from any other reference layout.
         assert request["workflow_profile_hash"]
-        expected = compile_ref2va_workflow(image_count=1, audio_count=0)
+        from shine.manual4.comfy.h3_adapter import compile_m4_ref2va_workflow
+
+        expected = compile_m4_ref2va_workflow(
+            image_count=1, audio_count=0, accelerator_id=DEFAULT_STRATEGY.accelerator_id,
+        )
         assert request["workflow_profile_hash"] == expected.graph_sha256
+        assert request["model_checkpoint_id"] == expected.checkpoint_id
 
 
 def test_strategy_shoot_via_director_start_builds_strategy_package(studio):
@@ -267,7 +280,9 @@ def test_second_pass_strategy_job_request_carries_compiled_second_pass_graph(stu
         job = db.get(Job, row.current_job_id)
         request = job.request
         expected = compile_ref2va_workflow(
-            image_count=1, audio_count=0, second_pass=strategy.second_pass_spec())
+            image_count=1, audio_count=0, accelerator_id=strategy.accelerator_id,
+            second_pass=strategy.second_pass_spec(),
+        )
         assert request["workflow_profile_hash"] == expected.graph_sha256
         plain = compile_ref2va_workflow(image_count=1, audio_count=0)
         assert request["workflow_profile_hash"] != plain.graph_sha256

@@ -66,7 +66,7 @@ def test_worker_submits_the_compiled_strategy_graph(api, fake_comfy, monkeypatch
     job_id = _seed_strategy_job(client, project_id, style["id"], DEFAULT_STRATEGY)
 
     comfy_client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
-    expected = compile_ref2va_workflow(image_count=1, audio_count=0)
+    expected = compile_ref2va_workflow(image_count=1, audio_count=0, accelerator_id=DEFAULT_STRATEGY.accelerator_id)
     monkeypatch.setattr(
         ComfyUIClient, "object_info", lambda self: _compiled_object_info(expected.graph))
 
@@ -127,7 +127,9 @@ def test_worker_submits_second_pass_graph(api, fake_comfy, monkeypatch):  # noqa
 
     comfy_client = ComfyUIClient(fake_comfy.base_url, timeout_s=2)
     expected = compile_ref2va_workflow(
-        image_count=1, audio_count=0, second_pass=strategy.second_pass_spec())
+        image_count=1, audio_count=0, accelerator_id=strategy.accelerator_id,
+        second_pass=strategy.second_pass_spec(),
+    )
     monkeypatch.setattr(
         ComfyUIClient, "object_info", lambda self: _compiled_object_info(expected.graph))
 

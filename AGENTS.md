@@ -2482,3 +2482,14 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   （不弱化断言）；共分片复跑 0 失败。
 - 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
   证据 `docs/ACCEPTANCE_20261121_EPISODE_SECONDS_VERDICT.md`。
+
+## 2026-11-21 V3 P1 单 Ref2VA 工作流
+
+- 新生产从 `foundation/h3.py::compile_h3_ref2va_graph` 进入
+  `comfy/graph_compiler.py`。`shine.ref2va.v1` 按变体、采样和实际参考清单生成逐镜图。
+  两条生产线沿用各自冻结输入与共享的参数映射、提交、对账、GPU 租约和技术质检。
+- `mode_capabilities` 从同一配方推导基础节点。整备与服务核验使用单图、单采，默认基础采样
+  为 `native20`。PDD、参考音频、二采和 RelayVSR 的资源随实际选项使用。
+- `config/workflows` 和数据库 profile 用于显式兼容及历史回放。常规整备不自动登记旧模板，
+  真实提交校验冻结图或配方 SHA，历史提示词与配方 SHA 继续可复现。
+- 验收记录见 `docs/ACCEPTANCE_20261121_V3_P1_SINGLE_REF2VA.md`。

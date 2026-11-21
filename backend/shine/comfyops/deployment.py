@@ -599,6 +599,13 @@ def _require_project(db, project_id: str | None):
     return svc_require_project(db, project_id)
 
 
+def required_model_bindings(catalog: dict) -> dict[str, str]:
+    from shine.comfyops.variant_readiness import required_h3_components
+
+    components = required_h3_components(catalog)
+    return {c["destination_family"]: c["component_id"] for c in components if c.get("destination_family")}
+
+
 def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | None,
                        *, instance_name: str, port: int, mode: str = "local"):
     """Create the NEXT controlled instance plan based on current instance state.
@@ -620,10 +627,13 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
         plan_operation,
         relocated_managed_root,
     )
+    from shine.comfyops.mode_capabilities import required_node_packs
+
     components = _component_map(catalog)
-    expected_nodes = {cid: c['revision'] for cid, c in components.items() if c['kind'] == 'node'}
-    expected_bindings = {c['destination_family']: cid for cid, c in components.items()
-                         if c['kind'] == 'model' and c.get('destination_family')}
+    expected_nodes = {c["component_id"]: c["revision"] for c in required_node_packs(catalog)}
+    expected_bindings = required_model_bindings(catalog)
+    allowed_bindings = {c["destination_family"]: cid for cid, c in components.items()
+                        if c["kind"] == "model" and c.get("destination_family")}
     instance = db.get(ComfyInstance, instance_identity(mode, port))
     if instance is None and any(
             row.payload.get('managed') and row.payload.get('root') == str(instance_root(settings, instance_name, mode))
@@ -643,7 +653,7 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
         raise HTTPException(409, 'PINNED_NODE_REVISION_CHANGED')
     missing_nodes = [cid for cid in expected_nodes if cid not in installed_nodes]
     bindings = instance.payload.get('model_bindings', {}) if instance else {}
-    if any(family not in expected_bindings or expected_bindings[family] != package_id
+    if any(allowed_bindings.get(family) != package_id
            for family, package_id in bindings.items()):
         raise HTTPException(409, 'INSTANCE_MODEL_BINDINGS_CHANGED')
     if instance is None:
@@ -654,7 +664,7 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
         action = 'STOP'
     elif missing_nodes:
         action = "INSTALL_NODE"
-    elif bindings != expected_bindings:
+    elif not expected_bindings.items() <= bindings.items():
         action = "BIND_MODELS"
     else:
         # Production owns the first fenced startup and GPU admission. An ordinary
@@ -676,9 +686,8 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
                 return existing, action
     rows = register_catalog_packages(db, catalog, [
         "comfyui", WHEEL_COMPONENT_ID,
-        *[cid for cid, c in components.items() if c["kind"] == "node"],
-        *[cid for cid, c in components.items()
-          if c["kind"] == "model" and c.get("destination_family")],
+        *missing_nodes,
+        *{**bindings, **expected_bindings}.values(),
     ])
     # risk_confirmed is the operator's explicit L2/L3 acknowledgment flag; the
     # human approval itself still happens per plan through the grant machinery.
@@ -697,9 +706,7 @@ def next_instance_plan(db, settings: Settings, catalog: dict, project_id: str | 
     elif action == "BIND_MODELS":
         plan = plan_operation(db, settings, InstanceOperation(
             project_id=project_id, name=instance_name, action=action, mode=mode, port=port,
-            model_bindings={c["destination_family"]: rows[cid].id
-                            for cid, c in components.items()
-                            if c["kind"] == "model" and c.get("destination_family")},
+            model_bindings={family: rows[cid].id for family, cid in {**bindings, **expected_bindings}.items()},
             risk_confirmed=risk))
     else:
         plan = plan_operation(db, settings, InstanceOperation(
@@ -970,7 +977,12 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     # installation keeps upstream defaults, so catalog repo ids must resolve to
     # the directories that really exist before they can be whitelisted.
     from shine.comfyops.existing_installation import resolve_node_pack_dirs
-    pack_dirs, missing_packs = resolve_node_pack_dirs(root, load_default_catalog())
+    from shine.comfyops.mode_capabilities import required_node_packs
+
+    catalog = load_default_catalog()
+    pack_dirs, missing_packs = resolve_node_pack_dirs(root, catalog)
+    required_packs = {row["component_id"] for row in required_node_packs(catalog)}
+    missing_packs = sorted(required_packs.intersection(missing_packs))
     # 真实安装缺节点包必须拦下：渲染器会把自定义节点全部禁用，缺包就得先补装。
     # 只有离线/夹具环境才降级——而且必须把缺失如实记下来，不能变成静默通过。
     node_pack_notes: list[dict] = []
@@ -1157,7 +1169,8 @@ def _update_env_file(env_path: Path, updates: dict) -> list:
 
 
 def installed_instance_blockers(db, settings, instance, catalog):
-    components = _component_map(catalog)
+    from shine.comfyops.mode_capabilities import required_node_packs
+
     install_blockers = []
     if instance is None:
         install_blockers.append("REAL_INSTANCE_MISSING_OR_AMBIGUOUS")
@@ -1186,12 +1199,11 @@ def installed_instance_blockers(db, settings, instance, catalog):
                 or not (root / ".shine-requirements.txt").is_file()
                 or not payload.get("dependency_hash")):
             install_blockers.append("INSTALLED_RUNTIME_FILES_MISSING")
-        expected_nodes = {cid: c["revision"] for cid, c in components.items() if c["kind"] == "node"}
+        expected_nodes = {c["component_id"]: c["revision"] for c in required_node_packs(catalog)}
         if any(payload.get("node_versions", {}).get(cid) != revision for cid, revision in expected_nodes.items()):
             install_blockers.append("PINNED_NODE_INSTALL_INCOMPLETE")
-        expected_bindings = {c['destination_family']: cid for cid, c in components.items()
-                             if c['kind'] == 'model' and c.get('destination_family')}
-        if payload.get('model_bindings') != expected_bindings:
+        expected_bindings = required_model_bindings(catalog)
+        if not expected_bindings.items() <= (payload.get("model_bindings") or {}).items():
             install_blockers.append('PINNED_MODEL_BINDINGS_INCOMPLETE')
     return install_blockers
 
@@ -1211,7 +1223,6 @@ def deployment_readiness(db, settings: Settings) -> dict:
     from shine.comfyops.host_env import probe_host_environment, setup_blockers
 
     catalog = load_default_catalog()
-    components = _component_map(catalog)
     layers = []
     env_report = probe_host_environment(settings.data_dir, deployment_dir=settings.comfyops_dir)
     blockers = setup_blockers(env_report)
@@ -1233,11 +1244,12 @@ def deployment_readiness(db, settings: Settings) -> dict:
             return {"status": "PENDING", "packages": rows}
         return {"status": "NOT_STARTED", "packages": rows}
 
-    core_ids = ["comfyui", WHEEL_COMPONENT_ID, *[
-        component_id for component_id in components
-        if components[component_id]["kind"] in {"node", "model"}
-        and component_id not in REVIEW_COMPONENTS.values()
-    ]]
+    from shine.comfyops.adoption import _required_capability_files
+    from shine.comfyops.mode_capabilities import required_node_packs
+
+    core_ids = ["comfyui", WHEEL_COMPONENT_ID,
+                *(node["component_id"] for node in required_node_packs(catalog)),
+                *required_model_bindings(catalog).values()]
     layers.append({"layer": "L1_catalog", "status": "READY", "catalog_id": catalog["catalog_id"],
                    "catalog_version": catalog["catalog_version"], "total_bytes": catalog["total_bytes"]})
     candidates = [row for row in db.scalars(select(ComfyInstance))
@@ -1247,12 +1259,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
     if instance and instance.payload.get("adopted"):
         adoption = instance.payload.get("adoption") or {}
         verified_h3 = {_verified_h3_key(item) for item in adoption.get("verified_h3_files", [])}
-        required_h3 = {
-            (component["component_id"], item["relative_path"], item["sha256"], item["size"])
-            for component in catalog.get("components", [])
-            if component.get("kind") == "model" and component["component_id"].startswith("minimax-h3-")
-            for item in component.get("files", [])
-        }
+        required_h3 = _required_capability_files(catalog, "h3")
         layer_two = {
             "layer": "L2_files_verified",
             "status": "READY" if required_h3 <= verified_h3 else "PENDING",
@@ -1306,6 +1313,7 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "validated_at": service_status.get("validated_at"),
         "node_count": service_status.get("node_count"),
         "workflow_profiles": service_status.get("workflow_profiles", []),
+        "mode_capabilities": service_status.get("mode_capabilities"),
         "review_models": service_status.get("review_models", {}),
         "note": "Live object_info and workflow input contracts are required; small-model review "
                 "services are advisory",

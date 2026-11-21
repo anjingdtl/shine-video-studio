@@ -547,11 +547,10 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             except Exception:  # noqa: BLE001 - 读不到的基线回退默认清单，台账层另行具名
                 binding = None
     if binding is not None:
-        from shine.comfyops.variant_readiness import _required_components
+        from shine.comfyops.variant_readiness import required_h3_components
 
         catalog = binding.catalog
-        component_ids = {str(row.get("component_id"))
-                         for row in _required_components(binding.catalog, binding.profiles)}
+        component_ids = {row["component_id"] for row in required_h3_components(catalog, profiles=binding.profiles)}
     else:
         catalog = _catalog_for(capability)
         component_ids = _component_ids_for(capability, catalog) if catalog is not None else set()
@@ -1131,10 +1130,11 @@ def runtime_closure_gap(db, settings, installation: dict | None,
     """
     from shine.comfyops import deployment
     from shine.comfyops.existing_installation import resolve_node_pack_dirs
+    from shine.comfyops.mode_capabilities import required_node_packs
     from shine.comfyops.models import ComfyInstance
 
     catalog = deployment.load_default_catalog()
-    components = deployment._component_map(catalog)
+    required_nodes = required_node_packs(catalog)
     include_h3 = capabilities is None or "h3" in capabilities
     instance_present = bool(installation and installation.get("instance_id"))
     gap: list[str] = []
@@ -1142,35 +1142,32 @@ def runtime_closure_gap(db, settings, installation: dict | None,
     if installation and installation.get("root"):
         root = Path(installation["root"])
         if include_h3:
-            _dirs, missing = resolve_node_pack_dirs(root, catalog)
+            _dirs, missing = resolve_node_pack_dirs(root, {"components": required_nodes})
             gap.extend(missing)
         if not instance_present:
             ladder = ["ADOPT"]
     elif not instance_present:
         if include_h3:
-            gap.extend(cid for cid, c in components.items()
-                       if c["kind"] in {"source", "wheel", "node"})
+            gap.extend(c["component_id"] for c in required_nodes)
             ladder = ["CREATE", "INSTALL_NODE", "BIND_MODELS"]
         else:
-            gap.extend(cid for cid, c in components.items()
-                       if c["kind"] in {"source", "wheel"})
             ladder = ["CREATE", "BIND_MODELS"]
+        gap.extend(c["component_id"] for c in catalog["components"] if c["kind"] in {"source", "wheel"})
     if instance_present and not installation.get("adopted"):
         instance = db.get(ComfyInstance, installation["instance_id"])
         payload = instance.payload if instance is not None else {}
         if include_h3:
-            expected_nodes = {cid for cid, c in components.items() if c["kind"] == "node"}
+            expected_nodes = {c["component_id"] for c in required_nodes}
             installed = payload.get("node_versions", {})
             if any(cid not in installed for cid in expected_nodes):
                 ladder.append("INSTALL_NODE")
-            expected_bindings = {c["destination_family"]: cid for cid, c in components.items()
-                                 if c["kind"] == "model" and c.get("destination_family")}
+            expected_bindings = deployment.required_model_bindings(catalog)
         else:
             img_catalog = deployment.load_deployment_catalog(deployment.IMAGE_CAPABILITY_CATALOG)
             expected_bindings = {c["destination_family"]: c["component_id"]
                                  for c in img_catalog.get("components", [])
                                  if c.get("kind") == "model" and c.get("destination_family")}
-        if payload.get("model_bindings", {}) != expected_bindings:
+        if not expected_bindings.items() <= (payload.get("model_bindings") or {}).items():
             ladder.append("BIND_MODELS")
     return {
         "instance_present": instance_present,

@@ -71,6 +71,19 @@ def test_a_real_installation_missing_node_packs_is_still_refused(prep, monkeypat
     assert detail["missing"], detail
 
 
+def test_baseline_configuration_does_not_require_unused_node_packs(prep, monkeypatch):
+    client, factory, settings = prep
+    client.app.state.settings = replace(settings, node_pack_gate="enforce")
+    project = create_project(client)
+    root = _synthetic_root(settings)
+    for pack in ("ComfyUI-KJNodes", "ComfyUI-SolAttn_triton"):
+        (root / "custom_nodes" / pack).mkdir()
+    _seed_instance(factory, root)
+    response = _configure(client, settings, project, monkeypatch)
+    assert response.status_code == 200, response.text
+    assert response.json()["node_pack_notes"] == []
+
+
 def test_the_diagnostic_note_has_a_reader_in_the_readiness_layer(prep, monkeypatch):
     """降级不是静默通过：readiness 必须带着缺失包，用户看得见。"""
     client, factory, settings = prep

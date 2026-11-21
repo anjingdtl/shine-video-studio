@@ -326,6 +326,10 @@ def create_series(
                 db, settings, project.id, profile,
                 output=body.output.model_dump(mode="json") if body.output else None,
             )
+    if body.strategy is None and not body.workflow_profile_id:
+        from shine.strategy import DEFAULT_STRATEGY
+
+        body = body.model_copy(update={"strategy": DEFAULT_STRATEGY.model_dump(mode="json")})
     if body.strategy is not None:
         # The dynamic per-shot path has no static profile to gate; the strategy
         # contract is the gate (variant acceptance, accelerator verification,
@@ -347,6 +351,7 @@ def create_series(
                 "message": "所选生产策略在本机不可用，不会替换成其他方案。",
                 "blockers": blockers,
             })
+        body = body.model_copy(update={"strategy": strategy.model_dump(mode="json")})
 
     # Every real H3 render belongs to exactly one series.  The answer comes
     # from the same helper the single-shot entry uses, so a shot that is

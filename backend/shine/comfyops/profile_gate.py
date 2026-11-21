@@ -135,7 +135,7 @@ def _weight_blockers(db: Session, settings, manifest: dict[str, Any],
         from shine.comfyops.variant_binding import load_binding
         from shine.comfyops.variant_readiness import weight_evidence
 
-        binding = load_binding(variant_id)
+        binding = load_binding(variant_id, include_profiles=True)
     except HTTPException:
         return [_blocker(
             "VARIANT_CATALOG_MISSING",

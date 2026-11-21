@@ -2742,7 +2742,12 @@ def _run_comfy_job(
         # transaction (it reads the live renderer's object_info over HTTP) and
         # is fully deterministic - the same strategy and manifest re-compile
         # to the same graph hash that the request builder already recorded.
-        from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
+        from shine.foundation.h3 import (
+            GraphCompileError,
+            H3ExecutionError,
+            compile_h3_ref2va_graph,
+            render_reference_counts,
+        )
         from shine.strategy import GenerationStrategy
 
         try:
@@ -2785,20 +2790,21 @@ def _run_comfy_job(
                     "hint": "渲染器不可达或未启动；确认受管实例运行后再重试。",
                 }, project_id=project_id)
             return job_id
-        image_count = sum(1 for item in manifest if item.use_as.value in ("subject", "picture"))
-        audio_count = sum(1 for item in manifest if item.use_as.value == "audio")
-        video_count = sum(1 for item in manifest if item.use_as.value == "video")
         try:
-            profile = compile_ref2va_workflow(
+            profile = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
-                image_count=image_count,
-                audio_count=audio_count,
-                video_count=video_count,
                 object_info=live_object_info,
+                **render_reference_counts(manifest),
             )
-        except GraphCompileError as exc:
+            if (profile.graph_sha256 != request.workflow_profile_hash
+                    or profile.checkpoint_id != request.model_checkpoint_id):
+                raise GraphCompileError(
+                    "WORKFLOW_IDENTITY_CHANGED", "逐镜执行图与冻结请求的图哈希或 checkpoint 不一致。",
+                    {"expected": request.workflow_profile_hash, "actual": profile.graph_sha256},
+                )
+        except (GraphCompileError, H3ExecutionError) as exc:
             with session_factory.begin() as db:
                 guarded = _guard_claimed_job(
                     db, job_id=job_id, expected_state_version=expected_version,

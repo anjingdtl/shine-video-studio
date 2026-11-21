@@ -301,7 +301,7 @@ export const auditEventLabels: Record<string, string> = {
   PROVIDER_PROFILE_DELETED: '删除模型配置', PROVIDER_PROFILE_DUPLICATED: '模型配置重复',
   PROVIDER_KEY_UPDATED: '更新模型密钥', PROVIDER_KEY_CLEARED: '清除模型密钥',
   PROVIDER_CONNECTION_TESTED: '检测模型连接', PROVIDER_GENERATION_TESTED: '检测模型生成',
-  WORKFLOW_PROFILE_REGISTERED: '注册工作流模板', WORKFLOW_PROFILE_AUTO_REGISTERED: '自动登记工作流模板',
+  WORKFLOW_PROFILE_REGISTERED: '注册工作流模板',
   WORKFLOW_PROFILE_VALIDATED: '校验工作流模板', WORKFLOW_PROFILE_DELETED: '删除工作流模板',
   TECHNICAL_QC_RUN: '运行技术质检', REPAIR_ESCALATED: '返工升级',
   REPAIR_PLAN_SUGGESTED: '建议返工方案', RULEPACK_APPROVED: '批准规则包',
@@ -321,6 +321,7 @@ export const auditEventLabels: Record<string, string> = {
 
 /** 后端已经不再写下的事件码：留着是为了让历史记录仍然读得懂，不再当活码用。 */
 export const auditEventLabelsDeprecated: Record<string, string> = {
+  WORKFLOW_PROFILE_AUTO_REGISTERED: '自动登记工作流模板',
   PROJECT_UPDATED: '修改项目设置', ASSET_METADATA_PATCHED: '修改素材信息',
   CANDIDATE_REJECTED: '候选素材被拒', STYLE_DRAFT_SAVED: '保存风格草稿',
   SHOT_UPDATED: '修改分镜', SHOT_BINDINGS_SET: '更新镜头素材绑定',

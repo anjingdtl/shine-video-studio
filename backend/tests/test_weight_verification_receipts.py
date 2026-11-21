@@ -135,8 +135,8 @@ def test_a_registry_status_alone_is_not_weight_evidence(api, tmp_path, monkeypat
                             sha256="0" * 64, status="FILES_VERIFIED_PENDING_RUNTIME"))
 
     monkeypatch.setattr(
-        "shine.comfyops.variant_readiness._required_components",
-        lambda catalog, profiles: [component],
+        "shine.comfyops.variant_readiness.required_h3_components",
+        lambda catalog, **kwargs: [component],
     )
     with factory() as db:
         evidence = weight_evidence(db, settings, _binding("synthetic-weights"))
@@ -159,8 +159,8 @@ def test_an_existing_install_receipt_is_reusable_by_another_variant(api, tmp_pat
     _save(factory, component, directory, variant_id="baseline")
 
     monkeypatch.setattr(
-        "shine.comfyops.variant_readiness._required_components",
-        lambda catalog, profiles: [component],
+        "shine.comfyops.variant_readiness.required_h3_components",
+        lambda catalog, **kwargs: [component],
     )
     with factory() as db:
         evidence = weight_evidence(db, settings, _binding("runtime-node", variant_id="candidate"))

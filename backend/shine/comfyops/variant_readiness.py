@@ -23,11 +23,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shine.comfy.graph_compiler import INT8_VARIANT_ID, VARIANT_ACCELERATORS
+from shine.comfyops.mode_capabilities import mode_workflows
 from shine.comfyops.models import ModelPackage
-from shine.models import Job, WorkflowProfile
+from shine.models import Job, MediaArtifact, WorkflowProfile
 
 #: The layers, in order.  The order is the dependency order, not a preference.
 LAYERS: tuple[tuple[str, str], ...] = (
@@ -53,7 +56,7 @@ def _model_components(catalog: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 #: The graph inputs that name a weight file on disk.
-MODEL_INPUTS = ("unet_name", "clip_name", "vae_name", "model_name", "lora_name", "model_path")
+MODEL_INPUTS = ("unet_name", "clip_name", "vae_name", "model_name", "lora_name", "model_path", "pdd_file")
 
 
 def _file_name(value: str) -> str:
@@ -93,12 +96,24 @@ def _required_components(catalog: dict[str, Any], profiles: tuple[dict[str, Any]
     return required
 
 
-def required_h3_components(catalog: dict[str, Any]) -> list[dict[str, Any]]:
+def required_h3_components(
+    catalog: dict[str, Any], *, profiles: tuple[dict[str, Any], ...] = (),
+) -> list[dict[str, Any]]:
+    """The model set for an explicit graph or the variant's minimum recipe."""
     from shine.comfyops.variant_binding import profile_files
 
+    if profiles:
+        return _required_components(catalog, profiles)
+    workflows = mode_workflows(catalog.get("variant_id") or "")
+    if workflows:
+        return _required_components(catalog, ({"graph": workflows[0].graph},))
     names = catalog.get("workflow_profiles") or []
     if names:
-        return _required_components(catalog, tuple(profile_files(names)))
+        try:
+            return _required_components(catalog, tuple(profile_files(names)))
+        except HTTPException:
+            # Catalog inventory is still readable for unsupported legacy variants.
+            pass
     return [row for row in catalog.get("components") or [] if row.get("kind") == "model"]
 
 
@@ -216,7 +231,7 @@ def weight_evidence(db: Session, settings, binding) -> list[dict[str, Any]]:
     instance_binding = current_instance(db, settings)
     registry = {row.id: row for row in db.scalars(select(ModelPackage)).all()}
     evidence: list[dict[str, Any]] = []
-    for component in _required_components(binding.catalog, binding.profiles):
+    for component in required_h3_components(binding.catalog, profiles=binding.profiles):
         component_id = str(component.get("component_id"))
         receipt = verify_receipt(
             db,
@@ -331,19 +346,22 @@ def _profile_rows(db: Session, project_id: str | None, names: list[str],
     return result
 
 
-def _real_render(db: Session, project_id: str | None, profile_ids: list[str]) -> dict[str, Any] | None:
+def _real_render(db: Session, project_id: str | None, profile_ids: list[str], *,
+                 dynamic_variant_id: str | None = None) -> dict[str, Any] | None:
     """A real, non-mock job that really passed with one of these profiles."""
-    if not profile_ids:
+    if not profile_ids and dynamic_variant_id is None:
         return None
-    row = db.scalars(
-        select(Job).where(
-            Job.project_id == project_id,
-            Job.workflow_profile_id.in_(profile_ids),
-            Job.provider == "comfyui",
-            Job.status == "PASSED",
-            Job.stale.is_(False),
-        ).order_by(Job.created_at.desc()).limit(1)
-    ).first()
+    query = select(Job).where(
+        Job.project_id == project_id, Job.provider == "comfyui", Job.status == "PASSED", Job.stale.is_(False),
+    )
+    if dynamic_variant_id is None:
+        query = query.where(Job.workflow_profile_id.in_(profile_ids))
+    else:
+        query = query.join(MediaArtifact, MediaArtifact.id == Job.artifact_id).where(
+            Job.workflow_profile_id.is_(None), MediaArtifact.is_mock.is_(False),
+            Job.request["strategy"]["model_variant_id"].as_string() == dynamic_variant_id,
+        )
+    row = db.scalars(query.order_by(Job.created_at.desc()).limit(1)).first()
     if row is None:
         return None
     return {
@@ -400,6 +418,10 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
     from shine.comfyops.runtime_configuration import service_evidence_status
 
     machine_validation = service_evidence_status(db, settings)
+    dynamic = binding.is_accepted and binding.variant_id in VARIANT_ACCELERATORS and not binding.profiles
+    mode = machine_validation.get("mode_capabilities") or {}
+    mode_validated = (machine_validation.get("status") == "READY"
+                      and (mode.get("variant_id") or INT8_VARIANT_ID) == binding.variant_id)
     machine_validated: dict[str, Any] = {}
     if machine_validation.get("status") == "READY":
         evidence = {"source": "machine_service_validation",
@@ -409,7 +431,10 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
                              for name in (machine_validation.get("workflow_profiles") or [])}
     profiles = _profile_rows(db, project_id, binding.profile_names, machine_validated)
     profile_ids = [row["profile_id"] for row in profiles if row["profile_id"]]
-    render = _real_render(db, project_id, profile_ids)
+    render = _real_render(db, project_id, profile_ids,
+                          dynamic_variant_id=binding.variant_id if dynamic else None)
+    if render is None and dynamic:
+        render = _real_render(db, project_id, profile_ids)
 
     manifest = binding.manifest
     acceptance = str(manifest.get("acceptance_status") or "")
@@ -417,15 +442,17 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
 
     missing_bytes = [w["component_id"] for w in weights if not w["prepared"]]
     unverified = [w["component_id"] for w in weights if w["prepared"] and not w["verified"]]
-    missing_profiles = [row["name"] for row in profiles if not row["registered"]]
-    unvalidated = [row["name"] for row in profiles if row["registered"] and not row["validated"]]
+    missing_profiles = [] if dynamic else [row["name"] for row in profiles if not row["registered"]]
+    unvalidated = ([] if mode_validated else ["Ref2VA"]) if dynamic else [
+        row["name"] for row in profiles if row["registered"] and not row["validated"]
+    ]
     # A real, passed, non-stale render of THIS variant is the strongest runtime
     # evidence there is: the graph ran on the real renderer and produced a shot
     # that passed technical QC.  Requiring each sibling profile to be probed
     # one by one on top of that made one card say "已真实验证" and "还没有核对
     # 4 个方案" at the same time - two verdicts for one fact.  The weaker
     # evidence is now reported, never used as a second gate.
-    render_proves_runtime = render is not None
+    render_proves_runtime = render is not None and not dynamic
 
     layers: list[dict[str, Any]] = []
     # The five layers are a dependency order: a layer can only be done when
@@ -456,7 +483,9 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
     else:
         add("DONE", "权重已按锁定的 revision、字节数与 SHA-256 核验。")
 
-    if blocked:
+    if dynamic:
+        add("PENDING" if blocked else "DONE", "逐镜执行图使用内置 Ref2VA 工作流定义。")
+    elif blocked:
         add("PENDING", "等前面的步骤完成后，才能把生成方案登记到这个作品。")
     elif missing_profiles:
         add("PENDING", "这个作品还没有登记这些生成方案：" + "、".join(missing_profiles) + "。",
@@ -486,7 +515,7 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
 
     for index, (layer_id, label) in enumerate(LAYERS):
         layers[index]["id"] = layer_id
-        layers[index]["label"] = label
+        layers[index]["label"] = "工作流定义" if dynamic and layer_id == "WORKFLOW_REGISTERED" else label
 
     reached = 0
     for index, layer in enumerate(layers):
@@ -507,7 +536,7 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
     files_found = bool(weights) and all(row["prepared"] for row in weights)
     files_verified = bool(weights) and all(row["verified"] for row in weights)
     instance_bound = bool(weights) and all(row["consumable"] for row in weights)
-    workflow_validated = bool(profiles) and (
+    workflow_validated = mode_validated if dynamic else bool(profiles) and (
         all(row["validated"] for row in profiles) or render_proves_runtime
     )
     trial_ready = bool(files_verified and instance_bound and workflow_validated)
@@ -536,6 +565,7 @@ def readiness(db: Session, settings, binding, project_id: str | None, *,
         "checkpoint_id": manifest.get("checkpoint_id"),
         "auto_download_allowed": downloadable,
         "workflow_profile_ids": binding.profile_names,
+        "profiles_registered": dynamic or any(row["registered"] for row in profiles),
         "layers": layers,
         "reached_layer": LAYER_IDS[reached] if reached < len(LAYER_IDS) else LAYER_IDS[-1],
         "reached_label": LAYER_LABELS[LAYER_IDS[reached]] if reached < len(LAYER_IDS) else LAYER_LABELS[LAYER_IDS[-1]],

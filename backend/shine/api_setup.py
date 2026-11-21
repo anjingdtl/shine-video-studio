@@ -190,7 +190,7 @@ def _inspection_catalog(variant_id: str | None = None, catalog: str | None = Non
         return deployment.load_default_catalog()
     from shine.comfyops.variant_binding import resolve_registration_target
 
-    return resolve_registration_target(variant_id=variant_id, catalog_id=catalog).catalog
+    return resolve_registration_target(variant_id=variant_id, catalog_id=catalog, include_profiles=False).catalog
 
 
 @router.get('/existing-installations')
@@ -686,13 +686,10 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     「在本机」优先看已采用的 ComfyUI 安装目录里是否真的有这套文件的
     全部组件（目录事实，扫描约 0.4 秒）；台账里已经核验过的结果优先。
     """
-    from sqlalchemy import select as _select
-
     from shine.comfyops import variant_readiness as _vr_module
     from shine.comfyops.variant_binding import load_binding
     from shine.comfyops.variant_readiness import readiness as variant_readiness
     from shine.comfyops.variants import list_variant_manifests
-    from shine.models import WorkflowProfile
     from shine.services import require_project
 
     require_project(db, project_id)
@@ -710,30 +707,12 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
 
     _selected = resolve_installation(db, settings).get("selected") or {}
     adopted_root = str(_selected["root"]) if _selected.get("adopted") and _selected.get("root") else None
-    project_profiles = {
-        row.name: row
-        for row in db.scalars(_select(WorkflowProfile).where(WorkflowProfile.project_id == project_id))
-    }
-    # 机器级运行激活已经把规范工作流按真实渲染器的 object_info 校验过
-    # （service_evidence_status READY + workflow_profiles）。这是规范方案就绪的
-    # 唯一裁决：项目继承它，不再要求每个项目把同一套规范图重新登记+重新校验一遍
-    # （那是下级闸卡上级，违反「一个裁决」）。项目自有方案行仍优先（含宽方案）。
-    from shine.comfyops.runtime_configuration import service_evidence_status
-
-    machine_validation = service_evidence_status(db, settings)
-    machine_validated_profiles = (
-        set(machine_validation.get("workflow_profiles") or [])
-        if machine_validation.get("status") == "READY" else set())
     rows = []
     for manifest in list_variant_manifests():
         variant_id = str(manifest.get("variant_id") or "")
         if not variant_id:
             continue
         acceptance = str(manifest.get("acceptance_status") or "UNKNOWN")
-        profile_names = list(manifest.get("workflow_profile_ids") or [])
-        registered = [project_profiles[name] for name in profile_names if name in project_profiles]
-        validated = [row for row in registered if (row.validated_against or {})]
-        inherited = [name for name in profile_names if name in machine_validated_profiles]
         entry = {
             "variant_id": variant_id,
             "label": manifest.get("label") or variant_id,
@@ -743,8 +722,8 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             "installed": False,
             "verified": False,
             "bound": False,
-            "profiles_registered": bool(registered) or bool(inherited),
-            "runtime_validated": bool(validated) or bool(inherited),
+            "profiles_registered": False,
+            "runtime_validated": False,
             "selectable_for_preparation": False,
             "trial_ready": False,
             "production_ready": False,
@@ -761,7 +740,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
             entry["reason"] = "这套方案的清单读不出来"
             rows.append(entry)
             continue
-        required = set(manifest.get("required_component_ids") or [])
         try:
             readiness_report = variant_readiness(db, settings, binding, project_id)
         except Exception:  # noqa: BLE001 - the ledger may be unreadable
@@ -773,7 +751,7 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         # loads are the requirement.  ``bool([]) and ...`` used to make
         # ``installed`` permanently false for such variants.
         weight_ids = {str(row.get("component_id")) for row in weights}
-        required_ids = required or weight_ids
+        required_ids = weight_ids
         installed_by_evidence = bool(weights) and all(row.get("prepared") for row in weights)
         # The durable verification ledger is the authority. Only fall back to a
         # directory scan when the ledger does not already prove the weights are
@@ -790,7 +768,9 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         # and the current instance really reads them from the registered
         # directory (an adopted external installation counts, and is labelled).
         entry["bound"] = bool(weights) and all(row.get("consumable") for row in weights)
-        accepted = acceptance in {"SUPPORTED", "EXPERIMENTAL"}
+        entry["profiles_registered"] = bool((readiness_report or {}).get("profiles_registered"))
+        entry["runtime_validated"] = bool((readiness_report or {}).get("workflow_validated"))
+        accepted = binding.is_accepted
         entry["selectable_for_preparation"] = True
         entry["trial_ready"] = bool(entry["installed"] and entry["verified"] and entry["bound"]
                                     and entry["profiles_registered"] and entry["runtime_validated"])

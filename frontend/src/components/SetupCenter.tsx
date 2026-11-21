@@ -686,7 +686,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
             {capabilityRows.map((row) => `${row.label} ${gib(row.bytes)}`).join(' · ')}
           </span>}
           <span>目录 {storage?.root} · 不会改动你原有的 ComfyUI，也不会删除已核验的模型</span>
-          <span>复用/下载 → 登记生成方案 → 生成受管配置 → 启动检测服务 → 激活</span>
+          <span>核验已有资源或补齐缺件 → 生成受管配置 → 核对 Ref2VA 运行合同 → 激活</span>
           {selectedVariant && !selectedVariant.auto_download_allowed && selectedVariant.acceptance_status !== 'BLOCKED' && (
             <span className="setup-warn"><AlertTriangle size={12} /> 候选方案：下载权重不等于验收，用于生产前必须先在本机真机跑通。点「开始准备」即确认下载候选权重。</span>
           )}

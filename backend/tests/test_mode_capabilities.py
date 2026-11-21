@@ -1,17 +1,4 @@
-"""Mode-level capability registration: template drift is advisory, not a lock.
-
-Covers the WP1 contract of the dynamic per-shot workflow round:
-
-* one drifted historical template must not block the whole Ref2VA mode
-  (T06), neither for a v2 mode-capability seal nor for a legacy v1 seal;
-* the audited core node set stays a hard gate: a renderer without it is
-  never READY, and a changed core set invalidates a v2 seal;
-* baseline templates a project never registered are auto-filled from the
-  repository files exactly once, and a drifted row is never overwritten;
-* the renderer startup node gate covers only the baseline mode's profiles -
-  a candidate variant registered by one project is not a startup requirement
-  for every renderer.
-"""
+"""The shared Ref2VA readiness contract and archived service evidence."""
 import json
 import os
 
@@ -85,46 +72,25 @@ def studio(tmp_path):
     app.state.engine.dispose()
 
 
-def test_baseline_classification_splits_drift_and_missing(studio):
-    factory, project_id = studio
-    with factory.begin() as db:
-        created = _register_baseline_rows(db, project_id, drift=mode_capabilities.baseline_profile_names()[0])
-        state = mode_capabilities.classify_baseline_profiles(db, project_id)
-    names = mode_capabilities.baseline_profile_names()
-    drifted_name = names[0]
-    assert drifted_name in state['drifted']
-    assert set(state['contracts']) == {name for name in names if name != drifted_name}
-    assert state['missing'] == []
-    assert created[drifted_name]  # the drifted row stays untouched
+def test_base_mode_and_resource_closure_work_without_legacy_templates(monkeypatch, tmp_path):
+    from shine.comfyops import deployment
+    from shine.comfyops.variant_binding import load_binding
+    from shine.comfyops.variant_readiness import required_h3_components
+    from shine.comfyops.variant_recipe import build_startup_contract
 
-
-def test_auto_register_fills_missing_once_and_never_overwrites_drift(studio):
-    factory, project_id = studio
-    names = mode_capabilities.baseline_profile_names()
-    drift_name = names[0]
-    with factory.begin() as db:
-        _register_baseline_rows(db, project_id, drift=drift_name)
-    with factory.begin() as db:
-        mode_capabilities.auto_register_missing_baseline_profiles(db, project_id, actor='test')
-    with factory() as db:
-        state = mode_capabilities.classify_baseline_profiles(db, project_id)
-        # The drifted row is still drifted - auto-fill must not absorb drift.
-        assert drift_name in state['drifted']
-        assert state['missing'] == []
-        # A second run registers nothing new (idempotent).
-        created_again = mode_capabilities.auto_register_missing_baseline_profiles(db, project_id, actor='test')
-    assert created_again == []
-
-
-def test_auto_register_creates_rows_for_a_fresh_project(studio):
-    factory, project_id = studio
-    with factory.begin() as db:
-        created = mode_capabilities.auto_register_missing_baseline_profiles(db, project_id, actor='test')
-    assert sorted(created) == sorted(mode_capabilities.baseline_profile_names())
-    with factory() as db:
-        state = mode_capabilities.classify_baseline_profiles(db, project_id)
-    assert not state['missing'] and not state['drifted']
-    assert set(state['contracts']) == set(mode_capabilities.baseline_profile_names())
+    monkeypatch.setattr(deployment, "PROFILE_DIR", tmp_path)
+    binding = load_binding("h3-ref2va-int8-convrot")
+    assert not binding.profiles
+    assert binding.profile_names
+    contract = build_startup_contract(binding.variant_id)
+    assert {graph["accelerator_id"] for graph in contract["graphs"]} == {"native20", "pdd8"}
+    assert "MiniMaxH3ReferenceToVideo" in mode_capabilities.core_mode_node_types()
+    assert {row["component_id"] for row in required_h3_components(binding.catalog)} == {
+        "minimax-h3-diffusion", "minimax-h3-text-encoder", "minimax-h3-vae", "minimax-h3-lora",
+    }
+    assert {row["component_id"] for row in mode_capabilities.required_node_packs(binding.catalog)} == {
+        "ComfyUI-KJNodes", "ComfyUI-SolAttn_triton",
+    }
 
 
 def test_v2_evidence_stays_ready_when_one_template_drifts(studio):
@@ -210,17 +176,18 @@ def test_changed_core_node_set_invalidates_v2_seal(studio):
 def test_core_mode_nodes_refuse_renderer_without_baseline_nodes():
     object_info = {'Reroute': {}, 'Note': {}}
     with pytest.raises(HTTPException) as exc:
-        from shine.comfyops.service_validation import _validate_core_mode_nodes
-        _validate_core_mode_nodes(object_info)
+        from shine.comfyops.service_validation import _validate_mode_workflows
+        _validate_mode_workflows(object_info)
     detail = exc.value.detail
     assert detail['code'] == 'CORE_MODE_NODES_MISSING'
     assert detail['missing_nodes']
 
 
 def test_core_mode_nodes_accept_full_baseline_inventory():
-    from shine.comfyops.service_validation import _validate_core_mode_nodes
-    inventory = {name: {'input': {}} for name in mode_capabilities.core_mode_node_types()}
-    _validate_core_mode_nodes(inventory)  # must not raise
+    from shine.comfyops.service_validation import _validate_mode_workflows
+    native, _pdd = mode_capabilities.mode_workflows()
+    inventory = {name: {'input': {}} for name in native.required_nodes}
+    assert set(_validate_mode_workflows(inventory)["accelerators"]) == {"native20"}
 
 
 def test_startup_node_gate_ignores_non_baseline_variant_profiles(studio):
@@ -237,17 +204,15 @@ def test_startup_node_gate_ignores_non_baseline_variant_profiles(studio):
             parameter_map={}, media_transfers={}, required_nodes=[],
             checkpoint_id=None, graph_sha256='x' * 64, model_identity={},
         ))
-    required = required_workflow_node_types(factory)
+    required = required_workflow_node_types()
     assert 'CandidateOnlyNode' not in required
     assert required  # the baseline classes still gate the renderer
 
 
-def test_startup_node_gate_covers_registered_baseline_graphs(studio):
-    factory, project_id = studio
+def test_startup_node_gate_comes_from_the_workflow_definition():
     from shine.comfyops.handoff_startup import required_workflow_node_types
-    with factory.begin() as db:
-        _register_baseline_rows(db, project_id)
-    required = required_workflow_node_types(factory)
+    required = required_workflow_node_types()
+    assert required == mode_capabilities.core_mode_node_types()
     assert 'MiniMaxH3ReferenceToVideo' in required
 
 
@@ -266,7 +231,8 @@ def test_existing_v2_seal_with_audio_superset_still_valid(studio):
 
     factory, _ = studio
     identity = _identity_stub()
-    old_nodes = sorted(set(mode_capabilities.core_mode_node_types()) | {'VHS_LoadAudioUpload'})
+    old_nodes = sorted({node for workflow in mode_capabilities.mode_workflows()
+                        for node in workflow.required_nodes} | {'VHS_LoadAudioUpload'})
     with factory.begin() as db:
         record_service_evidence(db, identity, {'mode_capabilities': {'required_nodes': old_nodes}})
     with factory() as db:

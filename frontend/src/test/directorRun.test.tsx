@@ -143,7 +143,7 @@ describe('⑤ 拍摄范围', () => {
     // 开拍提交的是生产策略（模型+加速），不再是静态方案 id；页面上不出现方案下拉。
     const strategy = posted?.['strategy'] as unknown as Record<string, unknown>;
     expect(strategy?.['model_variant_id']).toBe('h3-ref2va-int8-convrot');
-    expect(strategy?.['accelerator_id']).toBe('pdd8');
+    expect(strategy?.['accelerator_id']).toBe('native20');
     expect(posted?.['workflow_profile_id']).toBeUndefined();
   });
 

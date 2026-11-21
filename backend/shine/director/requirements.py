@@ -116,12 +116,7 @@ def _alias_index(catalog: dict[str, Any]) -> dict[str, str]:
 
 
 def bound_profile(db: Session, project_id: str) -> WorkflowProfile | None:
-    """The profile the current scope really renders with, from existing rows.
-
-    A confirmed package pins its profile.  A project without a package has no
-    frozen binding yet, and the newest registered profile is the honest answer;
-    mode names alone never decide it.
-    """
+    """Return an explicitly frozen legacy profile, when the package has one."""
     from shine.director.models import DirectorPackageVersion
 
     package = db.scalars(select(DirectorPackageVersion).where(
@@ -132,11 +127,8 @@ def bound_profile(db: Session, project_id: str) -> WorkflowProfile | None:
     if package is not None:
         profile_id = ((package.manifest or {}).get("binding") or {}).get("workflow_profile_id")
         if profile_id:
-            row = db.get(WorkflowProfile, profile_id)
-            if row is not None:
-                return row
-    return db.scalars(select(WorkflowProfile).where(
-        WorkflowProfile.project_id == project_id).order_by(WorkflowProfile.created_at.desc())).first()
+            return db.get(WorkflowProfile, profile_id)
+    return None
 
 
 def reference_capacity(profile: WorkflowProfile | None) -> dict[str, Any]:

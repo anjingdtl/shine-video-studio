@@ -11,10 +11,11 @@ import hashlib
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections import Counter
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 
 from shine.comfy.client import (
     ComfyError,
@@ -28,16 +29,22 @@ from shine.comfy.graph_compiler import (
     ACCELERATORS,
     AUDIO_REFERENCE_LIMIT,
     IMAGE_REFERENCE_LIMIT,
+    INT8_VARIANT_ID,
     TOTAL_REFERENCE_LIMIT,
+    VARIANT_ACCELERATORS,
     VIDEO_REFERENCE_LIMIT,
     CompiledWorkflow,
     GraphCompileError,
     SecondPassSpec,
     compile_ref2va_workflow,
 )
-from shine.comfy.provider import PreparedSubmission, find_output, reconcile_submission, submit_prepared_prompt
-from shine.comfy.workflow import apply_parameters, graph_hash, validate_against_object_info
-from shine.h3.mode_policy import REQUIRED_GENERATION_MODE, ModePolicyError, require_project_mode
+from shine.comfy.provider import (
+    find_output,
+    prepare_workflow_submission,
+    reconcile_submission,
+    submit_prepared_prompt,
+)
+from shine.comfy.workflow import apply_parameters, graph_hash
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
 
 MAX_IMAGE_SLOTS = IMAGE_REFERENCE_LIMIT
@@ -55,6 +62,7 @@ class H3ExecutionError(RuntimeError):
     def __init__(self, code: str, message: str, details: dict[str, Any] | None = None):
         super().__init__(message)
         self.code = code
+        self.message = message
         self.details = details or {}
 
 
@@ -83,6 +91,7 @@ class H3ExecutionRequest:
     second_pass: SecondPassSpec | None = None
     extra_data: dict[str, Any] | None = None
     idempotency_key: str = ""
+    recipe_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -99,15 +108,35 @@ class H3ExecutionReceipt:
 
 
 def verified_variants_catalog() -> list[dict[str, Any]]:
-    """Return H3 stack variants registered by the machine catalog."""
+    """Return production variants with an audited dynamic graph recipe."""
+    from shine.strategy import model_variant_options
+
     return [
         {
-            "variant_id": "h3-ref2va-int8-convrot",
-            "label": "H3 Ref2VA INT8 ConvRot（本机真机基线）",
+            "variant_id": row["variant_id"],
+            "label": row["label"],
             "verified": True,
-            "accelerators": ["pdd8", "native20"],
+            "accelerators": list(VARIANT_ACCELERATORS[row["variant_id"]]),
         }
+        for row in model_variant_options()
+        if row["verified"]
     ]
+
+
+class ReferenceCounts(TypedDict):
+    image_count: int
+    audio_count: int
+    video_count: int
+
+
+def render_reference_counts(manifest: Iterable) -> ReferenceCounts:
+    """H3 numbers subject and still-image references in one shared sequence."""
+    counts = Counter(item.use_as.value for item in manifest)
+    return {
+        "image_count": counts["subject"] + counts["picture"],
+        "audio_count": counts["audio"],
+        "video_count": counts["video"],
+    }
 
 
 def compile_h3_ref2va_graph(
@@ -115,38 +144,30 @@ def compile_h3_ref2va_graph(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
-    variant_id: str = "h3-ref2va-int8-convrot",
+    variant_id: str = INT8_VARIANT_ID,
     accelerator_id: str = "pdd8",
     second_pass: SecondPassSpec | None = None,
     object_info: dict[str, Any] | None = None,
 ) -> CompiledWorkflow:
-    """Single Ref2VA compile entry enforcing Ref2VA-only policy & slot limits."""
+    """Compile the single Ref2VA definition for the frozen reference layout."""
     try:
-        require_project_mode(REQUIRED_GENERATION_MODE)
-    except ModePolicyError as exc:
-        raise H3ExecutionError("PROJECT_REQUIRES_REF2VA", str(exc)) from exc
-
-    if image_count <= 0:
-        raise H3ExecutionError(
-            "PROJECT_REQUIRES_REF2VA",
-            "Ref2VA 生产要求每个镜头至少绑定 1 张有效图片参考。",
-            {"image_count": image_count},
+        return compile_ref2va_workflow(
+            variant_id=variant_id,
+            accelerator_id=accelerator_id,
+            second_pass=second_pass,
+            image_count=image_count,
+            audio_count=audio_count,
+            video_count=video_count,
+            object_info=object_info,
         )
-    if image_count + audio_count + video_count > MAX_TOTAL_SLOTS:
-        raise H3ExecutionError(
-            "TOTAL_REFERENCE_LIMIT_EXCEEDED",
-            f"参考素材总数不能超过 {MAX_TOTAL_SLOTS}。",
-            {"image_count": image_count, "audio_count": audio_count, "video_count": video_count},
-        )
-    return compile_ref2va_workflow(
-        variant_id=variant_id,
-        accelerator_id=accelerator_id,
-        second_pass=second_pass,
-        image_count=image_count,
-        audio_count=audio_count,
-        video_count=video_count,
-        object_info=object_info,
-    )
+    except GraphCompileError as exc:
+        if exc.code == "REF2VA_IMAGE_REFERENCE_REQUIRED":
+            raise H3ExecutionError(
+                "PROJECT_REQUIRES_REF2VA",
+                "Ref2VA 生产要求每个镜头至少绑定 1 张有效图片参考。",
+                {"image_count": image_count},
+            ) from exc
+        raise
 
 
 def extract_video_output(history_record: dict[str, Any]) -> tuple[str, str, str]:
@@ -266,9 +287,12 @@ class ComfyH3Executor:
             second_pass=request.second_pass,
             object_info=object_info,
         )
-        validation = compiled.validated_against or validate_against_object_info(
-            compiled.graph, compiled.parameter_map, object_info
-        )
+        if request.recipe_sha256 and compiled.recipe_sha256 != request.recipe_sha256:
+            raise H3ExecutionError(
+                "WORKFLOW_IDENTITY_CHANGED", "逐镜执行图与冻结请求的配方哈希不一致。",
+                {"expected": request.recipe_sha256, "actual": compiled.recipe_sha256},
+            )
+        validation = compiled.validated_against or {}
         if validation["missing_nodes"] or validation["missing_inputs"]:
             raise H3ExecutionError(
                 "H3_WORKFLOW_NODES_UNAVAILABLE",
@@ -312,24 +336,18 @@ class ComfyH3Executor:
                 aud_idx += 1
                 uploaded_names[f"reference_audio_{aud_idx}"] = remote_name
 
-        param_values: dict[str, Any] = {
-            "positive_prompt": request.prompt_text,
-            "duration": float(request.duration_s),
-            "seed": int(request.seed),
-            "width": int(request.width),
-            "height": int(request.height),
-            **uploaded_names,
-        }
         try:
-            final_graph = apply_parameters(compiled.graph, compiled.parameter_map, param_values)
+            prepared = prepare_workflow_submission(
+                compiled,
+                prompt=request.prompt_text,
+                duration_s=float(request.duration_s),
+                seed=int(request.seed),
+                width=int(request.width),
+                height=int(request.height),
+                references=uploaded_names,
+            )
         except ComfyWorkflowError as exc:
             raise H3ExecutionError("WORKFLOW_PARAMETER_ERROR", str(exc), details=exc.details) from exc
-        prepared = PreparedSubmission(
-            prompt=final_graph,
-            prompt_graph_sha256=graph_hash(final_graph),
-            workflow_hash=compiled.graph_sha256,
-            uploaded_references=len(uploaded_names),
-        )
 
         if on_before_submit is not None:
             on_before_submit(prepared.prompt_graph_sha256, prepared.prompt)

@@ -186,7 +186,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const [selected, setSelected] = useState<string[]>([]);
   const [options, setOptions] = useState<StrategyOptions>(FALLBACK_OPTIONS);
   const [variantId, setVariantId] = useState(typeof stored?.variantId === 'string' ? stored.variantId : 'h3-ref2va-int8-convrot');
-  const [acceleratorId, setAcceleratorId] = useState(typeof stored?.acceleratorId === 'string' ? stored.acceleratorId : 'pdd8');
+  const [acceleratorId, setAcceleratorId] = useState(typeof stored?.acceleratorId === 'string' ? stored.acceleratorId : 'native20');
   // 画幅/分辨率在七阶段里只有这一个控制节点：产出 OutputSpec 宽高，
   // 随开拍冻结进导演包，派发读同一份 binding.output。
   const [orientation, setOrientation] = useState<Orientation>(stored?.orientation === 'portrait' ? 'portrait' : 'landscape');
@@ -523,7 +523,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         {/* 生产策略：模型版本 / 加速 / 二次精修 / 高清视频。参考素材和每一镜的工作流由系统自动安排。 */}
         <div className="strategy-picker">
           <p className="strategy-note">
-            系统会按每一镜的分镜和已确认素材自动安排参考图/音频与生成流程；这里只需要选模型与生产策略。
+            选择模型和生产策略。Ref2VA 工作流会根据每镜已确认的参考素材生成执行图。
           </p>
           <div className="strategy-row" role="radiogroup" aria-label="模型版本">
             <span className="strategy-label">模型版本</span>

@@ -52,7 +52,7 @@ STEP_LABELS = {
     "TARGET": "确认本机安装与端口",
     "RECIPE": "生成受管运行配置",
     "IMAGE_BIND": "对齐出图运行时",
-    "PROFILES": "登记生成方案",
+    "PROFILES": "采用 Ref2VA 工作流定义",
     "VALIDATE": "核对运行合同",
     "IMAGE_VERIFY": "核对出图节点",
     "IMAGE_SAMPLES": "生成三类真实出图小样",
@@ -79,10 +79,8 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
         steps.extend(["INSTANCE", "TARGET", "RECIPE"])
         if "image" in capabilities:
             steps.append("IMAGE_BIND")
-        if "h3" in capabilities:
-            steps.append("PROFILES")
-            if verify_runtime:
-                steps.append("VALIDATE")
+        if "h3" in capabilities and verify_runtime:
+            steps.append("VALIDATE")
         if "image" in capabilities:
             steps.append("IMAGE_VERIFY")
             if verify_runtime:
@@ -1353,41 +1351,21 @@ def _step_image_bind(factory, settings, task) -> dict[str, Any]:
 
 
 def _step_profiles(factory, settings, task) -> dict[str, Any]:
-    from shine.api_setup import _register_project_profiles
-
-    if not task.get("project_id"):
-        return {"status": "SKIPPED",
-                "detail": "机器级整备：创建作品后会幂等绑定标准生成方案。"}
-    request = task.get("request") or {}
-    with factory() as db:
-        db.execute(text("BEGIN IMMEDIATE"))
-        _assert_claim_in_tx(db, task)
-        registered = _register_project_profiles(db, str(task.get("project_id")),
-                                                variant_id=request.get("variant_id"))
-    names = [row["name"] for row in registered]
-    return {"status": "DONE", "detail": "生成方案：" + ("、".join(names) if names else "已是最新")}
+    # Still dispatched for a task persisted before P1.
+    return {"status": "SKIPPED", "detail": "逐镜执行图由内置 Ref2VA 工作流定义自动编译。"}
 
 
 def _step_validate(factory, settings, task) -> dict[str, Any]:
-    from sqlalchemy import select
-
     from shine.comfyops.runtime_configuration import (
         RuntimeConfigurationBusy,
         require_idle_configuration,
         runtime_report,
     )
-    from shine.models import WorkflowProfile
-
     with factory() as db:
         _assert_claim_in_tx(db, task)
         report = runtime_report(db, settings)
-        profiles = db.scalars(select(WorkflowProfile).where(
-            WorkflowProfile.project_id == task.get("project_id"))).all() if task.get("project_id") else []
-        profiles_validated = not task.get("project_id") or bool(profiles) and all(
-            row.validated_against for row in profiles
-        )
-        if report.get("status") == "ACTIVE" and report.get("services_verified") and profiles_validated:
-            return {"status": "DONE", "detail": "本机运行合同与生成方案节点均已核验，无需重复启动。"}
+        if report.get("status") == "ACTIVE" and report.get("services_verified"):
+            return {"status": "DONE", "detail": "本机 Ref2VA 运行合同已核验，无需重复启动。"}
         try:
             require_idle_configuration(db)
         except RuntimeConfigurationBusy as exc:
@@ -1398,7 +1376,7 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
                 "detail": "还没有生成这部作品的运行配置。"}
     # Service validation needs the Worker offline, but this task runs *inside*
     # the Worker. Delegate to the supervisor: it stops the Worker, validates and
-    # activates, checks this project's profile nodes, records this step, then
+    # activates, records this step, then
     # restarts the Worker, which resumes here.
     delegation = {
         "task_id": task.get("task_id"),

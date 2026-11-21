@@ -696,10 +696,12 @@ def _confirmed_weight_still_matches(item: dict) -> bool:
     return True
 
 
-def _weight_witness_blockers(instance, *, capability: str = "h3") -> list[str]:
+def _weight_witness_blockers(instance, required, *, capability: str = "h3") -> list[str]:
     payload = instance.payload if isinstance(instance.payload, dict) else {}
     adoption = payload.get("adoption") or {}
     for item in _confirmed_rows_for(adoption, capability):
+        if _verified_key(item) not in required:
+            continue
         if item.get("source") or item.get("head_sha256") or item.get("mtime_ns") is not None:
             try:
                 if not _confirmed_weight_still_matches(item):
@@ -716,7 +718,8 @@ def adopted_installation_blockers(instance, catalog: dict, *, capability: str = 
 
     # Live weight witness checks run on every call (stat + 64 KiB head/tail
     # witness or mtime-triggered rehash), never hidden behind the 3s cache.
-    live_weight_blockers = _weight_witness_blockers(instance, capability=capability)
+    required = _required_capability_files(catalog, capability)
+    live_weight_blockers = _weight_witness_blockers(instance, required, capability=capability)
     key = (str(instance.sha256), graph_hash(catalog), capability, id(_ei.inspect))
     now = time.monotonic()
     hit = _ADOPTION_BLOCKERS_CACHE.get(key)
@@ -751,7 +754,9 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
             (row.get("component_id"), row.get("relative_path"))
             for row in report.get("matches", [])
         }
-        confirmed_rows = _confirmed_rows_for(adoption, capability)
+        required = _required_capability_files(catalog, capability)
+        confirmed_rows = [row for row in _confirmed_rows_for(adoption, capability)
+                          if _verified_key(row) in required]
         for item in confirmed_rows:
             pair = (item.get("component_id"), item.get("relative_path"))
             if item.get("source") or item.get("head_sha256") or item.get("mtime_ns") is not None:
@@ -774,10 +779,17 @@ def _adopted_installation_blockers_uncached(instance, catalog: dict, *, capabili
         expected_nodes = adoption.get("node_fingerprints") or {}
         # Older image-only records pinned only the packs visible in the image
         # catalog. Their evidence still applies to those same packs.
-        actual_nodes = _node_fingerprints(root, load_default_catalog())
+        node_catalog = load_default_catalog()
+        if capability == "h3":
+            from shine.comfyops.mode_capabilities import required_node_packs
+
+            packs = required_node_packs(node_catalog)
+            expected_nodes = {pack["component_id"]: expected_nodes[pack["component_id"]]
+                              for pack in packs if pack["component_id"] in expected_nodes}
+            node_catalog = {"components": packs}
+        actual_nodes = _node_fingerprints(root, node_catalog)
         if any(actual_nodes.get(name) != digest for name, digest in expected_nodes.items()):
             blockers.append("ADOPTED_COMFY_NODES_CHANGED")
-        required = _required_capability_files(catalog, capability)
         verified = {(item.get("component_id"), item.get("relative_path"),
                      item.get("sha256"), item.get("size"))
                     for item in confirmed_rows}

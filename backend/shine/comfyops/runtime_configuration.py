@@ -338,9 +338,11 @@ def service_evidence_status(db, settings, *, identity=None) -> dict:
         # v2+ seals the mode capability set; a change in the audited core
         # node classes means the seal was computed against another recipe
         # generation and must be re-derived, not trusted.
+        from shine.comfy.graph_compiler import INT8_VARIANT_ID
         from shine.comfyops.mode_capabilities import sealed_mode_nodes_compatible
-        sealed = (evidence.get('mode_capabilities') or {}).get('required_nodes') or []
-        if not sealed_mode_nodes_compatible(sealed):
+
+        mode = evidence.get('mode_capabilities') or {}
+        if not sealed_mode_nodes_compatible(mode.get('required_nodes'), mode.get('variant_id') or INT8_VARIANT_ID):
             blockers.append('MODE_CAPABILITY_CONTRACT_CHANGED')
     advisory_reviews = dict(evidence.get('advisory_reviews') or {})
     for role, expected in (evidence.get('review_profiles') or {}).items():

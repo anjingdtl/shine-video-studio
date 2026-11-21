@@ -191,10 +191,8 @@ def test_next_instance_plan_state_machine(prep):
     with factory() as db:
         plan = db.get(InstallationPlan, node_step["plan_id"])
         node_names = {p["spec"]["name"] for p in plan.payload["packages"]}
-        assert node_names == {"comfy-runtime-wheels", "ComfyUI-KJNodes", "comfyui-videohelpersuite",
-                              "ComfyUI-MiniMax-H3-PDD-Acc", "ComfyUI-SolAttn_triton",
-                              "Comfyui_Minimax_h3_latent_Upscaler"}
-    # With node_versions recorded, the next step is BIND_MODELS with all five families.
+        assert node_names == {"comfy-runtime-wheels", "ComfyUI-KJNodes", "ComfyUI-SolAttn_triton"}
+    # With the core node packs recorded, the next step binds only baseline families.
     with factory() as db:
         instance = db.get(ComfyInstance, identity)
         instance.payload = {**instance.payload,
@@ -212,7 +210,6 @@ def test_next_instance_plan_state_machine(prep):
             "text_encoders": "minimax-h3-text-encoder",
             "vae": "minimax-h3-vae",
             "loras": "minimax-h3-lora",
-            "pdd_acc": "minimax-h3-pdd",
         }
 
 

@@ -572,14 +572,15 @@ function activateRuntime() {    const candidate = runtime?.candidate;
     const project = projectRef.current;
     if (!candidate || !project) return;
     void run(async () => {
-      // The recipe is machine-wide; the workflows being validated belong to the
-      // project currently open, even when the recipe was created elsewhere.
       const result = await api<{ status: string; node_count: number; workflow_profiles: string[];
+        mode_capabilities?: { accelerators?: Record<string, unknown> };
         review_models: Record<string, string> }>('/setup/services/validate', withJson('POST', {
         project_id: project, recipe_sha256: candidate.recipe_sha256,
       }));
       await loadRuntime(); await loadReadiness();
-      return `服务与工作流验证完成：${result.status} · ${result.workflow_profiles.length} 个工作流 · ${result.node_count} 个节点 · 审片 ${Object.values(result.review_models).join(' / ')}`;
+      const samplers = Object.keys(result.mode_capabilities?.accelerators ?? {}).length;
+      const contract = samplers ? `${samplers} 个采样配方` : `${result.workflow_profiles.length} 个历史工作流`;
+      return `Ref2VA 运行合同核验 ${result.status} · ${contract} · ${result.node_count} 类节点`;
     });
   }
 

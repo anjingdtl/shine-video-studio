@@ -17,10 +17,7 @@ all work unchanged.
 """
 from __future__ import annotations
 
-import json
-from copy import deepcopy
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from shine.comfy.workflow import (
@@ -40,6 +37,9 @@ TOTAL_REFERENCE_LIMIT = 12
 WIDTH_DEFAULT = 1344
 HEIGHT_DEFAULT = 768
 FPS = 24.0
+REF2VA_WORKFLOW_DEFINITION = "shine.ref2va.v1"
+INT8_VARIANT_ID = "h3-ref2va-int8-convrot"
+W6A8_VARIANT_ID = "ref2va-lowend-candidate"
 
 # H3 renders on a 17k+5 frame grid at 24 fps: length must be 5 (mod 17).
 LENGTH_EXPRESSION = "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17"
@@ -48,6 +48,7 @@ UNET_BASELINE = "Minimax-H3\\minimax_h3_ref2va_pruned_int8_convrot.safetensors"
 CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 VIDEO_VAE = "MiniMax-H3(1)\\minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "MiniMax-H3(1)\\minimax_h3_audio_vae_fp32.safetensors"
+W6A8_VIDEO_VAE = "MiniMax-H3(1)\\minimax_h3_video_vae_int8_convrot.safetensors"
 REALISM_LORA = "MiniMax-H3\\h3-realism-people-t2v-i2v-r2v.safetensors"
 PDD_FILE = "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"
 LATENT_UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
@@ -84,22 +85,13 @@ ACCELERATORS = {
     },
 }
 
-BASE_MODEL_NODES = [
-    "MiniMaxH3ReferenceToVideo",
-    "MiniMaxH3SigmaShift",
-    "MiniMaxChunkFeedForward",
-    "MiniMaxH3MemoryEfficientSageAttentionPatch",
-    "MiniMaxLowVRAMAttention",
-    "SolAttnPatch",
-    "VAEDecodeAudio",
-    "SaveVideo",
-]
-PDD_NODES = ["MiniMaxH3PDDAccApply", "ShineH3SamplingMode"]
-SECOND_PASS_NODES = [
-    "MinimaxH3LatentUpscaler3DRefineHandoff",
-    "MiniMaxH3PDDAccScheduler",
-    "VRAM_Debug",
-]
+# In baseline order, the first recipe is the single-pass installation minimum.
+# W6A8 has a pinned graph recipe, but remains a candidate at production admission.
+VARIANT_ACCELERATORS = {
+    INT8_VARIANT_ID: ("native20", "pdd8"),
+    W6A8_VARIANT_ID: ("native20",),
+}
+BASELINE_ACCELERATOR_ID = VARIANT_ACCELERATORS[INT8_VARIANT_ID][0]
 
 
 class GraphCompileError(ValueError):
@@ -159,8 +151,8 @@ class CompiledWorkflow:
     def execution_identity(self) -> dict[str, Any]:
         """The frozen execution snapshot fields persisted with the attempt."""
         return {
-            "compiler": ("shine.graph_compiler.v2" if self.variant_id == "ref2va-lowend-candidate"
-                         else "shine.graph_compiler.v1"),
+            "definition": REF2VA_WORKFLOW_DEFINITION,
+            "compiler": _recipe_version(self.variant_id),
             "variant_id": self.variant_id,
             "accelerator_id": self.accelerator_id,
             "second_pass": (self.second_pass.recipe_hash() if self.second_pass else None),
@@ -170,60 +162,34 @@ class CompiledWorkflow:
         }
 
 
-def _variant_checkpoint(variant_id: str) -> str:
-    """Resolve the DiT weight file from the audited variant manifest."""
-    if variant_id in (None, "", "h3-ref2va-int8-convrot"):
-        return UNET_BASELINE
+def _recipe_version(variant_id: str) -> str:
+    # Historical recipe digests stay reproducible for frozen snapshots/plans.
+    return "shine.graph_compiler.v2" if variant_id == W6A8_VARIANT_ID else "shine.graph_compiler.v1"
+
+
+def _candidate_weights() -> tuple[str, str]:
+    """Read the W6A8 checkpoint and its audited source digest from the manifest."""
     from shine.comfyops.variants import load_variant_manifest
 
-    manifest = load_variant_manifest(variant_id)
-    checkpoint = str(manifest.get("checkpoint_id") or "")
+    try:
+        manifest = load_variant_manifest(W6A8_VARIANT_ID)
+    except (OSError, ValueError) as exc:
+        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "候选模型清单无法读取。") from exc
+    checkpoint = manifest.get("checkpoint_id")
     if not checkpoint:
-        raise GraphCompileError(
-            "VARIANT_CHECKPOINT_UNDECLARED",
-            "这个模型变体的清单没有声明 checkpoint 文件，不能编译执行图。",
-            {"variant_id": variant_id},
-        )
-    return checkpoint
-
-
-
-def _candidate_stack(accelerator_id: str, second_pass: SecondPassSpec | None) -> tuple[dict, dict, list, str]:
-    """Read the pinned candidate recipe; absence or drift never falls back to INT8."""
-    from shine.comfyops.variants import load_variant_manifest
-
-    if accelerator_id != "native20" or second_pass is not None:
-        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该候选模型仅登记 native20 单采配方。")
-    manifest = load_variant_manifest("ref2va-lowend-candidate")
-    profile_id = "local-h3-ref2va-lowend-pdd-free-2img"
-    path = Path(__file__).resolve().parents[3] / "config/workflows/ref2va-lowend-pdd-free-2img.json"
-    profile = json.loads(path.read_text(encoding="utf-8"))
-    source = profile["graph"]
-    digest = graph_hash(source)
-    if digest != manifest.get("graph_sha256", {}).get(profile_id):
-        raise GraphCompileError("VARIANT_RECIPE_DRIFT", "候选工作流与登记的配方哈希不一致。")
-    roles = {item["role"]: item for item in manifest.get("files", [])}
-    for role, node, key in (("dit", "10", "unet_name"), ("text_encoder", "20", "clip_name"),
-                            ("video_vae", "21", "vae_name")):
-        name = str(source[node]["inputs"][key]).replace("\\", "/").split("/")[-1]
-        if role not in roles or name != str(roles[role]["relative_path"]).split("/")[-1]:
+        raise GraphCompileError("VARIANT_CHECKPOINT_UNDECLARED", "候选模型未声明 checkpoint。")
+    digest = manifest.get("graph_sha256", {}).get("local-h3-ref2va-lowend-pdd-free-2img")
+    if not digest:
+        raise GraphCompileError("VARIANT_RECIPE_DRIFT", "候选模型清单缺少已审计的来源图哈希。")
+    roles = {item["role"]: item["relative_path"].split("/")[-1] for item in manifest["files"]}
+    for role, path in (("dit", checkpoint), ("text_encoder", CLIP), ("video_vae", W6A8_VIDEO_VAE)):
+        if roles.get(role) != path.replace("\\", "/").split("/")[-1]:
             raise GraphCompileError("VARIANT_RECIPE_MISMATCH", "候选配方与变体清单不一致。", {"role": role})
-    # The candidate's five audited model nodes are remapped to the existing
-    # compiler's output node 16, without introducing the baseline LoRA/SolAttn.
-    mapping = {"10": "10", "11": "12", "12": "13", "13": "14", "14": "16"}
-    nodes = {}
-    for old, new in mapping.items():
-        node = deepcopy(source[old])
-        model = node["inputs"].get("model")
-        if isinstance(model, list):
-            model[0] = mapping[model[0]]
-        nodes[new] = node
-    loaders = {key: deepcopy(source[key]) for key in ("20", "21", "22")}
-    return nodes, loaders, list(profile["required_nodes"]), digest
+    return checkpoint, digest
 
 
-def _model_stack(unet: str, *, sage_attention: bool = True) -> dict[str, Any]:
-    """UNET -> realism LoRA -> sigma shift -> memory savers -> SolAttn."""
+def _model_stack(unet: str, *, sage_attention: bool, lowend: bool) -> dict[str, Any]:
+    """Parameterize the shared model chain with the variant's audited patches."""
     nodes = {
         "10": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
         "11": {
@@ -268,6 +234,10 @@ def _model_stack(unet: str, *, sage_attention: bool = True) -> dict[str, Any]:
     if not sage_attention:
         del nodes["14"]
         nodes["15"]["inputs"]["model"] = ["13", 0]
+    if lowend:
+        del nodes["11"]
+        nodes["12"]["inputs"].update(model=["10", 0], shift_video=12, shift_audio=3)
+        nodes["16"] = nodes.pop("15")
     return nodes
 
 
@@ -309,7 +279,7 @@ def _sampling_stack(accelerator_id: str, steps: int) -> tuple[dict[str, Any], li
 
 def compile_ref2va_workflow(
     *,
-    variant_id: str = "h3-ref2va-int8-convrot",
+    variant_id: str = INT8_VARIANT_ID,
     accelerator_id: str = "pdd8",
     second_pass: SecondPassSpec | None = None,
     image_count: int,
@@ -360,6 +330,12 @@ def compile_ref2va_workflow(
             f"视频参考超过官方上限 {VIDEO_REFERENCE_LIMIT} 个。",
             {"video_count": video_count, "limit": VIDEO_REFERENCE_LIMIT},
         )
+    if image_count + audio_count + video_count > TOTAL_REFERENCE_LIMIT:
+        raise GraphCompileError(
+            "TOTAL_REFERENCE_LIMIT_EXCEEDED",
+            f"参考素材总数超过官方上限 {TOTAL_REFERENCE_LIMIT}。",
+            {"total": image_count + audio_count + video_count, "limit": TOTAL_REFERENCE_LIMIT},
+        )
     if video_count:
         # No audited loader recipe exists for the ref_videos group in this
         # installation yet.  Building one would mean inventing a node name -
@@ -368,12 +344,6 @@ def compile_ref2va_workflow(
             "VIDEO_REFERENCE_LOADER_UNVERIFIED",
             "视频参考的装载节点还没有在本机 object_info 上核验，不能编译。",
             {"video_count": video_count},
-        )
-    if image_count + audio_count + video_count > TOTAL_REFERENCE_LIMIT:
-        raise GraphCompileError(
-            "TOTAL_REFERENCE_LIMIT_EXCEEDED",
-            f"参考素材总数超过官方上限 {TOTAL_REFERENCE_LIMIT}。",
-            {"total": image_count + audio_count + video_count, "limit": TOTAL_REFERENCE_LIMIT},
         )
     if second_pass is not None:
         if not 0.0 < float(second_pass.denoise) <= 1.0:
@@ -389,20 +359,18 @@ def compile_ref2va_workflow(
                 {"latent_scale": second_pass.latent_scale},
             )
 
-    checkpoint = _variant_checkpoint(variant_id)
-    steps = int(ACCELERATORS[accelerator_id]["steps"])
-    graph: dict[str, Any] = {}
-    candidate = variant_id == "ref2va-lowend-candidate"
-    candidate_digest = None
-    if candidate:
-        model_nodes, candidate_loaders, candidate_required, candidate_digest = _candidate_stack(
-            accelerator_id, second_pass
+    variant = variant_id or INT8_VARIANT_ID
+    if variant not in VARIANT_ACCELERATORS:
+        raise GraphCompileError(
+            "VARIANT_RECIPE_UNVERIFIED", "该模型变体尚无完整的已审核动态配方。",
+            {"variant_id": variant_id},
         )
-        graph.update(model_nodes)
-    elif variant_id in (None, "", "h3-ref2va-int8-convrot"):
-        graph.update(_model_stack(checkpoint, sage_attention=accelerator_id != "pdd8"))
-    else:
-        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该模型变体尚无完整的已审核动态配方。")
+    candidate = variant == W6A8_VARIANT_ID
+    if candidate and (accelerator_id not in VARIANT_ACCELERATORS[variant] or second_pass is not None):
+        raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该候选模型仅登记 native20 单采配方。")
+    checkpoint, candidate_digest = _candidate_weights() if candidate else (UNET_BASELINE, None)
+    steps = int(ACCELERATORS[accelerator_id]["steps"])
+    graph = _model_stack(checkpoint, sage_attention=accelerator_id != "pdd8", lowend=candidate)
     sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(accelerator_id, steps)
     graph.update(sampling)
 
@@ -410,15 +378,13 @@ def compile_ref2va_workflow(
     # one LoadImage per image reference starting at node 40.
     graph.update({
         "20": {"class_type": "CLIPLoader", "inputs": {"clip_name": CLIP, "type": "minimax", "device": "default"}},
-        "21": {"class_type": "VAELoader", "inputs": {"vae_name": VIDEO_VAE}},
+        "21": {"class_type": "VAELoader", "inputs": {"vae_name": W6A8_VIDEO_VAE if candidate else VIDEO_VAE}},
         "22": {"class_type": "VAELoader", "inputs": {"vae_name": AUDIO_VAE}},
         "30": {
             "class_type": "ComfyMathExpression",
             "inputs": {"expression": LENGTH_EXPRESSION, "values.a": 7.0},
         },
     })
-    if candidate:
-        graph.update(candidate_loaders)
     parameter_map: dict[str, str] = {
         "positive_prompt": "31.inputs.prompt",
         "duration": "30.inputs.values.a",
@@ -458,11 +424,6 @@ def compile_ref2va_workflow(
             "ref_image_size": "match",
         },
     }
-
-    required_nodes = list(candidate_required if candidate else BASE_MODEL_NODES)
-    if accelerator_id == "pdd8":
-        required_nodes.remove("MiniMaxH3MemoryEfficientSageAttentionPatch")
-        required_nodes += PDD_NODES
 
     graph.update({
         "50": {
@@ -508,13 +469,11 @@ def compile_ref2va_workflow(
                 },
             },
         })
-        required_nodes = required_nodes + (["VHS_LoadAudioUpload"] if audio_count else [])
     else:
         # True second sampling stage: the first pass' latent is handed to a
         # second scheduler + model patch and refined through the audited 3D
         # refine handoff, then decoded and packed with the FIRST pass' audio
         # track (the refine stage must not re-synthesize audio).
-        required_nodes = required_nodes + SECOND_PASS_NODES + (["VHS_LoadAudioUpload"] if audio_count else [])
         graph["55"] = {"class_type": "VAEDecodeAudio", "inputs": {"samples": ["53", 0], "vae": ["22", 0]}}
         graph.update({
             "60": {
@@ -592,7 +551,7 @@ def compile_ref2va_workflow(
         media_transfers["audio"] = dict(AUDIO_TRANSFER)
 
     recipe_payload = {
-        "compiler": "shine.graph_compiler.v2" if candidate else "shine.graph_compiler.v1",
+        "compiler": _recipe_version(variant),
         "variant_id": variant_id,
         "checkpoint_id": checkpoint,
         "accelerator_id": accelerator_id,
@@ -605,7 +564,8 @@ def compile_ref2va_workflow(
         recipe_payload["variant_recipe_sha256"] = candidate_digest
     recipe_sha256 = graph_hash(recipe_payload)
 
-    validate_graph(graph, required_nodes=required_nodes)
+    validate_graph(graph)
+    required_nodes = sorted({node["class_type"] for node in graph.values()})
     validated_against = None
     if object_info is not None:
         validated_against = validate_against_object_info(graph, parameter_map, object_info)
@@ -629,7 +589,7 @@ def compile_ref2va_workflow(
         graph=graph,
         parameter_map=parameter_map,
         media_transfers=media_transfers,
-        required_nodes=sorted(set(required_nodes)),
+        required_nodes=required_nodes,
         mode="Ref2VA",
         checkpoint_id=checkpoint,
         variant_id=variant_id,

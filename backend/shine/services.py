@@ -901,11 +901,16 @@ def make_render_request(
     spec = spec or ShotSpec.model_validate(shot.spec)
     style = validate_shot_style(db, project.id, spec, require_current=True)
     strategy = None
-    if body.strategy is not None:
+    strategy_payload = body.strategy
+    if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id and strategy_payload is None:
+        from shine.strategy import DEFAULT_STRATEGY
+
+        strategy_payload = DEFAULT_STRATEGY
+    if strategy_payload is not None:
         from shine.strategy import GenerationStrategy, strategy_blockers
 
         try:
-            strategy = GenerationStrategy.model_validate(body.strategy)
+            strategy = GenerationStrategy.model_validate(strategy_payload)
         except ValueError as exc:
             raise HTTPException(422, detail={
                 "code": "STRATEGY_INVALID",
@@ -927,8 +932,6 @@ def make_render_request(
                 "code": "STRATEGY_PROFILE_EXCLUSIVE",
                 "message": "生产策略与静态生成方案不能同时指定。",
             })
-    if body.provider == RenderProvider.COMFYUI and not body.workflow_profile_id and strategy is None:
-        raise HTTPException(status_code=409, detail="ComfyUI renders require a registered workflow profile")
 
     stored = _binding_rows(db, shot)
     requested = body.references
@@ -1038,8 +1041,8 @@ def make_render_request(
             "action": "BIND_SUBJECT_REFERENCE",
         })
     mode_hint = body.generation_mode
-    if (mode_hint is None and profile is not None
-            and profile.mode.lower() == GenerationMode.REF2VA.value.lower()
+    if (mode_hint is None
+            and (strategy is not None or (profile is not None and profile.mode.lower() == "ref2va"))
             and len(manifest) == 1 and manifest[0].use_as == ReferenceUse.PICTURE
             and manifest[0].frame_role is None):
         # An ordinary reference picture stays a reference when the caller
@@ -1199,23 +1202,21 @@ def make_render_request(
         # checkpoint) and every named refusal (limits, unverified recipes,
         # video references without a proven loader) fires at request time -
         # the Worker re-compiles the same deterministic graph before submit.
-        from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
-
-        image_count = sum(
-            1 for item in manifest if item.use_as in (ReferenceUse.SUBJECT, ReferenceUse.PICTURE)
+        from shine.foundation.h3 import (
+            GraphCompileError,
+            H3ExecutionError,
+            compile_h3_ref2va_graph,
+            render_reference_counts,
         )
-        audio_count = sum(1 for item in manifest if item.use_as == ReferenceUse.AUDIO)
-        video_count = sum(1 for item in manifest if item.use_as == ReferenceUse.VIDEO)
+
         try:
-            compiled_strategy_graph = compile_ref2va_workflow(
+            compiled_strategy_graph = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
-                image_count=image_count,
-                audio_count=audio_count,
-                video_count=video_count,
+                **render_reference_counts(manifest),
             )
-        except GraphCompileError as exc:
+        except (GraphCompileError, H3ExecutionError) as exc:
             raise HTTPException(422, detail={
                 "code": exc.code,
                 "message": exc.message,

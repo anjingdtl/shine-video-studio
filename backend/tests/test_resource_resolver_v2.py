@@ -38,7 +38,8 @@ def test_candidate_pdd_preview_refuses_instead_of_substitution(studio):
     client, _factory, _settings = studio
     project = create_project(client, title="资源预检")
     response = client.post("/api/v1/setup/resources/resolve", json={
-        "project_id": project, "strategy": {"model_variant_id": "ref2va-lowend-candidate"},
+        "project_id": project,
+        "strategy": {"model_variant_id": "ref2va-lowend-candidate", "accelerator_id": "pdd8"},
     })
     assert response.status_code == 200
     assert response.json()["blockers"][0]["code"] == "VARIANT_RECIPE_UNVERIFIED"
@@ -463,7 +464,7 @@ def test_live_node_check_reports_exact_missing_classes(studio, monkeypatch):
 
     monkeypatch.setattr(httpx, "stream", stream)
     with factory() as db:
-        result = check_owned_node_inputs(db, "physical", GenerationStrategy())
+        result = check_owned_node_inputs(db, "physical", GenerationStrategy(accelerator_id="pdd8"))
     assert result["state"] == "NODE_INPUTS_MISSING"
     assert "MiniMaxH3ReferenceToVideo" in result["missing_nodes"]
     assert "MiniMaxH3MemoryEfficientSageAttentionPatch" not in result["missing_nodes"]

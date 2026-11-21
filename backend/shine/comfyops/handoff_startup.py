@@ -11,7 +11,6 @@ is never relaunched blindly.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
@@ -841,7 +840,7 @@ def start_managed_renderer(
             if measured.get("ready") is not True or not verified["ready"]:
                 raise HTTPException(409, "COMFY_STARTUP_MEMORY_INSUFFICIENT")
             guard.check()
-            required = (required_workflow_node_types(factory)
+            required = (required_workflow_node_types(factory, job_id)
                         if required_node_types is None else set(required_node_types))
             try:
                 inventory = verify_required_nodes(f"http://127.0.0.1:{port}", required=required)
@@ -1256,44 +1255,26 @@ def start_managed_review_service(
     return {"group": group, "config": config, "fence": fence}
 
 
-def required_workflow_node_types(factory):
-    """Node types the baseline Ref2VA mode needs a renderer to expose.
+def required_workflow_node_types(factory=None, job_id=None):
+    """The shared mode requirement for a dynamic job's frozen variant."""
+    from shine.comfy.graph_compiler import INT8_VARIANT_ID
+    from shine.comfyops.mode_capabilities import core_mode_node_types
 
-    The startup gate is the mode's audited baseline recipe set, not the union
-    of every registered profile: a candidate variant registered by one project
-    (extra node packs of an unaccepted quantization, project-local wide graphs)
-    must not become a hard requirement for every renderer this installation
-    starts.  Shots that actually compile those graphs validate their own nodes
-    against live ``object_info`` before submission.
-    """
-    from shine.comfyops.mode_capabilities import baseline_profile_names
-    from shine.models import WorkflowProfile
-
-    baseline = set(baseline_profile_names())
-    with factory() as db:
-        rows = db.scalars(select(WorkflowProfile).where(
-            WorkflowProfile.name.in_(sorted(baseline)))).all()
-    non_audio = [row for row in rows if "1aud" not in row.name]
-    selected = non_audio or rows
-    needed = set()
-    for row in selected:
-        graph = row.graph
-        if isinstance(graph, str):
-            try:
-                graph = json.loads(graph)
-            except ValueError:
-                continue
-        if not isinstance(graph, dict):
-            continue
-        for node in graph.values():
-            if isinstance(node, dict) and node.get("class_type"):
-                needed.add(str(node["class_type"]))
-    needed.discard("VHS_LoadAudioUpload")
-    return needed
+    variant_id = INT8_VARIANT_ID
+    if job_id is not None:
+        with factory() as db:
+            job = db.get(Job, job_id)
+            if job is not None:
+                if job.workflow_profile_id:
+                    # Frozen legacy jobs use the existing profile validation
+                    # and final ComfyUI validation of their exact prompt.
+                    return set()
+                variant_id = (job.request.get("strategy") or {}).get("model_variant_id") or INT8_VARIANT_ID
+    return core_mode_node_types(variant_id)
 
 
 class MissingRequiredNodes(HTTPException):
-    """The renderer cannot serve every registered production workflow."""
+    """The renderer lacks classes required by the current capability."""
 
     def __init__(self, missing):
         super().__init__(409, "COMFY_REQUIRED_NODE_MISSING")
@@ -1304,8 +1285,7 @@ def verify_required_nodes(base_url, *, required, timeout=30):
     """Confirm the renderer really exposes every required node type.
 
     A static whitelist can drift from the installed node packs. Reading the
-    live inventory closes that gap: a renderer that cannot serve every
-    registered workflow is rejected before any prompt is accepted.
+    live inventory closes that gap for the current production capability.
     """
     import httpx
 

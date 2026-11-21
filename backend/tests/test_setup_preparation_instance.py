@@ -31,6 +31,7 @@ def test_steps_include_instance_first():
     # 一次授权从补工具开始,核验已有字节,下载缺项,然后才创建实例。
     assert steps[:4] == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "INSTANCE"]
     assert "TARGET" in steps and "VALIDATE" in steps
+    assert "PROFILES" not in steps
 
 
 def test_instance_step_skips_when_installation_exists(studio, monkeypatch):
@@ -146,6 +147,8 @@ def test_prepare_plan_reports_runtime_gap_and_closure(studio, fake_deployment_ho
     assert body["runtime_gap"]["instance_ladder"][0] == "CREATE"
     h3 = next(row for row in body["plans"] if row["capability"] == "h3")
     assert "comfyui" in h3["components"]
+    assert {"minimax-h3-pdd", "comfyui-videohelpersuite", "ComfyUI-MiniMax-H3-PDD-Acc",
+            "Comfyui_Minimax_h3_latent_Upscaler"}.isdisjoint(h3["components"])
     assert h3["download_bytes"] > 0
 
 

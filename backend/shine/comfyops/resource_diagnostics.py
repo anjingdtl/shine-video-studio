@@ -6,8 +6,8 @@ from typing import Any
 
 import httpx
 
-from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
 from shine.comfy.workflow import validate_against_object_info
+from shine.foundation.h3 import GraphCompileError, compile_h3_ref2va_graph
 from shine.strategy import GenerationStrategy
 
 MAX_OBJECT_INFO_BYTES = 32 * 1024 * 1024
@@ -19,7 +19,7 @@ def check_owned_node_inputs(db, instance_id: str, strategy: GenerationStrategy) 
     from shine.runtime_orchestrator.status import _owned_listener_pid
 
     try:
-        compiled = compile_ref2va_workflow(
+        compiled = compile_h3_ref2va_graph(
             variant_id=strategy.model_variant_id, accelerator_id=strategy.accelerator_id,
             second_pass=strategy.second_pass_spec(), image_count=1,
         )

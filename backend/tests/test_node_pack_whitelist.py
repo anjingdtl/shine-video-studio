@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 from shine.comfyops.existing_installation import resolve_node_pack_dirs
 from shine.comfyops.service_validation import (
-    _validate_workflows_against_object_info,
+    _validate_mode_workflows,
     renderer_log_evidence,
 )
 
@@ -64,11 +64,9 @@ def test_contract_failure_carries_renderer_log_evidence(tmp_path):
     evidence = renderer_log_evidence(str(log))
     assert evidence["renderer_log"] == str(log)
     assert any("Cannot import" in line for line in evidence["import_errors"])
-    contracts = {"p": type("P", (), {"graph": {"1": {"class_type": "SolAttnPatch"}},
-                                   "parameter_map": {}})()}
     with pytest.raises(HTTPException) as exc:
-        _validate_workflows_against_object_info(contracts, {}, log_evidence=evidence)
-    assert exc.value.detail["code"] == "LIVE_WORKFLOW_CONTRACT_FAILED"
+        _validate_mode_workflows({}, log_evidence=evidence)
+    assert exc.value.detail["code"] == "CORE_MODE_NODES_MISSING"
     assert exc.value.detail["renderer_log"] == str(log)
     assert exc.value.detail["import_errors"]
 

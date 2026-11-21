@@ -21,6 +21,7 @@ from shine.comfyops.handoff_startup import (
     reconcile_managed_startups,
     start_managed_renderer,
 )
+from shine.comfyops.mode_capabilities import core_mode_node_types
 from shine.comfyops.models import ComfyInstance, ResourceLease
 from shine.comfyops.renderer_supervisor import windows_port_listeners
 from shine.comfyops.scheduler import ResourceScheduler
@@ -127,9 +128,7 @@ def claimed(api):
 
 def launch_arguments(renderer, inventory=None):
     script, marker, port, root = renderer
-    # The stub serves the node inventory that a real renderer exposes; the
-    # registered test workflow needs H3BaseSampler and SaveVideo.
-    served = {"H3BaseSampler": {}, "SaveVideo": {}} if inventory is None else inventory
+    served = dict.fromkeys(core_mode_node_types(), {}) if inventory is None else inventory
     return {
         "argv": [sys.executable, str(script), str(marker)],
         "cwd": str(root),
@@ -163,6 +162,7 @@ def start(factory, settings, renderer, claimed, **overrides):
         probe=overrides.get("probe", ready_memory),
         launch=overrides.get("launch"),
         supervisor_factory=overrides.get("supervisor_factory"),
+        required_node_types=overrides.get("required_node_types"),
     )
 
 
@@ -231,11 +231,12 @@ def test_startup_requires_a_closed_renderer(claimed, renderer, monkeypatch):
         assert db.get(ComfyInstance, "shine-test-renderer") is None
 
 
-def test_startup_refuses_a_renderer_that_cannot_serve_a_registered_workflow(claimed, renderer):
-    """A renderer missing a node of a registered workflow is never registered."""
+def test_startup_refuses_a_renderer_missing_a_core_node(claimed, renderer):
+    """A renderer missing a core Ref2VA node is never registered."""
     factory, settings, job_id, lease_id, attempt_id, version = claimed
     with pytest.raises(HTTPException, match="COMFY_REQUIRED_NODE_MISSING"):
-        start(factory, settings, renderer, claimed, inventory={"H3BaseSampler": {}})
+        start(factory, settings, renderer, claimed, inventory={"H3BaseSampler": {}},
+              required_node_types=core_mode_node_types())
     with factory() as db:
         journal = db.get(AppSetting, STARTUP_PREFIX + "shine-test-renderer")
         assert journal.value["stage"] == "RECONCILE_REQUIRED"

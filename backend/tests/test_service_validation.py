@@ -189,7 +189,7 @@ def test_service_validation_rejects_live_workflow_contract_missing_node(prep, mo
         "project_id": project_id, "recipe_sha256": recipe_sha256,
     }, headers=HEADERS)
     assert response.status_code == 409
-    assert "LIVE_WORKFLOW_CONTRACT_FAILED" in response.text
+    assert response.json()["detail"]["code"] == "CORE_MODE_NODES_MISSING"
 
 
 @pytest.mark.windows_only
@@ -214,14 +214,14 @@ def test_missing_review_models_and_runtime_are_advisory_and_do_not_block_rendere
     result = response.json()
     assert result["status"] == "READY"
     assert started == [True]
-    assert result["auto_registered_profiles"]
+    assert result["auto_registered_profiles"] == result["workflow_profiles"] == []
+    assert set(result["mode_capabilities"]["accelerators"]) == {"pdd8", "native20"}
     assert result["advisory_reviews"]["VLM"]["status"] == "NOT_READY"
     assert result["advisory_reviews"]["ASR"]["status"] == "NOT_READY"
     assert not result["review_models"]
     with factory() as db:
         registered = db.scalars(select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)).all()
-        assert {profile.name for profile in registered} == set(result["workflow_profiles"])
-        assert all(profile.validated_against for profile in registered)
+        assert registered == []
         status = service_evidence_status(db, settings)
         assert status["status"] == "READY", status
         assert status["advisory_reviews"]["VLM"]["status"] == "NOT_READY"
@@ -316,32 +316,34 @@ def test_service_validation_requires_candidate_and_operator(prep):
     assert response.status_code in {401, 403}
 
 
-def test_dynamic_ref2va_allows_missing_audio_plugin_for_image_only_and_rejects_core_missing(prep):
-    """R5 CE-8: Image-only Ref2VA passes without VHS_LoadAudioUpload; core/audio selection rejects missing."""
-    from shine.comfy.graph_compiler import compile_ref2va_workflow
+def test_dynamic_baseline_uses_native_when_pdd_and_audio_nodes_are_absent():
+    from shine.comfyops.mode_capabilities import mode_workflows
+    from shine.foundation.h3 import compile_h3_ref2va_graph
 
-    _client, factory, _settings = prep
-    with factory() as db:
-        _files, contracts, _adv = service_validation._workflow_contracts(db, None)
-    object_info = _fake_object_info()
-    object_info.pop("VHS_LoadAudioUpload", None)
+    native, pdd = mode_workflows()
+    object_info = {name: {"input": {}} for name in native.required_nodes}
+    report = service_validation._validate_mode_workflows(object_info)
+    assert set(report["accelerators"]) == {"native20"}
+    assert report["accelerator_advisories"]["pdd8"]["missing_nodes"] == sorted(
+        set(pdd.required_nodes) - set(native.required_nodes),
+    )
+    audio = compile_h3_ref2va_graph(
+        image_count=1, audio_count=1, accelerator_id="native20", object_info=object_info,
+    )
+    assert audio.validated_against["missing_nodes"] == ["VHS_LoadAudioUpload"]
 
-    advisories = service_validation._validate_workflows_against_object_info(contracts, object_info)
-    assert any(row["code"] == "OPTIONAL_AUDIO_TEMPLATE_NODES_MISSING" for row in advisories)
-
-    # Selecting an audio shot graph while VHS_LoadAudioUpload is missing must still fail.
-    audio_compiled = compile_ref2va_workflow(image_count=1, audio_count=1, object_info=object_info)
-    with pytest.raises(HTTPException) as exc_audio:
-        service_validation._validate_workflows_against_object_info(
-            contracts, object_info,
-            compiled_graph=audio_compiled.graph,
-            compiled_parameter_map=audio_compiled.parameter_map,
-        )
-    assert exc_audio.value.detail["code"] == "LIVE_WORKFLOW_CONTRACT_FAILED"
-    assert "VHS_LoadAudioUpload" in exc_audio.value.detail["missing_nodes"]
-
-    # Removing a core non-audio node must still fail.
-    object_info.pop("MiniMaxH3ReferenceToVideo", None)
+    object_info.pop("MiniMaxH3ReferenceToVideo")
     with pytest.raises(HTTPException) as exc_core:
-        service_validation._validate_workflows_against_object_info(contracts, object_info)
-    assert exc_core.value.detail["code"] == "LIVE_WORKFLOW_CONTRACT_FAILED"
+        service_validation._validate_mode_workflows(object_info)
+    assert exc_core.value.detail["code"] == "CORE_MODE_NODES_MISSING"
+    assert exc_core.value.detail["missing_nodes"] == ["MiniMaxH3ReferenceToVideo"]
+
+
+def test_pdd_sampler_can_validate_without_native_only_sage_attention():
+    from shine.comfyops.mode_capabilities import mode_workflows
+
+    _, pdd = mode_workflows()
+    report = service_validation._validate_mode_workflows({name: {} for name in pdd.required_nodes})
+    assert set(report["accelerators"]) == {"pdd8"}
+    missing = report["accelerator_advisories"]["native20"]["missing_nodes"]
+    assert missing == ["MiniMaxH3MemoryEfficientSageAttentionPatch"]

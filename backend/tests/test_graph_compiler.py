@@ -278,3 +278,69 @@ def test_pdd8_leaves_the_sage_attention_patch_out():
     assert compiled.graph["15"]["inputs"]["model"] == ["13", 0]
     native = compile_ref2va_workflow(accelerator_id="native20", image_count=1)
     assert native.graph["15"]["inputs"]["model"] == ["14", 0]
+
+
+@pytest.mark.parametrize("accelerator_id", ("pdd8", "native20"))
+@pytest.mark.parametrize("images", (1, 2, 6, 9))
+@pytest.mark.parametrize("audio", (0, 1, 3))
+def test_p1_minimal_graph_matrix(accelerator_id, images, audio):
+    from shine.comfy.provider import prepare_workflow_submission
+    from shine.foundation.h3 import compile_h3_ref2va_graph
+
+    shape = dict(accelerator_id=accelerator_id, image_count=images, audio_count=audio)
+    compiled = compile_h3_ref2va_graph(**shape)
+    assert compiled.execution_identity() == compile_h3_ref2va_graph(**shape).execution_identity()
+    assert compiled.required_nodes == sorted({node["class_type"] for node in compiled.graph.values()})
+    assert ("MiniMaxH3PDDAccApply" in compiled.required_nodes) == (accelerator_id == "pdd8")
+    assert ("VHS_LoadAudioUpload" in compiled.required_nodes) == bool(audio)
+    assert "MinimaxH3LatentUpscaler3DRefineHandoff" not in compiled.required_nodes
+
+    refs = {f"reference_image_{index}": f"image-{index}.png" for index in range(1, images + 1)}
+    refs.update({f"reference_audio_{index}": f"audio-{index}.wav" for index in range(1, audio + 1)})
+    transfers = {"image", "audio"} if audio else {"image"}
+    assert set(compiled.media_transfers) == transfers
+    final = prepare_workflow_submission(
+        compiled, prompt="a quiet scene", seed=42, duration_s=4.0, references=refs, width=672, height=384,
+    )
+    assert final.uploaded_references == len(refs)
+    image_values = [row["inputs"]["image"] for row in final.prompt.values() if row["class_type"] == "LoadImage"]
+    audio_values = [
+        row["inputs"]["audio"] for row in final.prompt.values() if row["class_type"] == "VHS_LoadAudioUpload"
+    ]
+    assert image_values == [refs[f"reference_image_{index}"] for index in range(1, images + 1)]
+    assert audio_values == [refs[f"reference_audio_{index}"] for index in range(1, audio + 1)]
+
+
+def test_p1_refusals_do_not_substitute_or_drop_references():
+    from shine.foundation.h3 import H3ExecutionError, compile_h3_ref2va_graph
+
+    with pytest.raises(H3ExecutionError) as missing:
+        compile_h3_ref2va_graph(image_count=0, audio_count=1)
+    assert missing.value.code == "PROJECT_REQUIRES_REF2VA"
+    for shape, code in (
+        (dict(image_count=9, audio_count=3, video_count=1), "TOTAL_REFERENCE_LIMIT_EXCEEDED"),
+        (dict(image_count=1, video_count=1), "VIDEO_REFERENCE_LOADER_UNVERIFIED"),
+        (dict(image_count=1, variant_id="ref2va-nvfp4-lowend", accelerator_id="native20"),
+         "VARIANT_RECIPE_UNVERIFIED"),
+    ):
+        with pytest.raises(GraphCompileError) as refused:
+            compile_h3_ref2va_graph(**shape)
+        assert refused.value.code == code
+
+
+def test_p1_preserves_the_archived_recipe_and_graph_identities():
+    for variant, accelerator, images, audio, graph_sha, recipe_sha in (
+        ("h3-ref2va-int8-convrot", "pdd8", 1, 0,
+         "4fc50291b9bca55f0167e9a4a2bbd7371b03358fa8a97c8db66f3d63b4339645",
+         "d06e3ed501cb649cd144f49a952ea89fe9c3892a7eb834a00fdef29d74086666"),
+        ("h3-ref2va-int8-convrot", "native20", 9, 3,
+         "888ca8d95aca0aebcbf6651e039df5d838938d778721245eb45e423d09443399",
+         "e79973410e21c6b70a83ab58f9c652623cd4bffe5a7f1658d9018e62d7ae1ff8"),
+        ("ref2va-lowend-candidate", "native20", 2, 0,
+         "4d5a3a7f7d291af900fda352cd0acb353fba8c469cb3b95db48a2671a1889d9b",
+         "f712222daa69e2fd906052a98efef42393256453bcd12f3034cc840ae6b634fc"),
+    ):
+        compiled = compile_ref2va_workflow(
+            variant_id=variant, accelerator_id=accelerator, image_count=images, audio_count=audio,
+        )
+        assert (compiled.graph_sha256, compiled.recipe_sha256) == (graph_sha, recipe_sha)

@@ -76,6 +76,30 @@ class ComfyResult:
     error_code: str | None = None
 
 
+def prepare_workflow_submission(
+    profile, *, prompt: str, seed: int | None, duration_s: float,
+    references: dict[str, str], width: int | None, height: int | None,
+) -> PreparedSubmission:
+    """Materialize the exact graph both production lines submit."""
+    parameter_map = profile.parameter_map
+    values = generic_h3_parameters(
+        prompt=prompt, seed=seed, duration_s=duration_s, references=references, width=width, height=height,
+    )
+    mapped = {key: value for key, value in values.items() if key in parameter_map}
+    if "positive_prompt" in parameter_map and not mapped.get("positive_prompt"):
+        raise ComfyUIError("The workflow profile does not accept the compiled H3 prompt")
+    graph = apply_parameters(profile.graph, parameter_map, mapped)
+    # Frozen static profiles can have more loaders than this request binds.
+    used_loaders = {parameter_map[key].split(".", 1)[0] for key in references}
+    graph = prune_unused_reference_nodes(graph, used_loaders)
+    return PreparedSubmission(
+        prompt=graph,
+        prompt_graph_sha256=graph_hash(graph),
+        workflow_hash=graph_hash(profile.graph),
+        uploaded_references=len(references),
+    )
+
+
 def submit_prepared_prompt(
     client: ComfyUIClient,
     prepared: PreparedSubmission,
@@ -571,32 +595,14 @@ class ComfyUIRenderService:
             object_info=object_info,
             profile=profile,
         )
-        values = generic_h3_parameters(
+        return prepare_workflow_submission(
+            profile,
             prompt=request.compiled_prompt or "",
             seed=seed,
             duration_s=request.expected_duration_s,
             references=uploaded,
             width=request.output_width,
             height=request.output_height,
-        )
-        mapped = {key: value for key, value in values.items() if key in profile.parameter_map}
-        if "positive_prompt" in profile.parameter_map and not mapped.get("positive_prompt"):
-            raise ComfyUIError("The workflow profile does not accept the compiled H3 prompt")
-        prompt = apply_parameters(graph, profile.parameter_map, mapped)
-        # The profile may offer more reference slots than this request binds.
-        # The loader of an unused slot would keep its placeholder file name and
-        # the renderer would reject the prompt, so it leaves the submitted graph.
-        used_loader_nodes = {
-            path.split(".", 1)[0]
-            for logical, path in profile.parameter_map.items()
-            if logical in uploaded
-        }
-        prompt = prune_unused_reference_nodes(prompt, used_loader_nodes)
-        return PreparedSubmission(
-            prompt=prompt,
-            prompt_graph_sha256=graph_hash(prompt),
-            workflow_hash=graph_hash(graph),
-            uploaded_references=len(uploaded),
         )
 
     def submit_prepared(

@@ -636,25 +636,21 @@ def _compiled_shot_blockers(
                 # Per-shot dynamic compilation check: the same compiler the
                 # Worker will run must accept this shot's reference layout
                 # under the frozen strategy, or the package is not startable.
-                from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
+                from shine.foundation.h3 import (
+                    GraphCompileError,
+                    H3ExecutionError,
+                    compile_h3_ref2va_graph,
+                    render_reference_counts,
+                )
 
-                def _family(item) -> str:
-                    return getattr(item.use_as, "value", str(item.use_as))
-
-                families = [_family(item) for item in reference_manifest]
-                image_count = sum(1 for family in families if family in ("subject", "picture"))
-                audio_count = sum(1 for family in families if family == "audio")
-                video_count = sum(1 for family in families if family == "video")
                 try:
-                    compile_ref2va_workflow(
+                    compile_h3_ref2va_graph(
                         variant_id=strategy_contract.model_variant_id,
                         accelerator_id=strategy_contract.accelerator_id,
                         second_pass=strategy_contract.second_pass_spec(),
-                        image_count=image_count,
-                        audio_count=audio_count,
-                        video_count=video_count,
+                        **render_reference_counts(reference_manifest),
                     )
-                except GraphCompileError as exc:
+                except (GraphCompileError, H3ExecutionError) as exc:
                     problems.append(_blocker(
                         exc.code,
                         f"镜头「{shot.name}」按所选生产策略无法编译执行图：{exc.message}",

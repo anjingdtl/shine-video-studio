@@ -2249,8 +2249,17 @@ def start_director_production(
         if workflow_profile_id:
             raise HTTPException(422, {"code": "STRATEGY_PROFILE_EXCLUSIVE",
                                       "message": "生产策略与静态生成方案不能同时指定。"})
-    package = _package_for_selection(db, project_id, requested, strategy_sha=strategy_sha,
-                                     output=output_payload)
+    package = _package_for_selection(
+        db, project_id, requested, strategy_sha=strategy_sha,
+        workflow_profile_id=workflow_profile_id, output=output_payload,
+    )
+    if package is None and strategy is None and not workflow_profile_id:
+        from shine.strategy import DEFAULT_STRATEGY
+
+        strategy = DEFAULT_STRATEGY.model_dump(mode="json")
+        package = _package_for_selection(
+            db, project_id, requested, strategy_sha=DEFAULT_STRATEGY.strategy_sha256(), output=output_payload,
+        )
     built = False
     if package is None:
         if strategy is not None:
@@ -2265,16 +2274,7 @@ def start_director_production(
                 settings=settings,
             )
         else:
-            profile_id = workflow_profile_id
-            if not profile_id:
-                from shine.director.requirements import bound_profile
-
-                bound = bound_profile(db, project_id)
-                if bound is None:
-                    raise HTTPException(409, {"code": "WORKFLOW_PROFILE_REQUIRED",
-                                              "message": "先登记本机生成方案，才能真实开拍"})
-                profile_id = bound.id
-            profile = db.get(WorkflowProfile, profile_id)
+            profile = db.get(WorkflowProfile, workflow_profile_id)
             # A profile registered for the whole machine has no project owner; a
             # project-owned profile must belong to this project.
             if profile is None or (profile.project_id and profile.project_id != project_id):
@@ -2335,7 +2335,7 @@ def start_director_production(
 
 
 def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strategy_sha: str | None = None,
-                           output: dict | None = None):
+                           workflow_profile_id: str | None = None, output: dict | None = None):
     """A confirmed, non-stale package whose scope - strategy - and frame match.
 
     A package only replays when it was frozen for the same production
@@ -2369,6 +2369,8 @@ def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strat
             continue
         binding = (package.manifest or {}).get("binding") or {}
         if binding.get("strategy_sha256") != strategy_sha:
+            continue
+        if workflow_profile_id and binding.get("workflow_profile_id") != workflow_profile_id:
             continue
         if norm(binding.get("output")) != wanted_output:
             continue

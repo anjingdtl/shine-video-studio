@@ -5,18 +5,11 @@ import re
 from dataclasses import replace
 from typing import Any
 
-from shine.comfy.graph_compiler import GraphCompileError, compile_ref2va_workflow
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.variant_binding import load_binding
-from shine.comfyops.variant_readiness import weight_evidence
+from shine.comfyops.variant_readiness import _file_name, _graph_model_files, weight_evidence
+from shine.foundation.h3 import GraphCompileError, compile_h3_ref2va_graph
 from shine.strategy import GenerationStrategy, strategy_blockers
-
-# These are filename inputs, not arbitrary text supplied by the browser.
-_MODEL_KEYS = {"unet_name", "clip_name", "vae_name", "lora_name", "pdd_file", "model_name", "model_path"}
-
-
-def _name(value: str) -> str:
-    return value.replace("\\", "/").split("/")[-1].lower()
 
 
 def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, Any]:
@@ -28,7 +21,7 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
     """
     binding = load_binding(strategy.model_variant_id, fresh=True)
     try:
-        compiled = compile_ref2va_workflow(
+        compiled = compile_h3_ref2va_graph(
             variant_id=strategy.model_variant_id, accelerator_id=strategy.accelerator_id,
             second_pass=strategy.second_pass_spec(), image_count=1,
         )
@@ -38,15 +31,13 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
                 "blockers": [{"code": exc.code}], "download_eligible": False,
                 "trial_ready": False, "production_ready": False}
 
-    names = {_name(value) for node in compiled.graph.values()
-             for key, value in node.get("inputs", {}).items()
-             if key in _MODEL_KEYS and isinstance(value, str) and value}
+    names = _graph_model_files(compiled.graph)
     matches: dict[str, list[dict]] = {name: [] for name in names}
     for component in binding.catalog.get("components", []):
         if component.get("kind") != "model":
             continue
         for entry in component.get("files", []):
-            name = _name(str(entry.get("relative_path") or ""))
+            name = _file_name(str(entry.get("relative_path") or ""))
             if name in matches:
                 matches[name].append(component)
     blockers = []
@@ -57,11 +48,11 @@ def resolve_resources(db, settings, strategy: GenerationStrategy) -> dict[str, A
                              "filename": name})
             continue
         component = rows[0]
-        entries = [f for f in component.get("files", []) if _name(str(f.get("relative_path") or "")) == name]
+        entries = [f for f in component.get("files", []) if _file_name(str(f.get("relative_path") or "")) == name]
         entry = entries[0]
         declared = [item for item in binding.manifest.get("files", [])
                     if item.get("component_id") == component.get("component_id")
-                    and _name(str(item.get("relative_path") or "")) == name]
+                    and _file_name(str(item.get("relative_path") or "")) == name]
         if declared and any(
             item.get("sha256") != entry.get("sha256") or item.get("size") != entry.get("size")
             or item.get("url") != entry.get("url")

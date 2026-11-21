@@ -1,214 +1,57 @@
-"""Mode-level capability checks for the Ref2VA production mode.
-
-The workbench no longer treats the historical static profile JSON files as a
-byte-exact startup contract.  Production readiness is derived from the
-capability the active mode actually needs: the core H3 node classes a managed
-renderer must expose, plus per-strategy requirements that are checked when a
-shot workflow is compiled.  A drifted or missing historical template is an
-advisory fact ("this template needs re-validation"), never a machine-wide
-block on the whole Ref2VA mode.
-"""
+"""Minimum runtime capabilities derived from the shared Ref2VA definition."""
 from __future__ import annotations
 
-import json
-from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from shine.comfy.graph_compiler import INT8_VARIANT_ID, VARIANT_ACCELERATORS
+from shine.foundation.h3 import CompiledWorkflow, compile_h3_ref2va_graph
 
-from shine.models import WorkflowProfile
-
-#: Repository profile templates, one JSON per audited static recipe.
-PROFILE_FILES_DIR_NAME = "workflows"
-
-
-def _profile_files() -> dict[str, dict[str, Any]]:
-    from shine.comfyops import deployment
-
-    files: dict[str, dict[str, Any]] = {}
-    for path in sorted(Path(deployment.PROFILE_DIR).glob("*.json")):
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            continue
-        name = raw.get("name")
-        if isinstance(name, str) and name:
-            files[name] = raw
-    return files
+# Approved catalog mappings for the custom node classes in the minimum graph.
+# All other installed packs can still be whitelisted for explicit shot options.
+_CORE_NODE_PACK_CLASSES = {
+    "ComfyUI-KJNodes": {"MiniMaxChunkFeedForward", "MiniMaxLowVRAMAttention"},
+    "ComfyUI-SolAttn_triton": {"SolAttnPatch"},
+}
 
 
 def baseline_profile_names() -> list[str]:
-    """Profile names the default deployment catalog registers for this mode.
-
-    ``deferred_workflow_profiles`` are deliberately excluded: they are
-    registered identities for recipes whose weights were never pinned or
-    verified on this machine (for example the historical latent-upscale
-    template), so they must not become a startup requirement for a renderer
-    that only has to serve the baseline Ref2VA mode.
-    """
+    """Archived profile names, used by the compatibility diagnostics."""
     from shine.comfyops import deployment
 
-    catalog = deployment.load_default_catalog()
-    names = [str(name) for name in (catalog.get("workflow_profiles") or [])]
-    deferred = {str(name) for name in (catalog.get("deferred_workflow_profiles") or [])}
-    return [name for name in names if name not in deferred]
+    return list(deployment.load_default_catalog().get("workflow_profiles") or [])
 
 
-def _graph_node_types(graph: Any) -> set[str]:
-    if isinstance(graph, str):
-        try:
-            graph = json.loads(graph)
-        except ValueError:
-            return set()
-    types: set[str] = set()
-    if isinstance(graph, dict):
-        for node in graph.values():
-            if isinstance(node, dict) and node.get("class_type"):
-                types.add(str(node["class_type"]))
-    return types
+def mode_workflows(variant_id: str = INT8_VARIANT_ID) -> tuple[CompiledWorkflow, ...]:
+    """Compile single-image, single-pass shapes for this variant's audited samplers."""
+    return tuple(compile_h3_ref2va_graph(variant_id=variant_id, accelerator_id=accelerator, image_count=1)
+                 for accelerator in VARIANT_ACCELERATORS.get(variant_id, ()))
 
 
-def core_mode_node_types() -> set[str]:
-    """Node classes a renderer must expose to serve image-only Ref2VA mode.
-
-    Derived from the audited non-audio repository templates of the default
-    catalog so image-only Ref2VA never blocks on optional audio-only nodes
-    (e.g. ``VHS_LoadAudioUpload``).  Audio shots, LoRA extras, second-pass,
-    and candidate graphs check their own compiled nodes per shot against live
-    ``object_info``.
-    """
-    types: set[str] = set()
-    files = _profile_files()
-    non_audio = [name for name in baseline_profile_names() if "1aud" not in name]
-    selected = non_audio or baseline_profile_names()
-    for name in selected:
-        raw = files.get(name)
-        if raw:
-            types |= _graph_node_types(raw.get("graph"))
-    if types:
-        types.discard("VHS_LoadAudioUpload")
-    return types
+def core_mode_node_types(variant_id: str = INT8_VARIANT_ID) -> set[str]:
+    """Every selectable sampling path needs these classes."""
+    workflows = mode_workflows(variant_id)
+    if not workflows:
+        return set()
+    return set.intersection(*(set(workflow.required_nodes) for workflow in workflows))
 
 
-def sealed_mode_nodes_compatible(sealed: Any) -> bool:
-    """True when a v2 seal proves every current core Ref2VA node class.
+def required_node_packs(catalog: dict) -> list[dict]:
+    """Physical packs needed for the baseline of an audited variant."""
+    variant_id = catalog.get("variant_id")
+    nodes = [component for component in catalog.get("components", []) if component["kind"] == "node"]
+    if variant_id not in VARIANT_ACCELERATORS:
+        return nodes
+    core = core_mode_node_types(variant_id)
+    return [component for component in nodes
+            if core & _CORE_NODE_PACK_CLASSES.get(component["component_id"], set())]
 
-    Pre-R5 v2 seals included optional baseline audio nodes (``VHS_LoadAudioUpload``
-    from the ``1aud`` baseline template) alongside all current core nodes; those
-    seals proved a strict superset of today's core contract and remain valid.
-    Missing core nodes or arbitrary removed node classes still invalidate the seal.
-    """
+
+def sealed_mode_nodes_compatible(sealed: Any, variant_id: str = INT8_VARIANT_ID) -> bool:
+    """Accept pre-P1 seals which covered the optional samplers and audio loader."""
     if not isinstance(sealed, list) or not all(isinstance(item, str) and item for item in sealed):
         return False
-    core = core_mode_node_types()
+    workflows = mode_workflows(variant_id)
+    known = {node for workflow in workflows for node in workflow.required_nodes} | {"VHS_LoadAudioUpload"}
+    core = core_mode_node_types(variant_id)
     sealed_set = set(sealed)
-    return (
-        len(sealed_set) == len(sealed)
-        and core.issubset(sealed_set)
-        and (sealed_set - core).issubset({"VHS_LoadAudioUpload"})
-    )
-
-
-def template_contract(raw: dict[str, Any]) -> dict[str, Any]:
-    """The byte-comparable identity of a repository workflow template."""
-    return {
-        "graph": raw.get("graph"),
-        "parameter_map": raw.get("parameter_map") or {},
-        "media_transfers": raw.get("media_transfers") or {},
-        "required_nodes": raw.get("required_nodes") or [],
-    }
-
-
-def template_drift(profile: WorkflowProfile, raw: dict[str, Any]) -> bool:
-    """True when a registered profile row no longer matches its template."""
-    from shine.comfy.workflow import graph_hash
-
-    expected = template_contract(raw)
-    return bool(
-        profile.graph_sha256 != graph_hash(expected["graph"])
-        or (profile.parameter_map or {}) != expected["parameter_map"]
-        or (profile.media_transfers or {}) != expected["media_transfers"]
-        or (profile.required_nodes or []) != expected["required_nodes"]
-    )
-
-
-def classify_baseline_profiles(db: Session, project_id: str) -> dict[str, Any]:
-    """Split the baseline templates into ready/drifted/missing, per project.
-
-    Returns ``{"contracts": {name: profile}, "drifted": [names],
-    "missing": [names], "templates": {name: raw}}``.  Only names whose
-    database row is present and byte-identical to the repository template
-    become ``contracts``; everything else is advisory and must never abort a
-    service validation on its own.
-    """
-    files = _profile_files()
-    profiles = db.scalars(
-        select(WorkflowProfile).where(WorkflowProfile.project_id == project_id)
-    ).all()
-    by_name = {profile.name: profile for profile in profiles}
-    contracts: dict[str, WorkflowProfile] = {}
-    drifted: list[str] = []
-    missing: list[str] = []
-    for name in baseline_profile_names():
-        raw = files.get(name)
-        profile = by_name.get(name)
-        if raw is None:
-            # The catalog names a template the repository no longer ships.
-            # That is a packaging defect, reported as drift, not a mode block.
-            drifted.append(name)
-            continue
-        if profile is None:
-            missing.append(name)
-            continue
-        if template_drift(profile, raw):
-            drifted.append(name)
-            continue
-        contracts[name] = profile
-    return {"contracts": contracts, "drifted": sorted(drifted),
-            "missing": sorted(missing), "templates": files}
-
-
-def auto_register_missing_baseline_profiles(db: Session, project_id: str, *, actor: str) -> list[str]:
-    """Create database rows for baseline templates this project has not registered.
-
-    This is the audited "standard recipe auto-fill": the content comes from
-    the repository's versioned template files, exactly as the manual
-    ``POST /setup/profiles`` registration path would install them.  A row with
-    the same name but different content is never overwritten - drift stays
-    visible to the operator instead of being silently absorbed.
-    """
-    from shine.comfy.capabilities import profile_metadata
-    from shine.comfy.workflow import graph_hash
-    from shine.services import add_audit
-
-    state = classify_baseline_profiles(db, project_id)
-    files = state["templates"]
-    created: list[str] = []
-    for name in state["missing"]:
-        raw = files.get(name)
-        if not raw:
-            continue
-        metadata = profile_metadata(
-            raw.get("graph") or {}, raw.get("mode") or "Ref2VA",
-            raw.get("parameter_map") or {}, raw.get("media_transfers") or {},
-        )
-        profile = WorkflowProfile(
-            project_id=project_id,
-            name=name,
-            mode=raw.get("mode") or "Ref2VA",
-            graph=raw.get("graph") or {},
-            parameter_map=raw.get("parameter_map") or {},
-            media_transfers=raw.get("media_transfers") or {},
-            required_nodes=raw.get("required_nodes") or [],
-            checkpoint_id=raw.get("checkpoint_id"),
-            graph_sha256=graph_hash(raw.get("graph") or {}),
-            model_identity=metadata,
-            validated_against=None,
-        )
-        db.add(profile)
-        db.flush()
-        add_audit(db, actor, "WORKFLOW_PROFILE_AUTO_REGISTERED", "workflow_profile", profile.id,
-                  {"name": name, "source": "repository-template"}, project_id=project_id)
-        created.append(name)
-    return created
+    return bool(core) and len(sealed_set) == len(sealed) and core <= sealed_set <= known

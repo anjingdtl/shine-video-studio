@@ -745,6 +745,7 @@ def _execute_single_job(
                 accelerator_id=accelerator_id,
                 second_pass=sp_spec,
                 idempotency_key=idempotency_key,
+                recipe_sha256=snap_item.get("recipe_sha256"),
                 extra_data={"shine_line": "manual4", "job_id": job_id, "run_id": run_info["id"]},
             )
             receipt = ComfyH3Executor().execute(

@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from shine.comfy.graph_compiler import ACCELERATORS, SecondPassSpec
+from shine.comfy.graph_compiler import ACCELERATORS, BASELINE_ACCELERATOR_ID, VARIANT_ACCELERATORS, SecondPassSpec
 from shine.comfy.workflow import graph_hash as _dict_hash
 
 
@@ -60,6 +60,7 @@ class GenerationStrategy(BaseModel):
     schema_version: Literal["1"] = "1"
     generation_mode: Literal["Ref2VA"] = "Ref2VA"
     model_variant_id: str = Field(default="h3-ref2va-int8-convrot", max_length=64)
+    # Schema 1 also reads partial strategies persisted by older series.
     accelerator_id: str = Field(default="pdd8", max_length=32)
     second_pass: SecondPassConfig = Field(default_factory=SecondPassConfig)
     upscale: UpscaleConfig = Field(default_factory=UpscaleConfig)
@@ -71,7 +72,7 @@ class GenerationStrategy(BaseModel):
         return self.second_pass.to_spec()
 
 
-DEFAULT_STRATEGY = GenerationStrategy()
+DEFAULT_STRATEGY = GenerationStrategy(accelerator_id=BASELINE_ACCELERATOR_ID)
 
 
 def parse_strategy(payload: dict | None) -> GenerationStrategy | None:
@@ -101,7 +102,7 @@ def model_variant_options() -> list[dict]:
             "variant_id": variant_id,
             "label": str(manifest.get("display_name") or variant_id),
             "acceptance_status": acceptance,
-            "verified": acceptance in ("SUPPORTED", "EXPERIMENTAL"),
+            "verified": acceptance in ("SUPPORTED", "EXPERIMENTAL") and variant_id in VARIANT_ACCELERATORS,
             "tier": manifest.get("tier"),
             "default_recommended": bool(manifest.get("default_recommended")),
         })

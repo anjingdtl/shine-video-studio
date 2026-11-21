@@ -495,3 +495,17 @@ prompt、UI 或素材；许可证与使用领域约束未因此变化。
   受管进程通过自己的数据目录加载 Shine handoff 与 sampling 节点。
 - 本轮按接口独立实现，无上游源码复制，未改上游 revision 或许可证边界。
   具体回归与真机范围见 `ACCEPTANCE_20261118_SETUP_RUNTIME_CONVERGENCE.md`。
+
+### 2026-11-21 V3 P1 Ref2VA 基础图
+
+- 只读核对本机 ComfyUI `b0b743566f65daafc423b4fea8a2fbda94b3384a` 的
+  `comfy_extras/nodes_minimax_h3.py`。`MiniMaxH3ReferenceToVideo` 与
+  `MiniMaxH3SigmaShift` 由 ComfyUI 提供，逐镜图片和音频插槽仍沿用已有 Autogrow 契约。
+- 本机 KJNodes `d3cfe21625e5170126ce06fbfcfe1d88108688c3` 提供
+  `MiniMaxChunkFeedForward`、`MiniMaxLowVRAMAttention` 和原生采样的 Sage Attention patch。
+  本机 SolAttn `26d816ebd4f1e43a2c6e4d4759be3137f10a7a73` 提供 `SolAttnPatch`。
+  这两个节点包是 INT8 单采基础图的第三方节点来源。
+- PDD Acc、VideoHelperSuite 与 latent upscaler 的本机目录缺少 Git 元数据。实际节点由
+  `object_info` 与作业图留证。仓库发布清单继续使用前文记录的上游固定 revision。
+  Shine 通过既有 ComfyUI 接口调用节点，上游文件、权重和许可证边界保持原样。
+- 真实运行与已安装组合见 [P1 验收](ACCEPTANCE_20261121_V3_P1_SINGLE_REF2VA.md)。

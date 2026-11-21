@@ -1,15 +1,4 @@
-"""One variant, one catalog, one profile set.
-
-The default installation path binds every workflow profile to the default
-catalog (``h3-ref2va-windows-x64``).  A candidate variant such as the
-official W6A8 low-end candidate owns its own catalog and its own profiles, so
-registering it has to resolve *that* catalog instead of the default one -
-and a caller that names a variant and a catalog that disagree must be
-refused instead of silently falling back to either of them.
-
-This module is the only place that resolves those three objects against each
-other.  It reads committed files; it never downloads, installs or renders.
-"""
+"""Bind a variant to its catalog. Load archived profiles only on legacy paths."""
 
 from __future__ import annotations
 
@@ -36,7 +25,9 @@ class VariantBinding:
 
     @property
     def profile_names(self) -> list[str]:
-        return [str(row.get("name")) for row in self.profiles]
+        if self.profiles:
+            return [str(row.get("name")) for row in self.profiles]
+        return list(self.catalog.get("workflow_profiles") or [])
 
     @property
     def acceptance_status(self) -> str:
@@ -81,8 +72,9 @@ def profile_files(names: list[str]) -> list[dict[str, Any]]:
     return found
 
 
-def load_binding(variant_id: str, *, catalog_id: str | None = None, fresh: bool = False) -> VariantBinding:
-    """Resolve one variant against its own catalog and its own profile files.
+def load_binding(variant_id: str, *, catalog_id: str | None = None, fresh: bool = False,
+                 include_profiles: bool = False) -> VariantBinding:
+    """Resolve one variant against its own catalog.
 
     ``catalog_id`` is the caller's *expected* catalog.  When it disagrees with
     the catalog the variant declares, the request is refused: mixing a W6A8
@@ -103,7 +95,7 @@ def load_binding(variant_id: str, *, catalog_id: str | None = None, fresh: bool 
         catalog_id=str(catalog.get("catalog_id") or declared),
         catalog=catalog,
         manifest=manifest,
-        profiles=tuple(profile_files(names)),
+        profiles=tuple(profile_files(names)) if include_profiles else (),
     )
 
 
@@ -143,7 +135,7 @@ def _manifest_and_catalog(variant_id: str) -> tuple[dict[str, Any], dict[str, An
     return manifest, catalog
 
 
-def binding_for_catalog(catalog: dict[str, Any]) -> VariantBinding:
+def binding_for_catalog(catalog: dict[str, Any], *, include_profiles: bool = True) -> VariantBinding:
     """Resolve the binding a *catalog* declares.
 
     The default catalog declares the audited INT8 baseline, so the ordinary
@@ -172,12 +164,13 @@ def binding_for_catalog(catalog: dict[str, Any]) -> VariantBinding:
         catalog_id=str(catalog.get("catalog_id") or ""),
         catalog=catalog,
         manifest=manifest,
-        profiles=tuple(profile_files(names)),
+        profiles=tuple(profile_files(names)) if include_profiles else (),
     )
 
 
 def resolve_registration_target(*, variant_id: str | None = None,
-                                 catalog_id: str | None = None) -> VariantBinding:
+                                 catalog_id: str | None = None,
+                                 include_profiles: bool = True) -> VariantBinding:
     """The one resolution used by registration, validation and configuration.
 
     * no variant and no catalog -> the default catalog (unchanged behaviour);
@@ -186,7 +179,7 @@ def resolve_registration_target(*, variant_id: str | None = None,
     * a catalog only -> the variant that catalog declares.
     """
     if variant_id:
-        return load_binding(variant_id, catalog_id=catalog_id)
+        return load_binding(variant_id, catalog_id=catalog_id, include_profiles=include_profiles)
     if catalog_id:
         try:
             catalog = deployment.load_deployment_catalog(catalog_id)
@@ -197,7 +190,7 @@ def resolve_registration_target(*, variant_id: str | None = None,
                 "catalog_id": catalog_id,
                 "cause": exc.detail,
             }) from exc
-        binding = binding_for_catalog(catalog)
+        binding = binding_for_catalog(catalog, include_profiles=include_profiles)
         # ``load_deployment_catalog`` resolves by file stem while the catalog's
         # declared identity carries the "shine-" prefix; a caller may name
         # either form, and only anything else is a real mismatch.
@@ -205,4 +198,4 @@ def resolve_registration_target(*, variant_id: str | None = None,
         if catalog_id not in (binding.catalog_id, normalized):
             raise _mismatch(binding.variant_id, binding.catalog_id, catalog_id)
         return binding
-    return binding_for_catalog(deployment.load_default_catalog())
+    return binding_for_catalog(deployment.load_default_catalog(), include_profiles=include_profiles)

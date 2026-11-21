@@ -34,7 +34,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
   const [scopeKind, setScopeKind] = useState<'project' | 'episode'>('project');
   const [selectedEpId, setSelectedEpId] = useState('');
   const [variantId, setVariantId] = useState('h3-ref2va-int8-convrot');
-  const [acceleratorId, setAcceleratorId] = useState('pdd8');
+  const [acceleratorId, setAcceleratorId] = useState('native20');
   const [resolutionScale, setResolutionScale] = useState(0.5);
   const [seed, setSeed] = useState(77);
   const [secondPassEnabled, setSecondPassEnabled] = useState(false);
@@ -288,12 +288,12 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
             </select>
           </label>
           <label>
-            加速配方：
+            Ref2VA 采样：
             <select className="m4-input" value={acceleratorId} onChange={(e) => setAcceleratorId(e.target.value)}>
               {(state?.options.accelerators?.length
                 ? state.options.accelerators
                 : [
-                    { id: 'pdd8', steps: 8, requires_pdd: true, label: 'PDD 8 步（推荐）' },
+                    { id: 'pdd8', steps: 8, requires_pdd: true, label: 'PDD 8 步' },
                     { id: 'native20', steps: 20, requires_pdd: false, label: '原生 20 步' },
                   ]
               )

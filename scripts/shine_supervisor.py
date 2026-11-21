@@ -620,14 +620,8 @@ def _validate_services_background(data_dir: Path, delegation: dict | None = None
                     return {"status": "STALE", "code": "TASK_SUPERSEDED"}
                 activate_runtime(db, settings, project_id, recipe_sha256, "supervisor:setup",
                                  claim_guard=_claim_guard)
-            # One-click preparation also finishes the project-level node check:
-            # validate each registered profile against the live renderer so the
-            # director package shows ready without a separate manual step.
-            # validate_services checked these profiles against the same live
-            # object_info already. One renderer startup owns that evidence.
-            checked = len(validated.get("workflow_profiles") or [])
             mark_task("DONE", None,
-                      f"服务核验通过，本机配置已激活；已核对 {checked} 个生成方案节点（Worker 已自动恢复）。")
+                      "Ref2VA 运行合同已核验并激活，Worker 已自动恢复。")
             return {"status": "READY"}
         except RuntimeConfigurationBusy as exc:
             mark_task("PENDING", exc.detail, exc.wait_message)
