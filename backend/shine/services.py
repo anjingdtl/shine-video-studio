@@ -1209,13 +1209,27 @@ def make_render_request(
             compile_h3_ref2va_graph,
             render_reference_counts,
         )
+        from shine.strategy import shot_reference_capability_blockers
 
+        counts = render_reference_counts(manifest)
+        ref_blockers = shot_reference_capability_blockers(
+            db,
+            settings,
+            audio_count=counts["audio_count"],
+            video_count=counts["video_count"],
+        )
+        if ref_blockers:
+            raise HTTPException(409, detail={
+                "code": "STRATEGY_BLOCKED",
+                "message": ref_blockers[0]["message"],
+                "blockers": ref_blockers,
+            })
         try:
             compiled_strategy_graph = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
-                **render_reference_counts(manifest),
+                **counts,
             )
         except (GraphCompileError, H3ExecutionError) as exc:
             raise HTTPException(422, detail={

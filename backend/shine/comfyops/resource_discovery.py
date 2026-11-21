@@ -47,16 +47,29 @@ MAX_MODEL_CANDIDATES = 4_000
 MAX_WORKFLOW_CANDIDATES = 400
 
 IMAGE_CATALOG_ID = "qwen-image-2.1-windows-x64"
+RELAYVSR_CATALOG_ID = "relayvsr-x2-windows-x64"
+_IMAGE_CATALOG_IDS = {IMAGE_CATALOG_ID, f"shine-{IMAGE_CATALOG_ID}", "test-image"}
+_RELAYVSR_CATALOG_IDS = {RELAYVSR_CATALOG_ID, f"shine-{RELAYVSR_CATALOG_ID}"}
 
 
 def _catalogues() -> list[dict]:
-    rows = []
-    for loader in (deployment.load_default_catalog,
-                   lambda: deployment.load_deployment_catalog(IMAGE_CATALOG_ID)):
+    rows: list[dict] = []
+    seen_ids: set[str] = set()
+    for loader in (
+        deployment.load_default_catalog,
+        lambda: deployment.load_deployment_catalog(IMAGE_CATALOG_ID),
+        lambda: deployment.load_deployment_catalog(RELAYVSR_CATALOG_ID),
+    ):
         try:
-            rows.append(loader())
+            catalog = loader()
         except (OSError, ValueError, FileNotFoundError):
             continue
+        cid = str(catalog.get("catalog_id") or "")
+        if cid and cid in seen_ids:
+            continue
+        if cid:
+            seen_ids.add(cid)
+        rows.append(catalog)
     return rows
 
 
@@ -456,13 +469,41 @@ def report(db) -> dict:
         row.get("unreadable") for row in coverage.values())
     per_capability: dict[str, dict] = {}
     for catalog in _catalogues():
-        capability = "image" if catalog["catalog_id"] == IMAGE_CATALOG_ID else "h3"
-        bucket = per_capability.setdefault(capability, {
-            "catalog_id": catalog["catalog_id"], "found": [], "missing": [], "unknown": [],
-        })
+        catalog_id = str(catalog.get("catalog_id") or "")
+        if catalog_id in _IMAGE_CATALOG_IDS:
+            default_cap = "image"
+            required_h3_ids: set[str] | None = None
+        elif catalog_id in _RELAYVSR_CATALOG_IDS:
+            default_cap = "relayvsr"
+            required_h3_ids = None
+        else:
+            default_cap = "h3"
+            from shine.comfyops.setup_summary import REVIEW_COMPONENTS
+            from shine.comfyops.variant_readiness import required_h3_components
+
+            review_map = {cid: role for role, cid in REVIEW_COMPONENTS.items()}
+            required_h3_ids = (
+                {row["component_id"] for row in required_h3_components(catalog)}
+                if catalog_id == "shine-h3-ref2va-windows-x64"
+                else None
+            )
         for component in catalog.get("components", []):
-            if component.get("kind") not in {"model", "review-model"}:
+            kind = component.get("kind")
+            if kind not in {"model", "review-model"}:
                 continue
+            cid = str(component.get("component_id") or "")
+            if default_cap == "h3":
+                if kind == "review-model":
+                    capability = review_map.get(cid, "vlm")
+                elif required_h3_ids is not None and cid not in required_h3_ids:
+                    capability = "pdd" if "pdd" in cid else "h3"
+                else:
+                    capability = "h3"
+            else:
+                capability = default_cap
+            bucket = per_capability.setdefault(capability, {
+                "catalog_id": catalog["catalog_id"], "found": [], "missing": [], "unknown": [],
+            })
             for spec in component.get("files", []):
                 sources = [row for row in resources["model_candidates"]
                            if row["component_id"] == component["component_id"]

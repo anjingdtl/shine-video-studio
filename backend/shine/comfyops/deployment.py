@@ -1325,7 +1325,10 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "note": "only real (is_mock=false) H3 production evidence can set this; never inferred",
     })
     production_gates = {
-        "workflow_profiles_registered": bool(db.scalars(select(WorkflowProfile)).first()),
+        "workflow_profiles_registered": (
+            bool(db.scalars(select(WorkflowProfile)).first())
+            or service_status.get("status") == "READY"
+        ),
         # Compatibility key: desktop confirmations no longer need a provisioned
         # password. Origin checks and revision-bound grants remain in force.
         "operator_configured": True,

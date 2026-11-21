@@ -86,11 +86,13 @@ class M4ReconcileBody(BaseModel):
 @production_router.get("/projects/{project_id}/production/state")
 def m4_production_state(
     project_id: str,
+    request: Request,
     platform_db: PlatformDB,
     m4_db: M4DB,
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
-    return get_production_state(m4_db, project)
+    settings = getattr(request.app.state, "settings", None)
+    return get_production_state(m4_db, project, platform_db=platform_db, settings=settings)
 
 
 @production_router.put("/projects/{project_id}/shots/{shot_id}/render-options")
@@ -98,6 +100,7 @@ def m4_update_shot_options(
     project_id: str,
     shot_id: str,
     body: M4ShotOptionsBody,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
@@ -112,7 +115,8 @@ def m4_update_shot_options(
         continuity_mode=body.continuity_mode,
     )
     m4_db.commit()
-    return {**res, "state": get_production_state(m4_db, project)}
+    settings = getattr(request.app.state, "settings", None)
+    return {**res, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.put("/projects/{project_id}/shots/{shot_id}/prompt/draft")
@@ -120,6 +124,7 @@ def m4_save_prompt_draft(
     project_id: str,
     shot_id: str,
     body: M4PromptDraftBody,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
@@ -127,13 +132,15 @@ def m4_save_prompt_draft(
     project = _project(project_id, platform_db, m4_db)
     prompt = save_prompt_draft(m4_db, project, shot_id, actor=actor, prompt_text=body.prompt_text)
     m4_db.commit()
-    return {"prompt": prompt, "state": get_production_state(m4_db, project)}
+    settings = getattr(request.app.state, "settings", None)
+    return {"prompt": prompt, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/shots/{shot_id}/prompt/freeze")
 def m4_freeze_prompt(
     project_id: str,
     shot_id: str,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
@@ -148,17 +155,20 @@ def m4_freeze_prompt(
         prompt_text=body.prompt_text if body else None,
     )
     m4_db.commit()
-    return {"prompt": prompt, "state": get_production_state(m4_db, project)}
+    settings = getattr(request.app.state, "settings", None)
+    return {"prompt": prompt, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/production/snapshot/preview")
 def m4_preview_snapshot(
     project_id: str,
     body: M4SnapshotConfigBody,
+    request: Request,
     platform_db: PlatformDB,
     m4_db: M4DB,
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
+    settings = getattr(request.app.state, "settings", None)
     return preview_execution_snapshot(
         m4_db,
         project,
@@ -170,6 +180,8 @@ def m4_preview_snapshot(
         second_pass=body.second_pass.model_dump() if body.second_pass else None,
         seed=body.seed,
         provider=body.provider,
+        platform_db=platform_db,
+        settings=settings,
     )
 
 
@@ -177,11 +189,13 @@ def m4_preview_snapshot(
 def m4_create_run(
     project_id: str,
     body: M4SnapshotConfigBody,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
+    settings = getattr(request.app.state, "settings", None)
     run = create_production_run(
         m4_db,
         project,
@@ -195,9 +209,11 @@ def m4_create_run(
         seed=body.seed,
         provider=body.provider,
         idempotency_key=body.idempotency_key,
+        platform_db=platform_db,
+        settings=settings,
     )
     m4_db.commit()
-    return {"run": run, "state": get_production_state(m4_db, project)}
+    return {"run": run, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/production/runs/{run_id}/{action}")
@@ -205,6 +221,7 @@ def m4_control_run(
     project_id: str,
     run_id: str,
     action: str,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
@@ -212,7 +229,8 @@ def m4_control_run(
     project = _project(project_id, platform_db, m4_db)
     run = control_production_run(m4_db, project, run_id, actor=actor, action=action)
     m4_db.commit()
-    return {"run": run, "state": get_production_state(m4_db, project)}
+    settings = getattr(request.app.state, "settings", None)
+    return {"run": run, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/shots/{shot_id}/retake", status_code=201)
@@ -220,11 +238,13 @@ def m4_retake_shot(
     project_id: str,
     shot_id: str,
     body: M4SnapshotConfigBody,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
+    settings = getattr(request.app.state, "settings", None)
     run = create_retake_job_run(
         m4_db,
         project,
@@ -236,9 +256,11 @@ def m4_retake_shot(
         second_pass=body.second_pass.model_dump() if body.second_pass else None,
         seed=body.seed,
         provider=body.provider,
+        platform_db=platform_db,
+        settings=settings,
     )
     m4_db.commit()
-    return {"run": run, "state": get_production_state(m4_db, project)}
+    return {"run": run, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/jobs/{job_id}/reconcile")
@@ -246,6 +268,7 @@ def m4_reconcile_job(
     project_id: str,
     job_id: str,
     body: M4ReconcileBody,
+    request: Request,
     actor: M4Operator,
     platform_db: PlatformDB,
     m4_db: M4DB,
@@ -253,7 +276,8 @@ def m4_reconcile_job(
     project = _project(project_id, platform_db, m4_db)
     job = reconcile_m4_job(m4_db, project, job_id, actor=actor, decision=body.decision)
     m4_db.commit()
-    return {"job": job, "state": get_production_state(m4_db, project)}
+    settings = getattr(request.app.state, "settings", None)
+    return {"job": job, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.get("/projects/{project_id}/jobs/{job_id}/media")

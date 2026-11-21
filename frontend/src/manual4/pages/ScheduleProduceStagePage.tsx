@@ -49,6 +49,18 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
     try {
       const data = await fetchM4ProductionState(projectId);
       setState(data);
+      const currentList = data.options.accelerators ?? [];
+      setAcceleratorId((prev) => {
+        const cur = currentList.find((a) => a.id === prev);
+        if (cur && cur.verified === false) {
+          const fallbackAcc = currentList.find((a) => a.verified !== false && a.requires_pdd !== null);
+          return fallbackAcc ? fallbackAcc.id : prev;
+        }
+        return prev;
+      });
+      if (data.options.second_pass && !data.options.second_pass.supported) {
+        setSecondPassEnabled(false);
+      }
       setDraftTexts((prev) => {
         const next = { ...prev };
         for (const ep of data.episodes) {
@@ -299,8 +311,8 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
               )
                 .filter((a) => a.requires_pdd !== null)
                 .map((a) => (
-                  <option key={a.id} value={a.id}>
-                    {a.label} ({a.steps} 步)
+                  <option key={a.id} value={a.id} disabled={a.verified === false}>
+                    {a.label} ({a.steps} 步){a.verified === false ? '（可选未就绪）' : ''}
                   </option>
                 ))}
             </select>
@@ -347,9 +359,11 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
             <input
               type="checkbox"
               checked={secondPassEnabled}
+              disabled={state?.options.second_pass ? !state.options.second_pass.supported : false}
               onChange={(e) => setSecondPassEnabled(e.target.checked)}
             />
             二采精修/潜空间放大
+            {state?.options.second_pass && !state.options.second_pass.supported ? '（可选未就绪）' : ''}
           </label>
           {secondPassEnabled && (
             <label>

@@ -116,14 +116,32 @@ def model_variant_options() -> list[dict]:
     return options
 
 
-def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
-    """Check one optional capability (pdd / second_pass) against sealed evidence.
+_OPTIONAL_CAPABILITY_LABELS: dict[str, str] = {
+    "pdd": "PDD 8步加速",
+    "second_pass": "二次采样精修",
+    "video_reference": "视频参考加载 (VHS_LoadVideo)",
+    "audio_reference": "音频参考加载 (VHS_LoadAudioUpload)",
+    "relayvsr": "RelayVSR 2X 超分",
+}
 
-    When sealed live ``object_info`` evidence exists (from ``validate_services``),
-    both the recorded node/weight probe and current on-disk weights are checked
-    so missing optional dependencies are named explicitly without silent fallback.
-    Before live validation runs (e.g. unconfigured machines or offline unit
-    tests), recipe-verified options stay selectable.
+_OPTIONAL_CAPABILITY_CODES: dict[str, str] = {
+    "pdd": "PDD_BACKEND_UNAVAILABLE",
+    "second_pass": "SECOND_PASS_BACKEND_UNAVAILABLE",
+    "video_reference": "VIDEO_REFERENCE_BACKEND_UNAVAILABLE",
+    "audio_reference": "AUDIO_REFERENCE_BACKEND_UNAVAILABLE",
+}
+
+
+def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
+    """Check one optional capability against sealed live evidence.
+
+    Supported capabilities: ``pdd``, ``second_pass``, ``video_reference``,
+    ``audio_reference``.  When sealed live ``object_info`` evidence exists
+    (from ``validate_services``), both the recorded node/weight probe and
+    current on-disk weights are checked so missing optional dependencies are
+    named explicitly without silent fallback.  Before live validation runs
+    (e.g. unconfigured machines or offline unit tests), recipe-verified
+    options stay selectable.
     """
     if db is None:
         return []
@@ -132,7 +150,7 @@ def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
     from shine.comfyops.existing_installation import declared_model_family_roots, model_family_directories
     from shine.comfyops.setup_summary import resolve_installation, sealed_optional_capabilities
 
-    code = "PDD_BACKEND_UNAVAILABLE" if capability == "pdd" else "SECOND_PASS_BACKEND_UNAVAILABLE"
+    code = _OPTIONAL_CAPABILITY_CODES.get(capability, f"{capability.upper()}_BACKEND_UNAVAILABLE")
     sealed = sealed_optional_capabilities(db, settings)
     if sealed is None:
         return []
@@ -149,6 +167,10 @@ def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
                 + ("、".join(missing_nodes + missing_weights) or "未就绪")
             ),
         }]
+    if capability in {"video_reference", "audio_reference"}:
+        # Reference loaders depend on live ComfyUI custom nodes (VHS_LoadVideo /
+        # VHS_LoadAudioUpload), never PDD or latent-upscaler model files.
+        return []
 
     installation = resolve_installation(db, settings)["selected"]
     root_value = (installation or {}).get("root") if isinstance(installation, dict) else None
@@ -178,6 +200,98 @@ def _optional_capability_blockers(db, settings, capability: str) -> list[dict]:
             "detail": f"本机缺少可选权重：{', '.join(missing_weights)}",
         }]
     return []
+
+
+def shot_reference_capability_blockers(
+    db, settings=None, *, audio_count: int = 0, video_count: int = 0,
+) -> list[dict]:
+    """Per-shot optional loader closure: check only what *this* shot actually binds.
+
+    A shot binding only image references never triggers a check or blocker for
+    missing ``VHS_LoadVideo`` / ``VHS_LoadAudioUpload``; only a shot that binds
+    video (``video_count > 0``) or audio (``audio_count > 0``) checks and blocks
+    by name on that shot.
+    """
+    blockers: list[dict] = []
+    if video_count > 0:
+        video_causes = _optional_capability_blockers(db, settings, "video_reference")
+        if video_causes:
+            blockers.append({
+                "code": "VIDEO_REFERENCE_BACKEND_UNAVAILABLE",
+                "capability": "video_reference",
+                "message": "当前镜头绑定了视频参考，但本机 ComfyUI 未就绪 VHS_LoadVideo 视频参考节点。",
+                "causes": video_causes,
+            })
+    if audio_count > 0:
+        audio_causes = _optional_capability_blockers(db, settings, "audio_reference")
+        if audio_causes:
+            blockers.append({
+                "code": "AUDIO_REFERENCE_BACKEND_UNAVAILABLE",
+                "capability": "audio_reference",
+                "message": "当前镜头绑定了参考音频，但本机 ComfyUI 未就绪 VHS_LoadAudioUpload 音频参考节点。",
+                "causes": audio_causes,
+            })
+    return blockers
+
+
+def optional_capabilities_overview(db=None, settings=None) -> dict[str, dict]:
+    """Single machine-wide projection of optional Ref2VA capabilities.
+
+    Read by setup_summary, environment_snapshot, 7-stage, and 4-stage so every
+    surface renders the exact same verdict and never confuses an unconfigured
+    optional extension with a baseline H3 shooting blocker.
+    """
+    sealed = None
+    if db is not None:
+        from shine.comfyops.setup_summary import sealed_optional_capabilities
+
+        sealed = sealed_optional_capabilities(db, settings)
+    overview: dict[str, dict] = {}
+    for key in ("pdd", "second_pass", "video_reference", "audio_reference"):
+        blockers = _optional_capability_blockers(db, settings, key)
+        if sealed is None:
+            status = "UNVERIFIED"
+            available = False
+        elif blockers:
+            status = "OPTIONAL_UNCONFIGURED"
+            available = False
+        else:
+            status = "READY"
+            available = True
+        overview[key] = {
+            "key": key,
+            "label": _OPTIONAL_CAPABILITY_LABELS[key],
+            "optional": True,
+            "available": available,
+            "status": status,
+            "blockers": blockers,
+            "impact": "仅在启用该可选能力或镜头绑定对应参考时校验，不阻塞基础 1 图 H3 拍摄。",
+        }
+    if db is not None:
+        from shine.comfyops.setup_summary import relayvsr_machine_readiness
+
+        relay = relayvsr_machine_readiness(db, settings)
+        relay_ok = relay.get("available") is True
+        overview["relayvsr"] = {
+            "key": "relayvsr",
+            "label": _OPTIONAL_CAPABILITY_LABELS["relayvsr"],
+            "optional": True,
+            "available": relay_ok,
+            "status": "READY" if relay_ok else "OPTIONAL_UNCONFIGURED",
+            "blockers": list(relay.get("blockers") or []),
+            "impact": "仅在开启 RelayVSR 2X 超分时校验，不阻塞基础 1 图 H3 拍摄。",
+        }
+    else:
+        overview["relayvsr"] = {
+            "key": "relayvsr",
+            "label": _OPTIONAL_CAPABILITY_LABELS["relayvsr"],
+            "optional": True,
+            "available": False,
+            "status": "UNVERIFIED",
+            "blockers": [],
+            "impact": "仅在开启 RelayVSR 2X 超分时校验，不阻塞基础 1 图 H3 拍摄。",
+        }
+    return overview
 
 
 def accelerator_options(db=None, settings=None) -> list[dict]:
@@ -211,6 +325,14 @@ def upscale_options(db, settings=None) -> list[dict]:
     Reads the same machine verdict as the setup capability card — never a
     bare no-evidence call, which would report BLOCKED on a prepared machine.
     """
+    if db is None:
+        return [{
+            "engine": "relayvsr",
+            "variant": "x2",
+            "enabled": False,
+            "status": "UNVERIFIED",
+            "blockers": [],
+        }]
     from shine.comfyops.setup_summary import relayvsr_machine_readiness
 
     readiness = relayvsr_machine_readiness(db, settings)
@@ -226,6 +348,8 @@ def upscale_options(db, settings=None) -> list[dict]:
 def strategy_options(db, settings=None) -> dict:
     """The full option matrix the director UI renders."""
     sp_blockers = _optional_capability_blockers(db, settings, "second_pass")
+    vid_blockers = _optional_capability_blockers(db, settings, "video_reference")
+    aud_blockers = _optional_capability_blockers(db, settings, "audio_reference")
     return {
         "model_variants": model_variant_options(),
         "accelerators": accelerator_options(db, settings),
@@ -234,7 +358,12 @@ def strategy_options(db, settings=None) -> dict:
             "recipes": ["h3-tail-refine-v1"],
             "blockers": sp_blockers,
         },
+        "reference_loaders": {
+            "video_reference": {"supported": not vid_blockers, "blockers": vid_blockers},
+            "audio_reference": {"supported": not aud_blockers, "blockers": aud_blockers},
+        },
         "upscale": upscale_options(db, settings),
+        "optional_capabilities": optional_capabilities_overview(db, settings),
     }
 
 

@@ -32,6 +32,51 @@ from shine.comfyops.storage import prepare_process_environment, storage_root
 from shine.models import WorkflowProfile, utcnow
 
 
+def h3_strategy_options(db: Session | None = None, settings: Any | None = None) -> dict[str, Any]:
+    """Unified production option matrix facade shared by 7-stage and 4-stage."""
+    from shine.strategy import strategy_options
+
+    return strategy_options(db, settings)
+
+
+def h3_shot_reference_blockers(
+    db: Session | None,
+    settings: Any | None = None,
+    *,
+    audio_count: int = 0,
+    video_count: int = 0,
+) -> list[dict[str, Any]]:
+    """Per-shot optional loader blocker facade delegating to ``shine.strategy``."""
+    from shine.strategy import shot_reference_capability_blockers
+
+    return shot_reference_capability_blockers(
+        db, settings, audio_count=audio_count, video_count=video_count
+    )
+
+
+def h3_strategy_blockers(
+    *,
+    variant_id: str,
+    accelerator_id: str,
+    second_pass: dict[str, Any] | None = None,
+    db: Session | None = None,
+    settings: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Validate strategy availability through the single ``strategy_blockers`` adjudicator."""
+    from shine.strategy import GenerationStrategy, SecondPassConfig, strategy_blockers
+
+    strategy_obj = GenerationStrategy(
+        model_variant_id=variant_id,
+        accelerator_id=accelerator_id,
+        second_pass=SecondPassConfig(
+            enabled=bool(second_pass and second_pass.get("enabled")),
+            denoise=float((second_pass or {}).get("denoise", 0.25)),
+            latent_scale=float((second_pass or {}).get("latent_scale", 1.0)),
+        ),
+    )
+    return strategy_blockers(strategy_obj, db, settings)
+
+
 def environment_snapshot(
     db: Session,
     settings: Any,
@@ -103,6 +148,7 @@ def environment_snapshot(
             }
             for key, row in caps.items()
         },
+        "optional_capabilities": snap.get("optional_capabilities") or {},
         "preparation": snap.get("preparation"),
         "verdict": snap.get("verdict"),
         "tools": {
@@ -132,16 +178,25 @@ def check_capability(
     * Missing Qwen image weights never block Manual4 / Ref2VA video when the
       user uploads valid reference images.
     """
+    from shine.comfy.graph_compiler import BASELINE_ACCELERATOR_ID
     from shine.comfyops.resource_resolver import resolve_resources
     from shine.platform_gpu import inspect_gpu_status
-    from shine.strategy import GenerationStrategy, SecondPassConfig, UpscaleConfig
+    from shine.strategy import (
+        GenerationStrategy,
+        SecondPassConfig,
+        UpscaleConfig,
+        shot_reference_capability_blockers,
+        strategy_blockers,
+    )
 
     req = dict(recipe or {})
     capability = str(req.get("capability") or "h3").strip().lower()
     variant_id = str(req.get("variant_id") or "h3-ref2va-int8-convrot")
-    accelerator_id = str(req.get("accelerator_id") or "pdd8")
+    accelerator_id = str(req.get("accelerator_id") or BASELINE_ACCELERATOR_ID)
     sp_raw = req.get("second_pass") or {}
     up_raw = req.get("upscale") or {}
+    audio_count = int(req.get("audio_count") or 0)
+    video_count = int(req.get("video_count") or 0)
 
     if capability == "h3":
         if accelerator_id == "turbo4":
@@ -184,8 +239,28 @@ def check_capability(
         relay_cap = (snap.get("capabilities") or {}).get("relayvsr") or {}
         h3_facts = h3_cap.get("facts") or {}
 
-        res_preview = resolve_resources(db, settings, strategy)
+        # Resolve pinned catalog components for the underlying recipe (without
+        # failing on optional unpinned latent-upscaler weights), while evaluating
+        # the full requested strategy (including second_pass and upscale) via
+        # the single strategy_blockers adjudicator.
+        base_strategy = (
+            strategy.model_copy(update={"second_pass": SecondPassConfig(enabled=False)})
+            if strategy.second_pass.enabled
+            else strategy
+        )
+        res_preview = resolve_resources(db, settings, base_strategy)
         blockers = list(res_preview.get("blockers") or [])
+        seen_blocker_codes = {b.get("code") for b in blockers if isinstance(b, dict)}
+        for prod_blocker in strategy_blockers(strategy, db, settings):
+            if isinstance(prod_blocker, dict) and prod_blocker.get("code") not in seen_blocker_codes:
+                blockers.append(prod_blocker)
+                seen_blocker_codes.add(prod_blocker.get("code"))
+        for ref_blocker in shot_reference_capability_blockers(
+            db, settings, audio_count=audio_count, video_count=video_count
+        ):
+            if ref_blocker.get("code") not in seen_blocker_codes:
+                blockers.append(ref_blocker)
+                seen_blocker_codes.add(ref_blocker.get("code"))
         missing_weights = [
             c for c in (res_preview.get("components") or []) if c.get("state") == "MISSING"
         ]

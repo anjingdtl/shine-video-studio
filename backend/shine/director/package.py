@@ -642,13 +642,31 @@ def _compiled_shot_blockers(
                     compile_h3_ref2va_graph,
                     render_reference_counts,
                 )
+                from shine.strategy import shot_reference_capability_blockers
 
+                counts = render_reference_counts(reference_manifest)
+                ref_blockers = shot_reference_capability_blockers(
+                    db,
+                    None,
+                    audio_count=counts["audio_count"],
+                    video_count=counts["video_count"],
+                )
+                for ref_blocker in ref_blockers:
+                    problems.append(_blocker(
+                        ref_blocker["code"],
+                        f"镜头「{shot.name}」{ref_blocker['message']}",
+                        shot_id=shot.id,
+                        capability=ref_blocker.get("capability"),
+                        causes=ref_blocker.get("causes") or [],
+                    ))
+                if ref_blockers:
+                    continue
                 try:
                     compile_h3_ref2va_graph(
                         variant_id=strategy_contract.model_variant_id,
                         accelerator_id=strategy_contract.accelerator_id,
                         second_pass=strategy_contract.second_pass_spec(),
-                        **render_reference_counts(reference_manifest),
+                        **counts,
                     )
                 except (GraphCompileError, H3ExecutionError) as exc:
                     problems.append(_blocker(

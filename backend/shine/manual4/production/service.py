@@ -120,7 +120,13 @@ def _serialize_run(run: M4ProductionRun, jobs: list[dict[str, Any]]) -> dict[str
     }
 
 
-def get_production_state(m4_db: Session, project: M4Project) -> dict[str, Any]:
+def get_production_state(
+    m4_db: Session,
+    project: M4Project,
+    *,
+    platform_db: Session | None = None,
+    settings: Any | None = None,
+) -> dict[str, Any]:
     confirmed = m4_db.scalar(
         select(M4StoryboardRevision)
         .where(M4StoryboardRevision.project_id == project.id, M4StoryboardRevision.status == "CONFIRMED")
@@ -224,13 +230,30 @@ def get_production_state(m4_db: Session, project: M4Project) -> dict[str, Any]:
             jobs_by_run.setdefault(j.run_id, []).append(_serialize_job(j, attempts_by_job.get(j.id, [])))
 
     verdict = evaluate_m4_readiness(m4_db, project)
+    from shine.foundation.environment import h3_strategy_options
+
+    opts = h3_strategy_options(platform_db, settings)
+    acc_by_id = {row["accelerator_id"]: row for row in (opts.get("accelerators") or [])}
+    accelerators_out = []
+    for k, v in ACCELERATORS.items():
+        live_acc = acc_by_id.get(k) or {}
+        accelerators_out.append({
+            "id": k,
+            **v,
+            "verified": live_acc.get("verified", v.get("requires_pdd") is not None),
+            "unverified_reason": live_acc.get("unverified_reason"),
+            "blockers": live_acc.get("blockers") or [],
+        })
     return {
         "confirmed_revision": {"id": confirmed.id, "revision": confirmed.revision} if confirmed else None,
         "episodes": episodes_data,
         "runs": [_serialize_run(r, jobs_by_run.get(r.id, [])) for r in runs],
         "options": {
             "variants": verified_variants_catalog(),
-            "accelerators": [{"id": k, **v} for k, v in ACCELERATORS.items()],
+            "accelerators": accelerators_out,
+            "second_pass": opts.get("second_pass"),
+            "reference_loaders": opts.get("reference_loaders"),
+            "optional_capabilities": opts.get("optional_capabilities"),
             "frames": frame_options(),
         },
         "readiness": verdict.model_dump(),
@@ -290,6 +313,8 @@ def _build_snapshot_payload(
     seed: int,
     provider: str,
     previous_passed_job_id: str | None = None,
+    platform_db: Session | None = None,
+    settings: Any | None = None,
 ) -> tuple[M4StoryboardRevision, dict[str, Any], list[dict[str, Any]], str]:
     confirmed = m4_db.scalar(
         select(M4StoryboardRevision)
@@ -385,6 +410,27 @@ def _build_snapshot_payload(
         except M4GraphCompileError as exc:
             raise HTTPException(422, {"code": exc.code, "message": exc.message, "shot_code": sh.shot_code}) from exc
 
+        if platform_db is not None and provider == "comfyui":
+            from shine.foundation.environment import h3_shot_reference_blockers
+
+            ref_blockers = h3_shot_reference_blockers(
+                platform_db,
+                settings,
+                audio_count=aud_count,
+                video_count=vid_count,
+            )
+            if ref_blockers:
+                raise HTTPException(
+                    409,
+                    {
+                        "code": ref_blockers[0]["code"],
+                        "shot_id": sh.id,
+                        "shot_code": sh.shot_code,
+                        "message": f"镜头 {sh.shot_code}：{ref_blockers[0]['message']}",
+                        "blockers": ref_blockers,
+                    },
+                )
+
         width, height = frame_size(sh.aspect_ratio, resolution_scale)
         items.append(
             {
@@ -408,6 +454,37 @@ def _build_snapshot_payload(
                 "seed": int(seed) + idx,
             }
         )
+
+    if platform_db is not None and provider == "comfyui":
+        from shine.foundation.environment import h3_strategy_blockers
+
+        try:
+            live_blockers = h3_strategy_blockers(
+                variant_id=variant_id,
+                accelerator_id=accelerator_id,
+                second_pass=second_pass,
+                db=platform_db,
+                settings=settings,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                422,
+                {"code": "STRATEGY_INVALID", "message": "生产策略合同不合法。", "details": str(exc)[:500]},
+            ) from exc
+        if live_blockers:
+            first_msg = str(
+                live_blockers[0].get("detail")
+                or live_blockers[0].get("message")
+                or "所选生产策略在本机不可用，不会替换成其他方案。"
+            )
+            raise HTTPException(
+                409,
+                {
+                    "code": "STRATEGY_BLOCKED",
+                    "message": first_msg,
+                    "blockers": live_blockers,
+                },
+            )
 
     config_json = {
         "variant_id": variant_id,
@@ -450,6 +527,8 @@ def preview_execution_snapshot(
     second_pass: dict[str, Any] | None = None,
     seed: int = 77,
     provider: str = "comfyui",
+    platform_db: Session | None = None,
+    settings: Any | None = None,
 ) -> dict[str, Any]:
     confirmed, config_json, items, snap_sha = _build_snapshot_payload(
         m4_db,
@@ -462,6 +541,8 @@ def preview_execution_snapshot(
         second_pass=second_pass,
         seed=seed,
         provider=provider,
+        platform_db=platform_db,
+        settings=settings,
     )
     return {
         "storyboard_revision_id": confirmed.id,
@@ -487,6 +568,8 @@ def create_production_run(
     provider: str = "comfyui",
     idempotency_key: str | None = None,
     previous_passed_job_id: str | None = None,
+    platform_db: Session | None = None,
+    settings: Any | None = None,
 ) -> dict[str, Any]:
     confirmed, config_json, items, snap_sha = _build_snapshot_payload(
         m4_db,
@@ -500,6 +583,8 @@ def create_production_run(
         seed=seed,
         provider=provider,
         previous_passed_job_id=previous_passed_job_id,
+        platform_db=platform_db,
+        settings=settings,
     )
 
     idem = (idempotency_key or "").strip() or f"m4run:{project.id}:{snap_sha[:24]}"
@@ -627,6 +712,8 @@ def create_retake_job_run(
     seed: int = 99,
     provider: str = "comfyui",
     previous_passed_job_id: str | None = None,
+    platform_db: Session | None = None,
+    settings: Any | None = None,
 ) -> dict[str, Any]:
     """Schedule a single-shot retake run, preserving all historical passed jobs & artifacts."""
     shot = m4_db.get(M4Shot, shot_id)
@@ -718,6 +805,8 @@ def create_retake_job_run(
         provider=provider,
         idempotency_key=unique_key,
         previous_passed_job_id=prev_passed_id,
+        platform_db=platform_db,
+        settings=settings,
     )
 
 

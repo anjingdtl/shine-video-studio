@@ -84,6 +84,16 @@ export type PreparationStep = {
   id: string; label: string; status: string; detail?: string | null; code?: string | null;
 };
 
+export type OptionalCapabilityStatus = {
+  key: string;
+  label: string;
+  optional: boolean;
+  available: boolean;
+  status: 'READY' | 'OPTIONAL_UNCONFIGURED' | 'UNVERIFIED' | string;
+  blockers?: Array<{ code?: string; detail?: string; message?: string }>;
+  impact?: string;
+};
+
 export type SetupSummary = {
   snapshot_version: number;
   computed_at: string;
@@ -96,6 +106,8 @@ export type SetupSummary = {
     choice_required: boolean;
   };
   capabilities: Record<CapabilityKey, SetupCapability>;
+  optional_capabilities?: Record<string, OptionalCapabilityStatus>;
+  optional_advisories?: string[];
   progress: Array<{ id: string; label: string; state: 'DONE' | 'ACTIVE' | 'PENDING' }>;
   primary_capability: CapabilityKey;
   action_required: (SetupNextStep & { options?: InstallationCandidate[] }) | null;
@@ -256,7 +268,7 @@ export function SetupEnvironmentStatus({
       {chosen && <p className="run-hint" data-testid="setup-installation">
         使用的 ComfyUI：{chosen.root}
         {chosen.port ? ` · 端口 ${chosen.port}` : ''}
-        {chosen.adopted ? ' · 你自己的安装（只读复用）' : ''}
+        {chosen.adopted ? ' · 复用本机已有 ComfyUI（受管启动与显存保护，不复制第二套程序或模型）' : ''}
       </p>}
       {summary.installation.choice_required && <div className="setup-choice" role="group" aria-label="选择本机安装">
         <b>这台电脑上找到不止一套 ComfyUI</b>
@@ -425,6 +437,26 @@ export function SetupEnvironmentStatus({
         这里是只读摘要。完整整备在「设置 → 制作环境」一处完成。
         {onGoSettings && <button type="button" className="btn-text" onClick={onGoSettings}>去设置处理</button>}
       </p>}
+
+      {summary.optional_capabilities && Object.keys(summary.optional_capabilities).length > 0 && (
+        <div className="setup-optional-capabilities" data-testid="setup-optional-capabilities" style={{ marginTop: 10 }}>
+          <div className="run-hint" style={{ marginBottom: 4 }}>
+            按需可选增强（仅在启用对应加速、二采精修、音视频参考或超分时生效，不影响基础 1 图 H3 拍摄）：
+          </div>
+          <div className="setup-cap-facts">
+            {Object.values(summary.optional_capabilities).map((opt) => (
+              <span
+                key={opt.key}
+                className={opt.available ? 'ok' : ''}
+                title={opt.impact ?? ''}
+              >
+                {opt.available ? <Check size={10} /> : <X size={10} />}
+                {opt.label}：{opt.available ? '已就绪' : opt.status === 'UNVERIFIED' ? '待核验（可选）' : '可选未配置'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {summary.blockers.length > 0 && <details className="setup-details">
         <summary><ChevronRight size={12} /> 诊断与审计（{summary.blockers.length}）</summary>

@@ -971,12 +971,25 @@ def summary(db, settings, *, project_id: str | None = None,
                                preparing=key in preparing_caps)
         for key in CAPABILITIES
     }
+    from shine.strategy import optional_capabilities_overview
+
     progress = _progress(capabilities)
     primary = capabilities["h3"] if (capabilities["h3"]["facts"] or {}).get("FILES_FOUND") else capabilities["image"]
     action_required = _next_action(installation, capabilities, project_id=project_id)
-    blockers = sorted({row.get("code") for key, row in capabilities.items()
-                       for row in (row.get("advisories") or [])
-                       if isinstance(row, dict) and row.get("code")})
+    blockers = sorted({
+        adv.get("code")
+        for _key, cap_row in capabilities.items()
+        if not cap_row.get("optional")
+        for adv in (cap_row.get("advisories") or [])
+        if isinstance(adv, dict) and adv.get("code")
+    })
+    optional_advisories = sorted({
+        adv.get("code")
+        for _key, cap_row in capabilities.items()
+        if cap_row.get("optional")
+        for adv in (cap_row.get("advisories") or [])
+        if isinstance(adv, dict) and adv.get("code")
+    })
     from shine.production_mode import machine_verdict
 
     verdict = machine_verdict(db, settings, report=report or None)
@@ -987,10 +1000,12 @@ def summary(db, settings, *, project_id: str | None = None,
         "variant_id": variant_id,
         "installation": installation,
         "capabilities": capabilities,
+        "optional_capabilities": optional_capabilities_overview(db, settings),
         "progress": progress,
         "primary_capability": primary["key"],
         "action_required": action_required,
         "blockers": blockers,
+        "optional_advisories": optional_advisories,
         "preparation": preparation,
         "verdict": verdict,
         "machine_progress": machine_progress(db, progress=progress, verdict=verdict),

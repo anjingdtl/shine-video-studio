@@ -503,7 +503,21 @@ export type M4ProductionState = {
   runs: M4ProductionRun[];
   options: {
     variants: Array<{ variant_id: string; label: string; verified: boolean; accelerators: string[] }>;
-    accelerators: Array<{ id: string; steps: number; requires_pdd: boolean | null; label: string }>;
+    accelerators: Array<{
+      id: string;
+      steps: number;
+      requires_pdd: boolean | null;
+      label: string;
+      verified?: boolean;
+      unverified_reason?: string | null;
+      blockers?: Array<{ code?: string; detail?: string }>;
+    }>;
+    second_pass?: {
+      supported: boolean;
+      recipes?: string[];
+      blockers?: Array<{ code?: string; detail?: string }>;
+    };
+    optional_capabilities?: Record<string, unknown>;
     frames: Array<{ orientation: string; aspect_ratio: string; scale: number; width: number; height: number }>;
   };
   readiness: M4Overview['readiness'];

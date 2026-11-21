@@ -2507,3 +2507,20 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   阻塞为 `RELAYVSR_NODES_MISSING_IN_LIVE`（离线单测与 EDL `episode_input_digest` 已验证，真机
   RelayVSR 未验证）。其余实机已出 `pdd8 + second_pass + VHS_LoadVideo` 与 `native20 + audio`
   真实视频。验收记录见 `docs/ACCEPTANCE_20261121_V3_P2_OPTIONAL_MULTIMODAL.md`。
+
+## 2026-11-22 V3 P3 基础配置与生产全链收敛
+
+- `setup_summary.summary` 与 `foundation/environment.py::environment_snapshot` 统一输出
+  `optional_capabilities`（`pdd`、`second_pass`、`video_reference`、`audio_reference`、
+  `relayvsr`），并将可选告警与顶部阻塞 `blockers` 分离，未启用可选能力与缺失审片包绝不阻塞基础
+  1 图 H3 拍摄；`deployment_readiness` 在活体服务核验 `READY` 时置 `workflow_profiles_registered=True`。
+- `strategy.shot_reference_capability_blockers` 作为按镜参考依赖唯一裁决口接入
+  `director/package.py`、`services.make_render_request` 与 `manual4/production/service.py`
+  （通过 `foundation/environment.py` 门面遵循四阶静态边界守卫）：缺失 `VHS_LoadVideo` /
+  `VHS_LoadAudioUpload` 时仅阻断实际绑定对应参考的镜头与分集，不误伤其他纯图镜头或分集。
+- `resource_discovery` 纳入 `relayvsr-x2-windows-x64` 并按 `setup_summary._component_ids_for`
+  统一分桶，消除扫描页把可选/审片模型误算作 H3 缺件的问题；`adoption._required_h3_files` 与
+  `profile_gate._weight_blockers` 收敛到统一基线与动态配方入口。
+- 回归与实机：8 分片 303 文件全绿（`shards-20261122-020135-231`）、前端 94 文件 472 测试与构建通过；
+  RTX 5080 独立目录验证外部 ComfyUI 43.98 GB 零下载核验接管、服务核验与七/四阶段共享出片均通过。
+  验收记录见 `docs/ACCEPTANCE_20261122_V3_P3_SETUP_PRODUCTION_CONVERGENCE.md`。

@@ -132,12 +132,15 @@ def _verified_existing_files(db, report: dict) -> list[dict]:
 
 
 def _required_h3_files(catalog: dict) -> set[tuple[str, str, str, int]]:
-    return {
+    """Baseline required H3 files plus any catalogued optional H3 components."""
+    files = set(_required_capability_files(catalog, "h3"))
+    files.update(
         (component["component_id"], item["relative_path"], item["sha256"], item["size"])
         for component in catalog.get("components", [])
-        if component.get("kind") == "model" and component["component_id"].startswith("minimax-h3-")
+        if component.get("kind") == "model" and str(component.get("component_id") or "").startswith("minimax-h3-")
         for item in component.get("files", [])
-    }
+    )
+    return files
 
 
 def _required_capability_files(catalog: dict, capability: str) -> set[tuple[str, str, str, int]]:
