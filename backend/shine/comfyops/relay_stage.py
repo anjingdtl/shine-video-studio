@@ -121,6 +121,38 @@ def episode_relay_items_unfinished(db: Session, run_id: str, episode) -> int:
     )).all())
 
 
+def episode_relay_gate(db: Session, run_id: str, episode, passed_jobs: dict[str, Job]) -> dict[str, Any]:
+    """Single verdict for whether an upscale-enabled episode is ready to assemble.
+
+    Never allows a failed or review-pending upscale item to be silently skipped
+    in favor of the un-upscaled 1x clip: either every current shot has a
+    verified 2x artifact, or the episode waits (PENDING) / blocks by name.
+    """
+    shot_ids = list(episode.shot_ids or [])
+    if not shot_ids:
+        return {"ready": True, "status": "PASSED"}
+    items = db.scalars(select(RelayUpscaleItem).where(
+        RelayUpscaleItem.run_id == run_id,
+        RelayUpscaleItem.stage == "relayvsr_x2",
+    )).all()
+    by_job = {row.job_id: row for row in items}
+    for shot_id in shot_ids:
+        job = passed_jobs.get(shot_id)
+        if job is None:
+            return {"ready": False, "status": "PENDING"}
+        item = by_job.get(job.id)
+        if item is None or item.status in RELAY_ITEM_LIVE_STATUSES:
+            return {"ready": False, "status": "PENDING"}
+        if item.status != "PASSED" or relay_artifact_for_job(db, job.id) is None:
+            return {
+                "ready": False,
+                "status": "BLOCKED",
+                "code": item.error_code or f"RELAY_UPSCALE_{item.status}",
+                "shot_id": shot_id,
+            }
+    return {"ready": True, "status": "PASSED"}
+
+
 def relay_artifact_for_job(db: Session, job_id: str) -> MediaArtifact | None:
     """The passed upscale artifact of a job, or None.
 
@@ -256,23 +288,7 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
         if item is None:
             return item_id
         project_id = item.project_id
-        # 1. The readiness gate speaks before anything is submitted.
-        try:
-            object_info = client.object_info()
-        except Exception:  # noqa: BLE001 - readiness re-check below stays honest
-            object_info = {}
-        readiness = relayvsr.relayvsr_readiness(object_info=object_info)
-        if not readiness["available"]:
-            blockers = readiness["blockers"]
-            with session_factory.begin() as fail_db:
-                target = fail_db.get(RelayUpscaleItem, item_id)
-                _fail_item(fail_db, target, blockers[0]["code"],
-                           {"blockers": blockers[:5]})
-                add_audit(fail_db, worker_id, "RELAY_STAGE_BACKEND_UNAVAILABLE",
-                          "relay_upscale_item", item_id, {"blockers": blockers[:5]},
-                          project_id=project_id)
-            return item_id
-        # 2. The source bytes are verified before the stage touches them.
+        # 1. The source bytes are verified before acquiring the GPU slot.
         artifact = db.get(MediaArtifact, item.source_artifact_id or "")
         if artifact is None or artifact.is_mock:
             with session_factory.begin() as fail_db:
@@ -306,26 +322,91 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
         detail = float((item.payload or {}).get("detail", 1.0))
         fps = float((item.source_fps) or 24.0)
 
+    def _requeue_busy(reason: str) -> None:
+        with session_factory.begin() as busy_db:
+            row = busy_db.get(RelayUpscaleItem, item_id)
+            if row is None:
+                return
+            row.status = "PENDING"
+            row.state_version += 1
+            row.lease_owner = None
+            row.lease_expires_at = None
+            row.payload = {**(row.payload or {}), "last_requeue": reason[:200]}
+
     try:
         slot = resource_slot(session_factory, "RELAYVSR", 8192, wait_seconds=0)
         slot.__enter__()
     except Exception as exc:  # GPU busy is a re-queue, not a failure.
         message = str(getattr(exc, "detail", "") or exc)
         if "GPU_BUSY" in message or "RECONCILE" in message:
-            with session_factory.begin() as db:
-                item = db.get(RelayUpscaleItem, item_id)
-                item.status = "PENDING"
-                item.state_version += 1
-                item.lease_owner = None
-                item.lease_expires_at = None
-                item.payload = {**(item.payload or {}), "last_requeue": message[:200]}
+            _requeue_busy(message)
             return None
         raise
 
+    started_managed_instance: str | None = None
+    active_client = client
     try:
+        if active_client is None:
+            from shine.comfy.client import ComfyUIClient
+            from shine.comfyops.managed_recipe import recipe_path
+
+            if recipe_path(settings).is_file():
+                from fastapi import HTTPException
+
+                from shine.comfyops.image_renderer import (
+                    ensure_image_renderer,
+                    load_image_recipe,
+                )
+
+                try:
+                    recipe = load_image_recipe(settings)
+                    instance_id = str((recipe.get("renderer") or {}).get("instance_id") or "")
+                    started = ensure_image_renderer(
+                        session_factory, settings, instance_id=instance_id,
+                    )
+                except HTTPException as exc:
+                    code = (exc.detail if isinstance(exc.detail, str)
+                            else str((exc.detail or {}).get("code", "RELAY_RENDERER_UNAVAILABLE")))
+                    if code in {
+                        "IMAGE_RENDERER_INSTALLATION_BUSY_H3",
+                        "IMAGE_RENDERER_INSTALLATION_UNCERTAIN",
+                        "IMAGE_RENDERER_START_IN_PROGRESS",
+                        "IMAGE_RENDERER_GPU_LEASE_ACTIVE",
+                        "GPU_BUSY_RETRY_OR_QUEUE",
+                    }:
+                        _requeue_busy(code)
+                        return None
+                    with session_factory.begin() as fail_db:
+                        _fail_item(fail_db, fail_db.get(RelayUpscaleItem, item_id), code)
+                    return item_id
+                if not started.get("reused") and not started.get("adopted_live"):
+                    started_managed_instance = instance_id
+                active_client = ComfyUIClient(started["base_url"], max_retries=0, trust_env=False)
+            else:
+                from shine.worker import _renderer_client
+
+                active_client = _renderer_client(settings, max_retries=0)
+
+        # 2. The readiness gate speaks against the live renderer before submitting.
+        try:
+            object_info = active_client.object_info()
+        except Exception:  # noqa: BLE001 - readiness re-check below stays honest
+            object_info = {}
+        readiness = relayvsr.relayvsr_readiness(object_info=object_info)
+        if not readiness["available"]:
+            blockers = readiness["blockers"]
+            with session_factory.begin() as fail_db:
+                target = fail_db.get(RelayUpscaleItem, item_id)
+                _fail_item(fail_db, target, blockers[0]["code"],
+                           {"blockers": blockers[:5]})
+                add_audit(fail_db, worker_id, "RELAY_STAGE_BACKEND_UNAVAILABLE",
+                          "relay_upscale_item", item_id, {"blockers": blockers[:5]},
+                          project_id=project_id)
+            return item_id
+
         # 3. Upload the source video for the LQ frames input.
         upload_name = f"shine-relay-{item_id[:12]}.mp4"
-        client.upload_file(
+        active_client.upload_file(
             upload_name, source_bytes,
             upload_path="/upload/image", field_name="image",
             subfolder="shine", content_type="video/mp4",
@@ -352,7 +433,7 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
 
         # 4. The external call.  An uncertain outcome is UNKNOWN, never a retry.
         try:
-            body = client.queue_prompt(prompt, extra_data={
+            body = active_client.queue_prompt(prompt, extra_data={
                 "shine": {"item_id": item_id, "intent_sha256": intent,
                           "engine": "relayvsr", "variant": "x2"},
             })
@@ -375,7 +456,7 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
             _record_prompt_id(db, db.get(RelayUpscaleItem, item_id), prompt_id)
 
         # 5. Poll with heartbeat; collect the rendered video.
-        record = _wait_terminal(client, prompt_id, item_heartbeat=heartbeat, timeout_s=1800.0)
+        record = _wait_terminal(active_client, prompt_id, item_heartbeat=heartbeat, timeout_s=1800.0)
         if record is None:
             with session_factory.begin() as db:
                 _record_unknown(db, db.get(RelayUpscaleItem, item_id), "POLL_TIMEOUT")
@@ -386,7 +467,7 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
                 _fail_item(db, db.get(RelayUpscaleItem, item_id), "RELAY_RENDER_FAILED",
                            {"status": status})
             return item_id
-        rendered = client.view(
+        rendered = active_client.view(
             _output_filename(record), subfolder="", file_type="output")
         if not rendered:
             with session_factory.begin() as db:
@@ -472,6 +553,15 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
                       project_id=project_id)
         return item_id
     finally:
+        if started_managed_instance:
+            try:
+                from shine.comfyops.image_renderer import stop_image_renderer
+
+                stop_image_renderer(
+                    session_factory, settings, instance_id=started_managed_instance, actor=worker_id,
+                )
+            except Exception:  # noqa: BLE001 - stop failure stays in startup record for reconciliation
+                pass
         try:
             slot.__exit__(None, None, None)
         except Exception:  # noqa: BLE001 - release failure is reconciliation work
@@ -505,10 +595,6 @@ def run_pending_relay_items(session_factory, *, settings, worker_id: str,
     recorded on the item itself with its evidence.
     """
     client = comfy_client
-    if client is None:
-        from shine.worker import _renderer_client
-
-        client = _renderer_client(settings, max_retries=0)
     root = asset_root or Path(settings.data_dir) / "assets"
     processed = 0
     while processed < limit:

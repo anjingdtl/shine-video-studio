@@ -493,3 +493,24 @@ def test_a_brief_row_whose_item_is_still_running_is_left_alone(api):
     assert brief.reconcile_orphan_brief_tasks(factory) == 0
     with factory() as db:
         assert db.get(AgentTaskRecord, alive.id).status == "RUNNING"
+
+
+def test_validation_batch_reuses_builtin_brief_without_remote_consent(api, monkeypatch):
+    """本地能力验证样例自带固定 brief，不得因远端文本授权缺失报 REMOTE_AGENT_CONSENT_REQUIRED。"""
+    from shine.materialprep import service
+
+    client, factory, settings = api
+    project_id = _project(client)
+    _route(client, kind="openai_compatible", base_url="https://api.example.com/v1")
+    calls = _responder(monkeypatch, lambda _n: copy.deepcopy(BRIEF_ANSWER))
+    with factory() as db:
+        batch = service.create_validation_batch(
+            db, project_id, families=["character"], idempotency_key="val-no-consent", rights_id=None)
+    item_id = batch["items"][0]
+    with factory() as db:
+        version = db.get(MaterialItem, item_id).state_version
+
+    result = brief.ensure_brief(factory, settings, item_id, "worker-1", version=version)
+    assert result["ready"] is True
+    assert result["reused"] is True
+    assert calls == []

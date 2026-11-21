@@ -975,12 +975,22 @@ def execute_next_m4_run(
                     if outcome in {"STOPPED", "NEEDS_REVIEW"}:
                         break
     except Exception as exc:
+        detail = getattr(exc, "detail", None)
+        exc_code = getattr(exc, "code", None) or (
+            detail.get("code") if isinstance(detail, dict)
+            else detail if isinstance(detail, str) else None
+        ) or "M4_RUN_EXECUTION_ERROR"
         with m4_factory.begin() as db:
             r = db.get(M4ProductionRun, run_id)
             if r and r.status in {"CLAIMED", "RUNNING"}:
                 r.status = "FAILED"
-                r.error_code = getattr(exc, "code", "M4_RUN_EXECUTION_ERROR")
-                r.error_detail = str(exc)[:400]
+                r.error_code = str(exc_code)[:120]
+                detail_msg = (
+                    detail.get("message")
+                    if isinstance(detail, dict) and detail.get("message")
+                    else exc
+                )
+                r.error_detail = str(detail_msg)[:400]
                 r.updated_at = m4_utcnow()
     finally:
         with m4_factory.begin() as db:
@@ -1000,6 +1010,20 @@ def execute_next_m4_run(
                 else:
                     r.status = "PAUSED"
                 r.updated_at = m4_utcnow()
+            if r and r.status == "FAILED":
+                now = m4_utcnow()
+                for qjob in db.scalars(select(M4Job).where(
+                    M4Job.run_id == run_id, M4Job.status == "QUEUED",
+                )).all():
+                    has_attempt = db.scalar(select(M4JobAttempt.id).where(
+                        M4JobAttempt.job_id == qjob.id).limit(1))
+                    if has_attempt is not None:
+                        continue
+                    qjob.status = "FAILED"
+                    qjob.failure_code = r.error_code or "M4_RUN_FAILED_BEFORE_SUBMIT"
+                    qjob.failure_detail = r.error_detail or "所属批次已失败，未提交到 ComfyUI。"
+                    qjob.state_version += 1
+                    qjob.updated_at = now
         heartbeat_m4_worker(m4_factory, worker_id, status="IDLE", current_run_id=None)
     return run_id
 

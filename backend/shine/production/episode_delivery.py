@@ -217,7 +217,12 @@ def build_episode_edl(
     if run is None:
         raise DeliveryBlock("EPISODE_RUN_MISSING")
 
+    from shine.comfyops.relay_stage import relay_artifact_for_job, run_upscale_enabled
+    from shine.director.models import DirectorPackageVersion
     from shine.production.runner import episode_current_jobs
+
+    package = db.get(DirectorPackageVersion, run.package_id)
+    upscale_required = run_upscale_enabled(package.manifest if package else None)
 
     passed = episode_current_jobs(db, run, episode)
     missing = [shot_id for shot_id in episode.shot_ids if shot_id not in passed]
@@ -233,10 +238,10 @@ def build_episode_edl(
             raise DeliveryBlock("EPISODE_SHOT_ATTEMPT_MISSING")
         attempt = max(attempts, key=lambda row: row.attempt_no)
         # The shot's approved highest stage wins: a passed RelayVSR X2 upscale
-        # artifact is the final clip, the base render stays the fallback.
-        from shine.comfyops.relay_stage import relay_artifact_for_job
-
+        # artifact is required when upscale was frozen in the package strategy.
         relay_artifact = relay_artifact_for_job(db, job.id)
+        if upscale_required and relay_artifact is None:
+            raise DeliveryBlock("EPISODE_UPSCALE_ARTIFACT_MISSING")
         artifact = relay_artifact or (db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None)
         if artifact is None or artifact.is_mock:
             raise DeliveryBlock("EPISODE_SOURCE_NOT_REAL_VIDEO")

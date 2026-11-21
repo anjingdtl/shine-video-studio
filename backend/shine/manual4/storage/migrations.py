@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import os
+
 from sqlalchemy import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from shine.manual4.storage.db import M4Base, make_m4_session_factory
@@ -40,9 +43,23 @@ def _apply_incremental_columns(engine: Engine) -> None:
 
 def ensure_m4_schema(engine: Engine) -> dict[str, str]:
     """Create and migrate Manual4 tables in manual4.sqlite without touching shine.db."""
+    factory = make_m4_session_factory(engine)
+    if os.getenv("SHINE_TEST_FAST_SQLITE") == "1":
+        try:
+            with factory() as db:
+                meta = read_m4_schema_meta(db)
+            if (
+                meta.get("manual4_schema_version") == MANUAL4_SCHEMA_VERSION
+                and meta.get("manual4_runtime_version") == MANUAL4_RUNTIME_VERSION
+            ):
+                return {
+                    "manual4_schema_version": MANUAL4_SCHEMA_VERSION,
+                    "manual4_runtime_version": MANUAL4_RUNTIME_VERSION,
+                }
+        except SQLAlchemyError:
+            pass
     M4Base.metadata.create_all(engine)
     _apply_incremental_columns(engine)
-    factory = make_m4_session_factory(engine)
     with factory.begin() as db:
         _upsert_meta(db, "manual4_schema_version", {"version": MANUAL4_SCHEMA_VERSION})
         _upsert_meta(db, "manual4_runtime_version", {"version": MANUAL4_RUNTIME_VERSION})

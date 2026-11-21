@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Generator
 
 from sqlalchemy import Engine, create_engine, event
@@ -32,6 +33,9 @@ def make_engine(database_url: str) -> Engine:
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.execute("PRAGMA busy_timeout=10000")
+            if os.getenv("SHINE_TEST_FAST_SQLITE") == "1":
+                cursor.execute("PRAGMA synchronous=OFF")
+                cursor.execute("PRAGMA temp_store=MEMORY")
             cursor.close()
 
     return engine

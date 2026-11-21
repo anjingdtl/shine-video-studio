@@ -186,15 +186,44 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
     # One safe cleanup: a recorded renderer whose process is proven gone (and
     # whose port is free) is cleared so the next start is not refused by a
     # record nobody can act on.  Anything less certain stays for a human.
-    if image and image.get("live_state") == "GONE":
+    if image and (image.get("live_state") == "GONE" or image.get("stage") == "FAILED"):
         try:
             if reconcile_dead_image_renderer(factory, installation_id):
                 normalized.append({"kind": "image_renderer", "outcome": "recorded_stopped"})
-            else:
+            elif image.get("live_state") == "GONE":
                 uncertain.append({"kind": "image_renderer", "state": "RECORD_CHANGED"})
         except (LifecycleGuardBusy, LifecycleGuardUnavailable) as exc:
             uncertain.append({"kind": "image_renderer", "state": "REFUSED",
                               "code": str(exc)})
+
+    try:
+        from pathlib import Path as _Path
+
+        m4_db_path = _Path(settings.data_dir) / "manual4.sqlite"
+        if m4_db_path.is_file():
+            from shine.manual4.comfy.managed_instance import reconcile_m4_renderer
+            from shine.manual4.storage.db import (
+                ensure_m4_schema,
+                make_m4_engine,
+                make_m4_session_factory,
+                manual4_database_url,
+            )
+
+            m4_engine = make_m4_engine(manual4_database_url(settings.data_dir))
+            try:
+                ensure_m4_schema(m4_engine)
+                m4_factory = make_m4_session_factory(m4_engine)
+                m4_res = reconcile_m4_renderer(factory, m4_factory, _Path(settings.data_dir))
+                if m4_res.get("reconciled"):
+                    normalized.append({"kind": "m4_renderer", "outcome": "reconciled_stopped"})
+            finally:
+                m4_engine.dispose()
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {"code": str(exc.detail)}
+        if detail.get("code") != "M4_RENDERER_STILL_RUNNING":
+            uncertain.append({"kind": "m4_renderer", "state": "REFUSED", "code": detail.get("code")})
+    except Exception as exc:  # noqa: BLE001 - reported, never fatal
+        logger.warning("reconcile m4 renderer failed: %s", type(exc).__name__)
 
     try:
         closed = _normalize_released_h3(factory, installation_id)

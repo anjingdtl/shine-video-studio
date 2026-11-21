@@ -605,8 +605,12 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_gu
     if project_id is not None:
         require_project(db, project_id)
     candidate = db.get(AppSetting, CANDIDATE_KEY)
-    if not candidate or candidate.value.get('project_id') != project_id:
+    if not candidate:
         raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
+    cand_project = candidate.value.get('project_id')
+    if cand_project is not None and project_id is not None and cand_project != project_id:
+        if candidate.value.get('identity', {}).get('recipe_sha256') != recipe_sha256:
+            raise HTTPException(409, 'GENERATE_RUNTIME_CONFIGURATION_FIRST')
     identity = candidate.value['identity']
     if recipe_sha256 != identity['recipe_sha256']:
         raise HTTPException(409, 'RUNTIME_CONFIRMATION_HASH_CHANGED')

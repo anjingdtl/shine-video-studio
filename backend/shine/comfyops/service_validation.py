@@ -688,8 +688,12 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
     if os.name != "nt":
         raise HTTPException(409, "SERVICE_VALIDATION_WINDOWS_ONLY")
     candidate = db.get(AppSetting, CANDIDATE_KEY)
-    if candidate is None or candidate.value.get("project_id") != project_id:
+    if candidate is None:
         raise HTTPException(409, "GENERATE_RUNTIME_CONFIGURATION_FIRST")
+    cand_project = candidate.value.get("project_id")
+    if cand_project is not None and project_id is not None and cand_project != project_id:
+        if candidate.value.get("identity", {}).get("recipe_sha256") != recipe_sha256:
+            raise HTTPException(409, "GENERATE_RUNTIME_CONFIGURATION_FIRST")
     if candidate.value.get("identity", {}).get("recipe_sha256") != recipe_sha256:
         raise HTTPException(409, "RUNTIME_CONFIRMATION_HASH_CHANGED")
     identity = configuration_identity(db, settings, recipe_path(settings))

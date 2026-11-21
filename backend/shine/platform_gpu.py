@@ -214,6 +214,70 @@ def is_m4_renderer_gone_for_lease(data_dir: Path | str, lease_id: str) -> bool:
     return True
 
 
+def read_m4_renderer_snapshot(data_dir: Path | str) -> dict[str, Any] | None:
+    """Read-only state of the Manual4 managed renderer, if active or uncertain.
+
+    Shares the exact physical process/Job Object/port proof with
+    ``is_m4_renderer_gone_for_lease`` so status classification and lease
+    reconciliation read one set of facts.
+    """
+    if isinstance(data_dir, str) and data_dir.startswith("memory:"):
+        return None
+    m4_db_path = Path(data_dir) / "manual4.sqlite"
+    if not m4_db_path.is_file():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{m4_db_path.as_posix()}?mode=ro", uri=True, timeout=3.0)
+        try:
+            row = conn.execute(
+                "SELECT status, pid, birth, job_name, port, lease_id, lease_owner "
+                "FROM m4_renderer_state WHERE id = 'comfyui-m4'"
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+    if row is None:
+        return None
+    status, pid, birth, job_name, port, lease_id, lease_owner = row
+    if status == "STOPPED":
+        return None
+    if status == "RECONCILE_REQUIRED":
+        state = "UNCERTAIN"
+    else:
+        alive = False
+        if pid and birth:
+            try:
+                from shine.comfyops.installer import process_identity
+
+                alive = process_identity(int(pid)) == str(birth)
+            except Exception:
+                alive = False
+        if not alive and job_name:
+            try:
+                from shine.comfyops.owned_process import named_group_active_processes
+
+                alive = named_group_active_processes(str(job_name)) > 0
+            except Exception:
+                alive = False
+        if alive:
+            state = "STARTING" if status == "STARTING" else "ACTIVE"
+        elif status == "STARTING" and not pid:
+            state = "STARTING"
+        else:
+            state = "GONE"
+    return {
+        "status": status,
+        "state": state,
+        "pid": pid,
+        "port": port,
+        "lease_id": lease_id,
+        "lease_owner": lease_owner,
+        "purpose": "m4",
+    }
+
+
 def acquire_m4_gpu_lease(
     platform_factory: sessionmaker,
     data_dir: Path,
@@ -346,3 +410,21 @@ def release_m4_gpu_lease(
                 raise HTTPException(409, {"code": "M4_LEASE_RECONCILE_REQUIRED"})
             ResourceScheduler().release(db, lease_id, owner, reconciled=reconciled)
             return True
+
+
+def release_orphaned_m4_leases(platform_factory: sessionmaker, data_dir: Path) -> int:
+    """Release any dangling ``m4:`` GPU leases when no Manual4 renderer process exists."""
+    with platform_factory() as db:
+        rows = db.scalars(
+            select(ResourceLease).where(
+                ResourceLease.owner.like("m4:%"),
+                ResourceLease.status.in_(("ACTIVE", "RECONCILE_REQUIRED")),
+            )
+        ).all()
+        pairs = [(row.id, row.owner) for row in rows]
+    released = 0
+    for lease_id, owner in pairs:
+        if is_m4_renderer_gone_for_lease(data_dir, lease_id):
+            if release_m4_gpu_lease(platform_factory, data_dir, lease_id=lease_id, owner=owner, reconciled=True):
+                released += 1
+    return released

@@ -338,10 +338,19 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
     return act('run', () => createProductionRun(projectId, { package_id: latestPackage.id }),
       '整部作品已启动：后台会持续推进，无需你逐段点击');
   };
-  const control = (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
+  const control = async (action: 'pause' | 'resume' | 'cancel' | 'reconcile') => {
     if (!activeRun) return;
+    if (action === 'resume') {
+      return act(action, async () => {
+        const result = await controlProductionRun(activeRun.id, 'resume');
+        if (result.status === 'NEEDS_REVIEW') {
+          throw new Error(result.message || '当前批次没有可安全续拍的未提交镜头，请先处理阻塞项。');
+        }
+        return result;
+      }, '已恢复生产');
+    }
     const keyword = { pause: '已暂停：当前片段会先安全落盘',
-      resume: '已恢复生产', cancel: '已取消：已产出数据全部保留',
+      cancel: '已取消：已产出数据全部保留',
       reconcile: '已按真实产物核对运行状态' }[action];
     return act(action, () => controlProductionRun(activeRun.id, action), keyword);
   };

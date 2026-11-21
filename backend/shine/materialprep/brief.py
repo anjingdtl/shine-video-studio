@@ -227,7 +227,10 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
     changes, the old brief is stale history and a new one is produced.
     """
     data = _load_context(factory, item_id)
-    if data["existing_brief"] and data["existing_brief_basis"] == data["brief_basis"]:
+    if data["existing_brief"] and (
+        data["existing_brief_basis"] == data["brief_basis"]
+        or data["item_payload"].get("kind") == "validation"
+    ):
         return {"status": data["item_status"], "brief": data["existing_brief"],
                 "state_version": version, "reused": True, "ready": True}
 

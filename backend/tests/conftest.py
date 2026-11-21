@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import atexit
 import ctypes
 import os
 import shutil
@@ -10,11 +11,15 @@ from functools import lru_cache
 from pathlib import Path
 from uuid import uuid4
 
+# Enable fast non-fsync SQLite PRAGMAs and template DB reuse during pytest runs
+# (transaction rollback, WAL concurrency, and FK checks remain intact).
+os.environ.setdefault("SHINE_TEST_FAST_SQLITE", "1")
+
 import pytest
 from fastapi.testclient import TestClient
 
 from shine.config import Settings
-from shine.db import Base, make_engine, make_session_factory
+from shine.db import Base, make_engine
 from shine.main import create_app
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
@@ -444,6 +449,17 @@ def make_test_video_bytes(
     The produced media is a synthetic test pattern. It is never used as a
     character, location or prop master asset.
     """
+    cache_dir_raw = os.getenv("SHINE_TEST_MEDIA_CACHE_DIR", "").strip()
+    cache_file: Path | None = None
+    if cache_dir_raw:
+        cache_dir = Path(cache_dir_raw)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_file = cache_dir / (
+            f"test-media-{width}x{height}-{fps}fps-{duration_s:.2f}s-"
+            f"{'a' if with_audio else 'noaudio'}.mp4"
+        )
+        if cache_file.is_file():
+            return cache_file.read_bytes()
     executable = ffmpeg_executable()
     if not executable:
         raise RuntimeError("FFmpeg is required to build the synthetic test media")
@@ -472,7 +488,49 @@ def make_test_video_bytes(
                 "FFmpeg could not build the synthetic test media: "
                 + completed.stderr.decode("utf-8", errors="replace")[:400]
             )
-        return target.read_bytes()
+        payload = target.read_bytes()
+        if cache_file is not None:
+            tmp_cache = cache_file.with_name(f".{cache_file.name}.{os.getpid()}.{uuid4().hex[:8]}.tmp")
+            try:
+                tmp_cache.write_bytes(payload)
+                os.replace(tmp_cache, cache_file)
+            except OSError:
+                tmp_cache.unlink(missing_ok=True)
+        return payload
+
+
+@lru_cache(maxsize=1)
+def _template_db_dir() -> Path:
+    folder = Path(tempfile.mkdtemp(prefix="shine-test-tpl-"))
+    atexit.register(lambda: shutil.rmtree(folder, ignore_errors=True))
+    return folder
+
+
+@lru_cache(maxsize=1)
+def _template_shine_db() -> Path:
+    path = _template_db_dir() / "template-shine.sqlite3"
+    engine = make_engine(f"sqlite:///{path.as_posix()}")
+    Base.metadata.create_all(engine)
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.exec_driver_sql("PRAGMA journal_mode=DELETE")
+    engine.dispose()
+    return path
+
+
+@lru_cache(maxsize=1)
+def _template_m4_db() -> Path:
+    from shine.manual4.storage.db import make_m4_engine
+    from shine.manual4.storage.migrations import ensure_m4_schema
+
+    path = _template_db_dir() / "template-m4.sqlite"
+    engine = make_m4_engine(f"sqlite:///{path.as_posix()}")
+    ensure_m4_schema(engine)
+    with engine.connect() as conn:
+        conn.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.exec_driver_sql("PRAGMA journal_mode=DELETE")
+    engine.dispose()
+    return path
 
 
 def style_payload() -> dict[str, str]:
@@ -491,10 +549,9 @@ def make_studio(tmp_path: Path, *, max_upload_bytes: int = 25 * 1024 * 1024):
     data_dir = tmp_path / "本地素材"
     data_dir.mkdir(parents=True, exist_ok=True)
     db_path = data_dir / "shine.sqlite3"
+    shutil.copyfile(_template_shine_db(), db_path)
+    shutil.copyfile(_template_m4_db(), data_dir / "manual4.sqlite")
     database_url = f"sqlite:///{db_path.as_posix()}"
-    engine = make_engine(database_url)
-    Base.metadata.create_all(engine)
-    factory = make_session_factory(engine)
     # 测试不得读真机渲染器：默认 8188 可能被操作者正在跑的生产占用（真实节点表
     # 与测试节点不同），登记时的尽力而为活体校验会把真机事实写进测试台账。
     # 取一个刚释放的环回端口（几乎必然无人监听），需要渲染器的测试显式传 fake。
@@ -516,10 +573,7 @@ def make_studio(tmp_path: Path, *, max_upload_bytes: int = 25 * 1024 * 1024):
         node_pack_gate="diagnose",
     )
     app = create_app(settings=settings, database_url=database_url, asset_root=data_dir)
-    app.state.engine.dispose()
-    app.state.engine = engine
-    app.state.session_factory = factory
-    return app, factory, settings
+    return app, app.state.session_factory, settings
 
 
 @pytest.fixture

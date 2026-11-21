@@ -731,7 +731,14 @@ def _control_route(request: Request, run_id: str, action: str, actor: str, db: D
         return {"id": run_id, "status": row.status if row else "GONE", "reconcile": result}
     db.expire_all()
     row = db.get(ProductionRun, run_id)
-    return {"id": run_id, "status": status, "state_version": row.state_version if row else None}
+    payload: dict[str, Any] = {
+        "id": run_id,
+        "status": status,
+        "state_version": row.state_version if row else None,
+    }
+    if action == "resume" and status == "NEEDS_REVIEW" and row is not None:
+        payload["message"] = run_engine.explain_run_resume_blocker(db, row)
+    return payload
 
 
 @router.post("/production-runs/{run_id}/pause", status_code=202)

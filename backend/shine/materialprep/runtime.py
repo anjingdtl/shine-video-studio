@@ -443,12 +443,21 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         blockers.extend(files["problems"])
     else:
         layer = LAYER_FILES_VERIFIED
-        if renderer_blocker is not None:
+        # A historical IMAGE_RENDERER_RECIPE_MISMATCH from before the recipe
+        # was aligned no longer applies once binding_state == "READY".
+        effective_renderer_blocker = (
+            None
+            if (renderer_blocker is not None
+                and binding_state == "READY"
+                and renderer_blocker.get("code") == "IMAGE_RENDERER_RECIPE_MISMATCH")
+            else renderer_blocker
+        )
+        if effective_renderer_blocker is not None:
             # A renderer that is gone has its own cause.  Reporting it as an
             # unverified graph would hide the reason the picture cannot be
             # rendered and send the person to the wrong place.
-            blockers.append({"code": renderer_blocker["code"], "layer": LAYER_GRAPH_VERIFIED,
-                             **{key: value for key, value in renderer_blocker.items() if key != "code"}})
+            blockers.append({"code": effective_renderer_blocker["code"], "layer": LAYER_GRAPH_VERIFIED,
+                             **{key: value for key, value in effective_renderer_blocker.items() if key != "code"}})
         elif graph_report is None:
             blockers.append({"code": "IMAGE_GRAPH_NOT_VERIFIED", "layer": LAYER_GRAPH_VERIFIED})
         elif not graph_report["complete"]:

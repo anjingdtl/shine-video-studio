@@ -1004,7 +1004,7 @@ export const getRunEvents = (runId: string, afterId = 0) =>
   api<RunEvent[]>(`/production-runs/${runId}/events?after_id=${afterId}&limit=40`);
 
 export const controlProductionRun = (runId: string, action: 'pause' | 'resume' | 'cancel' | 'reconcile') =>
-  api<{ id: string; status: string; state_version?: number | null }>(
+  api<{ id: string; status: string; state_version?: number | null; message?: string }>(
     `/production-runs/${runId}/${action}`, json('POST', {}));
 
 export type EpisodePostContract = {

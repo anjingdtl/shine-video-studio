@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import struct
 import zlib
+from contextlib import contextmanager
 from datetime import timedelta
 
 import pytest
@@ -430,3 +432,81 @@ def test_reconcile_never_stops_a_renderer_serving_an_active_run(tmp_path, monkey
         assert db.get(ResourceLease, lease_id).status == "ACTIVE"
     with mf() as db:
         assert db.get(M4RendererState, "comfyui-m4").status == "RECONCILE_REQUIRED"
+
+
+def test_live_m4_renderer_reports_busy_not_reconciling_and_failed_run_closes_queued_jobs(tmp_path, monkeypatch):
+    """BUG-2/BUG-3：活体四阶渲染器持租约时快照应为 BUSY 而非 RECONCILING；失败批次不得遗留 QUEUED 孤儿任务。"""
+    from shine.manual4.storage.models import (
+        M4ExecutionSnapshot,
+        M4Job,
+        M4ProductionRun,
+        M4Project,
+        M4RendererState,
+        M4StoryboardRevision,
+    )
+    from shine.manual4.worker import execute_next_m4_run
+    from shine.runtime_orchestrator.status import runtime_snapshot
+
+    app, data_dir = _setup_m4_client(tmp_path)
+    pf, mf = app.state.session_factory, app.state.m4_session_factory
+    settings = app.state.settings
+
+    lease = acquire_m4_gpu_lease(pf, data_dir, owner="m4:worker-live")
+    with mf.begin() as db:
+        db.add(M4RendererState(
+            id="comfyui-m4", status="RUNNING", port=8198,
+            job_name=r"Local\ShineM4Handoff-live", pid=os.getpid(), birth="birth-live",
+            lease_id=lease["lease_id"], lease_owner="m4:worker-live",
+        ))
+    import shine.comfyops.installer as _inst
+    monkeypatch.setattr(_inst, "process_identity", lambda pid: "birth-live" if pid == os.getpid() else "")
+    with pf() as db:
+        snap = runtime_snapshot(db, settings)
+    assert snap["state"] == "BUSY"
+    assert snap["recovery"]["required"] is False
+
+    # BUG-3：启动异常导致运行 FAILED 时，未提交的 QUEUED 任务同步收口为 FAILED。
+    with mf.begin() as db:
+        project = M4Project(title="失败收口")
+        db.add(project)
+        db.flush()
+        rev = M4StoryboardRevision(project_id=project.id, revision=1)
+        db.add(rev)
+        db.flush()
+        ex_snap = M4ExecutionSnapshot(project_id=project.id, storyboard_revision_id=rev.id, snapshot_sha256="1" * 64)
+        db.add(ex_snap)
+        db.flush()
+        run = M4ProductionRun(
+            project_id=project.id, execution_snapshot_id=ex_snap.id,
+            idempotency_key="fail-run-1", scope_kind="project", provider="comfyui", status="PENDING")
+        db.add(run)
+        db.flush()
+        qjob = M4Job(
+            project_id=project.id, run_id=run.id, episode_id="ep-1", shot_id="shot-1",
+            shot_revision=1, ordinal=1, idempotency_key="fail-job-1",
+            prompt_revision_id="pr-1", prompt_sha256="2" * 64,
+            reference_manifest_sha256="3" * 64, target_seconds=5.0, status="QUEUED",
+        )
+        db.add(qjob)
+        db.flush()
+        run_id, job_id = run.id, qjob.id
+
+    import shine.manual4.worker as m4_worker
+
+    @contextmanager
+    def _boom(*_a, **_k):
+        raise HTTPException(504, {"code": "M4_COMFY_STARTUP_TIMEOUT", "message": "四阶 ComfyUI 启动超时"})
+        yield
+
+    from dataclasses import replace
+
+    monkeypatch.setattr(m4_worker, "managed_m4_comfyui", _boom)
+    settings = replace(settings, render_provider="comfyui")
+    execute_next_m4_run(pf, mf, settings, data_dir / "manual4", worker_id="w-m4")
+    with mf() as db:
+        r = db.get(M4ProductionRun, run_id)
+        j = db.get(M4Job, job_id)
+        assert r.status == "FAILED"
+        assert r.error_code == "M4_COMFY_STARTUP_TIMEOUT"
+        assert j.status == "FAILED"
+        assert j.failure_code == "M4_COMFY_STARTUP_TIMEOUT"

@@ -434,15 +434,15 @@ def _provably_gone(record: dict[str, Any]) -> bool:
         return False
     if managed_process_state(record) == "GONE":
         return True
-    if record.get("stage") != "RUNNING" or record.get("process"):
+    if record.get("stage") not in ("RUNNING", "FAILED") or record.get("process"):
         return False
     port = record.get("port")
-    if not isinstance(port, int) or port <= 0:
-        return False
-    try:
-        return not windows_port_listeners(port)
-    except (OSError, ValueError):
-        return False
+    if isinstance(port, int) and port > 0:
+        try:
+            return not windows_port_listeners(port)
+        except (OSError, ValueError):
+            return False
+    return record.get("stage") == "FAILED"
 
 
 def _normalize_provably_dead_record(factory, instance_id: str, *, actor: str) -> bool:
@@ -460,9 +460,15 @@ def _normalize_provably_dead_record(factory, instance_id: str, *, actor: str) ->
         return False
     if not _provably_gone(record):
         return False
-    # The renderer died on its own: the reason is kept so the crash stays
-    # visible after the record is normalized into a stopped one.
-    _mark_stopped(factory, instance_id, record, actor=actor, reason="renderer_gone")
+    if record.get("stage") == "FAILED" and actor == "controller:reconcile":
+        # An operator reconcile clears a stale FAILED startup record once we
+        # proved no process or listener remains, keeping its error as history.
+        _mark_stopped(factory, instance_id, record, actor=actor, reason="operator_reconcile",
+                      clear_error=True)
+    else:
+        # The renderer died on its own: the reason is kept so the crash stays
+        # visible after the record is normalized into a stopped one.
+        _mark_stopped(factory, instance_id, record, actor=actor, reason="renderer_gone")
     _clear_image_marks(factory, instance_id, (record.get("process") or {}).get("job_name"))
     return True
 
@@ -860,7 +866,7 @@ def _without_image_marks(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str = "worker",
-                  reason: str = "operator_release") -> None:
+                  reason: str = "operator_release", *, clear_error: bool = False) -> None:
     job_name = (record.get("process") or {}).get("job_name")
     with factory.begin() as db:
         db.execute(text("BEGIN IMMEDIATE"))
@@ -876,6 +882,8 @@ def _mark_stopped(factory, instance_id: str, record: dict[str, Any], actor: str 
             value = dict(row.value) if isinstance(row.value, dict) else {}
             value.update({"stage": "STOPPED", "stopped_at": utcnow().isoformat(),
                           "stopped_reason": reason})
+            if clear_error and "error_code" in value:
+                value["resolved_error_code"] = value.pop("error_code")
             row.value = value
         add_audit(db, actor, "IMAGE_RENDERER_STOPPED", "comfy_instance", instance_id,
                   {"job_name": job_name})

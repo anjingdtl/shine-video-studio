@@ -384,10 +384,21 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     if (!run) return;
     setBusy(action); setProblem('');
     try {
-      await controlProductionRun(run.id, action);
+      const result = await controlProductionRun(run.id, action);
       const fresh = await getProductionRun(run.id);
       setRun(fresh);
       onRefresh?.();
+      if (action === 'resume') {
+        if (result.status === 'NEEDS_REVIEW') {
+          const msg = result.message || '当前批次没有可安全续拍的未提交镜头，请先处理阻塞项。';
+          setProblem(msg);
+          onMessage?.(msg, 'error');
+        } else {
+          onMessage?.('已恢复安全可恢复批次，后台 Worker 正在继续推进。', 'success');
+        }
+      } else if (action === 'reconcile') {
+        onMessage?.('已按真实产物核对运行状态。', 'success');
+      }
     } catch (error) {
       setProblem(describeError(error));
     } finally {
@@ -737,6 +748,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
             <RefreshCw size={13} /> 刷新进度
           </button>
         </div>
+        {problem && <p role="alert" className="form-error">{problem}</p>}
       </>}
     </section>
 

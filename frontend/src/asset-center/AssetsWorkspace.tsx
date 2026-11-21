@@ -124,6 +124,8 @@ function capabilityLabel(capability: { state: string; reason: string; can_genera
 const IMAGE_BLOCKER_LABELS: Record<string, { text: string; next: string }> = {
   IMAGE_RUNTIME_NOT_BOUND: { text: '还没有绑定本机出图运行时（ComfyUI 实例与模型目录）。', next: '打开本机出图配置，完成绑定。' },
   IMAGE_RENDERER_RECIPE_MISSING: { text: '受管渲染器的运行配方缺失，或与当前绑定的实例不一致。', next: '打开本机出图配置，重新准备运行环境。' },
+  IMAGE_RENDERER_RECIPE_MISMATCH: { text: '出图运行时绑定的实例与本机运行配置不是同一个实例。', next: '打开本机出图配置重新检查对齐。' },
+  IMAGE_RENDERER_MEMORY_INSUFFICIENT: { text: '本机显存或内存不够运行出图渲染器。', next: '先关闭占显存的其它进程或等待 H3 任务释放后重试。' },
   IMAGE_MODEL_ROOT_NOT_CONFIGURED: { text: '出图模型目录还没有配置。', next: '打开本机出图配置，指定模型目录。' },
   IMAGE_MODEL_FILE_MISSING: { text: '固定清单里的模型权重文件在本机缺失。', next: '在基础配置安装或导入对应权重。' },
   IMAGE_MODEL_SIZE_MISMATCH: { text: '模型权重文件大小与固定清单不一致。', next: '重新下载或导入该权重；核验通过前不会使用它。' },

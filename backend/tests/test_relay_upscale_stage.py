@@ -232,3 +232,59 @@ def test_edl_prefers_a_fully_verified_upscale_artifact(studio):
         item.output_sha256 = db.get(MediaArtifact, artifact_id).sha256
         db.commit()
         assert relay_artifact_for_job(db, job_id).id == artifact_id
+
+
+def test_failed_upscale_blocks_episode_and_never_silently_delivers_1x(studio):
+    """勾选 2X 高清后，超分失败/待核对绝不得静默回退交付 1x 原片。"""
+    from shine.comfyops.relay_stage import episode_relay_gate
+
+    client, factory, settings = studio
+    project_id, job_id, artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
+    _enqueue_one(factory, project_id, job_id, shot_id)
+
+    with factory.begin() as db:
+        item = db.scalar(select(RelayUpscaleItem))
+        item.status = "NEEDS_REVIEW"
+        item.error_code = "RELAYVSR_NODES_MISSING_IN_LIVE"
+
+    with factory() as db:
+        assert episode_relay_items_unfinished(db, "run-1", _EpisodeStub([shot_id])) == 0
+        gate = episode_relay_gate(db, "run-1", _EpisodeStub([shot_id]), {shot_id: db.get(Job, job_id)})
+        assert gate["ready"] is False
+        assert gate["status"] == "BLOCKED"
+        assert gate["code"] == "RELAYVSR_NODES_MISSING_IN_LIVE"
+
+
+def test_relay_worker_starts_and_stops_managed_renderer_when_recipe_exists(studio, fake_comfy, monkeypatch):  # noqa: F811
+    """comfy_client=None 且有 managed_recipe 时，RelayVSR 必须启动受管渲染器并在结束后释放。"""
+    from shine.comfyops import image_renderer
+
+    client, factory, settings = studio
+    project_id, job_id, _artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
+    _enqueue_one(factory, project_id, job_id, shot_id)
+
+    recipe_file = image_renderer.recipe_path(settings)
+    recipe_file.parent.mkdir(parents=True, exist_ok=True)
+    recipe_file.write_text('{"renderer": {"instance_id": "inst-relay"}}', encoding="utf-8")
+
+    lifecycle = []
+    monkeypatch.setattr(image_renderer, "load_image_recipe",
+                        lambda _s: {"renderer": {"instance_id": "inst-relay", "port": 8188}})
+    monkeypatch.setattr(image_renderer, "ensure_image_renderer",
+                        lambda _f, _s, *, instance_id: lifecycle.append(("start", instance_id)) or {
+                            "status": "RUNNING", "base_url": fake_comfy.base_url, "reused": False})
+    monkeypatch.setattr(image_renderer, "stop_image_renderer",
+                        lambda _f, _s, *, instance_id, actor: lifecycle.append(("stop", instance_id)) or {
+                            "status": "STOPPED"})
+    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_MODEL_SHA256", "a" * 64, raising=False)
+    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_VAE_SHA256", "b" * 64, raising=False)
+    monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: _relay_object_info())
+    fake_comfy.output_bytes = make_test_video_bytes(duration_s=6, width=1024, height=576)
+
+    processed = run_pending_relay_items(
+        factory, settings=worker_settings(settings), worker_id="relay-worker",
+        comfy_client=None, asset_root=Path(settings.data_dir) / "assets")
+    assert processed == 1
+    assert lifecycle == [("start", "inst-relay"), ("stop", "inst-relay")]
+    with factory() as db:
+        assert db.scalar(select(RelayUpscaleItem)).status == "PASSED"

@@ -796,18 +796,27 @@ def _ensure_episode_delivery(
         return None, False
     # 2b. The upscale stage runs between "all H3 shots passed" and "this
     #     episode may be assembled".  Items are created once, idempotently,
-    #     and the delivery order waits until every item reached a terminal
-    #     state - assembling earlier would silently deliver the un-upscaled
-    #     clip as the final one.
+    #     and the delivery order waits until every item passes; a failed or
+    #     unverified upscale blocks the episode instead of silently delivering
+    #     the un-upscaled clip as the final one.
     from shine.comfyops.relay_stage import (
         enqueue_relay_items_for_episode,
-        episode_relay_items_unfinished,
+        episode_relay_gate,
         run_upscale_enabled,
     )
 
     if run_upscale_enabled(package.manifest if package else None):
         enqueue_relay_items_for_episode(db, run, episode, passed)
-        if episode_relay_items_unfinished(db, run.id, episode):
+        gate = episode_relay_gate(db, run.id, episode, passed)
+        if not gate["ready"]:
+            if gate["status"] == "BLOCKED":
+                code = str(gate.get("code") or "RELAY_UPSCALE_FAILED")
+                if episode.status != "BLOCKED" or episode.blocker_code != code:
+                    episode.status = "BLOCKED"
+                    episode.blocker_code = code
+                    _event(db, run, "EPISODE_UPSCALE_BLOCKED",
+                           f"{episode.title or episode.episode_id} 2X 高清超分未通过：{code}",
+                           {"episode_id": episode.episode_id, "code": code, "shot_id": gate.get("shot_id")})
             return None, False
     digest = episode_input_digest(db, run, episode, batches)
     existing = db.scalars(
@@ -1364,11 +1373,27 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             project_id=run.project_id,
         )
 
-    def current_bindings_are_safe(shot: Shot, profile: WorkflowProfile, manifest) -> bool:
+    def current_bindings_are_safe(shot: Shot, profile: WorkflowProfile | None, manifest,
+                                  *, series: ProductionSeries | None = None) -> bool:
         """Allow slot recategorization only for the same pinned, locked masters."""
-        if (profile.mode != binding_pin.get("mode")
-                or (profile.parameter_map or {}) != (binding_pin.get("parameter_map") or {})
-                or (profile.media_transfers or {}) != (binding_pin.get("media_transfers") or {})):
+        if profile is not None:
+            if (profile.mode != binding_pin.get("mode")
+                    or (profile.parameter_map or {}) != (binding_pin.get("parameter_map") or {})
+                    or (profile.media_transfers or {}) != (binding_pin.get("media_transfers") or {})):
+                return False
+        elif series is not None and series.generation_strategy is not None:
+            if binding_pin.get("strategy_sha256"):
+                from shine.strategy import GenerationStrategy, strategy_blockers
+
+                try:
+                    contract = GenerationStrategy.model_validate(series.generation_strategy)
+                except ValueError:
+                    return False
+                if contract.strategy_sha256() != binding_pin.get("strategy_sha256"):
+                    return False
+                if strategy_blockers(contract, db):
+                    return False
+        else:
             return False
         pinned_shot = pinned_shots.get(shot.id)
         pinned_bindings = {
@@ -1381,13 +1406,14 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             for asset_id, asset in current_assets.items()
         ):
             return False
-        try:
-            validate_reference_slots(profile.parameter_map, manifest)
-        except (ComfyError, HTTPException, ValueError):
-            return False
-        # An unbound declared transfer family is a warning now, not a refusal:
-        # the unused loader is pruned and the shot still renders.
-        collect_unbound_transfer_families(profile.media_transfers or {}, manifest, current_assets)
+        if profile is not None:
+            try:
+                validate_reference_slots(profile.parameter_map, manifest)
+            except (ComfyError, HTTPException, ValueError):
+                return False
+            # An unbound declared transfer family is a warning now, not a refusal:
+            # the unused loader is pruned and the shot still renders.
+            collect_unbound_transfer_families(profile.media_transfers or {}, manifest, current_assets)
         return True
 
     for batch in _batch_rows(db, run.id):
@@ -1419,6 +1445,7 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
         old_job_id: str | None = None
         current_item: ProductionSeriesItem | None = None
         current_job: Job | None = None
+        current_manifest: list[dict[str, Any]] = []
 
         if series.failure_code == "SERIES_EXECUTION_FAILED:HTTPException":
             blocked = next((item for item in items if item.status == "BLOCKED"), None)
@@ -1455,11 +1482,11 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
                 continue
 
             shot = db.get(Shot, blocked.shot_id)
-            profile = db.get(WorkflowProfile, series.workflow_profile_id or "")
-            if shot is None or profile is None or job.shot_revision != shot.revision:
+            profile = db.get(WorkflowProfile, series.workflow_profile_id or "") if series.workflow_profile_id else None
+            if shot is None or job.shot_revision != shot.revision:
                 continue
             manifest = manifest_from_shot_bindings(db, shot)
-            if not current_bindings_are_safe(shot, profile, manifest):
+            if not current_bindings_are_safe(shot, profile, manifest, series=series):
                 continue
             previous_manifest = list((job.request or {}).get("reference_manifest") or [])
             current_manifest = [row.model_dump(mode="json") for row in manifest]
@@ -1470,42 +1497,76 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             current_item = blocked
             current_job = None
 
-        elif series.failure_code == "SERIES_INCOMPLETE":
-            current_item = next((item for item in items if item.status not in {"PASSED", "CANCELLED"}), None)
-            current_job = db.get(Job, current_item.job_id) if current_item and current_item.job_id else None
-            if not current_item or not current_job or current_job.status != "QUEUED" \
-                    or current_job.provider != "comfyui" or current_job.paused or current_job.stale \
-                    or current_job.artifact_id or current_job.provider_job_id \
-                    or db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == current_job.id).limit(1)):
+        else:
+            # Converged single verdict: ask production_series whether this
+            # NEEDS_REVIEW series has settled all external uncertainty and what
+            # safely remains (a mergeable completion, a queued 0-attempt shot,
+            # or an uncreated PENDING shot after an abandoned/settled blocker).
+            from shine.comfyops.production_series import peek_series_resume_plan, resume_series_in_session
+
+            plan = peek_series_resume_plan(db, series)
+            if not plan.get("resumable"):
                 continue
-            waiting = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + current_job.id))
-            if waiting is not None and waiting.status not in {"WAITING", "RELEASED"}:
+            if plan.get("kind") == "COMPLETE_SERIES":
+                if series.finalization_state not in {"NONE", "RELEASED"}:
+                    continue
+                resume_series_in_session(db, series.id, actor=actor)
+                batch.status = "PASSED"
+                batch.failure_code = None
+                batch.completed_at = series.finished_at or utcnow()
+                episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+                if episode is not None and episode.status == "BLOCKED":
+                    episode.status = "PRODUCING"
+                    episode.blocker_code = None
+                recovered += 1
                 continue
-            shot = db.get(Shot, current_item.shot_id)
-            profile = db.get(WorkflowProfile, series.workflow_profile_id or "")
-            if shot is None or profile is None or current_job.shot_revision != shot.revision:
+
+            current_item = plan["next_item"]
+            current_job = plan["next_job"]
+            shot = db.get(Shot, current_item.shot_id) if current_item else None
+            profile = db.get(WorkflowProfile, series.workflow_profile_id or "") if series.workflow_profile_id else None
+            if current_item is None or shot is None:
                 continue
             manifest = manifest_from_shot_bindings(db, shot)
-            if not current_bindings_are_safe(shot, profile, manifest):
+            if not current_bindings_are_safe(shot, profile, manifest, series=series):
                 continue
-            previous_manifest = list((current_job.request or {}).get("reference_manifest") or [])
-            current_manifest = [row.model_dump(mode="json") for row in manifest]
-            if not previous_manifest:
-                continue
-            if digest_of(previous_manifest) == digest_of(current_manifest):
-                recovery_kind = "QUEUED_JOB_WITHOUT_ATTEMPT"
+
+            if current_job is not None:
+                if (current_job.status != "QUEUED" or current_job.provider != "comfyui"
+                        or current_job.paused or current_job.stale
+                        or current_job.artifact_id or current_job.provider_job_id
+                        or current_job.shot_revision != shot.revision
+                        or db.scalar(select(JobAttempt.id).where(JobAttempt.job_id == current_job.id).limit(1))):
+                    continue
+                waiting = db.scalar(select(ResourceLease).where(ResourceLease.owner == "h3:" + current_job.id))
+                if waiting is not None and waiting.status not in {"WAITING", "RELEASED"}:
+                    continue
+                previous_manifest = list((current_job.request or {}).get("reference_manifest") or [])
+                current_manifest = [row.model_dump(mode="json") for row in manifest]
+                if not previous_manifest:
+                    continue
+                if digest_of(previous_manifest) == digest_of(current_manifest):
+                    recovery_kind = "QUEUED_JOB_WITHOUT_ATTEMPT"
+                else:
+                    # A queued job is an immutable request snapshot. Preserve it as
+                    # stale history and let the Worker create a new job from the
+                    # current bindings; no attempt means no external submission.
+                    current_job.stale = True
+                    current_job.failure_code = "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
+                    current_job.status = "NEEDS_REVIEW"
+                    current_job.state_version += 1
+                    recovery_kind = "QUEUED_JOB_REPLACED_PRE_SUBMIT_BINDINGS_CHANGED"
+                old_job_id = current_job.id
             else:
-                # A queued job is an immutable request snapshot. Preserve it as
-                # stale history and let the Worker create a new job from the
-                # current bindings; no attempt means no external submission.
-                current_job.stale = True
-                current_job.failure_code = "RUN_BINDINGS_REVISED_BEFORE_SUBMIT"
-                current_job.status = "NEEDS_REVIEW"
-                current_job.state_version += 1
-                recovery_kind = "QUEUED_JOB_REPLACED_PRE_SUBMIT_BINDINGS_CHANGED"
-            old_job_id = current_job.id
-        else:
-            continue
+                # PENDING item: job was never created or submitted to H3.
+                if series.failure_code == "SERIES_INCOMPLETE":
+                    # Preserve historical invariant: SERIES_INCOMPLETE with a
+                    # missing/non-QUEUED current job does not bypass the check
+                    # unless a settled failure already closed earlier items.
+                    if not plan.get("blocked_items"):
+                        continue
+                recovery_kind = "PENDING_ITEM_AFTER_SETTLED_FAILURE"
+                old_job_id = None
 
         if recovery_kind in {
             "PENDING_WORKFLOW_MAPPING_PROVEN_BEFORE_SUBMIT",
@@ -1530,24 +1591,23 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             current_item.failure_code = None
             series.current_item_id = None
             series.current_job_id = None
-        else:
+        elif current_job is not None:
             current_item.status = "QUEUED"
             current_item.failure_code = None
             series.current_item_id = current_item.id
             series.current_job_id = current_job.id
+        else:
+            current_item.status = "PENDING"
+            current_item.failure_code = None
+            series.current_item_id = None
+            series.current_job_id = None
 
-        # Safe continuation only reopens durable queue state. The resident
-        # Worker claims one series at a time and alone promotes it to RUNNING
-        # after it owns the series lease.
-        series.status = "QUEUED"
-        series.worker_id = None
-        series.lease_expires_at = None
-        series.heartbeat_at = None
-        series.lease_id = None
-        series.failure_code = None
-        series.finished_at = None
-        series.control_reason = None
-        series.state_version += 1
+        # Safe continuation only reopens durable queue state through the
+        # single series resume executor. The resident Worker claims one series
+        # at a time and alone promotes it to RUNNING after owning the lease.
+        from shine.comfyops.production_series import resume_series_in_session
+
+        resume_series_in_session(db, series.id, actor=actor)
         batch.status = "QUEUED"
         batch.failure_code = None
         episode = db.get(ProductionRunEpisode, batch.episode_row_id)
@@ -1573,6 +1633,27 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             )
         recovered += 1
     return recovered
+
+
+def explain_run_resume_blocker(db: Session, run: ProductionRun) -> str:
+    """Honest explanation when a NEEDS_REVIEW run has no safely resumable batch."""
+    from shine.comfyops.production_series import peek_series_resume_plan
+
+    for batch in _batch_rows(db, run.id):
+        if batch.status != "BLOCKED" or not batch.series_id:
+            continue
+        series = db.get(ProductionSeries, batch.series_id)
+        if series is None:
+            continue
+        plan = peek_series_resume_plan(db, series)
+        if plan.get("reason") == "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED":
+            return "当前批次仍有结果未知的提交记录，不能自动续拍；请先「核对真实产物」或对未知镜头点「放弃未知结果」。"
+        if plan.get("reason") == "SERIES_NO_RUNNABLE_ITEMS":
+            return (
+                "该批次没有可独立续拍的未提交镜头（其余镜头等待被放弃镜头重拍）；"
+                "请先「去⑦重拍此镜」并选用，整集即可继续。"
+            )
+    return "当前阻塞尚未满足安全续拍条件，请先核对真实产物或按提示处理阻塞镜头。"
 
 
 def resume_run(session_factory, run_id: str, *, actor: str = "user",

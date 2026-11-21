@@ -1259,6 +1259,21 @@ def _step_recipe(factory, settings, task) -> dict[str, Any]:
         (report.get("services_verified") and variant_matches)
         or "h3" not in capabilities
     ):
+        # Ensure CANDIDATE_KEY stays aligned with the active machine recipe so
+        # a new project's VALIDATE step never trips GENERATE_RUNTIME_CONFIGURATION_FIRST.
+        if "h3" in capabilities:
+            cand = report.get("candidate") or {}
+            active_id = active_value.get("identity") or {}
+            if cand.get("recipe_sha256") != active_id.get("recipe_sha256") and active_id:
+                with factory.begin() as db:
+                    from shine.comfyops.managed_recipe import recipe_path
+                    from shine.comfyops.runtime_configuration import record_candidate
+
+                    try:
+                        record_candidate(db, settings, task.get("project_id"), recipe_path(settings),
+                                         variant_id=request.get("variant_id"))
+                    except Exception:  # noqa: BLE001 - best-effort sync only
+                        pass
         _align_existing_image_binding(factory, settings, task)
         return {"status": "DONE", "detail": "运行合同已激活，沿用现有配置，无需重新生成。"}
     # Both capabilities share one physical recipe. H3 owns it when requested,

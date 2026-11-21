@@ -105,10 +105,19 @@ def reconcile_m4_renderer(platform_factory, m4_factory, data_dir: Path) -> dict[
 
     with m4_factory.begin() as db:
         state = db.get(M4RendererState, "comfyui-m4")
-        if state is None or state.status == "STOPPED":
-            return {"reconciled": False, "status": "STOPPED"}
         active_run = db.scalar(select(M4ProductionRun).where(
             M4ProductionRun.status.in_(("CLAIMED", "RUNNING", "PAUSE_REQUESTED"))))
+        if state is None or state.status == "STOPPED":
+            if active_run is not None:
+                return {"reconciled": False, "status": "STOPPED"}
+            # Even when M4RendererState already says STOPPED, an orphaned m4:
+            # lease can still linger in shine.db after a crash. Release it once
+            # we prove no Manual4 renderer process remains via the platform facade.
+            from shine.platform_gpu import release_orphaned_m4_leases
+
+            released_count = release_orphaned_m4_leases(platform_factory, data_dir)
+            return {"reconciled": bool(released_count), "status": "STOPPED",
+                    "released_orphan_leases": released_count}
         job_name = state.job_name
         lease_id, lease_owner = state.lease_id, state.lease_owner
         gone = _renderer_is_gone(state)

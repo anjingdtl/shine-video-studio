@@ -474,3 +474,33 @@ def test_the_attempt_reaches_a_terminal_state_when_the_renderer_dies(api, tmp_pa
     assert attempt.prompt_id == "prompt-1"
     assert item.status == "NEEDS_REVIEW"
     assert item.error_code == "IMAGE_RENDERER_GONE"
+
+
+def test_resolved_recipe_mismatch_no_longer_blocks_image_readiness(api, tmp_path, monkeypatch):
+    """配方已对齐（binding_state=READY）后，历史 IMAGE_RENDERER_RECIPE_MISMATCH 不再锁死出图验证。"""
+    _, factory, settings = api
+    _bind_runtime(settings, tmp_path, "http://127.0.0.1:8188")
+    with factory.begin() as db:
+        db.add(AppSetting(
+            key=image_renderer.image_startup_key("fake-instance"),
+            value={
+                "stage": "FAILED",
+                "instance_id": "fake-instance",
+                "port": 8188,
+                "error_code": "IMAGE_RENDERER_RECIPE_MISMATCH",
+            },
+        ))
+    monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "STOPPED")
+    with factory() as db:
+        report = runtime.readiness(db, settings, object_info=object_info_fixture())
+    assert report["binding_state"] == "READY"
+    assert report["layer"] == runtime.LAYER_GRAPH_VERIFIED
+    assert report["blockers"] == []
+
+    # reconcile_dead_image_renderer 应能清理陈旧 FAILED 记录（不再留 stage=FAILED）。
+    assert image_renderer.reconcile_dead_image_renderer(factory, "fake-instance") is True
+    with factory() as db:
+        row = db.get(AppSetting, image_renderer.image_startup_key("fake-instance"))
+        assert row.value["stage"] == "STOPPED"
+        assert row.value.get("error_code") is None
+        assert image_renderer.renderer_blocker(db, settings, instance_id="fake-instance") is None

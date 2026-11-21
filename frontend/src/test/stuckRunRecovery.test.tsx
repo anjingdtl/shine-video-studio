@@ -149,4 +149,21 @@ describe('⑥ 运行卡的人工决定面', () => {
     expect(await screen.findByText('运行等待人工核对')).toBeInTheDocument();
     expect(screen.queryByText('拍摄停在等待你决定的镜头')).toBeNull();
   });
+
+  it('点击继续安全可恢复批次仍停在 NEEDS_REVIEW 时展示服务端解释', async () => {
+    stubSystem();
+    stubStuckRun([stuckJob({ status: 'FAILED', failure_code: 'USER_ABANDONED_UNRECONCILED' })]);
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/production-runs\/run-1\/resume$/,
+      respond: () => jsonResponse({
+        id: 'run-1', status: 'NEEDS_REVIEW', state_version: 2,
+        message: '该批次没有可独立续拍的未提交镜头；请先「去⑦重拍此镜」并选用。',
+      }, 202) });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
+
+    await user.click(await screen.findByRole('button', { name: /继续安全可恢复批次/ }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('去⑦重拍此镜');
+  });
 });

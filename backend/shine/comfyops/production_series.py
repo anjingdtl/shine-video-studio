@@ -1648,6 +1648,65 @@ def pause_series(session_factory, series_id: str) -> str:
         return series.status
 
 
+def peek_series_resume_plan(db, series: ProductionSeries) -> dict[str, Any]:
+    """Single read-only verdict of how a ``NEEDS_REVIEW`` series can resume.
+
+    Returns ``{"resumable": False, "reason": ...}`` when external work is still
+    unreconciled or no runnable shot remains (waiting for a retake in ⑦), or
+    ``{"resumable": True, "kind": "COMPLETE_SERIES" | "REQUEUE_SERIES", ...}``
+    when the series can either merge completion or safely continue at its next
+    unsubmitted/runnable shot.
+    """
+    from shine.production.runner import _series_has_inflight_work
+
+    if _series_has_inflight_work(db, series):
+        return {"resumable": False, "reason": "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED"}
+
+    items = _items(db, series.id)
+    jobs = {
+        job.id: job
+        for job in db.scalars(select(Job).where(Job.id.in_([i.job_id for i in items if i.job_id]))).all()
+    } if any(i.job_id for i in items) else {}
+
+    passed_item_shots: set[str] = set()
+    blocked_items: list[ProductionSeriesItem] = []
+    next_item: ProductionSeriesItem | None = None
+    next_job: Job | None = None
+
+    for item in items:
+        job = jobs.get(item.job_id) if item.job_id else None
+        if _item_is_done(item, job):
+            if job is not None and job.status == "PASSED" and not job.stale:
+                passed_item_shots.add(item.shot_id)
+            continue
+        if job is not None and job.status in {"FAILED", "NEEDS_REVIEW"}:
+            blocked_items.append(item)
+            continue
+        if item.continuity_mode != "cut":
+            previous = _source_item(db, item, items)
+            if previous is not None:
+                source = jobs.get(previous.job_id) if previous.job_id else None
+                if source is None or source.status != "PASSED" or source.stale:
+                    blocked_items.append(item)
+                    continue
+        if next_item is None:
+            next_item = item
+            next_job = job
+
+    if next_item is None and not blocked_items:
+        return {"resumable": True, "kind": "COMPLETE_SERIES", "blocked_items": [], "next_item": None, "next_job": None}
+    if next_item is None:
+        return {"resumable": False, "reason": "SERIES_NO_RUNNABLE_ITEMS", "blocked_items": blocked_items,
+                "next_item": None, "next_job": None}
+    return {
+        "resumable": True,
+        "kind": "REQUEUE_SERIES",
+        "blocked_items": blocked_items,
+        "next_item": next_item,
+        "next_job": next_job,
+    }
+
+
 def resume_series_in_session(db, series_id: str, *, actor: str = "user") -> str:
     """Revive a paused - or provably settled review - series at its first unfinished shot.
 
@@ -1667,10 +1726,28 @@ def resume_series_in_session(db, series_id: str, *, actor: str = "user") -> str:
         raise HTTPException(409, "This production series is not paused")
     from_status = series.status
     if series.status == "NEEDS_REVIEW":
-        from shine.production.runner import _series_has_inflight_work
-
-        if _series_has_inflight_work(db, series):
+        plan = peek_series_resume_plan(db, series)
+        if plan.get("reason") == "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED":
             raise HTTPException(409, "PRODUCTION_SERIES_EXTERNAL_WORK_UNRECONCILED")
+        _sync_items(db, series)
+        if plan.get("kind") == "COMPLETE_SERIES":
+            series.status = "COMPLETED"
+            series.failure_code = None
+            series.finished_at = utcnow()
+            series.control_reason = None
+            series.lease_id = None
+            series.worker_id = None
+            series.lease_expires_at = None
+            series.heartbeat_at = None
+            series.finalization_state = "RELEASED"
+            series.completed_count = series.shot_count
+            series.state_version += 1
+            from shine.services import add_audit
+
+            add_audit(db, actor, "SERIES_OUTCOME_RECONCILED", "production_series", series.id,
+                      {"reason": "RESUMED_WITH_ALL_ITEMS_SETTLED", "from_status": from_status},
+                      project_id=series.project_id)
+            return series.status
         # The dead run's bookkeeping belongs to the review record, not to the
         # revived queue entry.
         series.failure_code = None

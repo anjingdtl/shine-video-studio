@@ -205,9 +205,12 @@ def in_flight_image_work(db) -> list[dict[str, Any]]:
 
 def installation_activity(db, installation_id: str, *, exclude_lease_id: str | None = None) -> dict[str, Any]:
     """Everything an executor must respect before a lifecycle decision."""
+    from shine.platform_gpu import data_dir_for_session, read_m4_renderer_snapshot
+
     h3 = [record for record in h3_records_for_installation(db, installation_id)
           if record["state"] in ("ACTIVE", "STARTING", "UNCERTAIN")]
     image = image_record_for_installation(db, installation_id)
+    m4_record = read_m4_renderer_snapshot(data_dir_for_session(db))
     leases = lease_facts(db, exclude_lease_id=exclude_lease_id)
     jobs = in_flight_h3_jobs(db)
     image_work = in_flight_image_work(db)
@@ -218,6 +221,10 @@ def installation_activity(db, installation_id: str, *, exclude_lease_id: str | N
         renderer_state = "H3"
     elif any(r["state"] == "UNCERTAIN" for r in h3):
         renderer_state = "UNCERTAIN_H3"
+    elif m4_record and m4_record["state"] in ("ACTIVE", "STARTING"):
+        renderer_state = "M4"
+    elif m4_record and m4_record["state"] in ("UNCERTAIN", "GONE"):
+        renderer_state = "UNCERTAIN_M4"
     else:
         renderer_state = "NONE"
     return {
@@ -225,6 +232,7 @@ def installation_activity(db, installation_id: str, *, exclude_lease_id: str | N
         "renderer_state": renderer_state,
         "h3_records": h3,
         "image_record": image if image_state in ("ACTIVE", "STARTING", "UNCERTAIN") else None,
+        "m4_record": m4_record,
         "gpu_leases": leases,
         "in_flight_h3_jobs": jobs,
         "in_flight_image_work": image_work,

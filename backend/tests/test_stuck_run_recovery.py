@@ -226,6 +226,7 @@ def test_abandoned_shot_retake_selection_finishes_the_run(api):
         job = db.get(Job, source_id)
         job.status = "FAILED"
         job.failure_code = "USER_ABANDONED_UNRECONCILED"
+        job.provider_job_id = "prompt-old"
         job.lease_owner = None
         job.lease_expires_at = None
         db.add(ExternalJobReconciliation(job_id=job.id, provider_job_id="prompt-old",
@@ -282,3 +283,129 @@ def test_abandoned_shot_retake_selection_finishes_the_run(api):
             ProductionRunEpisode.run_id == run_id)).first()
         assert episode.status != "BLOCKED"
         assert episode.delivery_order_id, "选用完成后必须创建分集交付单"
+
+
+def test_resume_run_continues_remaining_pending_shots_after_abandoned_shot(api):
+    """复现最终截图：停栈→放弃第1镜未知结果→第2镜仍 PENDING，点「继续安全可恢复批次」必须恢复开拍。"""
+    from shine.models import ProductionSeriesItem
+    from shine.production.models import ProductionRunBatch, ProductionRunEpisode
+    from shine.strategy import GenerationStrategy
+
+    client, factory, settings = api
+    studio = _studio(client, shots=2)
+    _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=2)
+    # 模拟新七阶段动态策略导演包（workflow_profile_id=None，frozen strategy 存在）。
+    with factory.begin() as db:
+        from shine.director.contracts import digest_of
+        from shine.director.models import DirectorPackageVersion
+
+        pkg = db.get(DirectorPackageVersion, package["id"])
+        manifest = dict(pkg.manifest)
+        binding = dict(manifest.get("binding") or {})
+        strat = GenerationStrategy()
+        binding["workflow_profile_id"] = None
+        binding["strategy"] = strat.model_dump(mode="json")
+        binding["strategy_sha256"] = strat.strategy_sha256()
+        manifest["binding"] = binding
+        pkg.manifest = manifest
+        pkg.manifest_sha256 = digest_of(manifest)
+    _confirm_package(client, package["id"])
+    created = client.post(f"/api/v1/projects/{studio['project']}/production-runs",
+                          json={"package_id": package["id"]}, headers=LOCAL)
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    _advance(factory, settings, run_id)
+
+    with factory() as db:
+        series = db.scalars(select(ProductionSeries).where(
+            ProductionSeries.project_id == studio["project"])).first()
+        series_id = series.id
+        items = db.scalars(select(ProductionSeriesItem).where(
+            ProductionSeriesItem.series_id == series_id).order_by(ProductionSeriesItem.position)).all()
+        assert len(items) == 2
+        first_item_id, second_item_id = items[0].id, items[1].id
+
+    from shine.comfyops.production_series import _create_item_job
+
+    source_id = _create_item_job(factory, series_id, first_item_id, settings=settings, offline=True)
+    with factory.begin() as db:
+        job = db.get(Job, source_id)
+        job.status = "FAILED"
+        job.failure_code = "USER_ABANDONED_UNRECONCILED"
+        job.provider_job_id = "prompt-old"
+        job.lease_owner = None
+        job.lease_expires_at = None
+        db.add(ExternalJobReconciliation(job_id=job.id, provider_job_id="prompt-old",
+                                         action="user_abandon", result="abandoned",
+                                         evidence={"resubmitted": False}))
+        lease = ResourceLease(owner="h3:" + job.id, budget_mb=16384, exclusive=True, priority=100,
+                              status="RELEASED", expires_at=utcnow() - timedelta(seconds=1))
+        db.add(lease)
+        db.flush()
+        series = db.get(ProductionSeries, series_id)
+        series.provider = "comfyui"
+        series.workflow_profile_id = None
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "USER_ABANDONED_UNRECONCILED"
+        series.worker_id = None
+        series.lease_expires_at = None
+        series.lease_id = lease.id
+        first_item = db.get(ProductionSeriesItem, first_item_id)
+        first_item.job_id = job.id
+        first_item.status = "BLOCKED"
+        second_item = db.get(ProductionSeriesItem, second_item_id)
+        assert second_item.job_id is None and second_item.status == "PENDING"
+    _advance(factory, settings, run_id)
+    with factory() as db:
+        assert db.get(ProductionRun, run_id).status == "NEEDS_REVIEW"
+
+    resumed = client.post(f"/api/v1/production-runs/{run_id}/resume", json={}, headers=LOCAL)
+    assert resumed.status_code == 202, resumed.text
+    assert resumed.json()["status"] == "RUNNING"
+    with factory() as db:
+        assert db.get(ProductionSeries, series_id).status == "QUEUED"
+        assert db.get(ProductionRunBatch, db.scalar(
+            select(ProductionRunBatch.id).where(ProductionRunBatch.run_id == run_id))).status == "QUEUED"
+        assert db.get(ProductionRunEpisode, db.scalar(
+            select(ProductionRunEpisode.id).where(ProductionRunEpisode.run_id == run_id))).status == "PRODUCING"
+
+
+def test_resume_run_explains_when_no_runnable_shot_remains(api):
+    """无剩余可独立续拍镜头时，resume 必须诚实保留 NEEDS_REVIEW 并给出中文说明。"""
+    client, factory, settings = api
+    studio = _studio(client, shots=1)
+    _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
+    _confirm_package(client, package["id"])
+    created = client.post(f"/api/v1/projects/{studio['project']}/production-runs",
+                          json={"package_id": package["id"]}, headers=LOCAL)
+    run_id = created.json()["id"]
+    _advance(factory, settings, run_id)
+    with factory() as db:
+        series = db.scalars(select(ProductionSeries).where(
+            ProductionSeries.project_id == studio["project"])).first()
+        series_id = series.id
+        item_id = series.items[0].id
+    from shine.comfyops.production_series import _create_item_job
+
+    source_id = _create_item_job(factory, series_id, item_id, settings=settings, offline=True)
+    with factory.begin() as db:
+        job = db.get(Job, source_id)
+        job.status = "FAILED"
+        job.failure_code = "USER_ABANDONED_UNRECONCILED"
+        job.provider_job_id = "prompt-old"
+        job.lease_owner = None
+        job.lease_expires_at = None
+        db.add(ExternalJobReconciliation(job_id=job.id, provider_job_id="prompt-old",
+                                         action="user_abandon", result="abandoned",
+                                         evidence={"resubmitted": False}))
+        series = db.get(ProductionSeries, series_id)
+        series.status = "NEEDS_REVIEW"
+        series.failure_code = "USER_ABANDONED_UNRECONCILED"
+        series.items[0].job_id = job.id
+        series.items[0].status = "BLOCKED"
+    _advance(factory, settings, run_id)
+
+    resumed = client.post(f"/api/v1/production-runs/{run_id}/resume", json={}, headers=LOCAL)
+    assert resumed.status_code == 202
+    assert resumed.json()["status"] == "NEEDS_REVIEW"
+    assert "重拍" in resumed.json().get("message", "")

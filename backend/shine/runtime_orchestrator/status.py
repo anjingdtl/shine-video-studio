@@ -104,15 +104,18 @@ def _classify(
     if image and (image.get("state") == "UNCERTAIN" or stage == "RECONCILE_REQUIRED"):
         return "BLOCKED_UNVERIFIED"
     # A live start intent: the process may not exist yet, and that is normal.
+    m4_record = activity.get("m4_record")
     if (image and stage in ("INTENT", "LAUNCHED", "LISTENING")
-            or any(record["state"] == "STARTING" for record in activity["h3_records"])):
+            or any(record["state"] == "STARTING" for record in activity["h3_records"])
+            or (m4_record and m4_record.get("state") == "STARTING")):
         return "STARTING"
     # The record claims a running renderer the OS cannot confirm.
     if live_image == "UNVERIFIED":
         return "BLOCKED_UNVERIFIED"
-    if activity["renderer_state"] == "UNCERTAIN_H3":
+    if activity["renderer_state"] in {"UNCERTAIN_H3", "UNCERTAIN_M4"}:
         return "BLOCKED_UNVERIFIED"
     h3_active = any(record["state"] == "ACTIVE" for record in activity["h3_records"])
+    m4_active = bool(m4_record and m4_record.get("state") == "ACTIVE")
     busy = bool(
         activity["in_flight_h3_jobs"]
         or activity["in_flight_image_work"]
@@ -127,6 +130,8 @@ def _classify(
         if not h3_verified:
             return "BLOCKED_UNVERIFIED"
         return "BUSY" if http_up is True else "DEGRADED"
+    if m4_active:
+        return "BUSY"
     if busy:
         # Work is recorded but no renderer can be proven: reconcile, do not
         # start a second one on top of an unknown outcome.
@@ -260,26 +265,39 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     }
     # Worker liveness is stack-level truth, independent of any installation
     # binding: it must be filled even on the NOT_BOUND early return.
+    from shine.platform_gpu import read_m4_renderer_snapshot
     from shine.runtime_orchestrator.operations import any_worker_online
 
     snapshot["health"]["worker"] = "UP" if any_worker_online(db) else "DOWN"
-    if not installation_id:
+    m4_snapshot = read_m4_renderer_snapshot(settings.data_dir)
+    has_live_m4 = bool(m4_snapshot and m4_snapshot.get("state") in ("ACTIVE", "STARTING", "UNCERTAIN", "GONE"))
+    if not installation_id and not has_live_m4:
         return snapshot
     from shine.models import utcnow
 
     snapshot["last_observed_at"] = utcnow().isoformat()
     activity = installation_activity(db, installation_id)
-    renderer_facts = image_renderer_state(db, settings, installation_id)
+    renderer_facts = image_renderer_state(db, settings, installation_id) if installation_id else {"state": "STOPPED"}
     image_record = activity.get("image_record")
     live_image = renderer_facts.get("state")
     # The startup record carries the port while a renderer was started; a
     # stopped/unstarted installation still owns the recipe's port claim, and
     # an external listener there is exactly the conflict to report.
     active_h3 = next((record for record in activity["h3_records"] if record["state"] == "ACTIVE"), None)
-    port = (active_h3 or {}).get("port") or renderer_facts.get("port") or port_hint
+    m4_record = activity.get("m4_record")
+    active_m4 = m4_record if (m4_record and m4_record.get("state") in ("ACTIVE", "STARTING")) else None
+    port = (
+        (active_h3 or {}).get("port")
+        or (active_m4 or {}).get("port")
+        or renderer_facts.get("port")
+        or port_hint
+    )
     h3_facts = verified_live_record(active_h3) if active_h3 else {}
     h3_verified = bool(h3_facts.get("alive") and h3_facts.get("owned"))
+    m4_facts = verified_live_record(active_m4) if active_m4 else {}
+    m4_verified = bool(m4_facts.get("alive") and m4_facts.get("owned"))
     process = ((active_h3 or {}).get("process") if h3_verified else
+               (active_m4 or {}).get("process") if m4_verified else
                (image_record or {}).get("process") if live_image == "RUNNING" else None)
     listener_pid = _owned_listener_pid(port, process)
     http_up = _http_up(f"http://127.0.0.1:{port}", job_name=process["job_name"]) if listener_pid else None
@@ -289,6 +307,8 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
     )
     if active_h3 and h3_verified:
         workflow = "VERIFIED" if active_h3.get("node_inventory") else "UNVERIFIED"
+    elif active_m4 and m4_verified:
+        workflow = "VERIFIED"
     state = _classify(
         activity, live_image=live_image, h3_verified=h3_verified, http_up=http_up, workflow=workflow,
     )
@@ -306,9 +326,12 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         })
     snapshot["health"]["comfy_http"] = "UP" if http_up else ("DOWN" if http_up is False else "UNKNOWN")
     snapshot["health"]["workflow"] = workflow
-    owner_kind = "h3" if active_h3 else ("image" if live_image == "RUNNING" else None)
+    owner_kind = (
+        "h3" if active_h3
+        else ("m4" if active_m4 else ("image" if live_image == "RUNNING" else None))
+    )
     snapshot["current"]["owner_kind"] = owner_kind
-    snapshot["current"]["task"] = (active_h3 or {}).get("job_id") or (
+    snapshot["current"]["task"] = (active_h3 or {}).get("job_id") or (active_m4 or {}).get("lease_owner") or (
         activity["in_flight_image_work"][0]["id"] if activity["in_flight_image_work"] else None
     )
     pending = db.scalar(
@@ -332,10 +355,10 @@ def runtime_snapshot(db, settings) -> dict[str, Any]:
         "waiting_leases": 0,
     }
     snapshot["ownership"] = {
-        "managed": bool(live_image == "RUNNING" or active_h3),
+        "managed": bool(live_image == "RUNNING" or active_h3 or active_m4),
         # "verified" is an OS fact, not the presence of a record: PID + birth +
         # named Job Object membership must agree.
-        "verified": bool(live_image == "RUNNING" or h3_verified),
+        "verified": bool(live_image == "RUNNING" or h3_verified or m4_verified),
         "port": port,
         "pid": listener_pid or (process or {}).get("pid"),
     }
