@@ -88,13 +88,21 @@ def launch_owned_comfyui_group(
     return group, birth
 
 
-def verify_loopback_listener_ownership(port: int, group: OwnedProcessGroup, birth: str) -> None:
-    """Confirm the loopback listener on ``port`` belongs strictly to ``group``."""
+def verify_loopback_listener_ownership(port: int, group: OwnedProcessGroup) -> int:
+    """Confirm the loopback listener on ``port`` is a live member of ``group``.
+
+    Same verdict as the director7 renderer supervisor: a uv venv ``python.exe`` is
+    a trampoline that runs the real interpreter as a Job-member child, so ownership
+    is Job membership plus the listener's own birth — never equality to the root
+    PID. Returns the listener PID so the caller can bind it to the handoff responder.
+    """
     if os.name != "nt":
-        return
+        return group.pid
     listener_pid = windows_loopback_listener_pid(port)
-    if listener_pid != group.pid or not group.owns(listener_pid, birth):
+    listener_birth = process_identity(listener_pid)
+    if not listener_birth or not group.owns(listener_pid, listener_birth):
         raise ValueError("M4_COMFY_LISTENER_OWNERSHIP_UNVERIFIED")
+    return listener_pid
 
 
 __all__ = [

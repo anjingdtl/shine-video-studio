@@ -263,11 +263,17 @@ def managed_m4_comfyui(
             row.updated_at = m4_utcnow()
 
         deadline = time.monotonic() + startup_timeout_s
+        last_failure: dict[str, str] = {}
         while time.monotonic() < deadline:
+            check = "system_stats"
             try:
                 client.system_stats(timeout_s=3.0)
-                verify_loopback_listener_ownership(port, group, birth)
-                client.handoff_resume(token)
+                check = "listener_ownership"
+                listener_pid = verify_loopback_listener_ownership(port, group)
+                check = "handoff_resume"
+                resumed = client.handoff_resume(token)
+                if resumed.get("pid") != listener_pid:
+                    raise ValueError("M4_COMFY_LISTENER_IDENTITY_MISMATCH")
                 break
             except Exception as exc:
                 if group.exit_code_if_stopped() is not None:
@@ -278,9 +284,16 @@ def managed_m4_comfyui(
                             "message": f"四阶 ComfyUI 启动过程中退出，请查看日志：{spec['log_file']}",
                         },
                     ) from exc
+                last_failure = {"check": check, "error": f"{type(exc).__name__}: {exc}"}
                 time.sleep(0.75)
         else:
-            raise HTTPException(504, {"code": "M4_COMFY_STARTUP_TIMEOUT", "message": "四阶 ComfyUI 启动超时"})
+            raise HTTPException(504, {
+                "code": "M4_COMFY_STARTUP_TIMEOUT",
+                "message": "四阶 ComfyUI 启动超时",
+                "failed_check": last_failure.get("check"),
+                "last_error": last_failure.get("error"),
+                "log_file": spec["log_file"],
+            })
 
         with m4_factory.begin() as db:
             row = db.get(M4RendererState, "comfyui-m4")
