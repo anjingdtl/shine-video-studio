@@ -470,6 +470,7 @@ def _semantic_review(
             settings.data_dir / "evidence" / project_id / job_id,
             ffmpeg_path=settings.ffmpeg_path,
             duration_s=spec.duration_target_s,
+            include_boundaries=True,
         )
     identity_labels = {
         f"{entry.label} / {entry.entity_id or entry.role or 'reference'}"

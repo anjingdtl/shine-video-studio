@@ -316,11 +316,16 @@ def test_ref2va_emits_all_six_official_sections_and_stable_labels():
     assert (
         "<Subject 1> is the approved, locked reference" in compiled.sections["subject_definitions"]
     )
-    assert compiled.sections["summary"].startswith("[reference generation + audio reference]")
+    # 1.4.0: a first-frame picture is a concrete frame anchor, so the official
+    # task type is keyframe completion alongside reference generation.
+    assert compiled.sections["summary"].startswith(
+        "[reference generation + keyframe completion + audio reference]"
+    )
     assert (
         "<Subject 1> (the first listed performer in [Shot 1]): fully_preserved"
         in compiled.sections["retention_analysis"]
     )
+    assert "<Picture 1> ([Shot 1] first_frame frame): fully_preserved" in compiled.sections["retention_analysis"]
     assert "<Subject 1> (S1) says: <d>[Chinese] 账册在哪儿？</d>" in compiled.sections["detailed_description"]
     assert compiled.labels["<Subject 1>"] == "asset-1"
 
@@ -660,6 +665,170 @@ def test_historical_compiler_versions_keep_their_exact_prompt_bytes():
         current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, project_language="Chinese")
         assert current.compiler_version == COMPILER_VERSION
         assert current.prompt_sha256 != expected, name
+
+
+#: The ledger holds TWO byte variants both pinned as ``1.3.0``: the anchored
+#: variant (current main) and the pre-anchoring variant (``1.3.0-original``).
+#: Both must replay byte-exactly so stored requests stay verifiable; neither is
+#: rewritten.  Captured on the same fixtures as the 1.2.x golden masters.
+_V13_PROMPT_HASHES = {
+    "silent_t2va_with_facts": {
+        "shine-h3-compiler/1.3.0": "329cfce89ca06a39318fdd725fb9469170b53e337899ad94d9e1a8b0f9930f6b",
+        "shine-h3-compiler/1.3.0-original": "07639f9c475acfeeceeddbf15b1b9f01704cc379ae4b96e653aa7b8709cd75bb",
+    },
+    "dialogue_ref2va_voice_master": {
+        "shine-h3-compiler/1.3.0": "af22fd909d3fff53da7af3718ac8957a4e971413d38c5bf852bfdcb7cd92b471",
+        "shine-h3-compiler/1.3.0-original": "ef0184ea99273dd3f4f74145bf6273d7be00fd2b2c9109154c38bdb9d5162c0f",
+    },
+    "silent_ref2va_continuity_audio": {
+        "shine-h3-compiler/1.3.0": "8eb6674db969de3cd47cbbc98a4ac2d67c0c794a4ff7895b1bf4fbc4ec932be4",
+        "shine-h3-compiler/1.3.0-original": "42bacd0479d19e72a14578bfc7aee8120de8b8bc894ef37c9a514d297d27edf0",
+    },
+    "narrated_ref2va": {
+        # Drift does not touch a narrated picture-only shot: both variants agree.
+        "shine-h3-compiler/1.3.0": "1a387ae785e9c73a18e0f2c05d79e8beb6b1ccde45ae740056694214d283acd6",
+        "shine-h3-compiler/1.3.0-original": "1a387ae785e9c73a18e0f2c05d79e8beb6b1ccde45ae740056694214d283acd6",
+    },
+    "silent_ref2va_no_sound_fields": {
+        "shine-h3-compiler/1.3.0": "866ed3680531ea1cb2b9c5b0121fe2f2c38690893fdd36b04afdd2f5090517af",
+        "shine-h3-compiler/1.3.0-original": "7380662d13cdb261744eedb1bf9d75a2a46205ada706f8671c6bce8a434431b3",
+    },
+}
+
+
+def test_both_historical_130_variants_replay_their_exact_bytes():
+    from shine.h3.compiler import (
+        LEGACY_ANCHORED_COMPILER_VERSION,
+        LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+    )
+
+    compiler = H3PromptCompiler()
+    for name, (shot, manifest) in _legacy_hash_fixtures().items():
+        hashes = {}
+        for version, expected in _V13_PROMPT_HASHES[name].items():
+            compiled = compiler.compile(
+                spec=shot, style=STYLE, manifest=manifest,
+                project_language="Chinese", compiler_version=version,
+            )
+            assert compiled.prompt_sha256 == expected, (name, version)
+            assert compiled.compiler_version == version, (name, version)
+            hashes[version] = compiled.prompt_sha256
+        # The two variants differ exactly where the drift reaches (silent anchor,
+        # silent ambience sanitizer, subject appearance) and agree elsewhere.
+        if name == "narrated_ref2va":
+            assert hashes[LEGACY_ANCHORED_COMPILER_VERSION] == hashes[LEGACY_PRE_ANCHOR_COMPILER_VERSION]
+        else:
+            assert hashes[LEGACY_ANCHORED_COMPILER_VERSION] != hashes[LEGACY_PRE_ANCHOR_COMPILER_VERSION]
+
+
+def test_pre_anchor_replay_restores_the_original_silent_and_subject_wording():
+    from shine.h3.compiler import LEGACY_PRE_ANCHOR_COMPILER_VERSION
+
+    shot = spec(
+        characters=["安娜"],
+        sound={"ambience": "Keep diegetic city ambience restrained beneath the original dialogue."},
+    )
+    manifest = [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="安娜", role="character")]
+    original = H3PromptCompiler().compile(
+        spec=shot, style=STYLE, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+    )
+    # Pre-anchoring bytes: no language-world anchor, no ambience sanitizing, and
+    # the original "hairstyle and build" subject wording.
+    assert "Chinese-language world" not in original.sections["overall_soundscape"]
+    assert "beneath the original dialogue" in original.sections["overall_soundscape"]
+    assert "hairstyle and build must be kept" in original.sections["subject_definitions"]
+    assert "reference appearance" not in original.sections["subject_definitions"]
+
+
+# --- P0-C / P3: native in-shot timeline, reference semantics, natural camera ----
+
+
+def test_internal_cuts_compile_to_the_native_shot_timeline():
+    shot = spec(
+        characters=["CHAR_A"],
+        duration_target_s=10,
+        internal_cuts=[
+            {"start_s": 3.5, "beat_id": "B02",
+             "visual_description": "The woman places both feet firmly on the floor and rises from the chair."},
+            {"start_s": 7.0, "beat_id": "B03",
+             "visual_description": "She crosses to the window and pulls the curtain aside."},
+        ],
+    )
+    manifest = [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character")]
+    compiled = compile_prompt(manifest, shot=shot)
+    desc = compiled.sections["detailed_description"]
+    assert "[Shot 1]" in desc
+    assert "[Shot 2] At 00:03.500, The woman places both feet firmly on the floor" in desc
+    assert "[Shot 3] At 00:07.000, She crosses to the window and pulls the curtain aside." in desc
+    assert "hard cut" not in desc
+    # The cut timeline must survive the rule pack's increasing-timestamp check.
+    from shine.h3.spec_review import review_h3_prompt
+    findings = review_h3_prompt(
+        compiled.prompt, compiled.sections, mode=compiled.mode.value,
+        dialogue=shot.dialogue, duration_s=shot.duration_target_s,
+        defined_labels={i.label for i in manifest},
+    )
+    assert not any(f.get("rule_id") == "H3_TIMING" for f in findings)
+
+
+def test_legacy_versions_ignore_internal_cuts_and_keep_single_block():
+    from shine.h3.compiler import LEGACY_ANCHORED_COMPILER_VERSION
+    shot = spec(
+        characters=["CHAR_A"], duration_target_s=10,
+        internal_cuts=[{"start_s": 3.5, "visual_description": "She rises from the chair."}],
+    )
+    manifest = [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character")]
+    legacy = H3PromptCompiler().compile(
+        spec=shot, style=STYLE, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_ANCHORED_COMPILER_VERSION,
+    )
+    assert "[Shot 2]" not in legacy.sections["detailed_description"]
+
+
+def test_empty_internal_cuts_keep_old_spec_bytes():
+    plain = spec()
+    assert "internal_cuts" not in plain.model_dump(mode="json")
+    with_empty = spec(internal_cuts=[])
+    assert with_empty.model_dump(mode="json") == plain.model_dump(mode="json")
+
+
+def test_video_motion_reference_is_not_labelled_continuation():
+    shot = spec(continuity={"mode": "cut"})
+    manifest = [item("<Video 1>", ReferenceUse.VIDEO, duration_s=4)]
+    compiled = compile_prompt(manifest, shot=shot)
+    assert "video continuation" not in compiled.sections["summary"]
+    assert "reference generation" in compiled.sections["summary"]
+    assert "motion and pacing reference" in compiled.sections["retention_analysis"]
+    assert "attribute_transfer" in compiled.sections["retention_analysis"]
+
+
+def test_true_video_continuation_is_labelled_continuation():
+    shot = spec(continuity={"mode": "video_reference", "previous_shot_id": "src"})
+    manifest = [item("<Video 1>", ReferenceUse.VIDEO, duration_s=4, role="continuity_derivative")]
+    compiled = compile_prompt(manifest, shot=shot)
+    assert "video continuation" in compiled.sections["summary"]
+    assert "(continuation structure): fully_preserved" in compiled.sections["retention_analysis"]
+
+
+def test_composition_picture_is_partially_preserved_not_a_frame_anchor():
+    manifest = [item("<Picture 1>", ReferenceUse.PICTURE)]  # no frame_role
+    compiled = compile_prompt(manifest, shot=spec(), mode=GenerationMode.REF2VA)
+    assert "keyframe completion" not in compiled.sections["summary"]
+    assert "composition reference): partially_preserved" in compiled.sections["retention_analysis"]
+
+
+def test_camera_is_natural_prose_not_mechanical_enumeration():
+    shot = spec(camera={
+        "composition": "A medium two-shot of the leads at the desk",
+        "movement": "The camera slowly pushes in on the lead's face",
+        "lighting": "Low-key side light keeps the shadows readable",
+    })
+    compiled = compile_prompt([], shot=shot)
+    desc = compiled.sections["integrated_multimodal_description"]
+    assert "composition:" not in desc and "movement:" not in desc and "lighting:" not in desc
+    assert "A medium two-shot of the leads at the desk" in desc
+    assert "The camera slowly pushes in on the lead's face" in desc
 
 
 def test_silent_shot_sanitizes_dialogue_ambience_and_anchors_project_language():

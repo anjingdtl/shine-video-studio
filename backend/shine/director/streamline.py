@@ -740,6 +740,23 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
                 "merged_section_ids": merged.get("merged_section_ids", []),
                 **({"non_narrative": True} if merged.get("non_narrative") else {}),
             })
+    # Creative-input selection (plan P0-A): a confirmed scene script that provably
+    # covers a whole section is preferred over the raw slice; everything else keeps
+    # the raw source.  Only adopted units gain fields, so a project without scene
+    # scripts keeps a byte-identical unit list (and request identity).
+    adopted_scripts = 0
+    for unit in units:
+        section = sections_by_id.get(unit["production_section_id"])
+        if section is None:
+            continue
+        selection = select_unit_creative_input(
+            db, project_id, document=document, section=section, unit=unit)
+        if selection["source"] == "confirmed_scene_script":
+            unit["creative_text"] = selection["text"]
+            unit["creative_source"] = selection["source"]
+            unit["script_artifact_id"] = selection["script_artifact_id"]
+            unit["script_sha256"] = selection["script_sha256"]
+            adopted_scripts += 1
     # The episode plan's target_seconds is the one duration goal. It used to
     # stop at episode grouping and a displayed deviation, so the crew only ever
     # saw the per-shot ceiling and hugged the dialogue minimum — a 60s target
@@ -768,6 +785,7 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
                "style_version_id": project.frozen_style_version_id, "asset_manifest_hash": asset_hash,
                "locked_facts": outline.payload_json.get("locked_facts", []),
                "stage": "STORYBOARD", "units": units, "cursor": 0, "results": [],
+               "creative_scripts_adopted": adopted_scripts,
                "blocked_episodes": {}, "fit_closed_episodes": {}, "automatic_replay": False},
     )
     db.add(row)
@@ -819,6 +837,56 @@ def _carryover_facts(db, project_id: str, prior_section_id: str | None) -> list[
             last_line = dialogue[-1]
             facts.append(f"上一场最后一句台词（{last_line.get('speaker_id')}）：{last_line.get('text')}")
     return facts
+
+
+def select_unit_creative_input(db, project_id: str, *, document, section: dict, unit: dict) -> dict:
+    """Read-only selection of one storyboard unit's creative text (plan P0-A).
+
+    Confirmed scene script preferred, raw source fallback.  A
+    ``FourStageSceneScript`` is adopted only when the existing confirmation
+    reader (``current_scene_script``) names it, it is not stale, it derives from
+    the SAME master document (identity + sha), and its source span provably
+    equals this section's slice of that document.  The original offsets stay the
+    immutable source evidence; the adopted script's identity is returned so the
+    request identity can pin it.
+
+    A unit that is only a sub-slice of its section (or a merge of several
+    sections) never takes the whole-scene script: it falls back to the raw source
+    so a whole scene is not fed to every fragment.  No guessed slicing.  This
+    function never writes, approves or creates anything.
+    """
+    from shine.director.pipeline import confirmed_scene_script_for_section, scene_script_creative_text
+
+    raw = document.text[unit["start_offset"]:unit["end_offset"]]
+    result = {
+        "text": raw,
+        "source": "raw_document",
+        "script_artifact_id": None,
+        "script_sha256": None,
+        "diagnostics": [],
+    }
+    whole_section = (
+        unit["start_offset"] == section["start_offset"]
+        and unit["end_offset"] == section["end_offset"]
+        and not unit.get("merged_section_ids")
+    )
+    if not whole_section:
+        result["diagnostics"].append("UNIT_NOT_WHOLE_SECTION_RAW_FALLBACK")
+        return result
+    script = confirmed_scene_script_for_section(db, project_id, document, section)
+    if script is None:
+        result["diagnostics"].append("NO_MATCHING_CONFIRMED_SCENE_SCRIPT_RAW_FALLBACK")
+        return result
+    # Provable lineage: same master document, same section source span, confirmed
+    # and current.  Adopt the creative text (never the frozen outline/episode
+    # facts, which remain authoritative elsewhere).
+    result.update(
+        text=scene_script_creative_text(script, section),
+        source="confirmed_scene_script",
+        script_artifact_id=script.id,
+        script_sha256=script.sha256,
+    )
+    return result
 
 
 def _fault_code(exc: Exception) -> str:
@@ -1031,7 +1099,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         try:
             result = (pending["result"] if landing_retry else
                       generate_storyboard(project_id, StoryboardRequest(
-                text=document.text[unit["start_offset"]:unit["end_offset"]],
+                text=unit.get("creative_text") or document.text[unit["start_offset"]:unit["end_offset"]],
                 locked_story_facts=state["locked_facts"], allow_remote_text=True,
                 start_role=state.get("failed_role") if retrying else None,
                 resume_steps=state.get("resume_steps", {}) if retrying else {},
@@ -1040,6 +1108,9 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 production_context={
                     "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                     "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                    **({"creative_source": unit["creative_source"],
+                        "script_artifact_id": unit["script_artifact_id"],
+                        "script_sha256": unit["script_sha256"]} if unit.get("script_artifact_id") else {}),
                     "unit_target_seconds": unit.get("target_seconds"),
                     "story_line": outline.payload_json.get("story_line", []),
                     "timeline": outline.payload_json.get("timeline", []),
@@ -1785,7 +1856,14 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
         subtitle_row = subtitles.get(shot.id)
         requested = list(spec.get("requested_assets") or [])
         beat = str(spec.get("story_beat") or "")
-        cuts = [{"start_s": float(m.group(1))} for m in _CUT_MARKER.finditer(beat)]
+        structured_cuts = spec.get("internal_cuts") or []
+        if structured_cuts:
+            cuts = [{"start_s": float(c["start_s"]), "beat_id": c.get("beat_id", ""),
+                     "visual_description": c.get("visual_description", "")} for c in structured_cuts]
+        else:
+            # Old shots landed before the structured field: parse the historical
+            # flattened markers so their cut table still displays.
+            cuts = [{"start_s": float(m.group(1))} for m in _CUT_MARKER.finditer(beat)]
         duration = float(spec.get("duration_target_s") or 0.0)
         total += duration
         continuity = spec.get("continuity") or {}

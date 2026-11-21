@@ -1128,8 +1128,29 @@ def verified_production_context(db, project_id, source_text, supplied):
         covered, min_start, max_end = False, 0, 0
     if (document is None or document.sha256 != outline.payload_json["document_sha256"] or section is None
             or type(left) is not int or type(right) is not int
-            or not covered or not min_start <= left < right <= max_end
-            or source_text.strip() != document.text[left:right].strip()):
+            or not covered or not min_start <= left < right <= max_end):
+        raise ValueError("STORY_SOURCE_RANGE_INVALID")
+    # Creative-input selection (plan P0-A): the brief may be the raw source slice
+    # OR the confirmed scene script provably adapted from that exact slice.  The
+    # single lineage adjudicator decides; an unconfirmed, superseded or mismatched
+    # script never widens the source range, and the raw offsets stay the immutable
+    # source evidence.
+    creative_text = None
+    creative_source = "raw_document"
+    script_artifact_id = None
+    script_sha256 = None
+    if supplied.get("script_artifact_id"):
+        from shine.director.pipeline import confirmed_scene_script_for_section, scene_script_creative_text
+
+        script = confirmed_scene_script_for_section(db, project_id, document, section)
+        if (script is not None and script.id == supplied.get("script_artifact_id")
+                and script.sha256 == supplied.get("script_sha256")):
+            creative_text = scene_script_creative_text(script, section)
+            creative_source = "confirmed_scene_script"
+            script_artifact_id = script.id
+            script_sha256 = script.sha256
+    if (source_text.strip() != document.text[left:right].strip()
+            and (creative_text is None or source_text.strip() != creative_text.strip())):
         raise ValueError("STORY_SOURCE_RANGE_INVALID")
     from shine.models import AppSetting
     current = db.get(AppSetting, f"current-story-outline:{project_id}")
@@ -1170,6 +1191,8 @@ def verified_production_context(db, project_id, source_text, supplied):
             "characters": outline.payload_json.get("characters", []),
             "continuity_facts": supplied.get("continuity_facts", []),
             "continuity": continuity_evidence,
+            **({"creative_source": creative_source, "script_artifact_id": script_artifact_id,
+                "script_sha256": script_sha256} if script_artifact_id else {}),
             "previous_render_status": previous_render_status}
 
 

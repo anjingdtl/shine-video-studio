@@ -15,6 +15,8 @@ from shine.h3.compiler import (
     BASE_RULE_SHA256,
     BASE_SECTION_ORDER,
     COMPILER_VERSION,
+    LEGACY_ANCHORED_COMPILER_VERSION,
+    LEGACY_PRE_ANCHOR_COMPILER_VERSION,
     REF_RULE_SHA256,
     REF_SECTION_ORDER,
     RULE_VERSION,
@@ -52,6 +54,48 @@ SOURCES.append(
 def digest(value: Any) -> str:
     data = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
+
+
+def _compiled_matches_request(compiled, request: RenderRequest) -> bool:
+    return (
+        compiled.prompt == request.compiled_prompt
+        and compiled.prompt_sha256 == request.prompt_sha256
+        and compiled.sections == request.compiled_prompt_sections
+    )
+
+
+def recompile_for_provenance(request: RenderRequest):
+    """The single compiler replays a stored request at its pinned version.
+
+    ``1.3.0`` is historically ambiguous: the ledger holds both the pre-anchoring
+    and the anchored bytes under that one label (the silent-shot sanitizer, the
+    language-world anchor and the subject appearance wording changed without a
+    version bump).  The canonical replay is the anchored variant; when it does
+    not reproduce the frozen bytes exactly, the pre-anchoring replay is tried.
+    Acceptance requires an exact byte match to one of the two pinned historical
+    variants, so a tampered prompt matches neither and is still refused.  No
+    stored hash or snapshot is ever rewritten.
+
+    Returns ``(compiled, replayed_variant)``; ``replayed_variant`` is ``None``
+    when the canonical pinned version matched, else the replay identity that did.
+    """
+    compiler = H3PromptCompiler()
+    pinned = request.compiler_version or COMPILER_VERSION
+    kwargs = dict(
+        spec=request.shot_spec,
+        style=request.style_snapshot,
+        manifest=request.reference_manifest,
+        mode_hint=request.generation_mode,
+        project_language=request.project_language,
+    )
+    compiled = compiler.compile(compiler_version=pinned, **kwargs)
+    if _compiled_matches_request(compiled, request):
+        return compiled, None
+    if pinned == LEGACY_ANCHORED_COMPILER_VERSION:
+        replay = compiler.compile(compiler_version=LEGACY_PRE_ANCHOR_COMPILER_VERSION, **kwargs)
+        if _compiled_matches_request(replay, request):
+            return replay, LEGACY_PRE_ANCHOR_COMPILER_VERSION
+    return compiled, None
 
 
 # Text below is authored for Shine. Locators identify evidence, not copied guide text.
@@ -404,24 +448,25 @@ class H3RulebookRegistry:
 
         if request.rulepack_id != pack.id or request.rulepack_hash != pack.sha256:
             reject("SHINE_PROVENANCE", "rulepack_hash", "Request rule pin does not match the project lock")
+        warnings: list[RuleViolation] = []
         try:
-            compiled = H3PromptCompiler().compile(
-                spec=request.shot_spec,
-                style=request.style_snapshot,
-                manifest=request.reference_manifest,
-                mode_hint=request.generation_mode,
-                project_language=request.project_language,
-                compiler_version=request.compiler_version or COMPILER_VERSION,
-            )
             # The single compiler is also the verifier: arbitrary agent strings cannot be submitted.
+            compiled, replayed_variant = recompile_for_provenance(request)
             if (
-                compiled.prompt != request.compiled_prompt
-                or compiled.prompt_sha256 != request.prompt_sha256
-                or compiled.sections != request.compiled_prompt_sections
+                not _compiled_matches_request(compiled, request)
                 or request.rule_version != RULE_VERSION
                 or request.prompt_skill_hash != SKILL_SHA256
             ):
                 reject("SHINE_PROVENANCE", "compiled_prompt", "Prompt differs from the deterministic compiler output")
+            elif replayed_variant:
+                warnings.append(self._warning_violation(pack, {
+                    "rule_id": "SHINE_PROVENANCE",
+                    "field": "compiler_version",
+                    "message": (
+                        f"Stored 1.3.0 request replayed byte-exactly as {replayed_variant} "
+                        "(pre-anchoring historical variant); no stored hash was rewritten."
+                    ),
+                }))
         except PromptCompilationError as exc:
             violations.extend(self.compilation_failure(pack, exc).violations)
         order = REF_SECTION_ORDER if request.generation_mode == GenerationMode.REF2VA else BASE_SECTION_ORDER
@@ -455,5 +500,6 @@ class H3RulebookRegistry:
         if times != sorted(set(times)) or any(t <= 0 or t >= request.expected_duration_s for t in times):
             reject("H3_TIMING", "compiled_prompt", "Cut timestamps are not increasing inside the duration")
         return RuleValidationReport(
-            rulepack_id=pack.id, rulepack_hash=pack.sha256, passed=not violations, violations=violations
+            rulepack_id=pack.id, rulepack_hash=pack.sha256, passed=not violations,
+            violations=violations, warnings=warnings,
         )

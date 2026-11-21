@@ -37,12 +37,33 @@ LEGACY_SOUND_COMPILER_VERSION = "shine-h3-compiler/1.2.3"
 # sentences state what the soundtrack contains and anchor every voice to the
 # project language instead.  Historical versions stay byte-identical so stored
 # requests remain verifiable.
-COMPILER_VERSION = "shine-h3-compiler/1.3.0"
+#
+# Version-drift reconciliation (2026-11-21, plan R6b): the silent-shot ambience
+# sanitizer, the silent language-world anchor and the subject appearance wording
+# were added to 1.3.0 *without* a version bump, so the ledger holds two different
+# byte variants both pinned as ``1.3.0``.  ``1.3.0`` keeps the current (anchored)
+# bytes; ``1.3.0-original`` is a replay-only identity that reproduces the exact
+# pre-anchoring bytes.  The single provenance verifier falls back to it for stored
+# ``1.3.0`` requests whose bytes predate the anchor.  Neither historical variant is
+# ever rewritten.  All new prompt behaviour lands in 1.4.0.
+LEGACY_ANCHORED_COMPILER_VERSION = "shine-h3-compiler/1.3.0"
+LEGACY_PRE_ANCHOR_COMPILER_VERSION = "shine-h3-compiler/1.3.0-original"
+COMPILER_VERSION = "shine-h3-compiler/1.4.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
     LEGACY_SOUND_COMPILER_VERSION,
+    LEGACY_ANCHORED_COMPILER_VERSION,
+    LEGACY_PRE_ANCHOR_COMPILER_VERSION,
     COMPILER_VERSION,
+)
+#: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
+LEGACY_SEMANTIC_VERSIONS = (
+    LEGACY_AUDIO_COMPILER_VERSION,
+    LEGACY_STYLE_COMPILER_VERSION,
+    LEGACY_SOUND_COMPILER_VERSION,
+    LEGACY_ANCHORED_COMPILER_VERSION,
+    LEGACY_PRE_ANCHOR_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -94,6 +115,11 @@ class _Context:
     legacy_audio: bool = False
     legacy_style: bool = False
     legacy_sound: bool = False
+    #: Replay-only: the pre-anchoring 1.3.0 bytes (no silent ambience sanitizer,
+    #: no silent language-world anchor, original subject appearance wording).
+    pre_anchor: bool = False
+    #: Keeps the pre-1.4.0 summary/retention/camera/shot-text behaviour.
+    legacy_semantics: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -391,6 +417,39 @@ def _camera_sentence(spec: ShotSpec) -> str:
     return "Camera: " + "; ".join(parts) + "." if parts else ""
 
 
+def _camera_narrative(spec: ShotSpec) -> str:
+    """Natural camera prose for 1.4.0 (plan P0-D.4 / R3).
+
+    The cinematographer's fields are already English prose; the compiler weaves
+    them into flowing sentences instead of the mechanical ``Camera: key: value``
+    enumeration.  A static camera is stated as holding still rather than left
+    ambiguous, and movement is described with its type/amplitude/speed as written.
+    """
+    camera = spec.camera or {}
+    if not camera:
+        return ""
+    order = ("composition", "shot_size", "movement", "angle", "axis_rule", "lens", "lighting")
+    prose: list[str] = []
+    for key in order:
+        value = str(camera.get(key) or "").strip().rstrip(".")
+        if value:
+            prose.append(value)
+    for key, value in camera.items():
+        if key in order or key == "director_style":
+            continue
+        text = str(value or "").strip().rstrip(".")
+        if text:
+            prose.append(text)
+    style = str(camera.get("director_style") or "").strip().rstrip(".")
+    if style:
+        # The frozen director-style constraint keeps its label so the shot states
+        # which style rules bind it; the camera prose itself stays natural.
+        prose.append(f"Director style: {style}")
+    if not prose:
+        return ""
+    return ". ".join(prose) + "."
+
+
 def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(
         _prompt_style(ctx.spec, ctx.style, legacy_style=ctx.legacy_style), ctx.spec.style_version_id,
@@ -417,7 +476,7 @@ def _shot_text(ctx: _Context) -> str:
                 "movement; the soundtrack stays non-vocal."
             )
     parts.append(ctx.spec.story_beat.strip())
-    camera = _camera_sentence(ctx.spec)
+    camera = _camera_sentence(ctx.spec) if ctx.legacy_semantics else _camera_narrative(ctx.spec)
     if camera:
         parts.append(camera)
     environment = ctx.spec.sound.get("environment")
@@ -477,7 +536,19 @@ def _shot_text(ctx: _Context) -> str:
             if ctx.legacy_audio else
             "Only non-vocal ambience continues from the previous approved shot."
         )
-    return " ".join(part.strip() for part in parts if part.strip())
+    base = " ".join(part.strip() for part in parts if part.strip())
+    # Plan P0-C: the official native in-shot timeline.  Each internal cut becomes
+    # its own [Shot N] At MM:SS.mmm block instead of a flattened "hard cut"
+    # sentence, so H3 reads the cut structure directly.  Legacy versions keep the
+    # historical single-block bytes untouched.
+    if not ctx.legacy_semantics and ctx.spec.internal_cuts:
+        blocks = [base]
+        for index, cut in enumerate(ctx.spec.internal_cuts, start=2):
+            blocks.append(
+                f"[Shot {index}] At {_format_timestamp(cut.start_s)}, {cut.visual_description.strip()}"
+            )
+        return "\n".join(blocks)
+    return base
 
 
 _DIALOGUE_AMBIENCE_PREP_RE = re.compile(
@@ -503,7 +574,9 @@ def non_vocal_ambience_text(text: str) -> str:
     return cleaned
 
 
-def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_sound: bool = False) -> str:
+def _spoken_language_sentence(
+    spec: ShotSpec, project_language: str, *, legacy_sound: bool = False, pre_anchor: bool = False
+) -> str:
     """The spoken-language contract of the shot.
 
     The whole prompt is written in English, so the language of the voice has to
@@ -533,7 +606,7 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_s
             )
         setting = (
             f" The scene takes place in a {language}-language world, and every sound stays wordless."
-            if language else ""
+            if language and not pre_anchor else ""
         )
         return (
             "This shot has no dialogue: the soundtrack is entirely non-vocal."
@@ -557,11 +630,14 @@ def _spoken_language_sentence(spec: ShotSpec, project_language: str, *, legacy_s
     )
 
 
-def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "", *, legacy_sound: bool = False) -> str:
+def _soundscape(
+    spec: ShotSpec, style: StyleBible, project_language: str = "", *,
+    legacy_sound: bool = False, pre_anchor: bool = False,
+) -> str:
     style = _prompt_style(spec, style)
     environment = spec.sound.get("environment", "").strip()
     ambience = spec.sound.get("ambience", "").strip()
-    if not spec.dialogue and not legacy_sound:
+    if not spec.dialogue and not legacy_sound and not pre_anchor:
         environment = non_vocal_ambience_text(environment)
         ambience = non_vocal_ambience_text(ambience)
     if not environment and not ambience:
@@ -582,7 +658,7 @@ def _soundscape(spec: ShotSpec, style: StyleBible, project_language: str = "", *
     else:
         pieces = [piece.rstrip(".") + "." for piece in (environment, ambience) if piece]
         sentences = pieces
-    spoken = _spoken_language_sentence(spec, project_language, legacy_sound=legacy_sound)
+    spoken = _spoken_language_sentence(spec, project_language, legacy_sound=legacy_sound, pre_anchor=pre_anchor)
     if spoken:
         sentences.append(spoken)
     return " ".join(sentences)
@@ -678,7 +754,7 @@ def _subject_definitions(ctx: _Context) -> str:
                 identity += f" ({role})"
             appearance_note = (
                 ", build, and reference appearance"
-                if not ctx.legacy_sound
+                if not ctx.legacy_sound and not ctx.pre_anchor
                 else " and build"
             )
             lines.append(
@@ -732,11 +808,34 @@ def _cast_order(ctx: _Context) -> str:
     )
 
 
+def _is_continuation_video(item: ReferenceManifestItem, ctx: _Context) -> bool:
+    """A video is a true continuation only when the shot declares video-reference
+    continuity AND the bound video is the continuity derivative (plan P0-D / R4).
+    A video bound merely as a motion/pacing reference is NOT a continuation."""
+    return (
+        item.use_as == ReferenceUse.VIDEO
+        and item.role == "continuity_derivative"
+        and ctx.spec.continuity.mode == ContinuityMode.VIDEO_REFERENCE
+    )
+
+
 def _summary(ctx: _Context) -> str:
     task_types = ["reference generation"]
-    if any(item.use_as == ReferenceUse.VIDEO for item in ctx.manifest):
-        task_types.append("video continuation")
+    if ctx.legacy_semantics:
+        # Historical behaviour: any video reference was labelled continuation.
+        if any(item.use_as == ReferenceUse.VIDEO for item in ctx.manifest):
+            task_types.append("video continuation")
+    else:
+        # Task types follow the actual role each reference plays (official ref-en
+        # §3): a concrete frame anchor is keyframe completion; only a true
+        # continuation is video continuation; a motion reference stays reference
+        # generation.  The mere presence of video/audio creates no task type.
+        if any(item.use_as == ReferenceUse.PICTURE and item.frame_role for item in ctx.manifest):
+            task_types.append("keyframe completion")
+        if any(_is_continuation_video(item, ctx) for item in ctx.manifest):
+            task_types.append("video continuation")
     if any(item.use_as == ReferenceUse.AUDIO for item in ctx.manifest):
+        # The product references timbre/ambience; it never copies the source signal.
         task_types.append("audio reference")
     labels = ", ".join(item.label for item in ctx.manifest)
     medium = ""
@@ -767,12 +866,35 @@ def _retention(ctx: _Context) -> str:
             )
             subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
-            lines.append(f"{item.label} ([Shot 1] frame): {marker} - the approved frame composition is retained.")
+            if ctx.legacy_semantics:
+                lines.append(f"{item.label} ([Shot 1] frame): {marker} - the approved frame composition is retained.")
+            elif item.frame_role:
+                lines.append(
+                    f"{item.label} ([Shot 1] {item.frame_role.value} frame): fully_preserved - "
+                    "the approved frame composition is retained."
+                )
+            else:
+                lines.append(
+                    f"{item.label} ([Shot 1] composition reference): partially_preserved - "
+                    "the approved composition and scene layout guide the frame while the action proceeds."
+                )
         elif item.use_as == ReferenceUse.VIDEO:
-            lines.append(
-                f"{item.label} (continuation structure): {marker} - the approved motion and framing are retained."
-                + ("" if ctx.legacy_audio else " Use the visual track only.")
-            )
+            visual_track = "" if ctx.legacy_audio else " Use the visual track only."
+            if ctx.legacy_semantics:
+                lines.append(
+                    f"{item.label} (continuation structure): {marker} - the approved motion and framing are retained."
+                    + visual_track
+                )
+            elif _is_continuation_video(item, ctx):
+                lines.append(
+                    f"{item.label} (continuation structure): fully_preserved - "
+                    "the approved motion and framing are retained." + visual_track
+                )
+            else:
+                lines.append(
+                    f"{item.label} (motion and pacing reference): attribute_transfer - "
+                    "the referenced camera motion and rhythm are transferred to the new subjects." + visual_track
+                )
         else:
             if ctx.legacy_audio:
                 lines.append(f"{item.label}: {marker} - the approved audio signal or timbre is referenced.")
@@ -814,6 +936,8 @@ class H3PromptCompiler:
         legacy_sound = compiler_version in (
             LEGACY_AUDIO_COMPILER_VERSION, LEGACY_STYLE_COMPILER_VERSION, LEGACY_SOUND_COMPILER_VERSION
         )
+        pre_anchor = compiler_version == LEGACY_PRE_ANCHOR_COMPILER_VERSION
+        legacy_semantics = compiler_version in LEGACY_SEMANTIC_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -837,6 +961,8 @@ class H3PromptCompiler:
             legacy_audio=legacy_audio,
             legacy_style=legacy_style,
             legacy_sound=legacy_sound,
+            pre_anchor=pre_anchor,
+            legacy_semantics=legacy_semantics,
         )
         if language_fallback:
             ctx.warnings.append(
@@ -857,7 +983,9 @@ class H3PromptCompiler:
         shots = _shot_text(ctx)
         if mode in {GenerationMode.T2VA, GenerationMode.I2VA, GenerationMode.FL2VA, GenerationMode.L2VA}:
             sections["integrated_multimodal_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language, legacy_sound=legacy_sound)
+            sections["overall_soundscape"] = _soundscape(
+                spec, style, spoken_language, legacy_sound=legacy_sound, pre_anchor=pre_anchor
+            )
             sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio, legacy_sound=legacy_sound)
             instruction = _align_instruction(mode, manifest, spec.duration_target_s)
             body = "\n".join(f"{name}: {sections[name]}" for name in BASE_SECTION_ORDER)
@@ -868,7 +996,9 @@ class H3PromptCompiler:
             sections["summary"] = _summary(ctx)
             sections["retention_analysis"] = _retention(ctx)
             sections["detailed_description"] = shots
-            sections["overall_soundscape"] = _soundscape(spec, style, spoken_language, legacy_sound=legacy_sound)
+            sections["overall_soundscape"] = _soundscape(
+                spec, style, spoken_language, legacy_sound=legacy_sound, pre_anchor=pre_anchor
+            )
             sections["non_diegetic_music"] = _music(spec, legacy_audio=legacy_audio, legacy_sound=legacy_sound)
             prompt = "\n\n".join(f"{name}:\n{sections[name]}" for name in REF_SECTION_ORDER)
             section_order = REF_SECTION_ORDER

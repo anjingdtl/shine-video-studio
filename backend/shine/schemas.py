@@ -200,6 +200,20 @@ class RequestedAsset(APIModel):
     carrier: Literal["object", "paper", "screen"] | None = None
 
 
+class InternalCut(APIModel):
+    """One in-shot cut frozen into the execution snapshot (plan P0-C).
+
+    ``start_s`` is measured from the render segment's start; the visual prose
+    belongs to the internal shot that begins at that offset.  ``ShotIntent.cuts``
+    remains the authoritative upstream; this is the frozen landing of it, never a
+    second independently editable copy.  An empty list is omitted from
+    serialization so old shot specs keep byte-identical hashes.
+    """
+    start_s: float = Field(gt=0, lt=15, allow_inf_nan=False)
+    beat_id: str = Field(default="", max_length=80)
+    visual_description: str = Field(min_length=1, max_length=1000)
+
+
 class ShotSpec(APIModel):
     schema_version: Literal["1.0"] = "1.0"
     story_beat: str = Field(min_length=1, max_length=2000)
@@ -218,21 +232,31 @@ class ShotSpec(APIModel):
     prompt_story_facts: list[str] = Field(default_factory=list, max_length=30)
     prompt_style: StyleBible | None = None
     requested_assets: list[RequestedAsset] = Field(default_factory=list, max_length=12)
+    internal_cuts: list[InternalCut] = Field(default_factory=list, max_length=19)
 
     @model_serializer(mode="wrap")
-    def _omit_empty_requested_assets(self, handler):
+    def _omit_empty_optional_lists(self, handler):
         # Old shots must keep byte-identical specs: every hash and request
         # fingerprint is computed over this snapshot, and a new empty list would
         # change all of them without changing a single creative fact.
         data = handler(self)
-        if isinstance(data, dict) and not data.get("requested_assets"):
-            data.pop("requested_assets", None)
+        if isinstance(data, dict):
+            if not data.get("requested_assets"):
+                data.pop("requested_assets", None)
+            if not data.get("internal_cuts"):
+                data.pop("internal_cuts", None)
         return data
 
     @model_validator(mode="after")
     def dialogue_fits_duration(self) -> ShotSpec:
         if any(line.end_s > self.duration_target_s for line in self.dialogue):
             raise ValueError("dialogue must fit inside the target shot duration")
+        # In-shot cuts strictly increase and stay inside the segment (plan P0-C).
+        previous = 0.0
+        for cut in self.internal_cuts:
+            if cut.start_s <= previous or cut.start_s >= self.duration_target_s:
+                raise ValueError("internal cut times must increase inside the target shot duration")
+            previous = cut.start_s
         # A chorus line names several speakers in one field ("S1, S2"); every
         # person it names has to be listed in the shot's characters.
         from shine.asset_identity import split_character_names

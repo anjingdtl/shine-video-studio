@@ -69,8 +69,13 @@ def extract_frames(
     ffmpeg_path: str = "ffmpeg",
     timeout_s: float = 60,
     duration_s: float | None = None,
+    include_boundaries: bool = False,
 ) -> list[Path]:
     """Extract up to ``count`` evenly spaced JPEG frames.
+
+    With ``include_boundaries`` (plan P1-A) the first and last frames are also
+    sampled so a reviewer can judge action completion and character pop-in/out at
+    the shot's edges; the default mid-bin sampling is unchanged.
 
     Returns an empty list when FFmpeg is unavailable or the extraction fails;
     a remote reviewer must never receive fabricated evidence.
@@ -84,9 +89,16 @@ def extract_frames(
         return []
     if count <= 0:
         return []
-    frames: list[Path] = []
+    measured = bool(duration_s and duration_s > 0)
+    offsets: list[float] = []
+    if include_boundaries and measured:
+        offsets.append(0.0)
     for index in range(count):
-        offset = (index + 0.5) * duration_s / count if duration_s and duration_s > 0 else 0.5 + index
+        offsets.append((index + 0.5) * duration_s / count if measured else 0.5 + index)
+    if include_boundaries and measured:
+        offsets.append(max(0.0, duration_s - 0.1))
+    frames: list[Path] = []
+    for index, offset in enumerate(offsets):
         target = out_dir / f"frame_{index:02d}.jpg"
         command = [
             executable,

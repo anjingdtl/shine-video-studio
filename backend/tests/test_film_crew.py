@@ -823,6 +823,63 @@ def test_rulebook_recompiles_a_persisted_request_with_the_legacy_audio_compiler(
         assert not registry.validate(mismatched, pack).passed
 
 
+def test_rulebook_replays_both_historical_130_byte_variants(api):
+    """The ledger pins two different byte variants as ``1.3.0``.  The single
+    verifier must replay each byte-exactly (anchored canonical, pre-anchoring
+    fallback) without rewriting any stored hash, and still refuse a tamper."""
+    from shine.h3.compiler import (
+        LEGACY_ANCHORED_COMPILER_VERSION,
+        LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+    )
+
+    client, factory, _ = api
+    project_id, style, _ = prepare(client)
+    asset = upload_asset(client, project_id, filename="subject.png", content=b"\x89PNG\r\n\x1a\nsubject")
+    approve_lock(client, asset["id"])
+    shot = create_shot(
+        client, project_id, style["id"],
+        beat="A lamp flickers beside the sealed letter.",
+        asset_ids=[asset["id"]],
+        bindings=[{"asset_id": asset["id"], "use_as": "subject", "ordinal": 0}],
+    )
+    job = create_job(client, project_id, shot["id"], generation_mode="Ref2VA")
+    with factory() as db:
+        request = RenderRequest.model_validate(db.get(Job, job["id"]).request)
+        registry = H3RulebookRegistry()
+        pack = db.get(RulePack, PACK_ID)
+        compiler = H3PromptCompiler()
+        kwargs = dict(
+            spec=request.shot_spec, style=request.style_snapshot, manifest=request.reference_manifest,
+            mode_hint=request.generation_mode, project_language=request.project_language,
+        )
+        anchored = compiler.compile(compiler_version=LEGACY_ANCHORED_COMPILER_VERSION, **kwargs)
+        original = compiler.compile(compiler_version=LEGACY_PRE_ANCHOR_COMPILER_VERSION, **kwargs)
+        # A silent subject shot is reached by the drift, so the variants differ.
+        assert anchored.prompt_sha256 != original.prompt_sha256
+
+        # Anchored bytes pinned as 1.3.0: canonical replay, no fallback warning.
+        anchored_req = request.model_copy(update={
+            "compiler_version": LEGACY_ANCHORED_COMPILER_VERSION, "compiled_prompt": anchored.prompt,
+            "compiled_prompt_sections": anchored.sections, "prompt_sha256": anchored.prompt_sha256,
+        })
+        report = registry.validate(anchored_req, pack)
+        assert report.passed, report
+        assert not any("replayed byte-exactly" in w.evidence for w in report.warnings)
+
+        # Pre-anchoring bytes ALSO pinned as 1.3.0: the fallback replays them.
+        original_req = request.model_copy(update={
+            "compiler_version": LEGACY_ANCHORED_COMPILER_VERSION, "compiled_prompt": original.prompt,
+            "compiled_prompt_sections": original.sections, "prompt_sha256": original.prompt_sha256,
+        })
+        report = registry.validate(original_req, pack)
+        assert report.passed, report
+        assert any(LEGACY_PRE_ANCHOR_COMPILER_VERSION in w.evidence for w in report.warnings)
+
+        # A tampered prompt matches neither historical variant: still refused.
+        tampered = original_req.model_copy(update={"compiled_prompt": original.prompt + " extra"})
+        assert not registry.validate(tampered, pack).passed
+
+
 def test_tampered_cache_blocks_agents_and_submission_without_fallback(api):
     client, factory, settings = api
     project_id, style, _ = prepare(client)

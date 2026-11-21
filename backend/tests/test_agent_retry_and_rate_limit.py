@@ -161,7 +161,7 @@ def test_a_refused_contract_is_retried_with_a_named_correction(api):
                 "beats": [{
                     "id": "B1", "description": "The woman waits beside a sealed letter.",
                     "characters": ["Lin"],
-                    "dialogue": [{"speaker_id": "Narrator", "text": "我来了。", "start_s": 1, "end_s": 2}],
+                    "dialogue": [{"speaker_id": "Stranger", "text": "我来了。", "start_s": 1, "end_s": 2}],
                 }],
             }
         return _responder(registry)(messages, schema)

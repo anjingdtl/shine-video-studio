@@ -139,7 +139,12 @@ def _storyboard_request(client, project_id, **overrides):
 @pytest.mark.parametrize(("ratio", "speaker", "end_s", "failure"), [
     (80, "Lin", 2, None),
     (0, "Lin", 2, "DIALOGUE_NOT_IN_USER_SCRIPT"),
-    (80, "Narrator", 2, "ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT"),
+    # P0-E: an unset narration_level derives to "none" for new tasks, so an
+    # invented narrator line is refused as not in the user's script.
+    (80, "Narrator", 2, "DIALOGUE_NOT_IN_USER_SCRIPT"),
+    # A non-narrator speaker the beat does not contain is still refused by the
+    # adapted-dialogue speaker check even when adaptation is allowed.
+    (80, "Stranger", 2, "ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT"),
     (80, "Lin", 16, "ADAPTED_DIALOGUE_OUTSIDE_BEAT_WINDOW"),
 ])
 def test_frozen_dialogue_ratio_controls_script_adaptation(studio, ratio, speaker, end_s, failure):
@@ -290,7 +295,15 @@ def test_director_groups_editorial_beats_and_applies_timed_cut(studio, duration,
     shots = client.get(f"/api/v1/projects/{project_id}/shots").json()
     assert len(shots) == 1
     assert shots[0]["spec"]["duration_target_s"] == 4.3
-    assert "At 00:02.400, hard cut." in shots[0]["spec"]["story_beat"]
+    # P0-C: the in-shot cut lands as the structured internal_cuts field (the
+    # compiler emits the native [Shot N] timeline from it); story_beat stays the
+    # opening segment instead of a flattened "hard cut" sentence.
+    assert "hard cut" not in shots[0]["spec"]["story_beat"]
+    cuts = shots[0]["spec"]["internal_cuts"]
+    assert len(cuts) == 1
+    assert cuts[0]["start_s"] == 2.4
+    assert cuts[0]["beat_id"] == "B2"
+    assert cuts[0]["visual_description"]
 
 
 CONFLICT_ISSUE = ("SHOT_03_CONTINUITY omits the required FRAME_A_LAST reference asset "

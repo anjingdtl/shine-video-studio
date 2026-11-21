@@ -662,6 +662,36 @@ def set_episode_post_contract_endpoint(run_id: str, episode_id: str, request: Re
     )
 
 
+@router.get("/production-runs/{run_id}/episodes/{episode_id}/cut-suggestions")
+def get_episode_cut_suggestions(run_id: str, episode_id: str, request: Request, db: DBSession) -> dict[str, Any]:
+    """Read-only, real-video-aware cut suggestions for one episode (plan P1-B).
+
+    Advisory only: applying a suggestion goes through the existing post-contract
+    endpoint and the same EDL/FFmpeg path.  This never writes a contract, never
+    assembles and never re-renders; it reads the current passed takes and their
+    measured durations, exactly like the EDL does.
+    """
+    from shine.media.output_layout import output_root
+    from shine.production.episode_delivery import suggest_episode_cuts
+    from shine.production.models import ProductionRunEpisode
+
+    run = db.get(ProductionRun, run_id)
+    if run is None:
+        raise HTTPException(404, "PRODUCTION_RUN_NOT_FOUND")
+    episode = db.scalar(select(ProductionRunEpisode).where(
+        ProductionRunEpisode.run_id == run_id,
+        ProductionRunEpisode.episode_id == episode_id,
+    ))
+    if episode is None:
+        raise HTTPException(404, "PRODUCTION_RUN_EPISODE_NOT_FOUND")
+    settings = request.app.state.settings
+    return suggest_episode_cuts(
+        db, run, episode,
+        ffprobe_path=settings.ffprobe_path, ffmpeg_path=settings.ffmpeg_path,
+        asset_root=output_root(db, settings),
+    )
+
+
 @router.get("/production-runs/{run_id}/blockers")
 def get_run_blockers(run_id: str, db: DBSession) -> dict[str, Any]:
     run = db.get(ProductionRun, run_id)

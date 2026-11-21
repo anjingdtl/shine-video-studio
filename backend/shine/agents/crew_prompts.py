@@ -334,7 +334,13 @@ def crew_prompt(
 
     if role == "scriptwriter":
         parts.append(
-            "Keep each line within a plausible 4-to-15-second beat timeline."
+            "Keep each line within a plausible 4-to-15-second beat timeline. "
+            "Write each beat as filmable action, not narration: name the subject, where they are and "
+            "their posture (seated, standing, kneeling), the observable action they perform from start "
+            "to finish, the emotion or evidence the audience must SEE (a tightening grip, averted eyes, "
+            "a held breath), and the state the beat ends in so the next beat can connect. Show inner "
+            "states through visible behaviour; never write 'he remembers' or 'she feels afraid' as the "
+            "action itself. Keep feet on the ground and bodies in plausible contact with the set and props."
         )
         if timing:
             parts.append(
@@ -400,6 +406,17 @@ def crew_prompt(
             "character master of EVERY speaker whose line a segment contains must be in that "
             "segment's asset_ids, exactly as for a visible character."
         )
+        parts.append(
+            "Give each render segment ONE clear action or emotional centre — the single thing the "
+            "audience should watch and feel — and develop it fully rather than cramming several events "
+            "into one shot. Decide whether the camera holds still or moves, and why; a static frame is "
+            "the default and movement needs a motive. Choose the opening and ending states so adjacent "
+            "segments can connect: end a segment on a completed action or a held look that the next "
+            "segment can pick up, and say in continuity.note how the boundary joins (action match, gaze "
+            "match, or a deliberate break). Keep performers' positions, screen direction and held props "
+            "consistent across the boundary. Do not recompute the editorial timing: the segment durations "
+            "and cut offsets in editorial_timing_plan are fixed facts you copy, never negotiate."
+        )
         if repair_director:
             parts.append(
                 " Repair the supplied DirectorialPlan using the supplied continuity report and "
@@ -422,6 +439,18 @@ def crew_prompt(
             "framing as the official guide asks: composition, subject position, environment, action "
             "and what the light does."
         )
+        parts.append(
+            "Default to a static camera: hold the frame still unless the action, a character's gaze, "
+            "or the reveal of new information genuinely requires movement. When you do move the camera, "
+            "state WHY in the movement field (the motive), then the movement type, its amplitude and its "
+            "speed — for example 'a slow small push-in as she realizes the letter is sealed, to tighten "
+            "on her face'. A push-in moves the camera; it is not a zoom. Do not stack push/pull/pan/tilt/"
+            "orbit terms without a reason. In composition, give the starting framing, the subject's "
+            "position in the frame and the camera's relative position (eye level, distance, side), and "
+            "describe the ending composition the shot settles into. Keep the subject's feet on the ground "
+            "and bodies in physically plausible contact with the set; describe where each performer stands "
+            "or sits relative to the others and to the props they handle."
+        )
     if role == "editor" and tool == "edit_intent":
         parts.append(
             "For edit_intent, the upstream DirectorialPlan shots are render segments. "
@@ -431,7 +460,11 @@ def crew_prompt(
             "does not ask the renderer to inherit the prior frame. Explain shot changes or intentional "
             "action matches in continuity_note. "
             "Use contiguous order values starting at 1 and the segment's duration_s as "
-            "planned_duration_s. Never omit, duplicate or invent a segment ID."
+            "planned_duration_s. Never omit, duplicate or invent a segment ID. "
+            "This is pre-production intent: the shots have NOT been rendered yet, so you have not seen "
+            "any real footage. Plan the rhythm and joining logic from the script and the director's "
+            "boundaries; never claim to have watched the video or cite real timestamps. The actual "
+            "in/out points are decided later from the real generated media."
         )
         if timing:
             parts.append(
@@ -515,6 +548,15 @@ def crew_prompt(
             "cumulative act or episode time. Check each beat's lines against the duration of the "
             "shot that uses that beat. Write each issue in Simplified Chinese for the user; "
             "preserve shot IDs, asset IDs and technical mode names exactly."
+        )
+        parts.append(
+            "When judging continuity, check the physical staging: each performer's position, costume "
+            "and held props carried across the boundary; feet on the ground and bodies in plausible "
+            "contact with the set; left/right screen direction preserved; an action begun in one shot "
+            "completed (not restarted or teleported) in the next; the gaze/axis line respected; and each "
+            "internal cut's offset legal inside its segment. Report a genuine physical contradiction "
+            "(a character in two places at once, a prop that vanishes mid-action, a reversed screen "
+            "direction) as a conflict with the shot ids; a mere stylistic preference is not a conflict."
         )
         if timing:
             parts.append(

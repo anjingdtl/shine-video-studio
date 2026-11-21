@@ -592,13 +592,20 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             beat = beats[intent["beat_id"]]
             cuts = intent.get("cuts", [])
             visual = intent["visual_description"]
+            # Plan P0-C: land the in-shot cuts as the structured internal_cuts
+            # field, not as flattened "hard cut" prose.  story_beat stays the
+            # opening segment; the compiler emits the native [Shot N] timeline
+            # from internal_cuts.  ShotIntent.cuts remains the authoritative
+            # upstream — this is its frozen landing, never a second editable copy.
+            internal_cuts: list[dict] = []
             if cuts:
                 characters = list(beat["characters"])
                 lines = list(beat["dialogue"])
                 for cut in cuts:
                     cut_beat = beats[cut["beat_id"]]
                     offset = cut["start_s"]
-                    visual += f'\nAt 00:{offset:06.3f}, hard cut. {cut["visual_description"]}'
+                    internal_cuts.append({"start_s": offset, "beat_id": cut["beat_id"],
+                                          "visual_description": cut["visual_description"]})
                     characters.extend(cut_beat["characters"])
                     lines.extend({**line, "start_s": round(line["start_s"] + offset, 3),
                                   "end_s": round(line["end_s"] + offset, 3)} for line in cut_beat["dialogue"])
@@ -709,6 +716,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 prompt_style=script.payload_json.get("prompt_style"),
                 camera=camera_fields,
                 sound=sound_fields,
+                internal_cuts=internal_cuts,
                 **(
                     {
                         "continuity": {

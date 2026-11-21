@@ -157,6 +157,65 @@ def current_scene_script(db, project_id: str, volume_id: str, section_id: str) -
     return artifact
 
 
+def confirmed_scene_script_for_section(db, project_id: str, document, section: dict):
+    """The confirmed, current scene script provably adapted from this section's
+    slice of the given master document, or ``None`` (plan P0-A).
+
+    Single lineage adjudicator for creative-input selection: the existing
+    confirmation reader (``current_scene_script``) must name the artifact, it must
+    not be stale, its volume document must derive from the SAME master document
+    (identity + sha), and its source span must equal this section's slice of that
+    document.  Read-only: never writes, approves or creates.  A superseded draft,
+    a different document, or a mismatched span all return ``None`` so the caller
+    falls back to the raw source.
+    """
+    from shine.models import AgentArtifact, ProjectDocument
+
+    section_id = section["production_section_id"]
+    section_source = document.text[section["start_offset"]:section["end_offset"]]
+    candidates = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == SCENE_SCRIPT_KIND,
+        AgentArtifact.stale.is_(False),
+        AgentArtifact.approved_at.isnot(None),
+    ).order_by(AgentArtifact.created_at.desc())).all()
+    for script in candidates:
+        payload = script.payload_json or {}
+        if payload.get("section_id") != section_id or not payload.get("text"):
+            continue
+        refs = payload.get("source_refs") or {}
+        volume_id = refs.get("volume_id")
+        if not volume_id:
+            continue
+        confirmed = current_scene_script(db, project_id, volume_id, section_id)
+        if confirmed is None or confirmed.id != script.id or confirmed.stale:
+            continue
+        volume_doc = db.get(ProjectDocument, refs.get("volume_document_id") or "")
+        if volume_doc is None:
+            continue
+        parsed = volume_doc.parsed or {}
+        if (parsed.get("master_document_id") != document.id
+                or parsed.get("master_sha256") != document.sha256):
+            continue
+        start, end = refs.get("start_offset"), refs.get("end_offset")
+        if start is None or end is None or volume_doc.text[start:end] != section_source:
+            continue
+        return script
+    return None
+
+
+def scene_script_creative_text(script, section: dict) -> str:
+    """The one creative-text rendering of a confirmed scene script for a section.
+
+    Both the storyboard queue and the source-range verifier build the creative
+    text through this single function so the two can never diverge.
+    """
+    payload = script.payload_json or {}
+    title = section.get("title") or payload.get("title") or ""
+    order = section.get("order", "?")
+    return f"第{order}场 {title}\n{payload.get('text', '')}"
+
+
 def _authoring_task(db, project_id: str, role_id: str, trace: dict) -> str:
     """The human authoring task every imported artifact must point at."""
     from shine.models import AgentTaskRecord

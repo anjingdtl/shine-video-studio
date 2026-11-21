@@ -818,10 +818,13 @@ class FilmAgentDispatcher:
                     canonical_spoken_language(project.language) or DEFAULT_SPOKEN_LANGUAGE
                 )
             narration = style.snapshot.get("narration_level")
-            if narration in {"none", "low", "high"}:
-                # Guidance for the scriptwriter: how much of the story may be
-                # told by an off-screen narrator.
-                context["narration_level"] = narration
+            # Plan P0-E: an unset narration level means narration is NOT authorized
+            # for newly created storyboard tasks.  The effective policy is derived
+            # here in the existing style decision layer (no second config item);
+            # the frozen snapshot and its hash are never rewritten, so old frozen
+            # styles keep their bytes.  Explicit low/high still follow the script
+            # and style; "none" never converts exposition into a narrator line.
+            context["narration_level"] = narration if narration in {"none", "low", "high"} else "none"
         if project.frozen_style_version_id and style:
             # The per-shot ceiling is a production decision frozen with the
             # storyboard book, read here for every role so the editorial

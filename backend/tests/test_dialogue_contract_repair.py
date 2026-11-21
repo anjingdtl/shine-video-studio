@@ -70,6 +70,35 @@ def test_unset_ratio_still_refuses_a_speaker_outside_the_beat():
     assert str(excinfo.value) == "ADAPTED_DIALOGUE_SPEAKER_NOT_IN_SOURCE_BEAT"
 
 
+def _narrator_proposal(text: str) -> ScriptBreakdown:
+    return ScriptBreakdown.model_validate({
+        "beats": [{
+            "id": "B1", "description": "Anna tastes the cake.",
+            "characters": ["安娜", "旁白"],
+            "dialogue": [{"speaker_id": "旁白", "text": text, "start_s": 1, "end_s": 2}],
+        }],
+    })
+
+
+def test_unauthorized_narration_is_refused_when_narration_none():
+    # P0-E: an unset narration_level derives to "none" for new storyboard tasks;
+    # an invented narrator line is an invention like any other and is named.
+    with pytest.raises(ValueError) as excinfo:
+        validate_output("scriptwriter", _narrator_proposal("夜幕降临了。"), _body(), [],
+                        {"narration_level": "none"})
+    assert str(excinfo.value) == "DIALOGUE_NOT_IN_USER_SCRIPT"
+    assert excinfo.value.details["offending_line"] == "夜幕降临了。"
+
+
+def test_script_authored_narration_still_passes_when_none():
+    # A narrator line that is verbatim in the user's script is authorized by the
+    # script itself, even with narration switched off — the contract forbids
+    # invention, not the user's own narrated source.
+    body = SimpleNamespace(brief="旁白：「夜幕降临了。」\n安娜没有回答。", locked_story_facts=[])
+    validate_output("scriptwriter", _narrator_proposal("夜幕降临了。"), body, [],
+                    {"narration_level": "none"})
+
+
 def test_normalisation_keeps_content_distinct():
     assert _normalised_dialogue("……好吃。") == _normalised_dialogue("… 好吃。")
     assert _normalised_dialogue("好吃。") != _normalised_dialogue("不好吃。")

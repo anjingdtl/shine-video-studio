@@ -292,6 +292,129 @@ def build_episode_edl(
     return {"schema_version": "1.1", "clips": clips}, "run_episode_plan", rules
 
 
+#: Cut-suggestion thresholds (plan P1-B).  A silent margin larger than these is a
+#: *candidate* trim, never an automatic cut: the human confirms through the same
+#: EpisodePostContract.  Buffers keep a breath around the spoken line so a trim
+#: never lands on the first/last syllable.
+SUGGEST_HEAD_MARGIN_S = 1.0
+SUGGEST_TAIL_MARGIN_S = 1.5
+SUGGEST_HEAD_BUFFER_S = 0.3
+SUGGEST_TAIL_BUFFER_S = 0.5
+CUT_SUGGESTION_RULES_VERSION = "run-episode-cut-suggestions-v1"
+
+
+def suggest_episode_cuts(
+    db: Session,
+    run: ProductionRun,
+    episode: ProductionRunEpisode,
+    *,
+    ffprobe_path: str = "ffprobe",
+    ffmpeg_path: str = "ffmpeg",
+    asset_root: Path,
+) -> dict[str, Any]:
+    """Read-only, real-video-aware cut suggestions for one episode (plan P1-B).
+
+    Reads the SAME current passed takes (``episode_current_jobs``) and the SAME
+    measured media durations the EDL uses — never the planned seconds.  For each
+    shot it proposes one legal continuous ``in_s/out_s`` range that keeps every
+    scripted line intact and only trims a large silent head/tail margin, marked
+    ``uncertain`` for human review.  It never writes a contract, never assembles,
+    and never claims to have judged picture content it could not see: a shot whose
+    media cannot be measured is reported ``unavailable``, not guessed.  Applying a
+    suggestion goes through the existing ``EpisodePostContract``/EDL/FFmpeg path.
+    """
+    from shine.media.artifacts import safe_asset_path
+    from shine.media.probe import probe_file
+    from shine.models import Shot
+    from shine.production.runner import episode_current_jobs
+
+    passed = episode_current_jobs(db, run, episode)
+    current_cuts = {cut["shot_id"]: cut for cut in (episode.post_contract or {}).get("cuts", [])}
+    suggestions: list[dict[str, Any]] = []
+    for position, shot_id in enumerate(episode.shot_ids):
+        base = {"shot_id": shot_id, "position": position + 1}
+        job = passed.get(shot_id)
+        if job is None:
+            suggestions.append({**base, "status": "not_passed",
+                                "reason": "这一镜还没有当前通过的产物，无法建议剪辑"})
+            continue
+        attempts = list(job.attempts)
+        attempt = max(attempts, key=lambda row: row.attempt_no) if attempts else None
+        from shine.comfyops.relay_stage import relay_artifact_for_job
+
+        relay_artifact = relay_artifact_for_job(db, job.id)
+        artifact = relay_artifact or (db.get(MediaArtifact, job.artifact_id) if job.artifact_id else None)
+        if attempt is None or artifact is None or artifact.is_mock or artifact.artifact_kind != "video":
+            suggestions.append({**base, "status": "unavailable", "job_id": job.id,
+                                "reason": "缺少可核验的真实视频产物"})
+            continue
+        if relay_artifact is None and (
+                artifact.attempt_id != attempt.id or artifact.sha256 != attempt.output_sha256):
+            suggestions.append({**base, "status": "unavailable", "job_id": job.id,
+                                "reason": "产物身份链不一致"})
+            continue
+        path = safe_asset_path(asset_root, artifact.storage_path)
+        if not path.is_file() or sha256_bytes(path.read_bytes()) != artifact.sha256:
+            suggestions.append({**base, "status": "unavailable", "job_id": job.id,
+                                "reason": "产物文件缺失或哈希不一致"})
+            continue
+        info = probe_file(path, ffprobe_path=ffprobe_path, ffmpeg_path=ffmpeg_path)
+        if info.duration_s is None:
+            suggestions.append({**base, "status": "unavailable", "job_id": job.id,
+                                "reason": "无法测得真实时长"})
+            continue
+        duration = round(info.duration_s, 3)
+        shot = db.get(Shot, shot_id)
+        dialogue = list((shot.spec or {}).get("dialogue") or []) if shot is not None else []
+        lines = sorted(dialogue, key=lambda row: float(row.get("start_s", 0)))
+        current = current_cuts.get(shot_id)
+        cur_in = round(float(current["in_s"]), 3) if current else 0.0
+        cur_out = round(min(float(current["out_s"]), duration), 3) if current else duration
+
+        in_s, out_s = 0.0, duration
+        confidence = "verified"
+        reasons = [f"真实时长 {duration}s（实测，非计划值）"]
+        if lines:
+            first_start = float(lines[0].get("start_s", 0))
+            last_end = max(float(row.get("end_s", 0)) for row in lines)
+            head_margin = first_start
+            tail_margin = duration - last_end
+            if head_margin > SUGGEST_HEAD_MARGIN_S:
+                in_s = round(max(0.0, first_start - SUGGEST_HEAD_BUFFER_S), 3)
+                confidence = "uncertain"
+                reasons.append(f"台词前静默 {round(head_margin, 2)}s，建议裁到首句前 {SUGGEST_HEAD_BUFFER_S}s")
+            if tail_margin > SUGGEST_TAIL_MARGIN_S:
+                out_s = round(min(duration, last_end + SUGGEST_TAIL_BUFFER_S), 3)
+                confidence = "uncertain"
+                reasons.append(f"末句后静默 {round(tail_margin, 2)}s，建议裁到末句后 {SUGGEST_TAIL_BUFFER_S}s")
+            reasons.append(f"保留全部台词 {round(first_start, 2)}–{round(last_end, 2)}s")
+        else:
+            reasons.append("无台词：不凭画面猜测裁剪，整条保留，交由人工看镜决定")
+        # A suggestion must stay legal: keep dialogue, fit the take, min span.
+        if lines:
+            in_s = min(in_s, float(lines[0].get("start_s", 0)))
+            out_s = max(out_s, max(float(row.get("end_s", 0)) for row in lines))
+        out_s = min(out_s, duration)
+        if out_s - in_s < MIN_CUT_SECONDS:
+            in_s, out_s, confidence = 0.0, duration, "verified"
+            reasons.append("裁剪后过短，回退整条")
+        changed = abs(in_s - cur_in) > 0.001 or abs(out_s - cur_out) > 0.001
+        suggestions.append({
+            **base, "status": "ok", "job_id": job.id, "artifact_id": artifact.id,
+            "real_duration_s": duration, "in_s": round(in_s, 3), "out_s": round(out_s, 3),
+            "current_in_s": cur_in, "current_out_s": cur_out, "changed": changed,
+            "confidence": confidence, "dialogue_line_count": len(lines),
+            "reason": "；".join(reasons),
+        })
+    return {
+        "episode_id": episode.episode_id,
+        "rules_version": CUT_SUGGESTION_RULES_VERSION,
+        "advisory": True,
+        "suggestions": suggestions,
+        "note": "剪辑建议只读，基于真实产物时长与台词时码；经既有剪辑合同确认后才生效，不自动装配。",
+    }
+
+
 def _claim_order(db: Session, order: DeliveryOrder, worker_id: str | None) -> bool:
     """The same conditional claim as a series order, scoped to this row."""
     now = utcnow()
