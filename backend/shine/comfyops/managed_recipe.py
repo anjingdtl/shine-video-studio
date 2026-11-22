@@ -242,6 +242,10 @@ def build_renderer_launch(recipe, *, port=None, token=None):
         raise HTTPException(409, "COMFY_RECIPE_EXECUTABLE_NOT_PINNED")
     env = {**os.environ, **prepare_process_environment(recipe['runtime_data_root'])}
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    env.pop("SHINE_COMFY_RUNTIME_PACKAGES", None)
+    packages = Path(recipe["root"]) / ".shine-python"
+    if recipe["root"] != recipe["base_directory"] and packages.is_dir():
+        env["SHINE_COMFY_RUNTIME_PACKAGES"] = str(packages)
     env.update({
         "HF_HUB_OFFLINE": "1",
         "TRANSFORMERS_OFFLINE": "1",
@@ -257,7 +261,9 @@ def build_renderer_launch(recipe, *, port=None, token=None):
     })
     if recipe.get("log_file"):
         env["SHINE_COMFY_LOG_FILE"] = str(recipe["log_file"])
-    return argv, recipe["root"], env, pins, token, port
+    # The renderer still belongs to the recorded installation. Its bootstrap
+    # imports the selected source tree even when that tree is stored separately.
+    return argv, recipe["base_directory"], env, pins, token, port
 
 
 def build_review_launch(recipe, *, token=None):

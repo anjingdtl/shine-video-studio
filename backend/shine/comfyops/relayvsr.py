@@ -20,10 +20,8 @@ sampled with **1 step at CFG 1**; only every 15th frame passes the model and
 Shine muxes the source audio losslessly back over the upscaled frames with
 FFmpeg after the render.
 
-Readiness is evidence-derived and honest: the pinned Shine ComfyUI revision
-predates the merge, so until an audited upgrade or an explicitly verified
-installation lands, ``relayvsr_readiness()`` reports BLOCKED with the exact
-missing facts - never a fabricated READY.
+Installing the weights does not establish support. Setup and the worker
+require the native core nodes reported by the managed renderer.
 """
 from __future__ import annotations
 
@@ -31,40 +29,24 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
-from shine.comfy.workflow import graph_hash
+from shine.comfy.workflow import graph_hash, validate_against_object_info
 
-#: Upstream facts, pinned for the audit trail.  Weight digests are NOT pinned
-#: yet: they must be recorded from the actually downloaded, hash-verified
-#: files before the backend may claim anything beyond BLOCKED.
+#: Upstream facts, pinned for the audit trail.
 RELAYVSR_MERGE_COMMIT = "2f8943324e1eae89a5ee6c7db93602299246b5f1"
-RELAYVSR_HF_REPO = "Comfy-Org/RelayVSR"
-RELAYVSR_LICENSE = "Apache-2.0"
 #: The audited HF revision the weight digests were read from (paths-info lfs.oid).
 RELAYVSR_HF_REVISION = "202c35eb0a5bb64b7017d5a09ea9acea87b7a081"
 
 RELAYVSR_X2_MODEL = "relayvsr_x2_lightx2v_int8_convrot.safetensors"
 RELAYVSR_X2_FLASH_VAE = "relayvsr_flash_vae_x2_fp32.safetensors"
-# Official digests recorded from Comfy-Org/RelayVSR@202c35eb (Apache-2.0):
-# the LFS oid is the file's SHA-256. Sizes match the published bytes.
-RELAYVSR_X2_MODEL_SHA256 = "240e75e0c17cf2845d559b25254a230ff7458f81449d7a8c5e7e3fb8275c7b3c"
-RELAYVSR_X2_MODEL_SIZE = 5163295248
-RELAYVSR_X2_VAE_SHA256 = "b5bb0339acb5b52545911ea29a51b4c5b805776a779222b5a14591571f42e21c"
-RELAYVSR_X2_VAE_SIZE = 127759464
 
 #: The exact node classes of the official core implementation.
 RELAYVSR_NODE_CLASSES = ("RelayVSRConditioning", "VSRDecode")
 
-#: The audited ComfyUI revision this installation pins (see
-#: config/deployment/_upstream-pins/archives.json).  Predates the RelayVSR
-#: merge, which is why the static readiness check reports BLOCKED today.
-PINNED_COMFYUI_REVISION = "b0b743566f65daafc423b4fea8a2fbda94b3384a"
-
 VIDEO_TRANSFER = {
     "upload_path": "/upload/image",
     "field_name": "image",
-    "subfolder": "shine",
+    "subfolder": "",
     "style": "multipart",
-    "required_node_classes": ["LoadVideo"],
 }
 
 
@@ -80,31 +62,23 @@ class RelayVSRUnavailable(RuntimeError):
 
 def relayvsr_weight_pins() -> list[dict]:
     """The expected weight files with their official digests and sources."""
+    from shine.comfyops.deployment import RELAYVSR_CATALOG, load_deployment_catalog
+
     return [
         {
-            "role": "diffusion_model",
-            "filename": RELAYVSR_X2_MODEL,
-            "destination_family": "diffusion_models",
-            "sha256": RELAYVSR_X2_MODEL_SHA256,
-            "size": RELAYVSR_X2_MODEL_SIZE,
-            "source_repo": RELAYVSR_HF_REPO,
-            "source_revision": RELAYVSR_HF_REVISION,
-            "url": (f"https://huggingface.co/{RELAYVSR_HF_REPO}/resolve/"
-                    f"{RELAYVSR_HF_REVISION}/diffusion_models/{RELAYVSR_X2_MODEL}"),
-            "license": RELAYVSR_LICENSE,
-        },
-        {
-            "role": "flash_vae",
-            "filename": RELAYVSR_X2_FLASH_VAE,
-            "destination_family": "vae",
-            "sha256": RELAYVSR_X2_VAE_SHA256,
-            "size": RELAYVSR_X2_VAE_SIZE,
-            "source_repo": RELAYVSR_HF_REPO,
-            "source_revision": RELAYVSR_HF_REVISION,
-            "url": (f"https://huggingface.co/{RELAYVSR_HF_REPO}/resolve/"
-                    f"{RELAYVSR_HF_REVISION}/vae/{RELAYVSR_X2_FLASH_VAE}"),
-            "license": RELAYVSR_LICENSE,
-        },
+            "role": component["role"],
+            "filename": Path(entry["relative_path"]).name,
+            "destination_family": component["destination_family"],
+            "sha256": entry["sha256"],
+            "size": entry["size"],
+            "source_repo": component["origin_repo"],
+            "source_revision": component["origin_revision"],
+            "url": entry["url"],
+            "license": component["license_id"],
+        }
+        for component in load_deployment_catalog(RELAYVSR_CATALOG)["components"]
+        if component["kind"] == "model"
+        for entry in component["files"]
     ]
 
 
@@ -113,18 +87,10 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
                        vae_root: Path | None = None) -> dict:
     """Evidence-derived readiness for the RelayVSR X2 backend.
 
-    Static checks first (weight pins recorded, pinned ComfyUI revision
-    contains the merge), then, when a live ``object_info`` is supplied, the
-    node contract.  Every missing fact is a named blocker; nothing here can
-    turn into a READY without the matching evidence.
+    Check local file presence and the native node contract when live
+    ``object_info`` is supplied.
     """
     blockers: list[dict] = []
-    if RELAYVSR_X2_MODEL_SHA256 is None or RELAYVSR_X2_VAE_SHA256 is None:
-        blockers.append({
-            "code": "RELAYVSR_WEIGHTS_NOT_PINNED",
-            "detail": "官方 X2 权重尚未下载并核验 sha256，不能启用。",
-            "expected_files": [RELAYVSR_X2_MODEL, RELAYVSR_X2_FLASH_VAE],
-        })
     if model_root is not None and not (model_root / RELAYVSR_X2_MODEL).is_file():
         blockers.append({
             "code": "RELAYVSR_MODEL_FILE_MISSING",
@@ -143,6 +109,13 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
                 "missing_nodes": missing_nodes,
                 "detail": "本机 ComfyUI 不含 RelayVSR 核心节点（需要 2f89433 或更高）。",
             })
+        else:
+            graph_check = validate_against_object_info(
+                build_relayvsr_x2_graph(), RELAYVSR_PARAMETER_MAP, object_info,
+            )
+            if graph_check["missing_nodes"] or graph_check["missing_inputs"]:
+                blockers.append({"code": "RELAYVSR_GRAPH_UNAVAILABLE", **graph_check,
+                                 "detail": "当前 ComfyUI 的 RelayVSR 工作流节点或接口不完整。"})
     # Pinning the weights is a prerequisite, not proof of a runnable backend.
     # Without either file evidence or a live node table the backend stays
     # unverified: a caller that passes no evidence must never read AVAILABLE.
@@ -159,7 +132,6 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
             "status": "BLOCKED",
             "blockers": blockers,
             "merge_commit": RELAYVSR_MERGE_COMMIT,
-            "pinned_comfyui_revision": PINNED_COMFYUI_REVISION,
         }
     return {
         "engine": "relayvsr",
@@ -168,7 +140,6 @@ def relayvsr_readiness(*, object_info: dict[str, Any] | None = None,
         "status": "AVAILABLE",
         "blockers": [],
         "merge_commit": RELAYVSR_MERGE_COMMIT,
-        "pinned_comfyui_revision": PINNED_COMFYUI_REVISION,
     }
 
 
@@ -186,10 +157,11 @@ def build_relayvsr_x2_graph() -> dict[str, Any]:
             "inputs": {"unet_name": RELAYVSR_X2_MODEL, "weight_dtype": "default"},
         },
         "11": {"class_type": "VAELoader", "inputs": {"vae_name": RELAYVSR_X2_FLASH_VAE}},
-        "12": {"class_type": "LoadVideo", "inputs": {"video": "shine-source.mp4"}},
+        "12": {"class_type": "LoadVideo", "inputs": {"file": "shine-source.mp4"}},
+        "13": {"class_type": "GetVideoComponents", "inputs": {"video": ["12", 0]}},
         "20": {
             "class_type": "RelayVSRConditioning",
-            "inputs": {"model": ["10", 0], "images": ["12", 0]},
+            "inputs": {"model": ["10", 0], "images": ["13", 0]},
         },
         "30": {
             "class_type": "BasicScheduler",
@@ -213,7 +185,7 @@ def build_relayvsr_x2_graph() -> dict[str, Any]:
             "inputs": {
                 "vae": ["11", 0],
                 "samples": ["34", 0],
-                "images": ["12", 0],
+                "images": ["13", 0],
                 "detail": 1.0,
             },
         },
@@ -222,9 +194,6 @@ def build_relayvsr_x2_graph() -> dict[str, Any]:
             "inputs": {
                 "images": ["40", 0],
                 "fps": 24.0,
-                "bit_depth": "auto",
-                "color_space": "sRGB",
-                "codec": "h264",
             },
         },
         "51": {
@@ -240,7 +209,7 @@ def build_relayvsr_x2_graph() -> dict[str, Any]:
 
 
 RELAYVSR_PARAMETER_MAP = {
-    "source_video": "12.inputs.video",
+    "source_video": "12.inputs.file",
     "seed": "32.inputs.noise_seed",
     "fps": "50.inputs.fps",
     "detail": "40.inputs.detail",
@@ -322,7 +291,7 @@ def mux_source_audio(upscaled_path: Path, source_path: Path, output_path: Path,
         "-i", str(upscaled_path), "-i", str(source_path),
         "-map", "0:v:0", "-map", "1:a:0?",
         "-c:v", "copy", "-c:a", "copy",
-        "-shortest", str(output_path),
+        str(output_path),
     ]
     result = subprocess.run(command, capture_output=True, text=True, timeout=600)
     if result.returncode != 0:

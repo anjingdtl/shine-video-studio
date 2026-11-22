@@ -405,6 +405,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
       return pendingRepair ? '自动补装缺失基础工具' : '勾选上方能力后开始准备';
     }
     if (!capabilityRows.length) {
+      if (caps.relayvsr) return '确认整备所选能力';
       return pendingRepair ? '自动补装缺失基础工具' : '确认并完成配置（不下载）';
     }
     if (capabilityRows.length > 1) return '确认整备所选能力';
@@ -415,7 +416,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     if (row.key === 'relayvsr') return `确认准备 RelayVSR 精修权重（约 ${gib(row.bytes)}）`;
     if (selectedVariant && !selectedVariant.auto_download_allowed) return '确认准备 H3 候选模型';
     return `确认准备 H3 权重（约 ${gib(row.bytes)}）`;
-  }, [anyCapSelected, capabilityRows, pendingRepair, selectedVariant]);
+  }, [anyCapSelected, capabilityRows, caps.relayvsr, pendingRepair, selectedVariant]);
 
   // The H3 scheme is a condition of the H3 capability alone: preparing only
   // image or review weights must not wait for an H3 variant that was never
@@ -458,15 +459,16 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           port: installation?.port ?? env?.port?.selected ?? env?.port?.port ?? undefined,
           variant_id: capabilities.includes('h3') ? selectedVariant?.variant_id : undefined,
           verify_runtime: true,
-          deep_scan: true,
+          deep_scan: capabilities.length !== 1 || capabilities[0] !== 'relayvsr' || !relayvsrPresent,
         }));
-      setResult(`已交给后台准备（${task.steps.length} 步）：检索复用、核验登记、下载缺项、运行配置、`
-        + '服务核验与真实小样会连续完成。可以离开这个页面，回到这里会看到最新进度。');
+      setResult(capabilities.length === 1 && capabilities[0] === 'relayvsr'
+        ? '已交给后台整备 RelayVSR。系统会复用已下载的权重、补齐缺少的核心组件并核对节点。'
+        : `已交给后台准备（${task.steps.length} 步）。可以离开这个页面，回到这里会看到最新进度。`);
       // 只刷新整备投影（能力卡读同一份 summary）；不触发整页重检测，
       // 否则回执与进度会被「检测中」分支吞掉。
       setPrepEpoch((n) => n + 1);
       onPrepSubmitted?.();
-      await loadImage();
+      if (capabilities.includes('image')) await loadImage();
     } catch (error) {
       setProblem(error instanceof Error ? error.message : String(error));
     } finally {
@@ -623,7 +625,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         </label>
         <label className="setup-cap">
           <input type="checkbox" checked={caps.relayvsr} disabled={!!running}
-            onChange={(event) => toggleCap('relayvsr', relayvsrPresent, event.target.checked)} />
+            onChange={(event) => toggleCap('relayvsr', false, event.target.checked)} />
           <Sparkles size={14} /><span><b>RelayVSR 2X 精修（后期放大，可选）</b>
             <em className={relayvsrPresent ? 'cap-found-warn' : undefined}>
               {capFacts('relayvsr')?.FILES_VERIFIED
@@ -686,7 +688,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
             {capabilityRows.map((row) => `${row.label} ${gib(row.bytes)}`).join(' · ')}
           </span>}
           <span>目录 {storage?.root} · 不会改动你原有的 ComfyUI，也不会删除已核验的模型</span>
-          <span>核验已有资源或补齐缺件 → 生成受管配置 → 核对 Ref2VA 运行合同 → 激活</span>
+          <span>{caps.relayvsr
+            ? '复用已核验的权重，按需补齐 RelayVSR 核心组件并核对运行合同。'
+            : '核验已有资源或补齐缺件 → 生成受管配置 → 核对 Ref2VA 运行合同 → 激活'}</span>
           {selectedVariant && !selectedVariant.auto_download_allowed && selectedVariant.acceptance_status !== 'BLOCKED' && (
             <span className="setup-warn"><AlertTriangle size={12} /> 候选方案：下载权重不等于验收，用于生产前必须先在本机真机跑通。点「开始准备」即确认下载候选权重。</span>
           )}

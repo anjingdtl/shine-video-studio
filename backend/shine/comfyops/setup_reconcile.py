@@ -49,7 +49,7 @@ def _capability_catalog(capability: str) -> dict:
     if capability == "image":
         return deployment.load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)
     if capability == "relayvsr":
-        return deployment.load_deployment_catalog("relayvsr-x2-windows-x64")
+        return deployment.load_deployment_catalog(deployment.RELAYVSR_CATALOG)
     return deployment.load_default_catalog()
 
 
@@ -208,6 +208,13 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
             catalog = load_binding(variant_id).catalog
         else:
             catalog = _capability_catalog(capability)
+        served_placed: list[str] = []
+        if capability == "relayvsr" and path:
+            # Place verified bytes before inspection so the receipt binds the
+            # exact file the renderer will load, including freshly downloaded weights.
+            if claim_guard is not None:
+                claim_guard(db)
+            served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
         if path:
             report = inspect(path, catalog)
         else:
@@ -258,9 +265,9 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         reconciled_attempts = reconcile_stopped_isolated_attempts(
             db, settings, actor=actor, evidence=f"setup-reconcile:{capability}"
         )
-        served_placed: list[str] = []
         if capability == "relayvsr" and path:
-            served_placed = _place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor)
+            # Manual intake may have filled the cache during this reconciliation.
+            served_placed.extend(_place_relayvsr_served(db, settings, catalog, Path(path) / "models", actor=actor))
         candidate_paths = {row["path"] for row in candidates}
         candidate_dirs = [cache_root, *(Path(row["path"]).parent for row in candidates)]
         registered = register_verified_packages(db, verified, catalog, root=report["root"],
@@ -292,7 +299,10 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         # Stage verified bytes for the existing installer when they are outside
         # the installation or the installation cannot be adopted.
         adopted = bool((adoption or {}).get("instance_id"))
+        relay_models_root = Path(path) / "models" if capability == "relayvsr" and path else None
         to_cache = [row for row in verified if Path(row["source"]).parent != cache_root
+                    and (relay_models_root is None
+                         or Path(row["source"]) != (relay_models_root / row["relative_path"]).resolve())
                     and ((not adopted and row["source"] in candidate_paths)
                          or (adoption is not None and not adopted and _verified_key(row) in required))]
         imported = import_models(settings, {"matches": to_cache, "snapshot": report["snapshot"]},
@@ -466,6 +476,8 @@ def _place_relayvsr_served(db, settings, catalog: dict, served_root: Path, *, ac
     placed: list[str] = []
     refused: list[dict] = []
     for component in catalog.get("components") or []:
+        if component.get("kind") != "model":
+            continue
         for item in component.get("files") or []:
             sha = str(item.get("sha256") or "")
             source = cache / sha

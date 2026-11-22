@@ -735,7 +735,12 @@ REVIEW_PORTS = {"VLM": 8116, "ASR": 8117}
 
 REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
-OPTIONAL_INSTALL_COMPONENTS = frozenset({*REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS})
+RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
+RELAYVSR_CORE = "relayvsr-comfyui-core"
+OPTIONAL_INSTALL_COMPONENTS = frozenset({
+    *REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS, RELAYVSR_CORE,
+    "relayvsr-comfy-kitchen", "relayvsr-comfy-aimdo",
+})
 
 
 def review_only_plan(payload: dict | None) -> bool:
@@ -947,6 +952,13 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     from shine.comfyops.managed_recipe import recipe_path as managed_recipe_path
 
     recipe_path = managed_recipe_path(settings)
+    previous_renderer = {}
+    if recipe_path.is_file():
+        try:
+            previous = json.loads(recipe_path.read_text(encoding="utf-8"))
+            previous_renderer = previous.get("renderer") or {} if isinstance(previous, dict) else {}
+        except (OSError, ValueError):
+            pass
     # For adopted installations add our nodes only to the Shine process. New
     # names avoid loading a same-named stale copy from the external checkout.
     node_root = (runtime_data_root if adopted else root) / "custom_nodes"
@@ -1046,6 +1058,14 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
             *(["{runtime_data_root}" + SEP + paths_config.name] if adopted else []),
         ],
     }
+    if (isinstance(previous_renderer, dict)
+            and previous_renderer.get("instance_id") == instance.id
+            and previous_renderer.get("root") != previous_renderer.get("base_directory")):
+        from shine.comfyops.relay_core import core_root, with_core
+
+        upgraded = core_root(settings)
+        if (upgraded / "main.py").is_file():
+            renderer = with_core(renderer, upgraded)
     reviews = {}
     catalog = load_default_catalog()
     components = _component_map(catalog)

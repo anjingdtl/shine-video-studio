@@ -297,7 +297,7 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path, monkeypa
                 "shine_managed_h3_sampling_mode.py",
                 "ComfyUI-KJNodes",
             ],
-            "pinned_files": ["{python}", "{root}\\main.py"],
+            "pinned_files": ["{python}", "{root}/main.py"],
             "node_pack_dirs": {"ComfyUI-KJNodes": "ComfyUI-KJNodes"},
         },
         "reviews": {},
@@ -379,6 +379,23 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path, monkeypa
         assert "--extra-model-paths-config" in spec["argv"]
         assert "shine_managed_comfy_handoff" in spec["whitelist_nodes"]
         assert "ComfyUI-KJNodes" in spec["whitelist_nodes"]
+
+        from shine.comfyops.relay_core import CORE_PINS, with_core
+
+        upgraded_source = tmp_path / "official-core"
+        for relative in ("main.py", *CORE_PINS):
+            pin = upgraded_source / relative
+            pin.parent.mkdir(parents=True, exist_ok=True)
+            pin.write_text("# stub\n", encoding="utf-8")
+        upgraded = {**recipe_doc, "renderer": with_core(recipe_doc["renderer"], upgraded_source)}
+        recipe_path.write_text(json.dumps(upgraded), encoding="utf-8")
+        launch = resolve_shared_comfy_launch(db, settings, tmp_path / "manual4")
+        assert launch["root"] == str(upgraded_source)
+        assert launch["cwd"] == str(comfy_root)
+        assert launch["models_dir"] == str(comfy_root / "models")
+        assert launch["argv"][launch["argv"].index("--base-directory") + 1] == str(comfy_root)
+        assert launch["env_base"]["SHINE_COMFY_RUNTIME_PACKAGES"] == str(upgraded_source / ".shine-python")
+        assert launch["whitelist_nodes"] == spec["whitelist_nodes"]
 
     # Acquire m4 lease -> epoch advances; expire it -> reconcile_dead_renderer_leases cleans it safely
     m4_lease = acquire_m4_gpu_lease(factory, tmp_path, owner="m4:run-epoch")

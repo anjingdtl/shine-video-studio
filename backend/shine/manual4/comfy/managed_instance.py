@@ -260,7 +260,7 @@ def managed_m4_comfyui(
     try:
         group, birth = launch_owned_comfyui_group(
             spec["argv"],
-            cwd=Path(spec["root"]),
+            cwd=Path(spec.get("cwd", spec["root"])),
             env=env,
             pinned_files=spec["pinned_files"],
             job_name=job_name,

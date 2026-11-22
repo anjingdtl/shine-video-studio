@@ -178,6 +178,13 @@ def test_missing_optional_backends_refused_in_strategy_options_and_blockers(api,
         identity = {"instance_id": inst.get("instance_id") or "inst-p2", "instance_sha256": "i" * 64,
                     "catalog_sha256": "c" * 64, "recipe_sha256": "r" * 64,
                     "comfyui_base_url": "http://127.0.0.1:8188", "files": {}}
+        from shine.comfyops import setup_summary
+        from shine.comfyops.models import ComfyInstance
+
+        db.add(ComfyInstance(id=identity["instance_id"], status="STOPPED", sha256="i" * 64,
+                             payload={"root": str(comfy_root), "port": 8188, "managed": True, "adopted": True}))
+        monkeypatch.setattr(setup_summary, "_runtime_instance_id", lambda *_args: identity["instance_id"])
+
         monkeypatch.setattr(
             "shine.comfyops.runtime_configuration._current_identity",
             lambda _db, _s: identity,

@@ -2,8 +2,7 @@
 
 Covers the WP5/WP6 contract:
 
-* on this machine the backend is genuinely unavailable (weights unpinned,
-  core nodes merged after the pinned ComfyUI revision): an item fails with
+* when the renderer lacks the native core nodes, an item fails with
   the named blocker and NOTHING is submitted - never a mocked pass;
 * with the backend monkeypatched available and a fake renderer speaking the
   official node contract, one item runs the whole chain: upload → intent
@@ -18,6 +17,7 @@ Covers the WP5/WP6 contract:
 """
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -25,18 +25,19 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from shine.comfy.client import ComfyUIClient
-from shine.comfyops import relayvsr
 from shine.comfyops.relay_stage import (
     enqueue_relay_items_for_episode,
     episode_relay_items_unfinished,
     relay_artifact_for_job,
     run_pending_relay_items,
 )
+from shine.comfyops.relayvsr import mux_source_audio
 from shine.models import Job, MediaArtifact, RelayUpscaleItem
 from tests.conftest import (
     create_job,
     create_project,
     create_referenced_shot,
+    ffmpeg_executable,
     freeze_style,
     make_studio,
     make_test_video_bytes,
@@ -45,6 +46,27 @@ from tests.conftest import (
 from tests.test_comfy_recovery import fake_comfy, worker_settings  # noqa: F401
 
 pytestmark = pytest.mark.full
+
+
+def test_relay_mux_keeps_trailing_audio_when_video_ends_first(tmp_path):
+    ffmpeg = ffmpeg_executable()
+    if not ffmpeg:
+        pytest.skip("FFmpeg is required")
+    source = tmp_path / "source.mp4"
+    frames = tmp_path / "upscaled.mp4"
+    output = tmp_path / "muxed.mp4"
+    source.write_bytes(make_test_video_bytes(duration_s=1.0, width=96, height=64))
+    frames.write_bytes(make_test_video_bytes(duration_s=0.94, width=192, height=128, with_audio=False))
+
+    assert mux_source_audio(frames, source, output, ffmpeg=ffmpeg) == []
+
+    def audio_hash(path):
+        return subprocess.check_output([
+            ffmpeg, "-loglevel", "error", "-i", str(path), "-map", "0:a:0", "-c:a", "copy",
+            "-f", "hash", "-hash", "sha256", "-",
+        ])
+
+    assert audio_hash(output) == audio_hash(source)
 
 
 class _EpisodeStub:
@@ -60,10 +82,12 @@ class _RunStub:
 
 def _relay_object_info() -> dict:
     info = {name: {"input": {"required": {}, "optional": {}}} for name in (
-        "Note", "Reroute", "UNETLoader", "VAELoader", "LoadVideo",
+        "Note", "Reroute", "UNETLoader", "VAELoader",
         "BasicScheduler", "BasicGuider", "RandomNoise", "KSamplerSelect",
         "SamplerCustomAdvanced", "CreateVideo", "SaveVideo",
     )}
+    info["LoadVideo"] = {"input": {"required": {"file": []}}, "output": ["VIDEO"]}
+    info["GetVideoComponents"] = {"input": {"required": {"video": []}}, "output": ["IMAGE"]}
     info["RelayVSRConditioning"] = {"input": {"required": {"model": [], "images": []}, "optional": {}}}
     info["VSRDecode"] = {"input": {"required": {"vae": [], "samples": [], "images": [], "detail": []}, "optional": {}}}
     return info
@@ -139,8 +163,6 @@ def test_full_chain_with_available_backend(studio, fake_comfy, monkeypatch):  # 
     project_id, job_id, artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
     _enqueue_one(factory, project_id, job_id, shot_id)
 
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_MODEL_SHA256", "a" * 64, raising=False)
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_VAE_SHA256", "b" * 64, raising=False)
     monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: _relay_object_info())
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6, width=1024, height=576)
 
@@ -177,8 +199,6 @@ def test_not_exactly_2x_is_a_named_refusal(studio, fake_comfy, monkeypatch):  # 
     project_id, job_id, _artifact_id, shot_id = _passed_job_with_artifact(client, factory, settings)
     _enqueue_one(factory, project_id, job_id, shot_id)
 
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_MODEL_SHA256", "a" * 64, raising=False)
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_VAE_SHA256", "b" * 64, raising=False)
     monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: _relay_object_info())
     # 1.5x: exactly the quiet substitution the contract forbids.
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6, width=768, height=432)
@@ -276,8 +296,6 @@ def test_relay_worker_starts_and_stops_managed_renderer_when_recipe_exists(studi
     monkeypatch.setattr(image_renderer, "stop_image_renderer",
                         lambda _f, _s, *, instance_id, actor: lifecycle.append(("stop", instance_id)) or {
                             "status": "STOPPED"})
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_MODEL_SHA256", "a" * 64, raising=False)
-    monkeypatch.setattr(relayvsr, "RELAYVSR_X2_VAE_SHA256", "b" * 64, raising=False)
     monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: _relay_object_info())
     fake_comfy.output_bytes = make_test_video_bytes(duration_s=6, width=1024, height=576)
 

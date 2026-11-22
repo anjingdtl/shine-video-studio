@@ -268,7 +268,7 @@ export function SetupEnvironmentStatus({
       {chosen && <p className="run-hint" data-testid="setup-installation">
         使用的 ComfyUI：{chosen.root}
         {chosen.port ? ` · 端口 ${chosen.port}` : ''}
-        {chosen.adopted ? ' · 复用本机已有 ComfyUI（受管启动与显存保护，不复制第二套程序或模型）' : ''}
+        {chosen.adopted ? ' · 复用本机 ComfyUI 的模型与节点包（受管启动与显存保护）' : ''}
       </p>}
       {summary.installation.choice_required && <div className="setup-choice" role="group" aria-label="选择本机安装">
         <b>这台电脑上找到不止一套 ComfyUI</b>
@@ -330,10 +330,12 @@ export function SetupEnvironmentStatus({
                   <Download size={12} /> 下载安装缺文件
                 </button>;
               }
-              // RelayVSR 没有「绑定」这一步：权重落位后，真实验证就是后期精修本身。
-              // 给一个空转的绑定按钮只会让人以为坏了。
               if (key === 'relayvsr') {
-                return <p className="run-hint">权重已落位到本机 ComfyUI；在「⑦ 后期成片」对成片执行一次精修即真实验证。</p>;
+                if (!action || action.action === 'SCAN') return null;
+                return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                  <Download size={12} /> 一键整备 RelayVSR
+                </button>;
               }
               // 文件已齐但运行未核验：交给同一个「一键准备」后台任务核对运行
               // 合同 / 真实出图小样。首次真实 H3 运行走「开拍」，不在这里空点试镜。

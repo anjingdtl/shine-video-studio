@@ -509,3 +509,37 @@ prompt、UI 或素材；许可证与使用领域约束未因此变化。
   `object_info` 与作业图留证。仓库发布清单继续使用前文记录的上游固定 revision。
   Shine 通过既有 ComfyUI 接口调用节点，上游文件、权重和许可证边界保持原样。
 - 真实运行与已安装组合见 [P1 验收](ACCEPTANCE_20261121_V3_P1_SINGLE_REF2VA.md)。
+
+### 2026-11-22 RelayVSR 2X 核心整备与真机运行
+
+- 对照本机 ComfyUI `b0b743566f65daafc423b4fea8a2fbda94b3384a` 和官方
+  `2f8943324e1eae89a5ee6c7db93602299246b5f1`，检查了
+  `comfy_extras/nodes_wan.py`、`comfy/ldm/wan/model_vsr.py`、
+  `comfy_extras/nodes_video.py`、`main.py`、`folder_paths.py` 与 `requirements.txt`。
+  `LoadVideo.file` 返回 `VIDEO`，`GetVideoComponents` 从中提取 `IMAGE`，
+  两个 RelayVSR 节点都读取该帧序列。成片从 `SaveVideo` 返回的文件名及子目录取回。
+  [官方合并记录](https://github.com/Comfy-Org/ComfyUI/commit/2f8943324e1eae89a5ee6c7db93602299246b5f1)
+- 整备清单固定官方源码 ZIP、`comfy-kitchen 0.2.41` 和 `comfy-aimdo 0.6.0` 的
+  URL、字节数和 SHA-256，共 79,233,787 字节。ZIP 与 aimdo 授权为 GPL-3.0，kitchen 为
+  Apache-2.0。Shine 通过既有安装器按需下载和校验，第三方源码及 wheel 留在本机数据目录。
+  [ComfyUI 许可证](https://github.com/Comfy-Org/ComfyUI/blob/2f8943324e1eae89a5ee6c7db93602299246b5f1/LICENSE)、
+  [kitchen 发布](https://pypi.org/project/comfy-kitchen/0.2.41/)、
+  [aimdo 发布](https://pypi.org/project/comfy-aimdo/0.6.0/)
+- 复用原安装的 Python、模型目录、节点包及模型路径配置。受管渲染器将官方核心和两份
+  依赖加载到自身进程，基础 Ref2VA 与可选 RelayVSR 共用同一次活体节点探测和服务回执。
+  基础配置和拍摄策略读取同一就绪裁决。权重继续使用 Apache-2.0 的固定 X2 模型清单。
+  [Comfy-Org/RelayVSR](https://huggingface.co/Comfy-Org/RelayVSR)
+- Windows RTX 5080 上通过基础配置的整备按钮提交任务。两份权重已在盘并通过核验。
+  核心 ZIP 的后台传输曾中断，`ControlledDownloader` 在隔离缓存中从官方源下载并验哈希，
+  同一整备任务复用该缓存继续，当前卡片与策略均为可用。再次预检所需下载为 0 字节。
+- 常驻 Worker 使用官方节点完成 416×224 → 832×448 的真实 X2 超分。源视频和输出
+  均为 96 帧、24 fps、4.000 秒。FFmpeg 完整解码通过，AAC 音轨复制前后的包数据
+  SHA-256 一致，渲染器退出后 GPU 租约已释放。
+- 同一受管启动入口用新版核心新拍了一条 H3 Ref2VA 原片。原片和随后超分的任务均为
+  `PASSED`。输出从 448×256 放大到 896×512，完整保留 107 帧与 141 个 AAC 包，
+  音轨 SHA-256 一致，成片 4.458 秒。核对完成时没有活动或待对账的 GPU 租约。
+- `run_backend_shards.ps1 -WorkRoot F:\ShineTest -Shards 8 -KeepRuns 20` 的 8 个分片
+  均退出 0，`shards_with_failure_markers=0`，日志目录为 `shards-20261122-115951-734`。
+  最后的启动路径调整通过了 49 项定向用例，音轨调整通过了 `test_relay_upscale_stage.py`
+  的 8 项用例。前端 `npx vitest run --no-file-parallelism` 通过 473 项，
+  `npm.cmd run build` 和涉及 Python 文件的 Ruff 检查通过。

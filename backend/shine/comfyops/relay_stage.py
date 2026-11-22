@@ -19,7 +19,7 @@ Discipline kept from the rest of the pipeline:
 * the source audio track is muxed back losslessly (``-c:v copy -c:a copy``)
   because the Relay graph deliberately renders video only;
 * the readiness gate re-checks the live renderer before anything is
-  submitted: on the pinned ComfyUI revision (pre-``2f89433``) every item
+  submitted: when the native node contract is missing every item
   fails with the named backend blocker instead of pretending to run.
 """
 from __future__ import annotations
@@ -333,8 +333,15 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
             row.lease_expires_at = None
             row.payload = {**(row.payload or {}), "last_requeue": reason[:200]}
 
+    renderer_stopped = True
+
+    def require_confirmed_cleanup():
+        if not renderer_stopped:
+            raise RuntimeError("RELAY_RENDERER_STOP_UNVERIFIED")
+
     try:
-        slot = resource_slot(session_factory, "RELAYVSR", 8192, wait_seconds=0)
+        slot = resource_slot(session_factory, "RELAYVSR", 8192, wait_seconds=0,
+                             release_models=require_confirmed_cleanup)
         slot.__enter__()
     except Exception as exc:  # GPU busy is a re-queue, not a failure.
         message = str(getattr(exc, "detail", "") or exc)
@@ -379,8 +386,12 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
                     with session_factory.begin() as fail_db:
                         _fail_item(fail_db, fail_db.get(RelayUpscaleItem, item_id), code)
                     return item_id
-                if not started.get("reused") and not started.get("adopted_live"):
-                    started_managed_instance = instance_id
+                if started.get("adopted_live"):
+                    with session_factory.begin() as fail_db:
+                        _fail_item(fail_db, fail_db.get(RelayUpscaleItem, item_id),
+                                   "RELAY_EXTERNAL_RENDERER_PROTECTED")
+                    return item_id
+                started_managed_instance = instance_id
                 active_client = ComfyUIClient(started["base_url"], max_retries=0, trust_env=False)
             else:
                 from shine.worker import _renderer_client
@@ -406,14 +417,16 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
 
         # 3. Upload the source video for the LQ frames input.
         upload_name = f"shine-relay-{item_id[:12]}.mp4"
-        active_client.upload_file(
+        transfer = relayvsr.VIDEO_TRANSFER
+        uploaded = active_client.upload_file(
             upload_name, source_bytes,
-            upload_path="/upload/image", field_name="image",
-            subfolder="shine", content_type="video/mp4",
+            upload_path=transfer["upload_path"], field_name=transfer["field_name"],
+            subfolder=transfer["subfolder"], content_type="video/mp4", style=transfer["style"],
         )
+        source_name = str(uploaded.get("name") or upload_name)
         graph = relayvsr.build_relayvsr_x2_graph()
         prompt = apply_parameters(graph, dict(relayvsr.RELAYVSR_PARAMETER_MAP), {
-            "source_video": f"shine/{upload_name}",
+            "source_video": source_name,
             "seed": 0,
             "fps": fps,
             "detail": detail,
@@ -467,8 +480,9 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
                 _fail_item(db, db.get(RelayUpscaleItem, item_id), "RELAY_RENDER_FAILED",
                            {"status": status})
             return item_id
-        rendered = active_client.view(
-            _output_filename(record), subfolder="", file_type="output")
+        output = _output_file(record)
+        rendered = active_client.view(output["filename"], subfolder=output.get("subfolder", ""),
+                                      file_type="output") if output else None
         if not rendered:
             with session_factory.begin() as db:
                 _fail_item(db, db.get(RelayUpscaleItem, item_id), "RELAY_OUTPUT_EMPTY")
@@ -557,11 +571,12 @@ def _execute_item(session_factory, settings, item_id: str, worker_id: str,
             try:
                 from shine.comfyops.image_renderer import stop_image_renderer
 
-                stop_image_renderer(
+                stopped = stop_image_renderer(
                     session_factory, settings, instance_id=started_managed_instance, actor=worker_id,
                 )
+                renderer_stopped = stopped.get("status") == "STOPPED"
             except Exception:  # noqa: BLE001 - stop failure stays in startup record for reconciliation
-                pass
+                renderer_stopped = False
         try:
             slot.__exit__(None, None, None)
         except Exception:  # noqa: BLE001 - release failure is reconciliation work
@@ -574,15 +589,14 @@ def _source_digest_bytes(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _output_filename(record: dict) -> str:
+def _output_file(record: dict) -> dict | None:
     for outputs in ((record.get("outputs") or {}).values()):
         for key in ("gifs", "videos", "images"):
             files = outputs.get(key) or []
             for entry in files:
-                name = entry.get("filename")
-                if name:
-                    return str(name)
-    return ""
+                if entry.get("filename") and entry.get("type", "output") == "output":
+                    return entry
+    return None
 
 
 def run_pending_relay_items(session_factory, *, settings, worker_id: str,
@@ -595,7 +609,10 @@ def run_pending_relay_items(session_factory, *, settings, worker_id: str,
     recorded on the item itself with its evidence.
     """
     client = comfy_client
-    root = asset_root or Path(settings.data_dir) / "assets"
+    from shine.media.output_layout import output_root
+
+    with session_factory() as db:
+        root = asset_root or output_root(db, settings)
     processed = 0
     while processed < limit:
         with session_factory.begin() as db:

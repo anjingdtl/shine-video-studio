@@ -12,6 +12,72 @@
   },
   "components": [
     {
+      "component_id": "relayvsr-comfyui-core",
+      "kind": "source",
+      "revision": "2f8943324e1eae89a5ee6c7db93602299246b5f1",
+      "license_id": "gpl-3.0-only",
+      "license_url": "https://github.com/Comfy-Org/ComfyUI/blob/2f8943324e1eae89a5ee6c7db93602299246b5f1/LICENSE",
+      "usage": "commercial",
+      "origin_repo": "Comfy-Org/ComfyUI",
+      "origin_revision": "2f8943324e1eae89a5ee6c7db93602299246b5f1",
+      "origin_kind": "github-codeload",
+      "dependencies": ["relayvsr-comfy-kitchen", "relayvsr-comfy-aimdo"],
+      "role": "comfyui_core",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "ComfyUI-2f8943324e1eae89a5ee6c7db93602299246b5f1.zip",
+          "sha256": "939d0b40b8e417f3e91299485a48e2737a10388a1e19e92de4dac55378f1f3f7",
+          "size": 13666175,
+          "url": "https://codeload.github.com/Comfy-Org/ComfyUI/zip/2f8943324e1eae89a5ee6c7db93602299246b5f1"
+        }
+      ]
+    },
+    {
+      "component_id": "relayvsr-comfy-kitchen",
+      "kind": "wheel",
+      "revision": "0.2.41",
+      "license_id": "apache-2.0",
+      "license_url": "https://pypi.org/project/comfy-kitchen/0.2.41/",
+      "usage": "commercial",
+      "origin_repo": "Comfy-Org/comfy-kitchen",
+      "origin_revision": "0.2.41",
+      "origin_kind": "pypi-wheel",
+      "dependencies": [],
+      "role": "comfyui_runtime",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "comfy_kitchen-0.2.41-cp312-abi3-win_amd64.whl",
+          "sha256": "cbe8f7fd9aa42e2af01a31d235fd4de59eb429ecc5a58287eed0975195b68707",
+          "size": 65283137,
+          "url": "https://files.pythonhosted.org/packages/f6/c0/403dd5e44158a0def758c20850f80200ebc39ff702d177493b96e4d480bf/comfy_kitchen-0.2.41-cp312-abi3-win_amd64.whl"
+        }
+      ]
+    },
+    {
+      "component_id": "relayvsr-comfy-aimdo",
+      "kind": "wheel",
+      "revision": "0.6.0",
+      "license_id": "gpl-3.0-only",
+      "license_url": "https://pypi.org/project/comfy-aimdo/0.6.0/",
+      "usage": "commercial",
+      "origin_repo": "Comfy-Org/comfy-aimdo",
+      "origin_revision": "0.6.0",
+      "origin_kind": "pypi-wheel",
+      "dependencies": [],
+      "role": "comfyui_runtime",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "comfy_aimdo-0.6.0-cp39-abi3-win_amd64.whl",
+          "sha256": "45f821b5828c4b38bcac6553f2250b56e6db87bd65334ed37eb938985d809a3c",
+          "size": 284475,
+          "url": "https://files.pythonhosted.org/packages/9f/97/e97d1895618957c7fe684790cd3eaa4b9e74c8cc2237feea3b50eed1edce/comfy_aimdo-0.6.0-cp39-abi3-win_amd64.whl"
+        }
+      ]
+    },
+    {
       "component_id": "relayvsr-x2-diffusion",
       "kind": "model",
       "revision": "202c35eb0a5b",
@@ -69,9 +135,9 @@
   "review_runtime_wheels": [],
   "workflow_profiles": [],
   "dependency_policy": {
-    "scope": "RelayVSR X2 video super-resolution weights only; runs after H3 on the same exclusive lease. Nodes come from the ComfyUI core (merge 2f89433+).",
+    "scope": "RelayVSR X2 weights and an on-demand native ComfyUI core for the shared managed renderer. Existing installations with the live node contract reuse their core.",
     "mirror": "hf-mirror.com is a transport alternative only; every byte is verified against the pinned sha256 and size.",
     "license": "Apache-2.0 (Comfy-Org/RelayVSR)."
   },
-  "total_bytes": 5291054712
+  "total_bytes": 5370288499
 }

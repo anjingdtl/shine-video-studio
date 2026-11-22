@@ -57,6 +57,7 @@ STEP_LABELS = {
     "IMAGE_VERIFY": "核对出图节点",
     "IMAGE_SAMPLES": "生成三类真实出图小样",
     "IMAGE_EDIT_SAMPLES": "验证图生图与局部改图",
+    "RELAYVSR": "整备 RelayVSR 并核对核心节点",
 }
 
 
@@ -72,9 +73,6 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
     # 的独立长请求；工具已达标时这一步如实跳过。
     steps.append("TOOL_REPAIR")
     steps.extend(["RECONCILE", "DOWNLOAD"])
-    # The instance/recipe/profile/validation chain belongs to the H3 and image
-    # runtimes. RelayVSR is post-production on the existing ComfyUI core: it
-    # only needs its weights reconciled and downloaded, not a managed recipe.
     if "h3" in capabilities or "image" in capabilities:
         steps.extend(["INSTANCE", "TARGET", "RECIPE"])
         if "image" in capabilities:
@@ -86,6 +84,8 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
             if verify_runtime:
                 steps.append("IMAGE_SAMPLES")
                 steps.append("IMAGE_EDIT_SAMPLES")
+    if "relayvsr" in capabilities:
+        steps.append("RELAYVSR")
     return steps
 
 
@@ -129,7 +129,9 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
                 and cur_req.get("verify_runtime", True) == verify_runtime
                 and cur_req.get("deep_scan", False) == deep_scan
                 and cur_req.get("adopt", True) == adopt
-                and cur_reconcile_mode == reconcile_mode):
+                and cur_reconcile_mode == reconcile_mode
+                and ("relayvsr" not in capabilities or reconcile_mode
+                     or any(step.get("id") == "RELAYVSR" for step in current.get("steps") or []))):
             if current.get("status") in {"QUEUED", "RUNNING"}:
                 return current
             return _resume_stopped_task(db, existing, current, actor=actor)
@@ -209,6 +211,27 @@ def _resume_stopped_task(db, existing, current: dict, *, actor: str) -> dict[str
         # Nothing is left to continue: the stopped record stays history and the
         # caller must issue a genuinely different request to start over.
         return current
+    if unfinished["id"] == "DOWNLOAD":
+        from shine.comfyops import installation
+        from shine.comfyops.models import InstallationAttempt
+
+        downloads = current.get("downloads") or {}
+        needs_reconcile = False
+        for capability, info in list(downloads.items()):
+            attempt = db.get(InstallationAttempt, info.get("attempt_id")) if info.get("attempt_id") else None
+            stage = (attempt.stage or attempt.status) if attempt else None
+            if attempt and stage in {installation.PAUSED, installation.FAILED_RETRYABLE}:
+                installation.request_resume(db, attempt)
+                continue
+            if stage in _DOWNLOAD_ACTIVE | _DOWNLOAD_SUCCESS:
+                continue
+            del downloads[capability]
+            needs_reconcile = True
+        current["downloads"] = downloads
+        reconcile = next((row for row in steps if row["id"] == "RECONCILE"), None)
+        if needs_reconcile and reconcile:
+            reconcile["status"] = "PENDING"
+            unfinished = reconcile
     for row in steps:
         if row.get("status") not in {"DONE", "SKIPPED"}:
             row["status"] = "PENDING"
@@ -523,6 +546,7 @@ def _run_step(factory, settings, task: dict[str, Any], step_id: str) -> dict[str
         "IMAGE_VERIFY": _step_image_verify,
         "IMAGE_SAMPLES": _step_image_samples,
         "IMAGE_EDIT_SAMPLES": _step_image_edit_samples,
+        "RELAYVSR": _step_relayvsr,
     }[step_id]
     return handler(factory, settings, task)
 
@@ -782,11 +806,29 @@ def plan_prepare_downloads(
                 closure = sorted(set(gap.get("missing_components") or []))
             elif capability == "image" and "h3" not in capabilities:
                 closure = sorted(set(gap.get("missing_components") or []))
-        components = sorted(set(capability_components) | set(closure))
         catalog_file = _catalog_file_for(capability, variant_id, report)
         catalog = deployment.load_deployment_catalog(catalog_file)
+        core_files = []
+        relay_probe = (capability == "relayvsr" and verify_runtime
+                       and any(row.get("code") in {"RELAYVSR_RUNTIME_UNVERIFIED", "RELAYVSR_NODES_MISSING_IN_LIVE"}
+                               for row in report.get("advisories") or []))
+        if relay_probe and (selected.get("instance_id") or "h3" in capabilities):
+            from shine.comfyops.relay_core import core_components, core_root
+            from shine.comfyops.setup_summary import _verified_components
+            from shine.comfyops.verification_receipts import installed_directory
+
+            if not (core_root(settings) / "main.py").is_file():
+                for component in core_components(catalog):
+                    cid = component["component_id"]
+                    directory = installed_directory(settings, component)
+                    evidence = _verified_components(db, settings, catalog, [cid], served_roots=[str(directory)])
+                    if cid not in evidence["in_place"]:
+                        capability_components.append(cid)
+                    if cid not in evidence["verified"]:
+                        core_files.extend(component["files"])
+        components = sorted(set(capability_components) | set(closure))
         cmap = {**default_cmap, **deployment._component_map(catalog)}
-        missing_bytes = sum(int(row.get("size") or 0) for row in missing)
+        missing_bytes = sum(int(row.get("size") or 0) for row in [*missing, *core_files])
         unknown_bytes = sum(int(row.get("size") or 0) for row in unknown)
         plans.append({
             "capability": capability,
@@ -803,10 +845,10 @@ def plan_prepare_downloads(
             "unknown_files": len(unknown),
             "scan_incomplete": bool(unknown),
             "components": components,
-            "files": len(missing) + sum(len(cmap.get(cid, {}).get("files", [])) for cid in closure),
-            "needs_download": bool(missing or closure),
+            "files": len(missing) + len(core_files) + sum(len(cmap.get(cid, {}).get("files", [])) for cid in closure),
+            "needs_download": bool(missing or closure or core_files),
             "needs_recipe": capability in {"h3", "image"},
-            "starts_services": bool(verify_runtime) and capability == "h3",
+            "starts_services": (bool(verify_runtime) and capability == "h3") or relay_probe,
             "changes_external_installation": False,
         })
     return {
@@ -1063,6 +1105,51 @@ def _step_image_edit_samples(factory, settings, task) -> dict[str, Any]:
                 "detail": f"出图 {len(ready)} 种模式均已真实验证（{'、'.join(ready)}），素材中心可直接使用。"}
     return {"status": "DONE",
             "detail": f"已验证：{'、'.join(ready) or '无'}；未通过：{'、'.join(failed)}（可在素材中心单独重试）。"}
+
+
+def _step_relayvsr(factory, settings, task) -> dict[str, Any]:
+    from fastapi import HTTPException
+
+    from shine.comfyops.relay_core import prepare_runtime
+    from shine.comfyops.runtime_configuration import RuntimeConfigurationBusy
+    from shine.comfyops.setup_reconcile import reconcile_installation
+    from shine.comfyops.setup_summary import relayvsr_machine_readiness, resolve_installation
+
+    request = task["request"]
+    path = (task.get("target") or {}).get("root") or request.get("installation_path")
+    with factory() as db:
+        selected = resolve_installation(db, settings, path=path)["selected"] or {}
+        report = relayvsr_machine_readiness(db, settings, installation=selected)
+    if report["available"]:
+        return {"status": "DONE", "detail": "本机 RelayVSR 权重和核心节点已核验。"}
+    if not selected.get("instance_id"):
+        raise HTTPException(409, {"code": "RELAYVSR_RUNTIME_NOT_CONFIGURED",
+                                  "message": "请先确认一套供工作台使用的本机 ComfyUI。"})
+    guard = _claim_guard_for(task)
+    file_codes = {"RELAYVSR_WEIGHTS_UNVERIFIED", "RELAYVSR_MODEL_FILE_MISSING", "RELAYVSR_VAE_FILE_MISSING"}
+    if any(row["code"] in file_codes for row in report["blockers"]):
+        with factory() as db:
+            result = reconcile_installation(db, settings, path=selected["root"], capability="relayvsr",
+                                            actor="worker:setup", claim_guard=guard)
+            if result.get("status") == "IN_PROGRESS":
+                return {"status": "PENDING", "detail": "正在核验 RelayVSR 权重。"}
+        with factory() as db:
+            report = relayvsr_machine_readiness(db, settings, installation=selected)
+        if any(row["code"] in file_codes for row in report["blockers"]):
+            raise HTTPException(409, {"code": "RELAYVSR_WEIGHTS_UNAVAILABLE",
+                                      "message": "当前 ComfyUI 模型目录中的 RelayVSR 权重未通过核验。"})
+    if not request.get("verify_runtime", True):
+        return {"status": "DONE", "detail": "RelayVSR 权重已核验并落位。"}
+    if not report["available"]:
+        try:
+            prepare_runtime(factory, settings, instance_id=selected["instance_id"], claim_guard=guard)
+        except RuntimeConfigurationBusy as exc:
+            return {"status": "PENDING", "code": exc.detail, "detail": exc.wait_message}
+        except HTTPException as exc:
+            if exc.detail == "GPU_BUSY_RETRY_OR_QUEUE":
+                return {"status": "PENDING", "code": exc.detail, "detail": "正在等显卡空闲，随后自动核验 RelayVSR。"}
+            raise
+    return {"status": "DONE", "detail": "RelayVSR 权重和核心节点已核验，可用于后期超分。"}
 
 
 def _step_instance(factory, settings, task) -> dict[str, Any]:

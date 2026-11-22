@@ -19,7 +19,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.comfyops.managed_recipe import adapter_identity
+from shine.comfyops.managed_recipe import adapter_identity, build_renderer_launch
 from shine.comfyops.models import ComfyInstance
 from shine.comfyops.runtime_configuration import (
     load_runtime_recipe,
@@ -491,18 +491,24 @@ def resolve_shared_comfy_launch(
         adapter_sha = str(renderer["adapter_sha256"])
         shared_runtime_root = Path(str(renderer.get("runtime_data_root") or comfy_root)).resolve()
         shared_paths_yaml = shared_runtime_root / "shine-node-paths.yaml"
-        m4_paths_yaml = m4_runtime_root / "shine-node-paths.yaml"
-        extra_args: list[str] = []
-        if shared_paths_yaml.is_file():
-            shutil.copyfile(shared_paths_yaml, m4_paths_yaml)
-            extra_args = ["--extra-model-paths-config", str(m4_paths_yaml)]
+        chosen_port = int(port) if port else _pick_free_port(preferred_port, exclude=registered_ports)
+        argv, cwd, env, shared_pins, _, _ = build_renderer_launch(renderer, port=chosen_port)
+        for name in ("user", "input", "output", "temp"):
+            flag = f"--{name}-directory"
+            path = str(m4_runtime_root / name)
+            if flag in argv:
+                argv[argv.index(flag) + 1] = path
+            else:
+                argv.extend([flag, path])
+        if shared_paths_yaml.is_file() and str(shared_paths_yaml) not in argv:
+            argv.extend(["--extra-model-paths-config", str(shared_paths_yaml)])
 
         # Preserve whitelist from the authoritative recipe argv (which already includes
         # shine_managed_comfy_handoff / shine_comfy_handoff and resolved node_pack_dirs)
-        argv_src = list(renderer.get("argv") or [])
-        if "--whitelist-custom-nodes" in argv_src:
-            wl_idx = argv_src.index("--whitelist-custom-nodes")
-            whitelist = [str(x) for x in argv_src[wl_idx + 1 :]]
+        if "--whitelist-custom-nodes" in argv:
+            tail = argv[argv.index("--whitelist-custom-nodes") + 1:]
+            end = next((index for index, value in enumerate(tail) if value.startswith("--")), len(tail))
+            whitelist = tail[:end]
         else:
             pack_dirs = list((renderer.get("node_pack_dirs") or {}).values())
             sampling_name = (
@@ -511,51 +517,34 @@ def resolve_shared_comfy_launch(
                 else "shine_h3_sampling_mode.py"
             )
             whitelist = [adapter_dir.name, sampling_name, *sorted(set(pack_dirs))]
-
-        chosen_port = int(port) if port else _pick_free_port(preferred_port, exclude=registered_ports)
-        argv = [
-            str(python_exe),
-            str(bootstrap),
-            "--listen", "127.0.0.1",
-            "--port", str(chosen_port),
-            "--user-directory", str(m4_runtime_root / "user"),
-            "--input-directory", str(m4_runtime_root / "input"),
-            "--output-directory", str(m4_runtime_root / "output"),
-            "--temp-directory", str(m4_runtime_root / "temp"),
-            *extra_args,
-            "--disable-async-offload",
-            "--disable-pinned-memory",
-            "--reserve-vram", "1",
-            "--fast", "fp16_accumulation",
-            "--disable-all-custom-nodes",
-            "--whitelist-custom-nodes",
-            *whitelist,
-        ]
+            if "--disable-all-custom-nodes" not in argv:
+                argv.append("--disable-all-custom-nodes")
+            argv.extend(["--whitelist-custom-nodes", *whitelist])
         sampling_candidate = adapter_dir.parent / (
             "shine_managed_h3_sampling_mode.py"
             if adapter_dir.name == "shine_managed_comfy_handoff"
             else "shine_h3_sampling_mode.py"
         )
         pinned_files = [
-            str(python_exe),
-            str(comfy_root / "main.py"),
+            *shared_pins,
             str(adapter_dir / "__init__.py"),
             str(adapter_dir / "barrier.py"),
             str(bootstrap),
         ]
         if sampling_candidate.is_file():
             pinned_files.append(str(sampling_candidate))
-        if extra_args:
-            pinned_files.append(str(m4_paths_yaml))
+        if shared_paths_yaml.is_file():
+            pinned_files.append(str(shared_paths_yaml))
 
-        env = {**os.environ, **prepare_process_environment(m4_runtime_root)}
+        env.update(prepare_process_environment(m4_runtime_root))
         return {
             "source": "managed_recipe",
             "recipe_sha256": recipe_sha,
             "instance_id": renderer.get("instance_id"),
             "python": str(python_exe),
             "root": str(comfy_root),
-            "models_dir": str(comfy_root / "models"),
+            "cwd": cwd,
+            "models_dir": str(Path(renderer["base_directory"]) / "models"),
             "adapter_dir": str(adapter_dir),
             "adapter_sha256": adapter_sha,
             "bootstrap": str(bootstrap),
@@ -564,7 +553,7 @@ def resolve_shared_comfy_launch(
             "log_file": str(log_file),
             "port": chosen_port,
             "argv": argv,
-            "pinned_files": pinned_files,
+            "pinned_files": list(dict.fromkeys(pinned_files)),
             "env_base": env,
         }
 

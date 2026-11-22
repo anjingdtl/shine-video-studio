@@ -2,7 +2,7 @@
 
 锁定四件事：
 * RelayVSR X2 权重已用官方真实 SHA-256 钉住，清单可加载并归类到 relayvsr 能力；
-* RelayVSR 整备只核验+下载权重，不拉 H3 受管配方/方案/核验链；
+* RelayVSR 整备复用已有权重，按需补齐官方核心；
 * 二次精修（upscale）与 PDD8 纯图方案进入默认清单并可解析登记；
 * 极速4步走 NVFP4 候选清单（候选确认下载路径）。
 """
@@ -31,10 +31,14 @@ def test_relayvsr_weights_are_pinned_with_real_digests():
 
 
 def test_relayvsr_catalog_loads_and_is_classified():
+    from shine.comfyops.relay_core import core_components
+
     catalog = deployment.load_deployment_catalog("relayvsr-x2-windows-x64")
     assert capability.catalog_capability("relayvsr-x2-windows-x64", catalog) == "relayvsr"
     ids = {c["component_id"] for c in catalog["components"]}
-    assert ids == {"relayvsr-x2-diffusion", "relayvsr-x2-flash-vae"}
+    core = core_components(catalog)
+    assert core[-1]["origin_revision"] == relayvsr.RELAYVSR_MERGE_COMMIT
+    assert ids == {*deployment.RELAYVSR_COMPONENTS, *(row["component_id"] for row in core)}
     # catalog digests match the pinned upstream facts exactly.
     by_id = {c["component_id"]: c for c in catalog["components"]}
     pins = {p["filename"]: p for p in relayvsr.relayvsr_weight_pins()}
@@ -52,12 +56,14 @@ def test_relayvsr_capability_report_names_missing_weights():
     assert missing_ids == {"relayvsr-x2-diffusion", "relayvsr-x2-flash-vae"}
 
 
-def test_strategy_and_setup_read_one_relayvsr_verdict(api, tmp_path):
-    """已下载就位的权重不得被策略矩阵报成「本机未就绪」（三原则反例）。"""
-    from shine.comfyops.setup_summary import (
-        record_installation_choice,
-        relayvsr_machine_readiness,
-    )
+def test_strategy_and_setup_read_one_relayvsr_verdict(api, tmp_path, monkeypatch):
+    """已下载权重只补核心，卡片与策略应读同一个核验结论。"""
+    from hashlib import sha256
+
+    from shine.comfyops import setup_summary
+    from shine.comfyops.existing_installation import register_verified_packages
+    from shine.comfyops.setup_preparation import plan_prepare_downloads
+    from shine.comfyops.setup_summary import relayvsr_machine_readiness
     from shine.strategy import (
         GenerationStrategy,
         UpscaleConfig,
@@ -65,10 +71,14 @@ def test_strategy_and_setup_read_one_relayvsr_verdict(api, tmp_path):
         strategy_options,
     )
 
-    client, factory, settings = api
-    with factory.begin() as db:
-        record_installation_choice(db, root=str(tmp_path), port=None, actor="local-user")
-    strategy = GenerationStrategy(upscale=UpscaleConfig(enabled=True))
+    _client, factory, settings = api
+    installation = {"instance_id": "relay-test", "root": str(tmp_path), "port": 8188}
+    monkeypatch.setattr(setup_summary, "resolve_installation",
+                        lambda *_args, **_kwargs: {"selected": installation})
+    monkeypatch.setattr(setup_summary, "_runtime_instance_id", lambda *_args: installation["instance_id"])
+    live = {"relayvsr": relayvsr.relayvsr_readiness(object_info={})}
+    monkeypatch.setattr(setup_summary, "sealed_optional_capabilities", lambda *_args: live)
+    strategy = GenerationStrategy(accelerator_id="native20", upscale=UpscaleConfig(enabled=True))
 
     with factory() as db:
         machine = relayvsr_machine_readiness(db, settings)
@@ -78,26 +88,47 @@ def test_strategy_and_setup_read_one_relayvsr_verdict(api, tmp_path):
         codes = {b["code"] for b in strategy_blockers(strategy, db, settings)}
         assert "UPSCALE_BACKEND_UNAVAILABLE" in codes
 
-    models = tmp_path / "models"
-    (models / "diffusion_models").mkdir(parents=True)
-    (models / "vae").mkdir(parents=True)
-    (models / "diffusion_models" / relayvsr.RELAYVSR_X2_MODEL).write_bytes(b"x")
-    (models / "vae" / relayvsr.RELAYVSR_X2_FLASH_VAE).write_bytes(b"x")
+    load_catalog = deployment.load_deployment_catalog
+    catalog = load_catalog(deployment.RELAYVSR_CATALOG)
+    verified = []
+    for component in catalog["components"]:
+        if component["kind"] != "model":
+            continue
+        for pin in component["files"]:
+            target = tmp_path / "models" / pin["relative_path"]
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"x")
+            pin.update(sha256=sha256(b"x").hexdigest(), size=1)
+            verified.append({**pin, "component_id": component["component_id"], "source": str(target)})
+    monkeypatch.setattr(deployment, "load_deployment_catalog",
+                        lambda name: catalog if name == deployment.RELAYVSR_CATALOG else load_catalog(name))
+    with factory.begin() as db:
+        register_verified_packages(db, verified, catalog, root=str(tmp_path))
 
+    with factory() as db:
+        pending = capability_report(db, settings, "relayvsr", installation=installation, project_id=None)
+        assert pending["missing_files"] == []
+        assert pending["next_step"]["code"] == "RELAYVSR_NODES_MISSING_IN_LIVE"
+        plan = plan_prepare_downloads(db, settings, capabilities=["relayvsr"])["plans"][0]
+        assert set(plan["components"]) == {c["component_id"] for c in catalog["components"]
+                                           if c["kind"] != "model"}
+
+    live["relayvsr"] = {"available": True, "blockers": []}
     with factory() as db:
         machine = relayvsr_machine_readiness(db, settings)
         assert machine["available"] is True
         options = strategy_options(db, settings)
         assert options["upscale"][0]["enabled"] is True
         assert strategy_blockers(strategy, db, settings) == []
+        assert plan_prepare_downloads(db, settings, capabilities=["relayvsr"])["download_bytes"] == 0
 
 
-def test_relayvsr_preparation_only_reconciles_and_downloads():
+def test_relayvsr_preparation_uses_existing_worker():
     steps = _steps_for(["relayvsr"], verify_runtime=True)
-    assert steps == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]
+    assert steps == ["TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "RELAYVSR"]
     # With the deep scan requested it leads, but still no H3 runtime chain.
     assert _steps_for(["relayvsr"], verify_runtime=True, deep_scan=True) == [
-        "SCAN", "TOOL_REPAIR", "RECONCILE", "DOWNLOAD"]
+        "SCAN", "TOOL_REPAIR", "RECONCILE", "DOWNLOAD", "RELAYVSR"]
     # H3 keeps its full chain.
     h3 = _steps_for(["h3"], verify_runtime=True)
     assert "INSTANCE" in h3 and "VALIDATE" in h3

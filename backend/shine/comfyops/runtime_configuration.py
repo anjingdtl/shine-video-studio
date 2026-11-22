@@ -398,17 +398,24 @@ def configuration_identity(db, settings, path):
                          else instance_root(settings, instance.payload['name'], 'local').resolve()
                          if instance else None)
         recorded_root = Path(instance.payload.get('root', '')) if instance else Path()
+        renderer_root = Path(renderer['root']).resolve()
+        base = Path(renderer['base_directory']).resolve()
+        if renderer_root != expected_root and base == expected_root:
+            from shine.comfyops.relay_core import core_root
+
+            if renderer_root == core_root(settings):
+                renderer_root = base
         relocated_managed = (
             bool(instance)
             and expected_root is not None
             and relocated_managed_root(instance, expected_root)
-            and Path(renderer['root']).resolve() == expected_root
+            and renderer_root == expected_root
         )
         if (not instance or not instance.payload.get('managed') or instance.payload.get('is_mock', True)
                 or instance.sha256 != graph_hash(instance.payload)
                 or not installation_identity_matches(instance, renderer['port'])
-                or Path(renderer['root']).resolve() != expected_root
-                or (not relocated_managed and recorded_root.resolve() != Path(renderer['root']).resolve())
+                or renderer_root != expected_root
+                or (not relocated_managed and recorded_root.resolve() != renderer_root)
                 or instance.payload['port'] != renderer['port']):
             raise HTTPException(409, 'REAL_RUNTIME_INSTANCE_IDENTITY_REQUIRED')
         if adopted:
@@ -426,7 +433,7 @@ def configuration_identity(db, settings, path):
             raise HTTPException(409, 'RUNTIME_INSTALLATION_BINDING_REQUIRED')
         paths = {path}
         if not adopted:
-            paths.add(Path(renderer['root']) / '.shine-requirements.txt')
+            paths.add(renderer_root / '.shine-requirements.txt')
         values = {**renderer, 'port': str(renderer['port'])}
         for template in renderer['pinned_files']:
             paths.add(Path(template.format_map(values)))
@@ -599,11 +606,17 @@ def require_idle_configuration(db):
 
 
 def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_guard=None):
-    from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
-
     db.execute(text('BEGIN IMMEDIATE'))
     if claim_guard is not None:
         claim_guard(db)
+    _activate_candidate(db, settings, project_id, recipe_sha256, actor)
+    db.commit()
+    return runtime_report(db, settings)
+
+
+def _activate_candidate(db, settings, project_id, recipe_sha256, actor):
+    from shine.comfyops.deployment import installed_instance_blockers, load_default_catalog
+
     if project_id is not None:
         require_project(db, project_id)
     candidate = db.get(AppSetting, CANDIDATE_KEY)
@@ -625,7 +638,7 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_gu
     active = db.get(AppSetting, ACTIVE_KEY)
     if (active and active.value.get('identity') == identity
             and active.value.get('sha256') == graph_hash(identity)):
-        return runtime_report(db, settings)
+        return
     instance = db.get(ComfyInstance, identity['instance_id'])
     blockers = installed_instance_blockers(db, settings, instance, load_default_catalog())
     if blockers:
@@ -650,8 +663,68 @@ def activate_runtime(db, settings, project_id, recipe_sha256, actor, *, claim_gu
     env_keys = persist_env({'SHINE_RENDER_PROVIDER': 'comfyui'}, runtime_settings_path(settings))
     add_audit(db, actor, 'DEPLOYMENT_RENDER_PROVIDER_PERSISTED', 'comfy_instance', instance.id,
               {'env_keys': env_keys, 'value': 'comfyui'}, project_id=project_id)
+
+
+def recover_relay_recipe(db, settings, instance_id: str) -> None:
+    """Recover an interrupted atomic file replacement against the runtime ledger."""
+    from shine.comfyops.installer import sync_directory
+
+    path = recipe_path(settings)
+    backup = path.with_suffix(".relay-backup.json")
+    if not backup.is_file():
+        return
+    db.execute(text("BEGIN IMMEDIATE"))
+    active = db.get(AppSetting, ACTIVE_KEY) or db.get(AppSetting, CANDIDATE_KEY)
+    identity = active.value["identity"] if active else {}
+    if identity.get("instance_id") != instance_id:
+        raise HTTPException(409, "RELAYVSR_RUNTIME_TARGET_CHANGED")
+    current = json.loads(path.read_text(encoding="utf-8"))
+    if graph_hash(current) == identity.get("recipe_sha256"):
+        backup.unlink()
+    else:
+        previous = json.loads(backup.read_text(encoding="utf-8"))
+        if graph_hash(previous) != identity.get("recipe_sha256"):
+            raise HTTPException(409, "RELAYVSR_RUNTIME_TARGET_CHANGED")
+        backup.replace(path)
+    sync_directory(path.parent)
     db.commit()
-    return runtime_report(db, settings)
+
+
+def publish_validated_renderer(db, settings, *, previous_identity: dict, renderer: dict,
+                               evidence: dict, claim_guard) -> None:
+    """Commit an already probed renderer through the existing candidate and activation ledger."""
+    from shine.comfyops.installer import durable_json
+
+    db.execute(text("BEGIN IMMEDIATE"))
+    claim_guard(db)
+    require_idle_configuration(db)
+    if _current_identity(db, settings) != previous_identity:
+        raise HTTPException(409, "RELAYVSR_RUNTIME_TARGET_CHANGED")
+    active = db.get(AppSetting, ACTIVE_KEY)
+    old = (active or db.get(AppSetting, CANDIDATE_KEY)).value
+    path = recipe_path(settings)
+    current_recipe, _ = load_runtime_recipe(settings)
+    if renderer == current_recipe["renderer"]:
+        record_service_evidence(db, previous_identity, evidence)
+        db.commit()
+        return
+    previous = json.loads(path.read_text(encoding="utf-8"))
+    backup = path.with_suffix(".relay-backup.json")
+    durable_json(backup, previous)
+    try:
+        durable_json(path, {**previous, "renderer": renderer})
+        record_candidate(db, settings, old.get("project_id"), path, variant_id=old.get("variant_id"))
+        db.flush()
+        identity = db.get(AppSetting, CANDIDATE_KEY).value["identity"]
+        record_service_evidence(db, identity, evidence)
+        if active:
+            _activate_candidate(db, settings, old.get("project_id"), identity["recipe_sha256"], "worker:setup")
+        db.commit()
+    except BaseException:
+        db.rollback()
+        backup.replace(path)
+        raise
+    backup.unlink(missing_ok=True)
 
 
 def runtime_report(db, settings):

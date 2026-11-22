@@ -78,6 +78,12 @@ def main():
             or os.environ.get("SHINE_COMFY_START_DRAINED") != "1"
             or len(os.environ.get("SHINE_COMFY_HANDOFF_TOKEN", "")) < 32):
         raise ValueError("COMFY_BOOTSTRAP_CONFIGURATION_INVALID")
+    runtime_packages = os.environ.get("SHINE_COMFY_RUNTIME_PACKAGES")
+    if runtime_packages:
+        packages = Path(runtime_packages).resolve(strict=True)
+        if not packages.is_dir() or packages != root.resolve() / ".shine-python":
+            raise ValueError("COMFY_BOOTSTRAP_CONFIGURATION_INVALID")
+        sys.path.insert(0, str(packages))
     sys.path.insert(0, str(root.resolve()))
     import main as comfy_main
 

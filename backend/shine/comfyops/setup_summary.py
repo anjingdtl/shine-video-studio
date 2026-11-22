@@ -36,7 +36,7 @@ SNAPSHOT_VERSION = 1
 IMAGE_CATALOG = "qwen-image-2.1-windows-x64"
 IMAGE_COMPONENTS = ("qwen-image-2.1-unet", "qwen-image-2.1-text-encoder", "qwen-image-2.1-vae")
 REVIEW_COMPONENTS = {"vlm": "qwen3-vl-8b-fp8", "asr": "qwen3-asr-0.6b"}
-RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
+RELAYVSR_CATALOG = deployment.RELAYVSR_CATALOG
 # One definition of the optional-enhancement component set: deployment.py owns
 # it (the install/optional-plan verdicts read the same tuple from there).
 RELAYVSR_COMPONENTS = deployment.RELAYVSR_COMPONENTS
@@ -233,10 +233,9 @@ def _verified_components(db, settings, catalog: dict, component_ids,
     from shine.comfyops.verification_receipts import cache_candidates, verify_receipt
 
     components = _catalog_components(catalog)
-    if db is None or settings is None:
-        # 没有台账或没有本机配置时，没有任何凭据可读：如实报"未核验"，不猜。
+    if db is None:
         return {"verified": set(), "in_place": set()}
-    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
+    cache = Path(settings.comfyops_dir) / "isolated-packages" / ".cache" if settings is not None else None
     verified: set[str] = set()
     in_place: set[str] = set()
     for component_id in component_ids:
@@ -522,15 +521,15 @@ def sealed_optional_capabilities(db, settings=None) -> dict[str, Any] | None:
     return dict(optional) if isinstance(optional, dict) else None
 
 
-def relayvsr_machine_readiness(db, settings=None, *, installation=_RELAYVSR_INSTALLATION_UNSET) -> dict:
+def relayvsr_machine_readiness(db, settings=None, *,
+                               installation=_RELAYVSR_INSTALLATION_UNSET, file_evidence=None) -> dict:
     """The one RelayVSR readiness verdict every surface reads.
 
     The capability card, the strategy option matrix and the production gates
     all hang off this single reader: a machine whose weights are verified and
     placed must not be told "not ready" by one surface and "ready" by another.
-    When sealed live ``object_info`` evidence exists for this installation,
-    its RelayVSR node check is enforced too so missing ComfyUI core nodes
-    never hide behind present weight files.
+    The weight receipts must cover the served directory, and the sealed live
+    node contract must belong to the same installation.
     """
     from shine.comfyops import relayvsr
 
@@ -540,22 +539,25 @@ def relayvsr_machine_readiness(db, settings=None, *, installation=_RELAYVSR_INST
     report = relayvsr.relayvsr_readiness(
         model_root=Path(models_root) / "diffusion_models" if models_root else None,
         vae_root=Path(models_root) / "vae" if models_root else None)
-    sealed = sealed_optional_capabilities(db, settings)
-    live_relay = (sealed or {}).get("relayvsr") if isinstance(sealed, dict) else None
-    if isinstance(live_relay, dict) and live_relay.get("available") is False:
-        blockers = list(report.get("blockers") or [])
-        seen_codes = {row.get("code") for row in blockers if isinstance(row, dict)}
-        for blocker in live_relay.get("blockers") or []:
-            if isinstance(blocker, dict) and blocker.get("code") not in seen_codes:
-                blockers.append(blocker)
-                seen_codes.add(blocker.get("code"))
-        report = {
-            **report,
-            "available": False,
-            "status": "BLOCKED",
-            "blockers": blockers,
-        }
-    return report
+    blockers = list(report["blockers"])
+    instance_id = (installation or {}).get("instance_id")
+    sealed = sealed_optional_capabilities(db, settings) if instance_id and instance_id == _runtime_instance_id(
+        db, settings) else None
+    live_relay = (sealed or {}).get("relayvsr")
+    if isinstance(live_relay, dict):
+        blockers.extend(live_relay.get("blockers") or [])
+    elif models_root:
+        blockers.append({"code": "RELAYVSR_RUNTIME_UNVERIFIED",
+                         "detail": "当前 ComfyUI 的 RelayVSR 节点尚未核验，可一键整备。"})
+    if models_root and report["available"]:
+        if file_evidence is None:
+            catalog = _catalog_for("relayvsr")
+            file_evidence = _verified_components(db, settings, catalog, RELAYVSR_COMPONENTS,
+                                                 served_roots=[models_root])
+        if not set(RELAYVSR_COMPONENTS) <= file_evidence["in_place"]:
+            blockers.append({"code": "RELAYVSR_WEIGHTS_UNVERIFIED", "detail": "本机权重待核验。"})
+    return {**report, "available": not blockers, "status": "BLOCKED" if blockers else "AVAILABLE",
+            "blockers": blockers}
 
 
 def capability_report(db, settings, capability: str, *, installation: dict | None,
@@ -726,7 +728,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                                              and facts["WORKFLOW_VALIDATED"])
             advisories.extend(report.get("blockers") or [])
         elif capability == "relayvsr":
-            report = relayvsr_machine_readiness(db, settings, installation=installation)
+            report = relayvsr_machine_readiness(db, settings, installation=installation, file_evidence=evidence)
             available = bool(report.get("available", False))
             facts["RELAYVSR_AVAILABLE"] = available
             facts["INSTANCE_BOUND"] = available
@@ -756,9 +758,11 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         advisories.append({"code": "FACT_LAYER_UNAVAILABLE", "detail": type(exc).__name__,
                            "layer": str(capability)})
 
+    relay_runtime_gap = next((row for row in advisories if row.get("code") in {
+        "RELAYVSR_NODES_MISSING_IN_LIVE", "RELAYVSR_RUNTIME_UNVERIFIED"}), None) if capability == "relayvsr" else None
     state, summary, next_step = _capability_verdict(
         capability, facts, missing_bytes=missing_bytes, has_installation=bool(installation),
-        missing_files=missing, unknown_files=unknown_files,
+        missing_files=missing, unknown_files=unknown_files, relay_runtime_gap=relay_runtime_gap,
     )
     return {
         "key": capability,
@@ -842,7 +846,8 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
 
 def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
                         has_installation: bool, missing_files: list,
-                        unknown_files: list | None = None) -> tuple[str, str, dict | None]:
+                        unknown_files: list | None = None,
+                        relay_runtime_gap: dict | None = None) -> tuple[str, str, dict | None]:
     """The one sentence a person reads, and the single action behind it."""
     if capability == "image" and facts.get("BINDING_STATE") == "PENDING_RECIPE":
         # The dominant fact is not "a file is missing": the person already
@@ -867,6 +872,12 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
         return "MISSING", "本机还没有这套资源。", {
             "code": "FILES_MISSING", "label": label, "reason": reason, "action": "PREPARE_ENVIRONMENT",
         }
+    if relay_runtime_gap:
+        return ("VERIFIED" if facts.get("FILES_VERIFIED") else "FOUND",
+                "本机已找到权重，完成整备后即可使用 RelayVSR。", {
+                    "code": relay_runtime_gap["code"], "label": "一键整备 RelayVSR",
+                    "reason": relay_runtime_gap.get("detail"), "action": "PREPARE_ENVIRONMENT",
+                })
     if not facts.get("FILES_VERIFIED"):
         return "FOUND", "已找到资源，尚未核验并登记。", {
             "code": "FILES_NOT_VERIFIED", "label": "核验已有文件",
@@ -889,7 +900,7 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
         }
     if not facts.get("RENDER_VERIFIED"):
         if capability == "relayvsr":
-            return "READY", "精修权重已就位，可在作品「⑦ 后期成片」直接使用。", None
+            return "READY", "可在拍摄设置启用 2X 超分，后期成片时自动精修。", None
         if capability in {"vlm", "asr"}:
             return "READY", "审片资源已就绪，将在出片质检时自动提供建议。", None
         if capability == "image":

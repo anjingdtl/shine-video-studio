@@ -19,9 +19,12 @@ import zipfile
 from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from http.client import HTTPException as HTTPBodyError
 from pathlib import Path, PureWindowsPath
 from typing import Literal
+from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, model_serializer, model_validator
@@ -263,6 +266,40 @@ def _retry_after_seconds(response) -> float | None:
         return None
 
 
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+class _ArchiveResponse:
+    def __init__(self, response):
+        self.response = response
+        self.status_code = response.status
+        self.headers = response.headers
+
+    def iter_bytes(self):
+        try:
+            yield from iter(lambda: self.response.read(64 * 1024), b"")
+        except (OSError, HTTPBodyError) as exc:
+            raise DownloadStreamInterrupted(f"DOWNLOAD_STREAM_FAILED:{type(exc).__name__}") from None
+
+
+@contextmanager
+def _stream_github_archive(url, headers):
+    # GitHub's chunked ZIP stream stalled mid-body under httpx on Windows.
+    # Disable automatic redirects here too: the approved redirect policy
+    # and the length, range and hash checks still belong to the same downloader.
+    opener = build_opener(_NoRedirect())
+    try:
+        response = opener.open(Request(url, headers=headers), timeout=30)
+    except HTTPError as error:
+        response = error
+    except (URLError, OSError, HTTPBodyError) as exc:
+        raise ValueError(f"DOWNLOAD_CONNECTION_FAILED:{type(exc).__name__}") from None
+    with response:
+        yield _ArchiveResponse(response)
+
+
 class HTTPTransport:
     def probe(self, url: str) -> float | None:
         """Bounded source timing; redirects are observed, never followed here."""
@@ -284,6 +321,10 @@ class HTTPTransport:
         headers = {"Range": f"bytes={offset}-{end if end is not None else ''}"} if offset or end is not None else {}
         if end is not None:
             headers["Accept-Encoding"] = "identity"
+        if urlsplit(url).hostname == "codeload.github.com":
+            with _stream_github_archive(url, headers) as response:
+                yield response
+            return
         with ExitStack() as stack:
             for attempt in range(3):
                 try:
@@ -402,11 +443,17 @@ class ControlledDownloader:
                 # and the primary may be tried again after the mirror failed.
                 candidate_index = (candidate_index + 1) % len(candidates)
             except ValueError as exc:
-                if str(exc) == "DOWNLOAD_HTTP_REJECTED" and candidate_index + 1 < len(candidates):
-                    # A mirror may not carry this pinned file. Try only the
-                    # already approved alternative; final SHA/size still gate it.
-                    candidate_index += 1
-                    continue
+                if str(exc) == "DOWNLOAD_HTTP_REJECTED":
+                    if candidate_index + 1 < len(candidates):
+                        candidate_index += 1
+                        continue
+                    if candidate_index and 0 < retries < self.max_stream_attempts - 1:
+                        # A broken original stream may have led to a mirror
+                        # that does not carry the file. Give the first source
+                        # the remaining attempt with the verified range rules.
+                        retries += 1
+                        candidate_index = 0
+                        continue
                 if not str(exc).startswith("DOWNLOAD_CONNECTION_FAILED"):
                     raise
                 retries += 1

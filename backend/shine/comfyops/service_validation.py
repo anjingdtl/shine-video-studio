@@ -514,6 +514,27 @@ def _validate_mode_workflows(object_info: dict, *, variant_id: str = INT8_VARIAN
     }
 
 
+def renderer_service_evidence(recipe: dict, probe: dict, *, variant_id: str) -> dict:
+    """Facts from the same owned renderer probe, independent of review services."""
+    object_info = probe["object_info"]
+    renderer = recipe["renderer"]
+    if probe["port"] != renderer.get("port"):
+        raise HTTPException(409, "SERVICE_VALIDATION_RENDERER_PORT_CHANGED")
+    payload = json.dumps(object_info, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return {
+        "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "node_count": len(object_info),
+        "node_inventory_sha256": hashlib.sha256(payload.encode("utf-8")).hexdigest(),
+        "workflow_profiles": {},
+        "mode_capabilities": _validate_mode_workflows(
+            object_info, variant_id=variant_id, log_evidence=renderer_log_evidence(renderer.get("log_file")),
+        ),
+        "optional_capabilities": probe_optional_capabilities(object_info),
+        "renderer_port": probe["port"],
+        "services_stopped": True,
+    }
+
+
 def _worker_online(db: Session, settings: Settings) -> bool:
     from datetime import timedelta
 
@@ -628,12 +649,10 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
     missing_resources = _review_resource_blockers(recipe)
     advisory_reviews = _advisory_review_status(missing_resources)
     renderer = _probe_renderer(recipe)
-    object_info = renderer["object_info"]
-    mode = _validate_mode_workflows(
-        object_info, variant_id=variant_id, log_evidence=renderer_log_evidence(recipe.get("log_file")),
-    )
-    if renderer["port"] != recipe["renderer"].get("port"):
-        raise HTTPException(409, "SERVICE_VALIDATION_RENDERER_PORT_CHANGED")
+    renderer_evidence = renderer_service_evidence(recipe, renderer, variant_id=variant_id)
+    mode = renderer_evidence["mode_capabilities"]
+    optional_capabilities = renderer_evidence["optional_capabilities"]
+    node_count = renderer_evidence["node_count"]
 
     reviews = {}
     for role, spec in recipe["reviews"].items():
@@ -691,26 +710,17 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
             "base_url": probe["base_url"],
             "capabilities_sha256": graph_hash(probe["capabilities"]),
         }
-    object_info_payload = json.dumps(object_info, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    optional_capabilities = probe_optional_capabilities(object_info)
     evidence = record_service_evidence(db, identity, {
+        **renderer_evidence,
         "project_id": project_id,
-        "validated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
-        "node_count": len(object_info),
-        "node_inventory_sha256": hashlib.sha256(object_info_payload.encode("utf-8")).hexdigest(),
-        "workflow_profiles": {},
-        "mode_capabilities": mode,
-        "optional_capabilities": optional_capabilities,
         "review_profiles": profiles,
         "advisory_reviews": advisory_reviews,
         "review_runtime": {role: probe.get("runtime_sha256") for role, probe in reviews.items()},
-        "renderer_port": renderer["port"],
-        "services_stopped": True,
     })
     add_audit(db, actor, "SETUP_SERVICES_VALIDATED", "comfy_instance", instance.id, {
         "configuration_sha256": graph_hash(identity),
         "recipe_sha256": recipe_sha256,
-        "node_count": len(object_info),
+        "node_count": node_count,
         "mode_capabilities": mode,
         "optional_capabilities": optional_capabilities,
         "review_models": {role: probe["model"] for role, probe in reviews.items()},
@@ -722,7 +732,7 @@ def validate_services(db: Session, settings: Settings, project_id: str | None, r
         "status": "READY",
         "configuration_sha256": graph_hash(identity),
         "recipe_sha256": recipe_sha256,
-        "node_count": len(object_info),
+        "node_count": node_count,
         "workflow_profiles": [],
         "mode_capabilities": mode,
         "optional_capabilities": optional_capabilities,
