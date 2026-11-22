@@ -2,8 +2,8 @@
 
 The live run lost scenes to LLM_CONNECTION/UNKNOWN: long non-streaming
 completions idle for minutes while the model thinks, and proxies/gateways cut
-such connections.  SSE keeps the connection alive with events; the no-event
-fallback keeps unprobed providers from buying a second answer.
+such connections. SSE keeps the connection alive with events; an acknowledged
+empty or interrupted stream is never silently resubmitted.
 """
 from __future__ import annotations
 
@@ -68,6 +68,24 @@ def test_complete_uses_the_stream_when_it_answers(monkeypatch):
     assert response.raw_meta.get("streamed") is True
 
 
+def test_stream_request_reuses_a_complete_json_response(monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content).get("stream", False))
+        return httpx.Response(200, json={
+            "model": "reported-model", "choices": [{"message": {"content": '{"ok": true}'}}],
+        })
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
+    response = openai_compatible.OpenAICompatibleProvider(_config(streaming=True)).complete(
+        [ChatMessage(role="user", content="hi")])
+    assert response.parsed == {"ok": True}
+    assert response.model == "reported-model"
+    assert calls == [True]
+
+
 def test_a_refused_stream_falls_back_to_exactly_one_plain_request(monkeypatch):
     calls = []
 
@@ -84,6 +102,29 @@ def test_a_refused_stream_falls_back_to_exactly_one_plain_request(monkeypatch):
     response = provider.complete([ChatMessage(role="user", content="hi")])
     assert response.parsed == {"ok": True}
     assert calls == [True, False]
+
+
+@pytest.mark.parametrize("body, error, outcome", [
+    ('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+     LLMFormatError, "RESPONSE_RECEIVED"),
+    ('data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}\n\n',
+     LLMConnectionError, "UNKNOWN"),
+    ("", LLMConnectionError, "UNKNOWN"),
+])
+def test_acknowledged_empty_stream_never_sends_a_second_request(monkeypatch, body, error, outcome):
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content).get("stream", False))
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    with pytest.raises(error) as excinfo:
+        provider.complete([ChatMessage(role="user", content="hi")])
+    assert classify_external_outcome(excinfo.value) == outcome
+    assert calls == [True]
 
 
 def test_a_stream_cut_after_events_is_unknown_and_never_replayed(monkeypatch):
@@ -136,6 +177,22 @@ def test_a_stream_silent_after_acknowledgement_is_unknown_and_never_replayed(mon
         provider.complete([ChatMessage(role="user", content="hi")])
     assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
     assert excinfo.value.details.get("headers_received") is True
+    assert calls == [True]
+
+
+def test_read_timeout_before_headers_does_not_resubmit(monkeypatch):
+    calls = []
+
+    def respond(request):
+        calls.append(json.loads(request.content).get("stream", False))
+        raise httpx.ReadTimeout("response headers unavailable", request=request)
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(respond)))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    with pytest.raises(LLMConnectionError) as excinfo:
+        provider.complete([ChatMessage(role="user", content="hi")])
+    assert excinfo.value.details["external_outcome"] == "UNKNOWN"
     assert calls == [True]
 
 

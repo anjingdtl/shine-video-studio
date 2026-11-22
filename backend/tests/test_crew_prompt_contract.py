@@ -215,6 +215,14 @@ def test_the_scriptwriter_prompt_makes_the_brief_the_only_beat_source():
     assert "zero beats" in prompt
 
 
+def test_the_scriptwriter_dialogue_target_keeps_added_speakers_bindable():
+    # 服务器按名字解析每条对白的说话方（角色主素材绑定），凭空新增的画外说话人
+    # 是无法绑定的镜头，不是额外风味；补充台词只允许本节拍既有 source 人物。
+    prompt = crew_prompt("scriptwriter", tool="propose", dialogue_ratio_percent=30)
+    assert "its speaker must be listed in that beat's characters" in prompt
+    assert "do not add an off-screen speaker to characters" in prompt
+
+
 def test_the_continuity_review_is_scoped_to_one_section_not_the_whole_work():
     # 活缺陷（2026-11-16）：锁定事实「全片共六场六镜」被场记当成单场约束，
     # 每个单元都被判「缺少 scene_02–06 → conflict → needs_review」，整部 run

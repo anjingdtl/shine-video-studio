@@ -21,7 +21,7 @@ from shine.llm.base import ProviderConfig
 
 MIN_CONNECT_TIMEOUT_S = 10.0
 MIN_FIRST_EVENT_S = 120.0
-MAX_FIRST_EVENT_S = 180.0
+MAX_FIRST_EVENT_S = 300.0
 MIN_IDLE_S = 45.0
 TOTAL_TIMEOUT_MULTIPLE = 6.0
 
@@ -33,8 +33,8 @@ def streaming_enabled(config: ProviderConfig) -> bool:
     sits idle for minutes while the model thinks, and proxies/gateways cut
     such connections (LLM_CONNECTION with an unknown outcome).  SSE keeps the
     connection alive with events and the separated deadlines below bound the
-    thinking time.  A provider that never emits an event falls back to exactly
-    one plain request, so an unprobed provider cannot buy a second answer.
+    thinking time. An acknowledged empty or interrupted stream stays unknown;
+    only a refused streaming shape or an unestablished connection may fall back.
     ``SHINE_LLM_STREAMING=off`` restores the old transport.
     """
     mode = os.getenv("SHINE_LLM_STREAMING", "on").strip().casefold()
@@ -69,7 +69,8 @@ def policy_for(config: ProviderConfig, *, streaming: bool | None = None) -> Tran
         # budget: a reasoning model emits events while it thinks, so a socket
         # silent past this ceiling is a hang, not deep thought. Waiting the full
         # base timeout (600s) for a first event let a stuck stream block a crew
-        # step for ten minutes; a bounded ceiling fails it fast as UNKNOWN.
+        # step for ten minutes; the bounded ceiling allows the normal 300s
+        # profile to wait for 300s while retaining a limit for longer profiles.
         first_event_s=max(MIN_FIRST_EVENT_S, min(base, MAX_FIRST_EVENT_S)),
         idle_s=max(MIN_IDLE_S, base / 2),
         total_s=max(base * TOTAL_TIMEOUT_MULTIPLE, 180.0),

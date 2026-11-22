@@ -237,13 +237,12 @@ class OpenAICompatibleProvider:
         raise last_error
 
     def _complete_stream(self, url: str, payload: dict[str, Any], *,
-                         json_mode: bool = True) -> LLMResponse | None:
+                         json_mode: bool = True) -> LLMResponse | httpx.Response | None:
         """Read one SSE completion with separated deadlines.
 
-        Returns ``None`` only when the provider produced no event at all - that
-        is the single case where falling back to a non-streaming request cannot
-        buy a second answer.  Once a byte has arrived, the answer exists and is
-        returned (or raised as a partial, with the visible text kept).
+        Returns ``None`` only when the streaming shape is refused or a
+        connection cannot be established. An acknowledged stream is never
+        silently submitted a second time.
         """
         from shine.llm.transport_policy import policy_for
 
@@ -293,6 +292,13 @@ class OpenAICompatibleProvider:
                     # falling back to a plain request would re-send a request the
                     # provider already accepted and could buy a second answer.
                     headers_received = True
+                    # Some compatible servers ignore stream=true and return a
+                    # complete JSON response. Reuse those exact bytes through
+                    # the ordinary response parser instead of sending again.
+                    content_type = response.headers.get("content-type", "").lower()
+                    if "application/json" in content_type:
+                        response.read()
+                        return response
                     for line in response.iter_lines():
                         if time.perf_counter() - started > policy.total_s:
                             break
@@ -320,20 +326,24 @@ class OpenAICompatibleProvider:
                             if choice.get("finish_reason"):
                                 finish_reason = choice["finish_reason"]
                                 saw_done = True
-        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError):
-            return None
+        except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
+            if not headers_received:
+                return None
+            raise LLMConnectionError("Provider stream broke after acknowledgement", details={
+                "external_outcome": "UNKNOWN", "streamed": True,
+                "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
+                "headers_received": True, "error_type": type(exc).__name__,
+            }) from None
         except httpx.HTTPError as exc:
             if not chunks:
-                if headers_received:
-                    # 200 arrived but no event did before the deadline: the
-                    # request was sent and the outcome is unknown. Never fall
-                    # back to a plain re-send (that would replay a sent request).
-                    raise LLMConnectionError("Provider stream silent after acknowledgement", details={
-                        "external_outcome": "UNKNOWN", "streamed": True,
-                        "first_event_ms": first_event_ms, "headers_received": True,
-                        "error_type": type(exc).__name__,
-                    }) from None
-                return None
+                # A read/write failure can happen after the POST was sent even
+                # when no response headers arrived; absence of headers does not
+                # prove the provider never received the request.
+                raise LLMConnectionError("Provider stream failed before content", details={
+                    "external_outcome": "UNKNOWN", "streamed": True,
+                    "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
+                    "headers_received": headers_received, "error_type": type(exc).__name__,
+                }) from None
             raise LLMConnectionError("Provider stream broke", details={
                 "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
                 "streamed": True, "first_event_ms": first_event_ms,
@@ -341,11 +351,17 @@ class OpenAICompatibleProvider:
             }) from None
         text = "".join(chunks)
         if not text:
-            # A clean stream that ended with no content at all (no timeout, no
-            # error) is the unprobed-shape case: one plain fallback is safe. A
-            # silent socket that TIMED OUT after 200 is handled above as UNKNOWN
-            # and never reaches here.
-            return None
+            if saw_done:
+                raise LLMFormatError("Provider completed stream without content", details={
+                    **_format_failure_details(200, finish_reason, usage),
+                    "streamed": True, "first_event_ms": first_event_ms,
+                    "last_event_ms": last_event_ms,
+                })
+            raise LLMConnectionError("Provider stream ended without a terminal event", details={
+                "external_outcome": "UNKNOWN", "streamed": True,
+                "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
+                "headers_received": headers_received, "error_type": "StreamEndedWithoutTerminalEvent",
+            })
         if not saw_done:
             # The socket ended without a terminal event: the provider may still
             # be generating, so this is an unknown outcome, not a bad answer.
@@ -418,6 +434,7 @@ class OpenAICompatibleProvider:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
         url = _chat_url(self.config.base_url)
+        response = None
         if self.config.streaming:
             budget = max(0, self.config.rate_limit_retry_attempts)
             streamed = None
@@ -434,19 +451,20 @@ class OpenAICompatibleProvider:
                         min(attempt, len(RATE_LIMIT_BACKOFF_SECONDS) - 1)]
                     note_rate_limit(self.config.base_url, pause)
                     time.sleep(pause)
-            if streamed is not None:
+            if isinstance(streamed, LLMResponse):
                 return streamed
-            # No event arrived: the provider refused the streaming shape before
-            # producing anything, so one plain request is safe and is not a
-            # replay of an answer.
-        try:
-            response = self._request("POST", url, payload=payload)
-        except LLMError as exc:
-            if json_mode and exc.details.get("status") in {400, 422}:
-                payload.pop("response_format", None)
+            if isinstance(streamed, httpx.Response):
+                response = streamed
+            # The stream shape was refused, or no connection was established.
+        if response is None:
+            try:
                 response = self._request("POST", url, payload=payload)
-            else:
-                raise
+            except LLMError as exc:
+                if json_mode and exc.details.get("status") in {400, 422}:
+                    payload.pop("response_format", None)
+                    response = self._request("POST", url, payload=payload)
+                else:
+                    raise
         try:
             body = response.json()
         except json.JSONDecodeError as exc:

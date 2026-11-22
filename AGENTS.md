@@ -2540,3 +2540,13 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 - **P1–P4 三原则复核**：修复 `frontend/src/useStudio.ts::queueShot` 在 `workflowProfiles` 为空时不再阻滞 `comfyui` 单镜排队，统一下沉至唯一裁决口 `services.make_render_request` 的动态策略。
 - **实机全链路验收**：独立目录 `.local-acceptance/v3-final-20261122` 实测既有 ComfyUI `b0b743566` 零拷贝接管与 `READY` 服务核验（`node_count=1281`）；确认 `RelayVSR X2` 权重在盘但缺少核心节点，各入口诚实报 `RELAYVSR_NODES_MISSING_IN_LIVE`、`POST /jobs` 返回 `409 STRATEGY_BLOCKED`（真机超分保留 `NOT_VERIFIED`），基础 1 图 H3 不受阻滞；真实 `MiniMax-M3.1-flash`（`reasoning_effort=low`）以中性风格（`profile_id=""`）完成五角色自动创作（全部命中 `cinema_skills`）与 RTX 5080 四镜连续 H3 成片 + 整集交付合成（23.52s、`ffprobe`/`ffmpeg` 零错误、静默镜 `-49.0/-40.9 dB`、对白镜 `-18.6/-15.5 dB`、7 条 GPU 租约全部 `RELEASED`）。
 - **全量回归**：Ruff、Copilot 契约（475）、Alembic、`test_isolation_static`、定向 12 模块（245 收集/244 通过/1 跳过）、Vitest（94 文件 472/472）、`tsc`、Vite build 与后端 8 分片 304 文件（`shards-20261122-110054-047`，8 分片全部 exit 0、`shards_with_failure_markers=0`）均通过。验收报告见 `docs/SHINE_V3_FINAL_ACCEPTANCE_REPORT_20261122.md`。
+
+## 2026-11-22 LLM 流式 UNKNOWN 语义收紧（接手 Codex 额度中断轮）
+
+- **被服务端确认过的流绝不静默重发**：`OpenAICompatibleProvider._complete_stream` 的回退出口收窄到仅剩两个——流形状被 4xx 拒绝（未受理），或 `ConnectTimeout/PoolTimeout/ConnectError` 且连接根本未建立。其余形态一律如实分类：headers 已到后断开、POST 已写出但读失败（含 headers 未到）、SSE 结束无终止事件 → `LLMConnectionError` UNKNOWN；「headers 未到 ≠ 请求未送达」。
+- **忽略 `stream=true` 的兼容服务器复用同一响应**：对流式请求返回 `application/json` 完整体时，读取该响应体走普通解析路径，只发一次请求，不再当作「无事件流」丢弃重发。
+- **有终止事件的空流是 RESPONSE_RECEIVED 不是 UNKNOWN**：`saw_done`（`finish_reason`/`[DONE]`）且无内容 → `LLMFormatError`，`classify_external_outcome` 判 `RESPONSE_RECEIVED`，重问走既有 `MAX_SUBTASK_RETRIES` 预算；只有 `reasoning_content` 无正文或完全空流仍是 UNKNOWN。
+- **首事件上限 180 → 300s**（`MAX_FIRST_EVENT_S`）：300s 常规档等满 300s 才判首事件超时，更长档保留上限，慢首事件不再被过早判成挂起。
+- **scriptwriter 补充台词说话方约束**：对话率分支钉住「补充台词的说话方必须是该节拍 `characters` 里列出的既有 source 人物，不得添加画外说话人」——服务器按名字解析说话方，画外新说话人是不可绑定镜头。契约断言补进 `test_crew_prompt_contract.py`。
+- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。进度与行为矩阵见
+  `docs/PROGRESS_20261122_LLM_STREAM_UNKNOWN_SEMANTICS.md`；回归：定向三文件 26 用例、相邻/扩展模块 182 用例、Ruff、后端 8 分片 304 文件全量（`shards-20261122-231522-576`，wall `1108.6s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）均通过。

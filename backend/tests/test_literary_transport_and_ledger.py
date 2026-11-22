@@ -43,19 +43,20 @@ def test_a_streamed_answer_carries_its_event_evidence():
     assert response.raw_meta["last_event_ms"] >= response.raw_meta["first_event_ms"]
 
 
-def test_a_stream_without_any_event_falls_back_to_one_plain_request():
-    """No event means nothing was generated; one plain request is not a replay."""
+def test_an_acknowledged_stream_without_events_stays_unknown():
+    """A 200 response without events does not prove the request was not processed."""
+    from shine.llm.base import LLMConnectionError
     server = FakeOpenAIServer().start()
     try:
         server.stream_mode = "empty"
         server.response_content = '{"text": "德明回来了。"}'
         provider = OpenAICompatibleProvider(_config(server))
-        response = provider.complete([], json_mode=True)
+        with pytest.raises(LLMConnectionError) as error:
+            provider.complete([], json_mode=True)
     finally:
         server.stop()
-    assert response.parsed == {"text": "德明回来了。"}
-    assert len(server.requests) == 2, "the streaming attempt then one plain request"
-    assert not server.requests[1].get("stream")
+    assert error.value.details["external_outcome"] == "UNKNOWN"
+    assert len(server.requests) == 1
 
 
 def test_a_broken_stream_keeps_the_visible_text_and_stays_unknown():

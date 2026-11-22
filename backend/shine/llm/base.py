@@ -96,8 +96,8 @@ class ProviderConfig:
 
     The agent lane sets it from ``streaming_enabled`` (on by default for
     SSE-capable adapters): long idle non-streaming connections get cut by
-    proxies/gateways.  A stream that never emits an event falls back to one
-    plain request, so an unprobed provider cannot buy a second answer.
+    proxies/gateways. An acknowledged stream with no answer stays unknown;
+    it is not silently replaced with a plain request.
     """
 
     rate_limit_retry_attempts: int = 0

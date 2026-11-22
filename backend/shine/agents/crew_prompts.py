@@ -304,6 +304,8 @@ def crew_prompt(
             "verbatim, with its speaker and punctuation. Use those lines first. If more beats need "
             "dialogue, adapt only intentions or facts already supported by this section into short, "
             "natural on-screen lines for existing characters already present in those beats. "
+            "For every added line, its speaker must be listed in that beat's characters and "
+            "be an existing source character; do not add an off-screen speaker to characters. "
             "Write added lines in the project_spoken_language. Keep them in beat.dialogue with local "
             "start_s/end_s that leave room for natural delivery and do not overlap. Never convert "
             "exposition into narration, off-screen voice-over, or a new character or story event. "
