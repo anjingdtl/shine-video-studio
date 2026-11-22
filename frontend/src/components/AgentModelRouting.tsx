@@ -228,9 +228,13 @@ export function AgentModelRouting({
         const role = roles.find(item => item.role === change.role);
         return <p key={change.role}><b>{role ? roleDisplay(role) : change.role}</b>　{change.from_profile_name || '未配置'} <ArrowRight size={12} /> {change.to_profile_name || '移除分配'}</p>;
       })}
-      {preview.affected_tasks.length > 0 && <div className="route-preview-warning"><AlertTriangle size={14} />
-        <span>有 {preview.affected_tasks.length} 个排队、运行或待核对任务受影响，当前批次不能保存。它们的已绑定模型不会被改动。</span>
+      {preview.blocking_tasks.length > 0 && <div className="route-preview-warning"><AlertTriangle size={14} />
+        <span>有 {preview.blocking_tasks.length} 个排队、运行或待核对任务缺少可验证的模型快照，暂时不能改派；请先完成对应任务或核对它的执行绑定。</span>
       </div>}
+      {preview.affected_tasks.some(task => task.continuity === 'PINNED_MODEL') &&
+        <p className="route-preview-note">{preview.affected_tasks.filter(task => task.continuity === 'PINNED_MODEL').length} 个未结束任务仍会使用各自已绑定的模型；本次改派只影响后续新任务。</p>}
+      {preview.affected_tasks.some(task => task.continuity === 'PINNED_MODEL' && task.status === 'NEEDS_REVIEW') &&
+        <p className="route-preview-note">待核对任务的 UNKNOWN 结果和旧模型绑定保持不变；改派不会重试或清除它们。</p>}
       {preview.blockers.map(blocker => <p className="route-preview-blocker" key={`${blocker.role}-${blocker.code}`}>{roleDisplay(roles.find(role => role.role === blocker.role) ?? { role: blocker.role } as LlmRole)}：{blocker.message}</p>)}
       {preview.can_apply && <button className="btn-secondary" type="button" disabled={busy} onClick={() => void saveChanges()}>
         <Save size={14} /> 确认保存 {preview.changed_role_count} 项分配

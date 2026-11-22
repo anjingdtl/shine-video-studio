@@ -123,7 +123,7 @@ describe('文本工种事务性路由', () => {
       changes: [
         { role: 'director', action: 'added', from_profile_id: null, to_profile_id: 'profile-1', from_profile_name: null, to_profile_name: '本地文本模型' },
         { role: 'editor', action: 'added', from_profile_id: null, to_profile_id: 'profile-1', from_profile_name: null, to_profile_name: '本地文本模型' },
-      ], changed_role_count: 2, affected_tasks: [], blockers: [], can_apply: true,
+      ], changed_role_count: 2, affected_tasks: [], blocking_tasks: [], blockers: [], can_apply: true,
     }) });
     stub.add({ method: 'PUT', pattern: /\/api\/v1\/agent-routes\/batch$/, respond: () => jsonResponse({
       routes: [], route_revision: 'n'.repeat(64), readiness: { status: 'READY', roles: [] }, changed_roles: ['director', 'editor'],

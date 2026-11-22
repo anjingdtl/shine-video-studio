@@ -198,7 +198,7 @@ def test_preview_blocks_disabled_models_without_writing_a_route(api):
     assert route_profile(factory, "director") is None
 
 
-def test_in_flight_agent_task_is_shown_in_preview_and_blocks_route_change(api):
+def test_in_flight_agent_task_with_matching_snapshot_survives_route_change(api):
     client, factory, _ = api
     project_id = create_project(client, "LLM 路由任务保护")
     current = create_profile(client, name="current")
@@ -222,15 +222,107 @@ def test_in_flight_agent_task_is_shown_in_preview_and_blocks_route_change(api):
 
     updates = [{"role": "director", "provider_profile_id": target["id"]}]
     preview = client.post("/api/v1/agent-routes/preview", json={"updates": updates}).json()
-    assert preview["can_apply"] is False
+    assert preview["can_apply"] is True
     assert preview["affected_tasks"][0]["role"] == "director"
     assert preview["affected_tasks"][0]["status"] == "RUNNING"
+    assert preview["affected_tasks"][0]["continuity"] == "PINNED_MODEL"
+    assert preview["blocking_tasks"] == []
+    result = client.put("/api/v1/agent-routes/batch", json={
+        "updates": updates, "expected_revision": preview["expected_revision"],
+    })
+    assert result.status_code == 200, result.text
+    assert route_profile(factory, "director") == target["id"]
+    with factory() as db:
+        task = db.scalar(select(AgentTaskRecord).where(AgentTaskRecord.role_id == "director"))
+        assert task is not None
+        assert task.model_profile_id == current["id"]
+        assert task.model_id == current["model"]
+        assert task.status == "RUNNING"
+
+
+def test_unpinned_coordinator_task_still_blocks_route_change(api):
+    client, factory, _ = api
+    project_id = create_project(client, "LLM 路由协调任务保护")
+    current = create_profile(client, name="current")
+    target = create_profile(client, name="target", model="model-two")
+    assert client.put("/api/v1/agent-routes", json={
+        "role": "scriptwriter", "provider_profile_id": current["id"],
+    }).status_code == 200
+    with factory() as db:
+        db.add(AgentTaskRecord(
+            project_id=project_id,
+            role_id="story_outline_run",
+            input_hash="a" * 64,
+            asset_manifest_hash="b" * 64,
+            rulepack_id="test",
+            rulepack_hash="c" * 64,
+            model_profile_id="crew-role-routing",
+            model_id="existing-film-crew",
+            status="NEEDS_REVIEW",
+            error_code="LLM_CONNECTION",
+            trace={"phase": "WAITING_PROVIDER", "external_outcome": "UNKNOWN"},
+        ))
+        db.commit()
+
+    updates = [{"role": "scriptwriter", "provider_profile_id": target["id"]}]
+    preview = client.post("/api/v1/agent-routes/preview", json={"updates": updates}).json()
+    assert preview["can_apply"] is False
+    assert preview["affected_tasks"][0]["continuity"] == "BLOCKING_ROUTE"
+    assert preview["blocking_tasks"][0]["task_id"] == preview["affected_tasks"][0]["task_id"]
     result = client.put("/api/v1/agent-routes/batch", json={
         "updates": updates, "expected_revision": preview["expected_revision"],
     })
     assert result.status_code == 409
     assert result.json()["detail"]["code"] == "LLM_ROUTE_PREVIEW_BLOCKED"
-    assert route_profile(factory, "director") == current["id"]
+    assert route_profile(factory, "scriptwriter") == current["id"]
+
+
+def test_unknown_direct_scriptwriter_task_does_not_lock_future_route(api):
+    client, factory, _ = api
+    project_id = create_project(client, "LLM UNKNOWN 请求保留模型")
+    current = create_profile(client, name="current")
+    target = create_profile(client, name="target", model="model-two")
+    assert client.put("/api/v1/agent-routes", json={
+        "role": "scriptwriter", "provider_profile_id": current["id"],
+    }).status_code == 200
+    with factory() as db:
+        task = AgentTaskRecord(
+            project_id=project_id,
+            role_id="scriptwriter",
+            input_hash="a" * 64,
+            asset_manifest_hash="b" * 64,
+            rulepack_id="test",
+            rulepack_hash="c" * 64,
+            model_profile_id=current["id"],
+            model_id=current["model"],
+            status="NEEDS_REVIEW",
+            error_code="LLM_CONNECTION",
+            trace={"phase": "WAITING_PROVIDER", "external_outcome": "UNKNOWN"},
+        )
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    updates = [{"role": "scriptwriter", "provider_profile_id": target["id"]}]
+    preview = client.post("/api/v1/agent-routes/preview", json={"updates": updates}).json()
+    assert preview["can_apply"] is True
+    assert preview["affected_tasks"][0]["task_id"] == task_id
+    assert preview["affected_tasks"][0]["continuity"] == "PINNED_MODEL"
+    assert preview["blocking_tasks"] == []
+    saved = client.put("/api/v1/agent-routes/batch", json={
+        "updates": updates,
+        "expected_revision": preview["expected_revision"],
+    })
+    assert saved.status_code == 200, saved.text
+    assert route_profile(factory, "scriptwriter") == target["id"]
+    with factory() as db:
+        task = db.get(AgentTaskRecord, task_id)
+        assert task is not None
+        assert task.model_profile_id == current["id"]
+        assert task.model_id == current["model"]
+        assert task.status == "NEEDS_REVIEW"
+        assert task.error_code == "LLM_CONNECTION"
+        assert task.trace["external_outcome"] == "UNKNOWN"
 
 
 def test_batch_commit_failure_rolls_back_every_route_and_audit(api, monkeypatch):

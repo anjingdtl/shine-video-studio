@@ -736,6 +736,7 @@ export type LlmOverview = {
 export type AgentRouteAssignment = { role: string; provider_profile_id: string | null };
 
 export type AgentRoutePreview = {
+  /** Route decision and impact use the backend's single pinned-snapshot verdict. */
   expected_revision: string; updates: AgentRouteAssignment[];
   changes: Array<{
     role: string; action: 'added' | 'reassigned' | 'removed' | 'unchanged';
@@ -743,7 +744,14 @@ export type AgentRoutePreview = {
     from_profile_name: string | null; to_profile_name: string | null;
   }>;
   changed_role_count: number;
-  affected_tasks: Array<{ task_id: string; role: string; status: string; model_profile_id: string; model_id: string }>;
+  affected_tasks: Array<{
+    task_id: string; role: string; status: string; model_profile_id: string; model_id: string;
+    continuity: 'PINNED_MODEL' | 'BLOCKING_ROUTE'; consumes_role: string;
+  }>;
+  blocking_tasks: Array<{
+    task_id: string; role: string; status: string; model_profile_id: string; model_id: string;
+    continuity: 'BLOCKING_ROUTE'; consumes_role: string;
+  }>;
   blockers: Array<{ role: string; code: string; message: string }>;
   can_apply: boolean;
 };

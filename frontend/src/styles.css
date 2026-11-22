@@ -1705,6 +1705,7 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .route-preview h4{font-size:var(--fs-caption);color:var(--olive-ink);margin:0 0 8px}
 .route-preview p{display:flex;align-items:center;gap:4px;font-size:var(--fs-caption);color:var(--ink-2);margin:5px 0;flex-wrap:wrap}
 .route-preview-warning{display:flex;align-items:flex-start;gap:6px;margin:8px 0;color:var(--warn-2);font-size:var(--fs-caption);line-height:1.6}
+.route-preview-note{margin:8px 0;color:var(--text-muted);font-size:var(--fs-caption);line-height:1.6}
 .route-preview-blocker{color:var(--danger-ink)!important}
 .route-preview-error{font-size:var(--fs-caption);color:var(--danger-ink)}
 .route-preview .btn-secondary{margin-top:7px}

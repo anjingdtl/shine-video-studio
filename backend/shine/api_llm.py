@@ -145,20 +145,32 @@ def _live_tasks_for_roles(db, roles: set[str]) -> list[AgentTaskRecord]:
     ).all())
 
 
-def _split_pinned_tasks(tasks: list[AgentTaskRecord]) -> tuple[list[AgentTaskRecord], list[AgentTaskRecord]]:
-    """Split live tasks into ones that continue on their snapshot and blockers.
+def _route_task_impact(
+    db, tasks: list[AgentTaskRecord]
+) -> tuple[list[dict[str, str]], list[dict[str, str]], list[dict[str, str]]]:
+    """Classify route impact once for previews and every route write path.
 
-    A queued task with a durable ``model_profile_id`` is not broken by a route
-    change: the worker pins that profile for the unit (J05).  Only a task
-    without a usable snapshot makes a mid-flight reassignment unsafe.
+    A task is isolated from route edits only when its stored profile and model
+    still identify the same persisted provider snapshot. Parent/coordinator
+    rows with sentinel routing ids, missing profiles, and mismatched snapshots
+    remain blockers until their own work is reconciled.
     """
     from shine.llm.role_catalog import TASK_ROLE_CONSUMERS
 
-    pinned, blocking = [], []
+    affected: list[dict[str, str]] = []
+    pinned: list[dict[str, str]] = []
+    blocking: list[dict[str, str]] = []
     for task in tasks:
-        pinned_task = task.role_id in TASK_ROLE_CONSUMERS and bool(task.model_profile_id)
-        (pinned if pinned_task else blocking).append(task)
-    return pinned, blocking
+        profile = db.get(ProviderProfile, task.model_profile_id) if task.model_profile_id else None
+        has_snapshot = bool(profile and task.model_id and profile.model == task.model_id)
+        row = {
+            **_active_task_dict(task),
+            "continuity": "PINNED_MODEL" if has_snapshot else "BLOCKING_ROUTE",
+            "consumes_role": TASK_ROLE_CONSUMERS.get(task.role_id, task.role_id),
+        }
+        affected.append(row)
+        (pinned if has_snapshot else blocking).append(row)
+    return affected, pinned, blocking
 
 
 def _live_tasks_for_profile(db, profile_id: str) -> list[AgentTaskRecord]:
@@ -278,24 +290,8 @@ def _route_preview(db, assignments: list[dict[str, Any]], secrets: SecretStore) 
                     "message": "所选模型的密钥不可读取，请重新保存密钥。",
                 })
 
-    from shine.llm.role_catalog import TASK_ROLE_CONSUMERS
-
     affected = _live_tasks_for_roles(db, changed_roles)
-    active_tasks = []
-    blocking_tasks = []
-    for task in affected:
-        pinned = task.role_id in TASK_ROLE_CONSUMERS and bool(task.model_profile_id) and bool(task.model_profile_id)
-        row = {
-            **_active_task_dict(task),
-            # A task with a durable model snapshot continues on it; only the
-            # next task follows the new route.  A task without one cannot be
-            # handed a different provider mid-flight.
-            "continuity": "PINNED_MODEL" if pinned else "BLOCKING_ROUTE",
-            "consumes_role": TASK_ROLE_CONSUMERS.get(task.role_id, task.role_id),
-        }
-        active_tasks.append(row)
-        if not pinned:
-            blocking_tasks.append(row)
+    active_tasks, _pinned_tasks, blocking_tasks = _route_task_impact(db, affected)
     return {
         "expected_revision": _route_revision(db),
         "updates": normalized,
@@ -989,7 +985,7 @@ def batch_agent_routes(
             detail={
                 "code": "LLM_ROUTE_PREVIEW_BLOCKED",
                 "message": (
-                    "部分 Agent 仍有未结束任务，或所选模型当前不可用于真实文本任务。"
+                    "有任务缺少可验证的模型快照，或所选模型当前不可用于真实文本任务。"
                     "请按下方提示处理后重新预览。"
                 ),
                 "preview": preview,
@@ -1074,15 +1070,17 @@ def bulk_route(
         for row in db.scalars(select(AgentRoute).where(AgentRoute.role.in_(roles)))
     }
     changed_roles = {role for role in roles if existing.get(role) != profile.id}
-    pinned_tasks, blocking_tasks = _split_pinned_tasks(_live_tasks_for_roles(db, changed_roles))
+    _affected_tasks, pinned_tasks, blocking_tasks = _route_task_impact(
+        db, _live_tasks_for_roles(db, changed_roles)
+    )
     if blocking_tasks:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
-                "message": "受影响角色仍有无法按原模型继续的任务；请先完成或对账，再批量改派。",
-                "active_tasks": [_active_task_dict(task) for task in blocking_tasks],
-                "pinned_tasks": [_active_task_dict(task) for task in pinned_tasks],
+                "message": "有任务缺少可验证的模型快照；请先完成或对账，再批量改派。",
+                "active_tasks": blocking_tasks,
+                "pinned_tasks": pinned_tasks,
             },
         )
     try:
@@ -1126,17 +1124,17 @@ def upsert_route(body: AgentRouteUpdate, db: DBSession) -> AgentRoutePublic:
         raise HTTPException(status_code=404, detail="Provider profile not found")
     route = db.scalar(select(AgentRoute).where(AgentRoute.role == body.role.value))
     if (route.provider_profile_id if route else None) != profile.id:
-        pinned_tasks, blocking_tasks = _split_pinned_tasks(
-            _live_tasks_for_roles(db, {body.role.value})
+        _affected_tasks, pinned_tasks, blocking_tasks = _route_task_impact(
+            db, _live_tasks_for_roles(db, {body.role.value})
         )
         if blocking_tasks:
             raise HTTPException(
                 status_code=409,
                 detail={
                     "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
-                    "message": "该角色仍有无法按原模型继续的任务；请先完成或对账后再改派。",
-                    "active_tasks": [_active_task_dict(task) for task in blocking_tasks],
-                    "pinned_tasks": [_active_task_dict(task) for task in pinned_tasks],
+                    "message": "该角色仍有任务缺少可验证的模型快照；请先完成或对账后再改派。",
+                    "active_tasks": blocking_tasks,
+                    "pinned_tasks": pinned_tasks,
                 },
             )
     if route is None:
@@ -1163,14 +1161,16 @@ def delete_route(role: str, db: DBSession) -> Response:
     route = db.scalar(select(AgentRoute).where(AgentRoute.role == role))
     if not route:
         raise HTTPException(status_code=404, detail="Agent route not found")
-    active_tasks = _live_tasks_for_roles(db, {role})
-    if active_tasks:
+    _affected_tasks, _pinned_tasks, blocking_tasks = _route_task_impact(
+        db, _live_tasks_for_roles(db, {role})
+    )
+    if blocking_tasks:
         raise HTTPException(
             status_code=409,
             detail={
                 "code": "LLM_ROUTE_HAS_IN_FLIGHT_TASKS",
-                "message": "该角色仍有排队、运行或待核对任务；请先完成或对账后再移除路由。",
-                "active_tasks": [_active_task_dict(task) for task in active_tasks],
+                "message": "该角色仍有缺少有效模型快照的排队、运行或待核对任务；请先完成或对账后再移除路由。",
+                "active_tasks": blocking_tasks,
             },
         )
     add_audit(db, "user", "AGENT_ROUTE_DELETED", "agent_route", route.id, {"role": role})

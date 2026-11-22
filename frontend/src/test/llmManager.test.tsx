@@ -78,7 +78,7 @@ it('只补齐未配置角色时保留已有 Agent 分配', async () => {
       role: missing.role, action: 'added', from_profile_id: null, to_profile_id: SECOND_PROFILE.id,
       from_profile_name: null, to_profile_name: SECOND_PROFILE.name,
     }],
-    changed_role_count: 1, affected_tasks: [], blockers: [], can_apply: true,
+    changed_role_count: 1, affected_tasks: [], blocking_tasks: [], blockers: [], can_apply: true,
   };
   const onPreview = vi.fn(async () => preview);
   const onApply = vi.fn(async () => true);
@@ -95,5 +95,42 @@ it('只补齐未配置角色时保留已有 Agent 分配', async () => {
   ]));
   expect(onApply).not.toHaveBeenCalled();
   await user.click(await screen.findByRole('button', { name: '确认保存 1 项分配' }));
+  expect(onApply).toHaveBeenCalledWith(preview);
+});
+
+it('预览将待核对任务保留在旧模型，同时允许保存后续路由', async () => {
+  const scriptwriter = role('scriptwriter', '故事大纲', PROFILE.id);
+  const preview: AgentRoutePreview = {
+    expected_revision: 'r'.repeat(64),
+    updates: [{ role: 'scriptwriter', provider_profile_id: SECOND_PROFILE.id }],
+    changes: [{
+      role: 'scriptwriter', action: 'reassigned', from_profile_id: PROFILE.id,
+      to_profile_id: SECOND_PROFILE.id, from_profile_name: PROFILE.name, to_profile_name: SECOND_PROFILE.name,
+    }],
+    changed_role_count: 1,
+    affected_tasks: [{
+      task_id: 'task-unknown', role: 'scriptwriter', status: 'NEEDS_REVIEW',
+      model_profile_id: PROFILE.id, model_id: PROFILE.model,
+      continuity: 'PINNED_MODEL', consumes_role: 'scriptwriter',
+    }],
+    blocking_tasks: [], blockers: [], can_apply: true,
+  };
+  const onPreview = vi.fn(async () => preview);
+  const onApply = vi.fn(async () => true);
+  vi.spyOn(window, 'confirm').mockReturnValue(true);
+  const user = userEvent.setup();
+
+  render(<AgentModelRouting roles={[scriptwriter]} profiles={[PROFILE, SECOND_PROFILE]}
+    routes={[{ role: 'scriptwriter', provider_profile_id: PROFILE.id, profile_name: PROFILE.name }]}
+    revision={preview.expected_revision} busy={false} multimodal={[]}
+    onPreview={onPreview} onApply={onApply} />);
+  await user.selectOptions(await screen.findByLabelText('为 故事大纲 选择模型'), SECOND_PROFILE.id);
+  await user.click(screen.getByRole('button', { name: /预览改派影响/ }));
+
+  expect(await screen.findByText(/UNKNOWN 结果和旧模型绑定保持不变/)).toBeInTheDocument();
+  expect(screen.queryByText(/当前批次不能保存/)).not.toBeInTheDocument();
+  const save = await screen.findByRole('button', { name: /确认保存 1 项分配/ });
+  expect(save).toBeEnabled();
+  await user.click(save);
   expect(onApply).toHaveBeenCalledWith(preview);
 });
