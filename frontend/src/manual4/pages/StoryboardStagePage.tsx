@@ -55,6 +55,33 @@ function splitAssetsTopLevel(raw: string): string[] {
   return parts;
 }
 
+const CHARACTER_ROLE_TAGS = new Set([
+  '女主',
+  '男主',
+  '主角',
+  '女主角',
+  '男主角',
+  '配角',
+  '男配',
+  '女配',
+  '男一',
+  '女一',
+  '男二',
+  '女二',
+  '主角一',
+  '主角二',
+  '反派',
+  '群演',
+  '龙套',
+  '路人',
+  'lead',
+  'hero',
+  'heroine',
+  'male lead',
+  'female lead',
+  'protagonist',
+]);
+
 function parseAssetsText(raw: string): M4RequestedAsset[] {
   const out: M4RequestedAsset[] = [];
   for (const t of splitAssetsTopLevel(raw)) {
@@ -67,9 +94,30 @@ function parseAssetsText(raw: string): M4RequestedAsset[] {
       family = f === '场景' || f === 'scene' ? 'scene' : f === '道具' || f === 'prop' ? 'prop' : 'character';
       rest = colon[2].trim();
     }
-    const vm = rest.match(/^(.+?)[（(\[【]([^）)\]】]+)[）)\]】]$/);
-    if (vm) out.push({ family, name: vm[1].trim(), variant: vm[2].trim() });
-    else out.push({ family, name: rest, variant: '' });
+    let name = rest;
+    let variant = '';
+    const vm = rest.match(/^(.+?)\s*[（(\[【]([^）)\]】]+)[）)\]】]$/);
+    if (vm) {
+      name = vm[1].trim();
+      variant = vm[2].trim();
+    } else {
+      const unclosed = rest.match(/^(.+?)\s*[（(\[【]([^）)\]】]*)$/);
+      if (unclosed) {
+        name = unclosed[1].trim();
+        variant = unclosed[2].replace(/[()（）\[\]【】]/g, '').trim();
+      } else {
+        name = rest.replace(/[)）\]】]+$/, '').trim();
+      }
+    }
+    if (family === 'character' && variant) {
+      const subTokens = variant.split(/[,，、;；/／|]+/).map((s) => s.trim()).filter(Boolean);
+      if (subTokens.some((tok) => CHARACTER_ROLE_TAGS.has(tok.toLowerCase()))) {
+        variant = subTokens.filter((tok) => !CHARACTER_ROLE_TAGS.has(tok.toLowerCase())).join('、');
+      }
+    }
+    if (name) {
+      out.push({ family, name, variant });
+    }
   }
   return out;
 }

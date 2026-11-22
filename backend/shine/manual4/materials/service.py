@@ -26,7 +26,12 @@ from shine.manual4.comfy.image_workflow import (
     MODEL_FAMILY,
 )
 from shine.manual4.materials.probe import probe_file
-from shine.manual4.prompts.service import label_ordered_m4_bindings, order_m4_shot_bindings
+from shine.manual4.prompts.service import (
+    build_shot_reference_manifest,
+    label_ordered_m4_bindings,
+    manifest_digest,
+    order_m4_shot_bindings,
+)
 from shine.manual4.status.readiness import evaluate_m4_readiness, evaluate_shot_ref2va_bindings
 from shine.manual4.storage.files import (
     ALLOWED_M4_EXTENSIONS,
@@ -46,7 +51,12 @@ from shine.manual4.storage.models import (
     M4StoryboardRevision,
     m4_utcnow,
 )
-from shine.manual4.storyboard.parser import canonical_entity_key
+from shine.manual4.storyboard.parser import (
+    canonical_entity_key,
+    coalesce_broken_bracket_assets,
+    normalize_requested_asset,
+    unify_storyboard_entity_variants,
+)
 
 VALID_FAMILIES = {"character", "scene", "prop", "voice", "reference_video"}
 MAX_IMAGE_SLOTS = 6
@@ -345,6 +355,282 @@ def sync_m4_material_tasks(
     return task_map
 
 
+def reconcile_m4_confirmed_entities(m4_db: Session, project: M4Project) -> bool:
+    """Idempotently coalesce bracket-split and single-variant entities on an existing confirmed revision."""
+    confirmed = m4_db.scalar(
+        select(M4StoryboardRevision)
+        .where(M4StoryboardRevision.project_id == project.id, M4StoryboardRevision.status == "CONFIRMED")
+        .order_by(M4StoryboardRevision.revision.desc())
+        .limit(1)
+    )
+    if confirmed is None:
+        return False
+
+    shots = m4_db.scalars(
+        select(M4Shot)
+        .where(M4Shot.storyboard_revision_id == confirmed.id)
+        .order_by(M4Shot.episode_id, M4Shot.shot_no)
+    ).all()
+    if not shots:
+        return False
+
+    reqs = m4_db.scalars(
+        select(M4MaterialRequirement)
+        .where(M4MaterialRequirement.storyboard_revision_id == confirmed.id)
+        .order_by(M4MaterialRequirement.created_at)
+    ).all()
+
+    def _has_broken_bracket(text: str) -> bool:
+        t = str(text or "")
+        return any(ch in t for ch in ("(", "（", "[", "【", ")", "）", "]", "】"))
+
+    shot_payloads: dict[str, dict[str, Any]] = {}
+    pseudo_ep = {"shots": []}
+    needs_work = False
+    for sh in shots:
+        orig_assets = [dict(a) for a in (sh.requested_assets or []) if isinstance(a, dict)]
+        if any(_has_broken_bracket(a.get("name", "")) for a in orig_assets):
+            needs_work = True
+        entry = {"shot_id": sh.id, "requested_assets": [dict(a) for a in orig_assets]}
+        shot_payloads[sh.id] = entry
+        pseudo_ep["shots"].append(entry)
+
+    unified_desc = unify_storyboard_entity_variants([pseudo_ep])
+
+    if not needs_work:
+        for sh in shots:
+            if shot_payloads[sh.id]["requested_assets"] != list(sh.requested_assets or []):
+                needs_work = True
+                break
+    if not needs_work and reqs:
+        for r in reqs:
+            if _has_broken_bracket(r.entity_name) or _has_broken_bracket(r.variant_name):
+                needs_work = True
+                break
+
+    if not needs_work:
+        return False
+
+    # Build authoritative entity -> (entity_name, variant_name, shot_ids) map from unified shots
+    needed_entities: dict[tuple[str, str], dict[str, Any]] = {}
+    for sh in shots:
+        new_assets = shot_payloads[sh.id]["requested_assets"]
+        if new_assets != list(sh.requested_assets or []):
+            sh.requested_assets = new_assets
+            sh.updated_at = m4_utcnow()
+        for asset in new_assets:
+            ckey = _canonical_key(asset["name"], asset.get("variant", ""))
+            rec = needed_entities.setdefault(
+                (asset["family"], ckey),
+                {
+                    "family": asset["family"],
+                    "entity_name": asset["name"],
+                    "variant_name": asset.get("variant", ""),
+                    "canonical_key": ckey,
+                    "shot_ids": [],
+                },
+            )
+            if sh.id not in rec["shot_ids"]:
+                rec["shot_ids"].append(sh.id)
+
+    # Also update confirmed.payload if episodes/shots match
+    if isinstance(confirmed.payload, dict) and isinstance(confirmed.payload.get("episodes"), list):
+        p_copy = dict(confirmed.payload)
+        p_eps = []
+        by_code = {sh.shot_code: sh.requested_assets for sh in shots}
+        for ep in p_copy["episodes"]:
+            ep_copy = dict(ep)
+            ep_shots = []
+            for psh in ep_copy.get("shots") or []:
+                sc = psh.get("shot_code")
+                sh_copy = dict(psh)
+                if sc in by_code:
+                    sh_copy["requested_assets"] = by_code[sc]
+                ep_shots.append(sh_copy)
+            ep_copy["shots"] = ep_shots
+            p_eps.append(ep_copy)
+        p_copy["episodes"] = p_eps
+        confirmed.payload = p_copy
+
+    reqs_by_id = {r.id: r for r in reqs}
+    surviving_by_key: dict[tuple[str, str], M4MaterialRequirement] = {}
+    # Prefer existing canonical requirements first (especially ones that already have promoted assets)
+    for r in reqs:
+        key = (r.family, r.canonical_key)
+        if key in needed_entities and not _has_broken_bracket(r.entity_name):
+            cur = surviving_by_key.get(key)
+            if cur is None or (r.bound_asset_version_id and not cur.bound_asset_version_id):
+                surviving_by_key[key] = r
+
+    for key, spec_entry in needed_entities.items():
+        desc_note = unified_desc.get((key[0], _canonical_key(spec_entry["entity_name"], "")), "")
+        surv = surviving_by_key.get(key)
+        if surv is not None:
+            surv.entity_name = spec_entry["entity_name"]
+            surv.variant_name = spec_entry["variant_name"]
+            surv.shot_ids = list(spec_entry["shot_ids"])
+            if desc_note and not surv.description:
+                surv.description = desc_note
+            surv.updated_at = m4_utcnow()
+        else:
+            # Reuse a split requirement whose normalized base matches, or create canonical row
+            matched_old: M4MaterialRequirement | None = None
+            for r in reqs:
+                if r.id in {s.id for s in surviving_by_key.values()}:
+                    continue
+                norm_r = normalize_requested_asset(r.family, r.entity_name, r.variant_name)
+                if norm_r and (
+                    norm_r["family"] == key[0]
+                    and _canonical_key(norm_r["name"], "") == _canonical_key(spec_entry["entity_name"], "")
+                ):
+                    matched_old = r
+                    break
+            if matched_old is not None:
+                matched_old.entity_name = spec_entry["entity_name"]
+                matched_old.variant_name = spec_entry["variant_name"]
+                matched_old.canonical_key = spec_entry["canonical_key"]
+                matched_old.shot_ids = list(spec_entry["shot_ids"])
+                if desc_note and not matched_old.description:
+                    matched_old.description = desc_note
+                matched_old.updated_at = m4_utcnow()
+                surviving_by_key[key] = matched_old
+            else:
+                new_req = M4MaterialRequirement(
+                    project_id=project.id,
+                    storyboard_revision_id=confirmed.id,
+                    family=spec_entry["family"],
+                    entity_name=spec_entry["entity_name"],
+                    variant_name=spec_entry["variant_name"],
+                    canonical_key=spec_entry["canonical_key"],
+                    description=desc_note,
+                    shot_ids=list(spec_entry["shot_ids"]),
+                    status="missing",
+                )
+                m4_db.add(new_req)
+                m4_db.flush()
+                surviving_by_key[key] = new_req
+
+    surviving_ids = {s.id for s in surviving_by_key.values()}
+    orphan_reqs = [r for r in reqs if r.id not in surviving_ids]
+    broken_asset_ids: set[str] = set()
+    all_assets = m4_db.scalars(
+        select(M4AssetVersion).where(M4AssetVersion.project_id == project.id)
+    ).all()
+    for ast in all_assets:
+        if _has_broken_bracket(ast.entity_name) or (
+            ast.requirement_id and ast.requirement_id not in surviving_ids and ast.status != "promoted"
+        ):
+            # Mark assets originating from orphan split fragments (e.g., 探险装）, 林风（男主)
+            norm_ast = normalize_requested_asset(ast.family, ast.entity_name, ast.variant_name)
+            ast_bkey = (
+                (norm_ast["family"], _canonical_key(norm_ast["name"], ""))
+                if norm_ast
+                else (ast.family, _canonical_key(ast.entity_name, ""))
+            )
+            if _has_broken_bracket(ast.entity_name) or ast_bkey not in needed_entities:
+                broken_asset_ids.add(ast.id)
+
+    for orphan in orphan_reqs:
+        m4_db.delete(orphan)
+    m4_db.flush()
+
+    # Reconcile shot bindings so every shot binds the surviving canonical assets in cast order
+    assets_by_id = {a.id: a for a in all_assets}
+    affected_shots: list[M4Shot] = []
+    for sh in shots:
+        sh_links = m4_db.scalars(
+            select(M4ShotAssetBinding)
+            .where(M4ShotAssetBinding.shot_id == sh.id)
+            .order_by(M4ShotAssetBinding.ordinal)
+        ).all()
+        changed_this_shot = False
+        kept_asset_ids: set[str] = set()
+        for lnk in list(sh_links):
+            if lnk.asset_version_id in broken_asset_ids:
+                m4_db.delete(lnk)
+                changed_this_shot = True
+            else:
+                kept_asset_ids.add(lnk.asset_version_id)
+
+        for req_item in sh.requested_assets or []:
+            k = (req_item["family"], _canonical_key(req_item["name"], req_item.get("variant", "")))
+            surv = surviving_by_key.get(k)
+            if surv and surv.bound_asset_version_id and surv.bound_asset_version_id not in kept_asset_ids:
+                bound_ast = assets_by_id.get(surv.bound_asset_version_id)
+                if bound_ast and bound_ast.status == "promoted":
+                    new_lnk = M4ShotAssetBinding(
+                        project_id=project.id,
+                        shot_id=sh.id,
+                        asset_version_id=bound_ast.id,
+                        use_as=_use_as_for_asset(bound_ast),
+                        role_label=surv.entity_name,
+                        ordinal=999,
+                    )
+                    m4_db.add(new_lnk)
+                    kept_asset_ids.add(bound_ast.id)
+                    changed_this_shot = True
+        if changed_this_shot:
+            m4_db.flush()
+            fresh_links = m4_db.scalars(
+                select(M4ShotAssetBinding)
+                .where(M4ShotAssetBinding.shot_id == sh.id)
+                .order_by(M4ShotAssetBinding.ordinal)
+            ).all()
+            for idx, lnk in enumerate(order_m4_shot_bindings(fresh_links, assets_by_id, sh)):
+                lnk.ordinal = idx
+            affected_shots.append(sh)
+
+    if affected_shots:
+        _invalidate_frozen_prompts_for_shots(
+            m4_db,
+            [s.id for s in affected_shots],
+            "M4_REFERENCE_MANIFEST_CHANGED",
+        )
+        broken_names = [
+            ast.entity_name
+            for ast in all_assets
+            if ast.id in broken_asset_ids and ast.entity_name
+        ]
+        for sh in affected_shots:
+            new_manifest = build_shot_reference_manifest(m4_db, sh)
+            new_m_sha = manifest_digest(new_manifest)
+            new_assign_line = ", ".join(f"{m['h3_label']}={m['role_label']}" for m in new_manifest)
+            new_subject_count = sum(1 for m in new_manifest if str(m.get("h3_label") or "").startswith("<Subject "))
+            prompt_rows = m4_db.scalars(
+                select(M4ManualPromptRevision).where(
+                    M4ManualPromptRevision.shot_id == sh.id,
+                    M4ManualPromptRevision.status.in_(["DRAFT", "INVALIDATED"]),
+                )
+            ).all()
+            for pr in prompt_rows:
+                updated_text = pr.prompt_text or ""
+                if new_assign_line:
+                    lines = updated_text.splitlines()
+                    rewritten: list[str] = []
+                    for ln in lines:
+                        ln_subjects = ln.count("<Subject ")
+                        has_stale = ln_subjects != new_subject_count or any(
+                            bn in ln for bn in broken_names
+                        )
+                        is_assign_line = ln.lstrip().startswith("<Subject 1>=") or (
+                            "<Subject " in ln and "=" in ln and has_stale
+                        )
+                        if is_assign_line and has_stale:
+                            rewritten.append(new_assign_line)
+                        else:
+                            rewritten.append(ln)
+                    updated_text = "\n".join(rewritten)
+                if updated_text != pr.prompt_text or pr.status == "DRAFT":
+                    pr.prompt_text = updated_text
+                    pr.prompt_sha256 = hashlib.sha256(updated_text.encode("utf-8")).hexdigest()
+                    pr.reference_manifest = new_manifest
+                    pr.reference_manifest_sha256 = new_m_sha
+                    pr.updated_at = m4_utcnow()
+    _ = coalesce_broken_bracket_assets, reqs_by_id
+    m4_db.flush()
+    return True
+
+
 def get_materials_state(
     m4_db: Session,
     project: M4Project,
@@ -352,6 +638,7 @@ def get_materials_state(
     platform_db: Session | None = None,
     settings: Any = None,
 ) -> dict[str, Any]:
+    reconcile_m4_confirmed_entities(m4_db, project)
     task_map = sync_m4_material_tasks(m4_db, platform_db, settings, project)
     confirmed = m4_db.scalar(
         select(M4StoryboardRevision)

@@ -805,3 +805,256 @@ def test_p4_sqlite_lock_retry_config_timeout_and_needs_review_closure(tmp_path, 
         assert cancelled.status_code == 200
         assert cancelled.json()["run"]["status"] == "CANCELLED"
         assert all(j["status"] == "CANCELLED" for j in cancelled.json()["run"]["jobs"])
+
+
+def test_p4_h3_audio_contract_enforces_chinese_tags_and_silences_hallucinations(tmp_path):
+    import re
+    import shutil
+    import subprocess
+    from types import SimpleNamespace
+
+    from shine.comfy.provider import ComfyUIRenderService
+    from shine.foundation.h3_audio import (
+        enforce_h3_render_audio_contract,
+        ensure_h3_execution_prompt_contract,
+        has_authorized_h3_speech,
+        sanitize_h3_dialogue_text,
+    )
+
+    assert sanitize_h3_dialogue_text("“这就是……古地图上的遗迹，”") == "这就是，古地图上的遗迹"
+
+    refs = [
+        {"h3_label": "<Subject 1>", "image_slot": 1, "use_as": "image", "role_label": "林风", "entity_name": "林风"},
+        {"h3_label": "<Picture 2>", "image_slot": 2, "use_as": "image", "role_label": "沙漠", "entity_name": "沙漠"},
+    ]
+
+    silent_prompt = "[Subject Definitions]\n<Subject 1>=林风, <Picture 2>=沙漠\n[Detailed Description]\n林风 walking."
+    silent_enforced = ensure_h3_execution_prompt_contract(silent_prompt, references=refs, dialogue=[])
+    assert "<Picture 1>" in silent_enforced
+    assert "entirely non-vocal" in silent_enforced
+    assert "non_diegetic_music:\nInstrumental only." in silent_enforced
+    assert has_authorized_h3_speech(silent_enforced, dialogue=[]) is False
+
+    spoken_prompt = "[Subject Definitions]\n<Subject 1>=林风, <Picture 2>=沙漠\n[Detailed Description]\n林风 speaking."
+    spoken_enforced = ensure_h3_execution_prompt_contract(
+        spoken_prompt,
+        references=refs,
+        dialogue=[{"speaker": "林风", "text": "“注意脚下……”"}],
+    )
+    assert "<d>[Chinese] 注意脚下</d>" in spoken_enforced
+    assert "Every voice in this shot speaks Chinese." in spoken_enforced
+    assert has_authorized_h3_speech(spoken_enforced, dialogue=[]) is True
+
+    ffmpeg_exe = shutil.which("ffmpeg")
+    if ffmpeg_exe:
+        noisy_mp4 = tmp_path / "noisy.mp4"
+        subprocess.run(
+            [
+                ffmpeg_exe, "-nostdin", "-y", "-hide_banner", "-loglevel", "error",
+                "-f", "lavfi", "-i", "testsrc=size=128x128:rate=24:duration=2",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p",
+                "-c:a", "aac", "-ac", "2", "-ar", "48000",
+                str(noisy_mp4),
+            ],
+            check=True,
+        )
+        raw_bytes = noisy_mp4.read_bytes()
+        assert len(raw_bytes) > 4096
+
+        # Dialogue-free shot must be silenced deterministically
+        cleaned_bytes = enforce_h3_render_audio_contract(
+            raw_bytes,
+            prompt_text=silent_enforced,
+            dialogue=[],
+            ffmpeg_path=ffmpeg_exe,
+        )
+        cleaned_mp4 = tmp_path / "cleaned.mp4"
+        cleaned_mp4.write_bytes(cleaned_bytes)
+        vol = subprocess.run(
+            [ffmpeg_exe, "-hide_banner", "-i", str(cleaned_mp4), "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        m_max = re.search(r"max_volume:\s*([-\d.]+)\s*dB", vol.stderr)
+        assert m_max is not None and float(m_max.group(1)) <= -60.0
+
+        # Spoken shot with <d>[Chinese] ...</d> preserves real audio
+        kept_bytes = enforce_h3_render_audio_contract(
+            raw_bytes,
+            prompt_text=spoken_enforced,
+            dialogue=[],
+            ffmpeg_path=ffmpeg_exe,
+        )
+        assert kept_bytes == raw_bytes
+
+        # 7-stage ComfyUIRenderService.poll enforces silence on silent prompt recovered from history
+        fake_client = SimpleNamespace(
+            history=lambda pid: {
+                pid: {
+                    "prompt": [0, pid, {"31": {"inputs": {"prompt": silent_enforced}}}, {}, []],
+                    "outputs": {"9": {"videos": [{"filename": "out.mp4", "subfolder": "", "type": "output"}]}},
+                }
+            },
+            view=lambda *_a, **_kw: raw_bytes,
+        )
+        svc = ComfyUIRenderService(fake_client, tmp_path, ffmpeg_path=ffmpeg_exe)
+        res = svc.poll("pid-silent-1")
+        assert res.status == "completed" and res.content is not None
+        svc_mp4 = tmp_path / "svc_cleaned.mp4"
+        svc_mp4.write_bytes(res.content)
+        vol2 = subprocess.run(
+            [ffmpeg_exe, "-hide_banner", "-i", str(svc_mp4), "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        m_max2 = re.search(r"max_volume:\s*([-\d.]+)\s*dB", vol2.stderr)
+        assert m_max2 is not None and float(m_max2.group(1)) <= -60.0
+
+
+def test_p4_last_frame_continuity_injects_picture_slot_alignment_and_syncs_storyboard(tmp_path):
+    from types import SimpleNamespace
+
+    from shine.foundation.h3 import ComfyH3Executor, H3ExecutionRequest, H3ReferenceInput
+    from shine.foundation.h3_audio import ensure_h3_execution_prompt_contract
+    from shine.manual4.comfy.h3_adapter import compile_m4_ref2va_workflow
+    from shine.manual4.storage.files import sha256_bytes
+    from shine.manual4.storage.models import M4StoryboardRevision
+
+    # 1. Updating continuity_mode on Stage 3 syncs M4StoryboardRevision.payload so Stage 1 & 3 keep one truth
+    app, data_dir = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid, shots = _prepare_two_shots_materials_ready(client)
+        s1_id, s2_id = shots[0]["id"], shots[1]["id"]
+        r_opt = client.put(
+            f"/api/v1/manual4/projects/{pid}/shots/{s2_id}/render-options",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"continuity_mode": "last_frame"},
+        )
+        assert r_opt.status_code == 200
+        with app.state.m4_session_factory() as mdb:
+            conf = mdb.scalars(
+                mdb.query(M4StoryboardRevision).statement.where(
+                    M4StoryboardRevision.project_id == pid,
+                    M4StoryboardRevision.status == "CONFIRMED",
+                )
+            ).first()
+            assert conf is not None
+            s2_payload = conf.payload["episodes"][0]["shots"][1]
+            assert s2_payload["continuity_mode"] == "last_frame"
+
+        # 2. Freeze prompts & verify run chains Shot 2 -> Shot 1, and single-shot retake on Shot 2 resolves Shot 1
+        assert (
+            client.post(
+                f"/api/v1/manual4/projects/{pid}/shots/{s1_id}/prompt/freeze",
+                headers=LOCAL_ACTION_HEADERS,
+                json={"prompt_text": "detailed_description:\nShot 1 opening."},
+            ).status_code
+            == 200
+        )
+        assert (
+            client.post(
+                f"/api/v1/manual4/projects/{pid}/shots/{s2_id}/prompt/freeze",
+                headers=LOCAL_ACTION_HEADERS,
+                json={"prompt_text": "[Subject Definitions]\n<Subject 1>=林晚\n[Detailed Description]\nWalk forward."},
+            ).status_code
+            == 200
+        )
+        created = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "project", "provider": "mock"},
+        ).json()["run"]
+        assert created["jobs"][1]["continuity_mode"] == "last_frame"
+        assert created["jobs"][1]["previous_job_id"] == created["jobs"][0]["id"]
+
+    # 3. Verify ensure_h3_execution_prompt_contract & ComfyH3Executor declare <Picture N> as 0.00s opening frame
+    subj_png = tmp_path / "linwan.png"
+    last_png = tmp_path / "c_prev.png"
+    subj_png.write_bytes(_minimal_png(32, 32))
+    last_png.write_bytes(_minimal_png(64, 64))
+
+    refs = [
+        {"use_as": "image", "role_label": "林晚", "entity_name": "林晚", "h3_label": "<Subject 1>", "image_slot": 1},
+        {
+            "use_as": "image",
+            "family": "scene",
+            "role_label": "last_frame_continuity",
+            "entity_name": "last_frame_continuity",
+            "h3_label": "<Picture 2>",
+            "image_slot": 2,
+            "frame_role": "first_frame",
+        },
+    ]
+    raw_prompt = "[Subject Definitions]\n<Subject 1>=林晚\n[Detailed Description]\nLin Wan steps forward."
+    contracted = ensure_h3_execution_prompt_contract(raw_prompt, references=refs, dialogue=[])
+    assert "at 0.00 seconds into the target video, <Picture 2>" in contracted
+    assert "<Picture 2> is the first_frame continuity reference" in contracted
+    assert "<Picture 2> ([Shot 1] first_frame frame): fully_preserved" in contracted
+
+    compiled = compile_m4_ref2va_workflow(accelerator_id="native20", image_count=2)
+    object_info = {
+        node["class_type"]: {"input": {"required": {}, "optional": {}}}
+        for node in compiled.graph.values()
+    }
+    captured_graphs: list[dict] = []
+    out_mp4 = make_mp4_fixture(duration_s=5.0, width=768, height=1344, fps=24)
+
+    class _FakeComfy:
+        def object_info(self):
+            return object_info
+
+        def upload_file(self, filename, _raw, **_kw):
+            return {"name": filename, "subfolder": "shine"}
+
+        def queue_prompt(self, graph, **_kw):
+            captured_graphs.append(graph)
+            return {"prompt_id": "pid-cont-1"}
+
+        def history(self, pid=None):
+            rec = {
+                "prompt": [0, "pid-cont-1", captured_graphs[-1], {}, []],
+                "outputs": {"57": {"videos": [{"filename": "cont.mp4", "subfolder": "", "type": "output"}]}},
+            }
+            return {"pid-cont-1": rec} if pid else {"pid-cont-1": rec}
+
+        def queue(self):
+            return {"queue_running": [], "queue_pending": []}
+
+        def view(self, *_a, **_kw):
+            return out_mp4
+
+    _ = SimpleNamespace
+    req = H3ExecutionRequest(
+        prompt_text=raw_prompt,
+        prompt_sha256=sha256_bytes(raw_prompt.encode()),
+        duration_s=5.0,
+        width=1344,
+        height=768,
+        seed=77,
+        accelerator_id="native20",
+        references=[
+            H3ReferenceInput(
+                family="image", path=subj_png, filename="linwan.png",
+                content_type="image/png", sha256=sha256_bytes(subj_png.read_bytes()), role_label="林晚",
+            ),
+            H3ReferenceInput(
+                family="image", path=last_png, filename="c_prev.png",
+                content_type="image/png", sha256=sha256_bytes(last_png.read_bytes()),
+                role_label="last_frame_continuity",
+            ),
+        ],
+        reference_manifest=refs,
+        normalize_audio_prompt=True,
+    )
+    receipt = ComfyH3Executor().execute(_FakeComfy(), req)
+    assert receipt.status == "completed"
+    submitted_prompt = captured_graphs[0]["31"]["inputs"]["prompt"]
+    assert captured_graphs[0]["40"]["inputs"]["image"] == "shine/linwan.png"
+    assert captured_graphs[0]["41"]["inputs"]["image"] == "shine/c_prev.png"
+    assert "at 0.00 seconds into the target video, <Picture 2>" in submitted_prompt
+    assert "<Picture 2> ([Shot 1] first_frame frame): fully_preserved" in submitted_prompt
+
+

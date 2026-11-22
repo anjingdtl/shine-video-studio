@@ -4,12 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from shine.foundation.h3_audio import canonical_h3_language, sanitize_h3_dialogue_text
+from shine.manual4.contracts.schemas import canonical_digest
 from shine.manual4.h3.spec_review import review_h3_prompt
 from shine.manual4.storage.models import (
     M4AssetVersion,
@@ -238,6 +241,28 @@ def _get_confirmed_shot(m4_db: Session, project: M4Project, shot_id: str) -> tup
     return confirmed, shot
 
 
+_D_BLOCK_RE = re.compile(r"<d\s*>(.*?)</d\s*>", flags=re.IGNORECASE | re.DOTALL)
+_LANG_TAG_PREFIX_RE = re.compile(r"^\s*\[([^\[\]]{1,32})\]\s*(.*)$", flags=re.DOTALL)
+
+
+def _normalize_explicit_d_tags(text: str) -> str:
+    if "<d" not in (text or "").lower():
+        return text
+
+    def _rewrite(match: re.Match[str]) -> str:
+        inner = match.group(1).strip()
+        m_lang = _LANG_TAG_PREFIX_RE.match(inner)
+        if m_lang:
+            lang = canonical_h3_language(m_lang.group(1))
+            body = sanitize_h3_dialogue_text(m_lang.group(2))
+        else:
+            lang = "Chinese"
+            body = sanitize_h3_dialogue_text(inner)
+        return f"<d>[{lang}] {body}</d>" if body else ""
+
+    return _D_BLOCK_RE.sub(_rewrite, text).strip()
+
+
 def save_prompt_draft(
     m4_db: Session,
     project: M4Project,
@@ -247,7 +272,7 @@ def save_prompt_draft(
     prompt_text: str,
 ) -> dict[str, Any]:
     _confirmed, shot = _get_confirmed_shot(m4_db, project, shot_id)
-    text = (prompt_text or "").strip()
+    text = _normalize_explicit_d_tags((prompt_text or "").strip())
     manifest = build_shot_reference_manifest(m4_db, shot)
     labels = {m["h3_label"] for m in manifest} | {
         f"<Picture {m['image_slot']}>" for m in manifest if m.get("image_slot")
@@ -336,7 +361,7 @@ def freeze_prompt(
         )
 
     if prompt_text is not None:
-        text = prompt_text.strip()
+        text = _normalize_explicit_d_tags(prompt_text.strip())
     else:
         draft = m4_db.scalar(
             select(M4ManualPromptRevision)
@@ -344,7 +369,7 @@ def freeze_prompt(
             .order_by(M4ManualPromptRevision.revision.desc())
             .limit(1)
         )
-        text = (draft.prompt_text if draft else "").strip()
+        text = _normalize_explicit_d_tags((draft.prompt_text if draft else "").strip())
 
     if not text:
         raise HTTPException(422, {"code": "M4_PROMPT_EMPTY", "message": "人工 H3 提示词不能为空，请填写后冻结。"})
@@ -543,6 +568,37 @@ def update_shot_render_options(
             pr.invalidated_reason = "M4_SHOT_OPTIONS_CHANGED"
             pr.updated_at = m4_utcnow()
             invalidated_count += 1
+
+        # Sync confirmed & any open draft storyboard payloads so Stage 1 and Stage 3 share one truth
+        rev_rows = m4_db.scalars(
+            select(M4StoryboardRevision).where(
+                M4StoryboardRevision.project_id == project.id,
+                M4StoryboardRevision.status.in_(["CONFIRMED", "DRAFT"]),
+            )
+        ).all()
+        for rev_row in rev_rows:
+            if not isinstance(rev_row.payload, dict) or not isinstance(rev_row.payload.get("episodes"), list):
+                continue
+            payload_copy = dict(rev_row.payload)
+            touched = False
+            new_eps: list[dict[str, Any]] = []
+            for ep in payload_copy["episodes"]:
+                ep_copy = dict(ep)
+                new_shots: list[dict[str, Any]] = []
+                for psh in ep_copy.get("shots") or []:
+                    sh_copy = dict(psh)
+                    if sh_copy.get("shot_code") == shot.shot_code:
+                        sh_copy["aspect_ratio"] = shot.aspect_ratio
+                        sh_copy["continuity_mode"] = shot.continuity_mode
+                        touched = True
+                    new_shots.append(sh_copy)
+                ep_copy["shots"] = new_shots
+                new_eps.append(ep_copy)
+            if touched:
+                payload_copy["episodes"] = new_eps
+                rev_row.payload = payload_copy
+                rev_row.summary_sha256 = canonical_digest(payload_copy)
+                rev_row.updated_at = m4_utcnow()
 
     shot.updated_at = m4_utcnow()
     m4_db.add(

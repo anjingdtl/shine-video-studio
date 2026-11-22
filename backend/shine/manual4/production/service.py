@@ -18,6 +18,7 @@ from shine.manual4.comfy.h3_adapter import (
     verified_variants_catalog,
 )
 from shine.manual4.h3.output_frame import frame_options, frame_size
+from shine.manual4.materials.service import reconcile_m4_confirmed_entities
 from shine.manual4.prompts.service import (
     _serialize_prompt,
     build_shot_reference_manifest,
@@ -150,6 +151,7 @@ def get_production_state(
     platform_db: Session | None = None,
     settings: Any | None = None,
 ) -> dict[str, Any]:
+    reconcile_m4_confirmed_entities(m4_db, project)
     confirmed = m4_db.scalar(
         select(M4StoryboardRevision)
         .where(M4StoryboardRevision.project_id == project.id, M4StoryboardRevision.status == "CONFIRMED")
@@ -307,6 +309,94 @@ def get_production_state(
     }
 
 
+def resolve_m4_continuity_source_job(
+    m4_db: Session,
+    shot: M4Shot,
+    *,
+    explicit_previous_job_id: str | None = None,
+) -> M4Job | None:
+    """Single adjudicator for the verified preceding job backing a ``last_frame`` shot.
+
+    Returns ``None`` when ``continuity_mode != 'last_frame'`` or when the shot
+    is the first shot of its episode.  Raises ``M4_CONTINUITY_SOURCE_INVALID`` or
+    ``M4_CONTINUITY_SOURCE_MISSING`` when a prior shot exists in the episode but
+    has no current matching PASSED output yet.
+    """
+    if shot.continuity_mode != "last_frame":
+        return None
+    if explicit_previous_job_id is not None:
+        explicit_prev = m4_db.get(M4Job, explicit_previous_job_id)
+        if (
+            explicit_prev is None
+            or explicit_prev.project_id != shot.project_id
+            or explicit_prev.episode_id != shot.episode_id
+            or explicit_prev.status != "PASSED"
+            or not explicit_prev.output_storage_path
+        ):
+            raise HTTPException(
+                409,
+                {
+                    "code": "M4_CONTINUITY_SOURCE_INVALID",
+                    "message": "指定的续帧源任务无效、非同一集或未通过质检。",
+                },
+            )
+        return explicit_prev
+
+    prev_shot = m4_db.scalar(
+        select(M4Shot)
+        .where(
+            M4Shot.storyboard_revision_id == shot.storyboard_revision_id,
+            M4Shot.episode_id == shot.episode_id,
+            M4Shot.shot_no < shot.shot_no,
+        )
+        .order_by(M4Shot.shot_no.desc())
+        .limit(1)
+    )
+    if prev_shot is None:
+        return None
+
+    prev_prompt = m4_db.scalar(
+        select(M4ManualPromptRevision)
+        .where(
+            M4ManualPromptRevision.shot_id == prev_shot.id,
+            M4ManualPromptRevision.status == "FROZEN",
+        )
+        .order_by(M4ManualPromptRevision.revision.desc())
+        .limit(1)
+    )
+    ok_prev_prompt, _ = validate_frozen_prompt_for_shot(m4_db, prev_shot, prev_prompt)
+    prev_manifest_sha = manifest_digest(build_shot_reference_manifest(m4_db, prev_shot))
+    candidates = m4_db.scalars(
+        select(M4Job)
+        .where(
+            M4Job.shot_id == prev_shot.id,
+            M4Job.status == "PASSED",
+            M4Job.shot_revision == prev_shot.revision,
+        )
+        .order_by(M4Job.created_at.desc())
+    ).all()
+    for cand in candidates:
+        if (
+            ok_prev_prompt
+            and prev_prompt is not None
+            and cand.prompt_sha256 == prev_prompt.prompt_sha256
+            and cand.reference_manifest_sha256 == prev_manifest_sha
+            and cand.output_storage_path
+        ):
+            return cand
+
+    raise HTTPException(
+        409,
+        {
+            "code": "M4_CONTINUITY_SOURCE_MISSING",
+            "message": (
+                f"上一镜 {prev_shot.shot_code} 尚未产出匹配当前版本的通过成片，"
+                "无法按 last_frame 续帧。"
+            ),
+        },
+    )
+
+
 def _resolve_scope_shots(
     m4_db: Session,
     project: M4Project,
@@ -439,8 +529,16 @@ def _build_snapshot_payload(
         aud_count = sum(1 for m in manifest if m["use_as"] == "audio")
         vid_count = sum(1 for m in manifest if m["use_as"] == "video")
         same_episode_prev = idx > 0 and selected_shots[idx - 1].episode_id == sh.episode_id
+        resolved_first_prev_id: str | None = None
+        if idx == 0 and sh.continuity_mode == "last_frame":
+            resolved_first_job = resolve_m4_continuity_source_job(
+                m4_db,
+                sh,
+                explicit_previous_job_id=previous_passed_job_id,
+            )
+            resolved_first_prev_id = resolved_first_job.id if resolved_first_job else None
         has_continuity_source = sh.continuity_mode == "last_frame" and (
-            same_episode_prev or (idx == 0 and previous_passed_job_id is not None)
+            same_episode_prev or (idx == 0 and resolved_first_prev_id is not None)
         )
         extra_last_frame = 1 if has_continuity_source else 0
         try:
@@ -495,10 +593,12 @@ def _build_snapshot_payload(
                 "prompt_text": latest_prompt.prompt_text,
                 "prompt_sha256": latest_prompt.prompt_sha256,
                 "prompt_excerpt": latest_prompt.prompt_text[:120],
+                "dialogue": list(sh.dialogue or []),
                 "reference_manifest": manifest,
                 "reference_manifest_sha256": latest_prompt.reference_manifest_sha256,
                 "recipe_sha256": compiled.recipe_sha256,
                 "seed": int(seed) + idx,
+                "_resolved_prev_job_id": resolved_first_prev_id if idx == 0 else None,
             }
         )
 
@@ -596,7 +696,7 @@ def preview_execution_snapshot(
         "scope_kind": scope_kind,
         "snapshot_sha256": snap_sha,
         "config": config_json,
-        "items": items,
+        "items": [{k: v for k, v in it.items() if not k.startswith("_")} for it in items],
     }
 
 
@@ -663,12 +763,13 @@ def create_production_run(
             },
         )
 
+    clean_items = [{k: v for k, v in it.items() if not k.startswith("_")} for it in items]
     snapshot = M4ExecutionSnapshot(
         project_id=project.id,
         storyboard_revision_id=confirmed.id,
         snapshot_sha256=snap_sha,
         config_json=config_json,
-        items_json=items,
+        items_json=clean_items,
         created_by=actor,
     )
     m4_db.add(snapshot)
@@ -695,7 +796,7 @@ def create_production_run(
         job_idem = f"{run.id}:s{item['shot_id']}:o{item['ordinal']}"
         if item["continuity_mode"] == "last_frame":
             if item_idx == 0:
-                eff_prev_job_id = previous_passed_job_id
+                eff_prev_job_id = previous_passed_job_id or item.get("_resolved_prev_job_id")
             elif prev_episode_id == item["episode_id"]:
                 eff_prev_job_id = prev_job_id
             else:
@@ -767,75 +868,12 @@ def create_retake_job_run(
     if shot is None or shot.project_id != project.id:
         raise HTTPException(404, {"code": "M4_SHOT_NOT_FOUND", "message": "镜头不存在。"})
 
-    prev_passed_id: str | None = None
-    if shot.continuity_mode == "last_frame":
-        if previous_passed_job_id is not None:
-            explicit_prev = m4_db.get(M4Job, previous_passed_job_id)
-            if (
-                explicit_prev is None
-                or explicit_prev.project_id != project.id
-                or explicit_prev.episode_id != shot.episode_id
-                or explicit_prev.status != "PASSED"
-                or not explicit_prev.output_storage_path
-            ):
-                raise HTTPException(
-                    409,
-                    {
-                        "code": "M4_CONTINUITY_SOURCE_INVALID",
-                        "message": "指定的续帧源任务无效、非同一集或未通过质检。",
-                    },
-                )
-            prev_passed_id = explicit_prev.id
-        else:
-            prev_shot = m4_db.scalar(
-                select(M4Shot).where(
-                    M4Shot.storyboard_revision_id == shot.storyboard_revision_id,
-                    M4Shot.episode_id == shot.episode_id,
-                    M4Shot.shot_no < shot.shot_no,
-                ).order_by(M4Shot.shot_no.desc()).limit(1)
-            )
-            if prev_shot is not None:
-                prev_prompt = m4_db.scalar(
-                    select(M4ManualPromptRevision)
-                    .where(
-                        M4ManualPromptRevision.shot_id == prev_shot.id,
-                        M4ManualPromptRevision.status == "FROZEN",
-                    )
-                    .order_by(M4ManualPromptRevision.revision.desc())
-                    .limit(1)
-                )
-                ok_prev_prompt, _ = validate_frozen_prompt_for_shot(m4_db, prev_shot, prev_prompt)
-                prev_manifest_sha = manifest_digest(build_shot_reference_manifest(m4_db, prev_shot))
-                candidates = m4_db.scalars(
-                    select(M4Job)
-                    .where(
-                        M4Job.shot_id == prev_shot.id,
-                        M4Job.status == "PASSED",
-                        M4Job.shot_revision == prev_shot.revision,
-                    )
-                    .order_by(M4Job.created_at.desc())
-                ).all()
-                for cand in candidates:
-                    if (
-                        ok_prev_prompt
-                        and prev_prompt is not None
-                        and cand.prompt_sha256 == prev_prompt.prompt_sha256
-                        and cand.reference_manifest_sha256 == prev_manifest_sha
-                        and cand.output_storage_path
-                    ):
-                        prev_passed_id = cand.id
-                        break
-                if prev_passed_id is None:
-                    raise HTTPException(
-                        409,
-                        {
-                            "code": "M4_CONTINUITY_SOURCE_MISSING",
-                            "message": (
-                                f"上一镜 {prev_shot.shot_code} 尚未产出匹配当前版本的通过成片，"
-                                "无法按 last_frame 续帧重拍。"
-                            ),
-                        },
-                    )
+    prev_job = resolve_m4_continuity_source_job(
+        m4_db,
+        shot,
+        explicit_previous_job_id=previous_passed_job_id,
+    )
+    prev_passed_id = prev_job.id if prev_job is not None else None
 
     unique_key = f"retake:{project.id}:{shot_id}:{m4_utcnow().isoformat()}"
     return create_production_run(

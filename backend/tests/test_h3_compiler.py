@@ -851,3 +851,38 @@ def test_silent_shot_sanitizes_dialogue_ambience_and_anchors_project_language():
     assert "reference appearance" in silent.sections["subject_definitions"]
     for token in (*_PRIMING_VOCABULARY, "narration"):
         assert token not in silent.prompt.lower(), token
+
+
+def test_compiler_140_sanitizes_dialogue_quotes_and_silent_style_priming():
+    english_style = StyleBible(
+        photography_language="Eye-level medium shot.",
+        shot_blocking="Medium two-shot follows the 180-degree dialogue axis.",
+        color_palette="Neutral desert amber.",
+        lighting_tone="Hard noon sunlight.",
+        lens_texture="Clean spherical image.",
+        editing_rhythm="Natural dialogue breaths between cuts.",
+        sound_performance="Natural Mandarin Chinese speech.",
+    )
+    silent = H3PromptCompiler().compile(
+        spec=spec(sound={"environment": "desert wind beneath the original dialogue"}),
+        style=english_style,
+        manifest=[item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="林风", role="character")],
+        project_language="Chinese",
+    )
+    desc = silent.sections["detailed_description"].lower()
+    assert "dialogue" not in desc.replace("performed without dialogue", "")
+    assert "180-degree interaction axis" in desc
+    assert "natural silent reaction beats" in desc
+    assert "beneath the original" not in desc
+
+    spoken = H3PromptCompiler().compile(
+        spec=spec(
+            characters=["林风"],
+            dialogue=[{"speaker_id": "林风", "text": "“这就是……古地图上的遗迹，”", "start_s": 0.5, "end_s": 3.0}],
+        ),
+        style=english_style,
+        manifest=[item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="林风", role="character")],
+        project_language="Chinese",
+    )
+    assert "<d>[Chinese] 这就是，古地图上的遗迹</d>" in spoken.sections["detailed_description"]
+

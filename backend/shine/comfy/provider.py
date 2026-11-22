@@ -32,6 +32,11 @@ from shine.comfy.workflow import (
     validate_against_object_info,
     validate_graph,
 )
+from shine.foundation.h3_audio import (
+    enforce_h3_render_audio_contract,
+    extract_comfy_prompt_texts,
+    has_authorized_h3_speech,
+)
 from shine.media.artifacts import content_type_for_name, safe_asset_path
 from shine.models import Asset
 from shine.schemas import RenderProvider, RenderRequest
@@ -364,9 +369,11 @@ def unbound_transfer_family_warning(family: str) -> str:
 class ComfyUIRenderService:
     """Maps an immutable Shine RenderRequest onto a registered API workflow."""
 
-    def __init__(self, client, asset_root: Path):
+    def __init__(self, client, asset_root: Path, *, ffmpeg_path: str = "ffmpeg"):
         self.client = client
         self.asset_root = asset_root
+        self.ffmpeg_path = ffmpeg_path
+        self._speech_allowed_by_prompt_id: dict[str, bool] = {}
 
     def _profile_graph(self, profile) -> dict[str, Any]:
         graph = profile.graph or {}
@@ -611,7 +618,7 @@ class ComfyUIRenderService:
         request: RenderRequest,
     ) -> ComfySubmission:
         """Queue a prepared prompt. The caller must persist the intent first."""
-        return submit_prepared_prompt(
+        submission = submit_prepared_prompt(
             self.client,
             prepared,
             idempotency_key=request.idempotency_key,
@@ -623,6 +630,15 @@ class ComfyUIRenderService:
                 }
             },
         )
+        speech_allowed = has_authorized_h3_speech(
+            request.compiled_prompt or "",
+            dialogue=request.shot_spec.dialogue,
+            references=[{"use_as": item.use_as.value} for item in request.reference_manifest],
+        )
+        if len(self._speech_allowed_by_prompt_id) >= 256:
+            self._speech_allowed_by_prompt_id.clear()
+        self._speech_allowed_by_prompt_id[submission.prompt_id] = speech_allowed
+        return submission
 
     def submit(
         self,
@@ -666,6 +682,18 @@ class ComfyUIRenderService:
                 subfolder = output.get("subfolder") or ""
                 file_type = output.get("type") or "output"
                 content = self.client.view(filename, subfolder=subfolder, file_type=file_type)
+                speech_allowed = self._speech_allowed_by_prompt_id.get(prompt_id)
+                if speech_allowed is None:
+                    extracted_prompt = extract_comfy_prompt_texts(record.get("prompt"))
+                    if extracted_prompt:
+                        speech_allowed = has_authorized_h3_speech(extracted_prompt)
+                if speech_allowed is False:
+                    content = enforce_h3_render_audio_contract(
+                        content,
+                        prompt_text="",
+                        dialogue=(),
+                        ffmpeg_path=self.ffmpeg_path,
+                    )
                 return ComfyResult(
                     status="completed",
                     output_filename=filename,

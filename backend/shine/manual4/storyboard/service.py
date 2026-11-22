@@ -31,9 +31,11 @@ from shine.manual4.storyboard.parser import (
     M4ParseError,
     canonical_entity_key,
     chunk_storyboard_text,
+    coalesce_broken_bracket_assets,
     extract_storyboard_from_text,
     normalize_requested_asset,
     parse_m4_document,
+    unify_storyboard_entity_variants,
 )
 from shine.platform_projects import chat_completions_url
 
@@ -81,7 +83,7 @@ def _normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:
             dur = float(dur_raw) if dur_raw not in (None, "") else None
             assets = []
             seen_assets: set[tuple[str, str]] = set()
-            for item in sh.get("requested_assets") or []:
+            for item in coalesce_broken_bracket_assets(list(sh.get("requested_assets") or [])):
                 norm = normalize_requested_asset(
                     str(item.get("family") or ""),
                     str(item.get("name") or ""),
@@ -117,11 +119,20 @@ def _normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:
                 "shots": shots,
             }
         )
-    return {
+    unified_descriptions = {
+        k: v for k, v in (payload.get("unified_entity_descriptions") or {}).items() if v
+    }
+    for (fam, key), note in unify_storyboard_entity_variants(episodes).items():
+        if note:
+            unified_descriptions.setdefault(f"{fam}::{key}", note)
+    result_payload: dict[str, Any] = {
         "episodes": episodes,
         "ambiguities": list(payload.get("ambiguities") or []),
         "extractor": str(payload.get("extractor") or "manual"),
     }
+    if unified_descriptions:
+        result_payload["unified_entity_descriptions"] = unified_descriptions
+    return result_payload
 
 
 def _revision_public(row: M4StoryboardRevision | None, project: M4Project) -> dict[str, Any]:
@@ -850,6 +861,7 @@ def confirm_storyboard_plan(
                 if sh_row.id not in entry["shot_ids"]:
                     entry["shot_ids"].append(sh_row.id)
 
+    unified_desc_map = normalized.get("unified_entity_descriptions") or {}
     for (family, ckey), req in merged_reqs.items():
         prior_req = prior_reqs_by_key.get((family, ckey))
         bound_id = None
@@ -859,6 +871,8 @@ def confirm_storyboard_plan(
             if av is not None and av.status == "promoted":
                 bound_id = av.id
                 req_status = "bound"
+        inferred_desc = str(unified_desc_map.get(f"{family}::{ckey}") or "").strip()
+        desc = (prior_req.description if prior_req and prior_req.description else inferred_desc)
         db.add(
             M4MaterialRequirement(
                 project_id=project.id,
@@ -867,7 +881,7 @@ def confirm_storyboard_plan(
                 entity_name=req["entity_name"],
                 variant_name=req["variant_name"],
                 canonical_key=req["canonical_key"],
-                description=prior_req.description if prior_req else "",
+                description=desc,
                 shot_ids=req["shot_ids"],
                 status=req_status,
                 bound_asset_version_id=bound_id,

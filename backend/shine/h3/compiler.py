@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shine.asset_identity import character_reference_matches
+from shine.foundation.h3_audio import sanitize_h3_dialogue_text, sanitize_non_vocal_style_text
 from shine.h3.film_type import film_type_sentence
 from shine.h3.narrator import is_narrator_speaker, narrator_sentence
 from shine.h3.spoken_language import (
@@ -132,7 +133,12 @@ def _language_tag(text: str, project_language: str) -> str:
 
 
 def _style_sentences(
-    style: StyleBible, style_version_id: str, include_sound: bool = True, *, legacy_sound: bool = False
+    style: StyleBible,
+    style_version_id: str,
+    include_sound: bool = True,
+    *,
+    legacy_sound: bool = False,
+    legacy_semantics: bool = False,
 ) -> str:
     if include_sound:
         sound_clause = f"Performance and sound: {style.sound_performance}."
@@ -143,14 +149,24 @@ def _style_sentences(
             "Performance and sound: this shot is performed without dialogue; "
             "its soundtrack is entirely non-vocal."
         )
+    blocking = (
+        style.shot_blocking
+        if (include_sound or legacy_semantics)
+        else (sanitize_non_vocal_style_text(style.shot_blocking) or style.shot_blocking)
+    )
+    rhythm = (
+        style.editing_rhythm
+        if (include_sound or legacy_semantics)
+        else (sanitize_non_vocal_style_text(style.editing_rhythm) or style.editing_rhythm)
+    )
     film_clause = film_type_sentence(style.film_type)
     film_prefix = f"{film_clause} " if film_clause else ""
     return (
         "Visual style constraints from the frozen Style Bible "
         f"(version {style_version_id}). {film_prefix}Photography language: {style.photography_language}. "
-        f"Blocking: {style.shot_blocking}. Color palette: {style.color_palette}. "
+        f"Blocking: {blocking}. Color palette: {style.color_palette}. "
         f"Lighting and tone: {style.lighting_tone}. Lens and texture: {style.lens_texture}. "
-        f"Editing rhythm: {style.editing_rhythm}. {sound_clause}"
+        f"Editing rhythm: {rhythm}. {sound_clause}"
     )
 
 
@@ -401,9 +417,10 @@ def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     else:
         subject = "The speaker"
     speaker = ", ".join(ctx.speaker_labels[name] for name in speakers)
+    spoken_line = line.text if ctx.legacy_semantics else (sanitize_h3_dialogue_text(line.text) or line.text)
     return (
         f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}) says: "
-        f"<d>[{language}] {line.text}</d>"
+        f"<d>[{language}] {spoken_line}</d>"
     )
 
 
@@ -454,6 +471,7 @@ def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(
         _prompt_style(ctx.spec, ctx.style, legacy_style=ctx.legacy_style), ctx.spec.style_version_id,
         include_sound=bool(ctx.spec.dialogue), legacy_sound=ctx.legacy_sound,
+        legacy_semantics=ctx.legacy_semantics,
     )]
     cast = _cast_order(ctx)
     if cast:
@@ -480,6 +498,8 @@ def _shot_text(ctx: _Context) -> str:
     if camera:
         parts.append(camera)
     environment = ctx.spec.sound.get("environment")
+    if environment and not ctx.spec.dialogue and not ctx.legacy_semantics:
+        environment = non_vocal_ambience_text(environment)
     if environment:
         parts.append(f"The scene is set in {environment}.")
     facts = ctx.spec.locked_story_facts

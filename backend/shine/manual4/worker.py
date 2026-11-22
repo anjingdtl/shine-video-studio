@@ -37,7 +37,9 @@ from shine.foundation.h3 import (
     H3ReferenceInput,
     SecondPassSpec,
     compile_h3_ref2va_graph,
+    enforce_h3_render_audio_contract,
     evaluate_h3_technical_qc,
+    extract_comfy_prompt_texts,
     extract_last_frame_png,
     extract_video_output,
     reconcile_submission,
@@ -191,7 +193,9 @@ def reconcile_stalled_m4_runs(
     recovered = 0
     cutoff = m4_utcnow() - timedelta(seconds=stale_seconds)
     now = m4_utcnow()
-    pending_reconcile: list[tuple[str, str, str, str, str | None, str | None, str, int, float, bool]] = []
+    pending_reconcile: list[
+        tuple[str, str, str, str, str | None, str | None, str, int, float, bool, str, list[dict[str, Any]]]
+    ] = []
 
     with m4_factory.begin() as db:
         active_runs = db.scalars(
@@ -246,6 +250,8 @@ def reconcile_stalled_m4_runs(
                                 latest_att.attempt_no,
                                 float(job.target_seconds),
                                 has_audio,
+                                str(item.get("prompt_text") or ""),
+                                list(item.get("dialogue") or []),
                             )
                         )
                     else:
@@ -281,7 +287,20 @@ def reconcile_stalled_m4_runs(
 
     # Reconcile in-flight submissions outside DB transaction against ComfyUI /history & /queue
     touched_runs: set[str] = set()
-    for run_id, proj_id, job_id, att_id, pid, gsha, job_key, attempt_no, dur_s, has_audio in pending_reconcile:
+    for (
+        run_id,
+        proj_id,
+        job_id,
+        att_id,
+        pid,
+        gsha,
+        job_key,
+        attempt_no,
+        dur_s,
+        has_audio,
+        snap_prompt_text,
+        snap_dialogue,
+    ) in pending_reconcile:
         touched_runs.add(run_id)
         matched_id, state, rec = reconcile_submission(
             comfy_client,
@@ -295,6 +314,13 @@ def reconcile_stalled_m4_runs(
                 fname, sub, ftype = extract_video_output(rec)
                 out_name = safe_m4_filename(fname)
                 out_bytes = comfy_client.view(fname, subfolder=sub, file_type=ftype)
+                eff_prompt_text = snap_prompt_text or extract_comfy_prompt_texts(rec.get("prompt"))
+                out_bytes = enforce_h3_render_audio_contract(
+                    out_bytes,
+                    prompt_text=eff_prompt_text,
+                    dialogue=snap_dialogue,
+                    ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
+                )
                 rel_out, out_sha, abs_out = store_m4_bytes(m4_root, proj_id, "renders", out_name, out_bytes)
                 qc = evaluate_h3_technical_qc(
                     abs_out,
@@ -570,6 +596,7 @@ def _execute_single_job(
     # 2. Disk I/O, SHA checks & FFmpeg tail frame extraction OUTSIDE any SQLite transaction
     h3_refs: list[H3ReferenceInput] = []
     ref_files_to_upload: list[tuple[str, str, bytes, str]] = []
+    continuity_ref_item: dict[str, Any] | None = None
     try:
         for idx, item in enumerate(img_items):
             p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
@@ -634,9 +661,20 @@ def _execute_single_job(
                     role_label="last_frame_continuity",
                 )
             )
+            continuity_slot = len(img_items) + 1
             ref_files_to_upload.append(
-                (f"reference_image_{len(img_items) + 1}", frame_png.name, raw_frame, "image/png")
+                (f"reference_image_{continuity_slot}", frame_png.name, raw_frame, "image/png")
             )
+            continuity_ref_item = {
+                "use_as": "image",
+                "family": "scene",
+                "role_label": "last_frame_continuity",
+                "entity_name": "last_frame_continuity",
+                "h3_label": f"<Picture {continuity_slot}>",
+                "image_slot": continuity_slot,
+                "frame_role": "first_frame",
+                "sha256": frame_sha,
+            }
 
         for idx, item in enumerate(aud_items):
             p = _resolve_manifest_ref_path(m4_root, item, platform_factory=platform_factory, settings=settings)
@@ -818,6 +856,10 @@ def _execute_single_job(
                 idempotency_key=idempotency_key,
                 recipe_sha256=snap_item.get("recipe_sha256"),
                 extra_data={"shine_line": "manual4", "job_id": job_id, "run_id": run_info["id"]},
+                dialogue=list(snap_item.get("dialogue") or []),
+                reference_manifest=[*ref_items, *([continuity_ref_item] if continuity_ref_item else [])],
+                normalize_audio_prompt=True,
+                ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
             )
             render_timeout_s = float(
                 max(60, int(getattr(settings, "comfy_render_timeout_seconds", 3600) or 3600))

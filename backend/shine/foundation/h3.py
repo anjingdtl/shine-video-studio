@@ -45,6 +45,14 @@ from shine.comfy.provider import (
     submit_prepared_prompt,
 )
 from shine.comfy.workflow import apply_parameters, graph_hash
+from shine.foundation.h3_audio import (
+    canonical_h3_language,
+    enforce_h3_render_audio_contract,
+    ensure_h3_execution_prompt_contract,
+    extract_comfy_prompt_texts,
+    has_authorized_h3_speech,
+    sanitize_h3_dialogue_text,
+)
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
 
 MAX_IMAGE_SLOTS = IMAGE_REFERENCE_LIMIT
@@ -92,6 +100,11 @@ class H3ExecutionRequest:
     extra_data: dict[str, Any] | None = None
     idempotency_key: str = ""
     recipe_sha256: str | None = None
+    dialogue: list[dict[str, Any]] = field(default_factory=list)
+    reference_manifest: list[dict[str, Any]] = field(default_factory=list)
+    normalize_audio_prompt: bool = False
+    project_language: str = "Chinese"
+    ffmpeg_path: str = "ffmpeg"
 
 
 @dataclass(frozen=True)
@@ -340,10 +353,27 @@ class ComfyH3Executor:
                 vid_idx += 1
                 uploaded_names[f"reference_video_{vid_idx}"] = remote_name
 
+        effective_prompt = request.prompt_text
+        if request.normalize_audio_prompt:
+            ref_dicts = request.reference_manifest or [
+                {
+                    "use_as": "subject" if r.family == "image" else r.family,
+                    "role_label": r.role_label,
+                    "entity_name": r.role_label,
+                }
+                for r in request.references
+            ]
+            effective_prompt = ensure_h3_execution_prompt_contract(
+                request.prompt_text,
+                references=ref_dicts,
+                dialogue=request.dialogue,
+                project_language=request.project_language,
+            )
+
         try:
             prepared = prepare_workflow_submission(
                 compiled,
-                prompt=request.prompt_text,
+                prompt=effective_prompt,
                 duration_s=float(request.duration_s),
                 seed=int(request.seed),
                 width=int(request.width),
@@ -425,6 +455,13 @@ class ComfyH3Executor:
 
         filename, subfolder, file_type = extract_video_output(history_rec)
         out_bytes = client.view(filename, subfolder=subfolder, file_type=file_type)
+        out_bytes = enforce_h3_render_audio_contract(
+            out_bytes,
+            prompt_text=effective_prompt,
+            dialogue=request.dialogue,
+            references=request.reference_manifest or request.references,
+            ffmpeg_path=request.ffmpeg_path,
+        )
         out_sha = hashlib.sha256(out_bytes).hexdigest()
         return H3ExecutionReceipt(
             status="completed",
@@ -457,11 +494,17 @@ __all__ = [
     "MAX_VIDEO_SLOTS",
     "SecondPassSpec",
     "apply_parameters",
+    "canonical_h3_language",
     "compile_h3_ref2va_graph",
+    "enforce_h3_render_audio_contract",
+    "ensure_h3_execution_prompt_contract",
     "evaluate_h3_technical_qc",
+    "extract_comfy_prompt_texts",
     "extract_last_frame_png",
     "extract_video_output",
     "graph_hash",
+    "has_authorized_h3_speech",
     "reconcile_submission",
+    "sanitize_h3_dialogue_text",
     "verified_variants_catalog",
 ]

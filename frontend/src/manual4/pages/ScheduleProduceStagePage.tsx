@@ -320,6 +320,33 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
     }
   };
 
+  const handleBatchContinuity = async (
+    shotsToUpdate: Array<{ id: string; continuity_mode: string }>,
+    mode: 'last_frame' | 'cut',
+  ) => {
+    const targets = shotsToUpdate.filter((s) => s.continuity_mode !== mode);
+    if (targets.length === 0) return;
+    setBusyKey(`batch-continuity:${mode}`);
+    try {
+      let latestState: M4ProductionState | null = null;
+      for (const sh of targets) {
+        const res = await updateM4ShotOptions(projectId, sh.id, { continuity_mode: mode });
+        latestState = res.state;
+      }
+      if (latestState) {
+        await applyState(latestState);
+      }
+      onMessage?.(
+        `已将该集 ${targets.length} 镜统一设为「${mode === 'last_frame' ? '尾帧延续' : 'CUT 硬切'}」。`,
+        'success',
+      );
+    } catch (err) {
+      onMessage?.(`批量更新衔接配置失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
+
   const handlePreviewSnapshot = async () => {
     setBusyKey('preview');
     try {
@@ -648,6 +675,30 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
               <strong>
                 {ep.episode_code}：{ep.title || '未命名分集'}（{ep.shots.length} 镜 · {ep.planned_total_seconds}s）
               </strong>
+              <span className="m4-toolbar">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busyKey !== null || ep.shots.every((s) => s.continuity_mode === 'last_frame')}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void handleBatchContinuity(ep.shots, 'last_frame');
+                  }}
+                >
+                  整集尾帧延续
+                </button>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  disabled={busyKey !== null || ep.shots.every((s) => s.continuity_mode === 'cut')}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    void handleBatchContinuity(ep.shots, 'cut');
+                  }}
+                >
+                  整集 CUT 硬切
+                </button>
+              </span>
             </summary>
 
             {ep.shots.map((sh) => {
@@ -687,6 +738,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                       <select
                         className="m4-input"
                         style={{ width: 110 }}
+                        disabled={busyKey !== null}
                         value={sh.aspect_ratio}
                         onChange={(e) => void handleOptionChange(sh.id, { aspect_ratio: e.target.value })}
                       >
@@ -699,6 +751,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                       <select
                         className="m4-input"
                         style={{ width: 130 }}
+                        disabled={busyKey !== null}
                         value={sh.continuity_mode}
                         onChange={(e) => void handleOptionChange(sh.id, { continuity_mode: e.target.value })}
                       >

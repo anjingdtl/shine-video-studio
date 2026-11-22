@@ -107,7 +107,10 @@ def m4_production_state(
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
     settings = getattr(request.app.state, "settings", None)
-    return get_production_state(m4_db, project, platform_db=platform_db, settings=settings)
+    state = get_production_state(m4_db, project, platform_db=platform_db, settings=settings)
+    if m4_db.new or m4_db.dirty or m4_db.deleted:
+        m4_db.commit()
+    return state
 
 
 @production_router.put("/projects/{project_id}/shots/{shot_id}/render-options")

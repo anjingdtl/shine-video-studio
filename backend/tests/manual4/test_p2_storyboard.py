@@ -262,3 +262,143 @@ def test_p2_parenthetical_entity_splitting_and_role_tag_dedup(tmp_path):
             ("scene", "雪山营地", "暴风雪，夜"),
         }
         assert all("）" not in r["entity_name"] and "（" not in r["entity_name"] for r in mat_state["requirements"])
+
+
+def test_p2_intro_variant_curly_quotes_and_broken_bracket_reconciliation(tmp_path):
+    from shine.manual4.materials.service import reconcile_m4_confirmed_entities
+    from shine.manual4.storage.models import (
+        M4AssetVersion,
+        M4MaterialRequirement,
+        M4Project,
+        M4Shot,
+        M4ShotAssetBinding,
+    )
+
+    app, _ = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post(
+            "/api/v1/platform/manual4-projects",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"title": "首镜变体收敛与弯引号对白测试", "max_shot_seconds": 15.0},
+        ).json()["id"]
+
+        raw_text = (
+            "第1集：大漠遗迹\n"
+            "第1镜（8s）：林风与苏瑶在沙丘跋涉。\n"
+            "人物：林风（男主，探险装），苏瑶（女主，冲锋衣）\n"
+            "场景：敦煌戈壁沙漠\n"
+            "第2镜（8s）：林风查看古地图。\n"
+            "人物：林风，苏瑶\n"
+            "场景：敦煌戈壁沙漠\n"
+            "第3镜（8s）：林风低声道：“这就是古地图上的遗迹……”\n"
+            "人物：林风，苏瑶\n"
+            "场景：敦煌戈壁沙漠\n"
+        )
+        imp = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/import",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"text": raw_text, "filename": "script.txt"},
+        )
+        assert imp.status_code == 201
+        shots = imp.json()["draft"]["payload"]["episodes"][0]["shots"]
+        # Intro-only outfit variants unify with bare names across Shot 1..3
+        assert shots[0]["requested_assets"] == [
+            {"family": "character", "name": "林风", "variant": ""},
+            {"family": "character", "name": "苏瑶", "variant": ""},
+            {"family": "scene", "name": "敦煌戈壁沙漠", "variant": ""},
+        ]
+        assert shots[1]["requested_assets"] == shots[0]["requested_assets"]
+        # Chinese curly quotes in dialogue are parsed cleanly
+        assert shots[2]["dialogue"] == [{"speaker": "林风", "text": "这就是古地图上的遗迹……"}]
+
+        conf = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/confirm",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"expected_revision": imp.json()["draft"]["revision"]},
+        )
+        assert conf.status_code == 200
+        mat_state = client.get(f"/api/v1/manual4/projects/{pid}/materials/requirements").json()
+        reqs_by_name = {(r["family"], r["entity_name"], r["variant_name"]): r for r in mat_state["requirements"]}
+        assert set(reqs_by_name) == {
+            ("character", "林风", ""),
+            ("character", "苏瑶", ""),
+            ("scene", "敦煌戈壁沙漠", ""),
+        }
+        assert "探险装" in reqs_by_name[("character", "林风", "")]["description"]
+        assert "冲锋衣" in reqs_by_name[("character", "苏瑶", "")]["description"]
+        assert len(reqs_by_name[("character", "林风", "")]["shot_ids"]) == 3
+
+        # Simulate legacy broken DB state on confirmed Shot 1 (`林风（男主`, `探险装）`) while canonical
+        # `林风` & `苏瑶` already have promoted assets, then verify idempotent self-healing.
+        with app.state.m4_session_factory.begin() as mdb:
+            proj = mdb.get(M4Project, pid)
+            assert proj is not None
+            sh1 = mdb.scalars(
+                mdb.query(M4Shot).statement.where(M4Shot.project_id == pid, M4Shot.shot_code == "ep01-s01")
+            ).first()
+            assert sh1 is not None
+            lin_req = mdb.scalars(
+                mdb.query(M4MaterialRequirement).statement.where(
+                    M4MaterialRequirement.project_id == pid,
+                    M4MaterialRequirement.entity_name == "林风",
+                )
+            ).first()
+            su_req = mdb.scalars(
+                mdb.query(M4MaterialRequirement).statement.where(
+                    M4MaterialRequirement.project_id == pid,
+                    M4MaterialRequirement.entity_name == "苏瑶",
+                )
+            ).first()
+            assert lin_req is not None and su_req is not None
+
+            lin_ast = M4AssetVersion(
+                project_id=pid, requirement_id=lin_req.id, family="character", entity_name="林风",
+                variant_name="", source_kind="upload", filename="lin.png", content_type="image/png",
+                sha256="a" * 64, byte_size=123, storage_path="lin.png", status="promoted",
+            )
+            su_ast = M4AssetVersion(
+                project_id=pid, requirement_id=su_req.id, family="character", entity_name="苏瑶",
+                variant_name="", source_kind="upload", filename="su.png", content_type="image/png",
+                sha256="b" * 64, byte_size=123, storage_path="su.png", status="promoted",
+            )
+            broken_ast = M4AssetVersion(
+                project_id=pid, requirement_id=lin_req.id, family="character", entity_name="林风（男主",
+                variant_name="", source_kind="upload", filename="broken.png", content_type="image/png",
+                sha256="c" * 64, byte_size=123, storage_path="broken.png", status="promoted",
+            )
+            mdb.add_all([lin_ast, su_ast, broken_ast])
+            mdb.flush()
+            lin_req.bound_asset_version_id = lin_ast.id
+            lin_req.status = "bound"
+            su_req.bound_asset_version_id = su_ast.id
+            su_req.status = "bound"
+
+            orphan_req = M4MaterialRequirement(
+                project_id=pid, storyboard_revision_id=lin_req.storyboard_revision_id,
+                family="character", entity_name="探险装）", variant_name="", canonical_key="探险装）",
+                shot_ids=[sh1.id], status="missing",
+            )
+            mdb.add(orphan_req)
+            sh1.requested_assets = [
+                {"family": "character", "name": "林风（男主", "variant": ""},
+                {"family": "character", "name": "探险装）", "variant": ""},
+                {"family": "character", "name": "苏瑶（女主", "variant": ""},
+                {"family": "character", "name": "冲锋衣）", "variant": ""},
+                {"family": "scene", "name": "敦煌戈壁沙漠", "variant": ""},
+            ]
+            mdb.add(
+                M4ShotAssetBinding(
+                    project_id=pid, shot_id=sh1.id, asset_version_id=broken_ast.id,
+                    use_as="image", role_label="林风（男主", ordinal=0,
+                )
+            )
+            mdb.flush()
+            assert reconcile_m4_confirmed_entities(mdb, proj) is True
+
+        healed = client.get(f"/api/v1/manual4/projects/{pid}/production/state").json()
+        s1_manifest = healed["episodes"][0]["shots"][0]["reference_manifest"]
+        assert [(m["h3_label"], m["role_label"]) for m in s1_manifest] == [
+            ("<Subject 1>", "林风"),
+            ("<Subject 2>", "苏瑶"),
+        ]
+

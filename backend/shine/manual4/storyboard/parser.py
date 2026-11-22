@@ -219,7 +219,35 @@ _CAST_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:人物|角色|出场人物)(
 _SCENE_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:场景|地点)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
 _PROP_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:道具|物品)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
 _DIALOGUE_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:对白|台词)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
-_QUOTE_LINE_RE = re.compile(r'^([^\s:：]{1,24})\s*[:：]\s*[「『"](.+?)[」』"]\s*$')
+_QUOTE_LINE_RE = re.compile(r'^([^\s:：]{1,24})\s*[:：]\s*[「『"\u201c\u2018](.+?)[」』"\u201d\u2019]\s*$')
+_INLINE_SPEAKER_QUOTE_RE = re.compile(
+    r'([^\s，。；！？、:："“”「」『』]{1,12}?)'
+    r'(?:低声道|低声说|轻声道|轻声说|冷声道|冷声说|沉声道|开口道|说道|喊道|问道|答道|笑道|叹道|怒道|叫道|回应|回答|开口|说|道|喊|问)\s*[:：]?\s*'
+    r'[「『"\u201c](.+?)[」』"\u201d]'
+)
+_BARE_QUOTES_RE = re.compile(r'^[「『"\u201c\u2018]+(.+?)[」』"\u201d\u2019]+$')
+_SPEECH_VERB_SUFFIX_RE = re.compile(
+    r"(?:低声|轻声|冷声|沉声|大声|小声|急声|开口)?(?:说道|喊道|问道|答道|笑道|叹道|怒道|叫道|回应|回答|道|说|喊|问)$"
+)
+
+
+def _extract_quote_dialogue(raw: str) -> list[dict[str, str]]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    hits = [
+        {"speaker": hit.group(1).strip(), "text": hit.group(2).strip()}
+        for hit in _INLINE_SPEAKER_QUOTE_RE.finditer(text)
+        if hit.group(2).strip()
+    ]
+    if hits:
+        return hits
+    qm = _QUOTE_LINE_RE.match(text)
+    if qm:
+        raw_sp = qm.group(1).strip()
+        clean_sp = _SPEECH_VERB_SUFFIX_RE.sub("", raw_sp).strip() or raw_sp
+        return [{"speaker": clean_sp, "text": qm.group(2).strip()}]
+    return []
 _VARIANT_RE = re.compile(r"^(.+?)\s*[（(\[【]([^）)\]】]+)[）)\]】]$")
 _FAMILY_PREFIX_RE = re.compile(
     r"^(?:\[(?:人物|场景|道具)\]\s*|(?:人物|场景|道具|character|scene|prop)\s*[:：]\s*)",
@@ -235,15 +263,149 @@ _CHARACTER_ROLE_TAGS = {
     "配角",
     "男配",
     "女配",
+    "男一",
+    "女一",
+    "男二",
+    "女二",
+    "主角一",
+    "主角二",
     "反派",
     "群演",
     "龙套",
     "路人",
     "lead",
+    "hero",
+    "heroine",
+    "male lead",
+    "female lead",
     "protagonist",
 }
 _BRACKET_PAIRS = {"(": ")", "（": "）", "[": "]", "【": "】"}
 _CLOSE_BRACKETS = set(_BRACKET_PAIRS.values())
+
+
+def _bracket_balance(text: str) -> int:
+    """Positive if there are unclosed opening brackets, negative if stray closing brackets."""
+    depth = 0
+    for ch in text or "":
+        if ch in _BRACKET_PAIRS:
+            depth += 1
+        elif ch in _CLOSE_BRACKETS:
+            depth -= 1
+    return depth
+
+
+def coalesce_broken_bracket_assets(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge adjacent same-family asset items split across an unclosed bracket pair.
+
+    For example ``[{"name": "林风（男主"}, {"name": "探险装）"}]`` ->
+    ``[{"name": "林风（男主，探险装）"}]``.
+    """
+    coalesced: list[dict[str, Any]] = []
+    idx = 0
+    n = len(items)
+    while idx < n:
+        cur = dict(items[idx] or {})
+        fam = str(cur.get("family") or "").strip().lower()
+        raw_name = str(cur.get("name") or "").strip()
+        raw_var = str(cur.get("variant") or "").strip()
+        combined = f"{raw_name}（{raw_var}）" if (raw_name and raw_var) else raw_name
+        bal = _bracket_balance(combined)
+        j = idx + 1
+        while bal > 0 and j < n:
+            nxt = dict(items[j] or {})
+            nxt_fam = str(nxt.get("family") or "").strip().lower()
+            if nxt_fam != fam:
+                break
+            nxt_name = str(nxt.get("name") or "").strip()
+            nxt_var = str(nxt.get("variant") or "").strip()
+            nxt_text = f"{nxt_name}（{nxt_var}）" if (nxt_name and nxt_var) else nxt_name
+            if not nxt_text:
+                j += 1
+                continue
+            combined = f"{combined}，{nxt_text}"
+            bal += _bracket_balance(nxt_text)
+            j += 1
+            if bal <= 0:
+                break
+        if j > idx + 1 and bal <= 0:
+            coalesced.append({"family": fam, "name": combined, "variant": ""})
+            idx = j
+        else:
+            coalesced.append(cur)
+            idx += 1
+    return coalesced
+
+
+def unify_storyboard_entity_variants(episodes: list[dict[str, Any]]) -> dict[tuple[str, str], str]:
+    """Unify single-variant introductory notes with bare mentions across shots.
+
+    Screenplays routinely introduce ``林风（男主，探险装）`` in Shot 1 and write
+    ``林风`` in Shots 2..N. When an entity `(family, canonical_base)` appears as
+    both a bare mention (`variant == ""`) and AT MOST ONE distinct non-empty
+    variant across the whole storyboard, that variant is an introductory
+    costume/appearance note for the same single entity — not a second person.
+    Returns ``{(family, canonical_key): note}`` so downstream material
+    generation retains the outfit note in ``description``.
+    """
+    bare_seen: set[tuple[str, str]] = set()
+    variants_by_base: dict[tuple[str, str], list[str]] = {}
+
+    for ep in episodes or []:
+        for sh in ep.get("shots") or []:
+            coalesced = coalesce_broken_bracket_assets(list(sh.get("requested_assets") or []))
+            normed_list: list[dict[str, str]] = []
+            seen_in_shot: set[tuple[str, str]] = set()
+            for item in coalesced:
+                norm = normalize_requested_asset(
+                    str(item.get("family") or ""),
+                    str(item.get("name") or ""),
+                    str(item.get("variant") or ""),
+                )
+                if norm is None:
+                    continue
+                skey = (norm["family"], canonical_entity_key(norm["name"], norm["variant"]))
+                if skey in seen_in_shot:
+                    continue
+                seen_in_shot.add(skey)
+                normed_list.append(norm)
+                bkey = (norm["family"], canonical_entity_key(norm["name"], ""))
+                if not norm["variant"]:
+                    bare_seen.add(bkey)
+                else:
+                    bucket = variants_by_base.setdefault(bkey, [])
+                    vkey = canonical_entity_key(norm["variant"], "")
+                    if not any(canonical_entity_key(v, "") == vkey for v in bucket):
+                        bucket.append(norm["variant"])
+            sh["requested_assets"] = normed_list
+
+    unified_descriptions: dict[tuple[str, str], str] = {}
+    to_unify: set[tuple[str, str]] = set()
+    for bkey, vars_list in variants_by_base.items():
+        if bkey in bare_seen and len(vars_list) == 1:
+            to_unify.add(bkey)
+            unified_descriptions[bkey] = vars_list[0]
+
+    if to_unify:
+        for ep in episodes or []:
+            for sh in ep.get("shots") or []:
+                rebuilt: list[dict[str, str]] = []
+                seen: set[tuple[str, str]] = set()
+                for asset in sh.get("requested_assets") or []:
+                    bkey = (asset["family"], canonical_entity_key(asset["name"], ""))
+                    eff = (
+                        {"family": asset["family"], "name": asset["name"], "variant": ""}
+                        if bkey in to_unify
+                        else dict(asset)
+                    )
+                    skey = (eff["family"], canonical_entity_key(eff["name"], eff["variant"]))
+                    if skey in seen:
+                        continue
+                    seen.add(skey)
+                    rebuilt.append(eff)
+                sh["requested_assets"] = rebuilt
+
+    return unified_descriptions
 
 
 def canonical_entity_key(entity_name: str, variant_name: str = "") -> str:
@@ -519,6 +681,7 @@ def extract_storyboard_from_text(
                     if dur_inline:
                         duration_s = float(dur_inline.group(1))
                         tail = (tail[: dur_inline.start()] + tail[dur_inline.end() :]).strip(" -—:：")
+                tail_dialogue = _extract_quote_dialogue(tail) if tail else []
                 current_shot = {
                     "episode_code": ep_obj["episode_code"],
                     "shot_no": shot_no,
@@ -526,7 +689,7 @@ def extract_storyboard_from_text(
                     "target_seconds": duration_s,
                     "summary": "",
                     "_summary_lines": [tail] if tail else [],
-                    "dialogue": [],
+                    "dialogue": tail_dialogue,
                     "requested_assets": [],
                     "source_span": {
                         "document_id": document_id,
@@ -577,22 +740,30 @@ def extract_storyboard_from_text(
             dlg_m = _DIALOGUE_RE.match(line)
             if dlg_m:
                 raw_dlg = dlg_m.group(1).strip()
-                qm = _QUOTE_LINE_RE.match(raw_dlg)
-                if qm:
-                    current_shot["dialogue"].append({"speaker": qm.group(1), "text": qm.group(2)})
-                else:
-                    current_shot["dialogue"].append({"speaker": "", "text": raw_dlg})
+                if raw_dlg.lower() not in {"无", "暂无", "无对白", "none", "-"}:
+                    extracted = _extract_quote_dialogue(raw_dlg)
+                    if extracted:
+                        current_shot["dialogue"].extend(extracted)
+                    else:
+                        bm = _BARE_QUOTES_RE.match(raw_dlg)
+                        cleaned_dlg = bm.group(1).strip() if bm else raw_dlg
+                        current_shot["dialogue"].append({"speaker": "", "text": cleaned_dlg})
                 continue
 
-            qm = _QUOTE_LINE_RE.match(line)
-            if qm:
-                current_shot["dialogue"].append({"speaker": qm.group(1), "text": qm.group(2)})
+            if _QUOTE_LINE_RE.match(line):
+                current_shot["dialogue"].extend(_extract_quote_dialogue(line))
                 continue
+
+            for hit in _INLINE_SPEAKER_QUOTE_RE.finditer(line):
+                sp, qt = hit.group(1).strip(), hit.group(2).strip()
+                if qt:
+                    current_shot["dialogue"].append({"speaker": sp, "text": qt})
 
             current_shot["_summary_lines"].append(line)
 
     _finalize_shot(current_shot)
     episodes = [episodes_map[no] for no in sorted(episode_order)]
+    unified_descriptions = unify_storyboard_entity_variants(episodes)
     if not episodes or all(not ep["shots"] for ep in episodes):
         ambiguities.append(
             {
@@ -611,4 +782,7 @@ def extract_storyboard_from_text(
             for c in chunks
         ],
         "extractor": "deterministic",
+        "unified_entity_descriptions": {
+            f"{fam}::{key}": note for (fam, key), note in unified_descriptions.items()
+        },
     }
