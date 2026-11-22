@@ -618,16 +618,26 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
         # The queue opens only after the adapter proved that it is the pinned
         # one; the image submission is a real prompt, not a rehearsal.
         supervisor.resume()
+        from shine.comfyops.capability import IMAGE_RUNTIME_REQUIREMENTS
+
+        image_min_ram_mb = min(
+            int(renderer.get("min_ram_mb", IMAGE_RUNTIME_REQUIREMENTS["min_ram_mb"])),
+            IMAGE_RUNTIME_REQUIREMENTS["min_ram_mb"],
+        )
+        image_min_vram_mb = min(
+            int(renderer.get("min_vram_mb", IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"])),
+            IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"],
+        )
         measured = probe_memory(
             renderer["gpu_uuid"],
-            min_ram_mb=int(renderer.get("min_ram_mb", 8192)),
-            min_vram_mb=int(renderer.get("min_vram_mb", 12000)),
+            min_ram_mb=image_min_ram_mb,
+            min_vram_mb=image_min_vram_mb,
         )
         verified = evaluate_readiness(
             available_ram_bytes=measured.get("available_ram_bytes"),
             gpu=measured.get("gpu"),
-            min_ram_mb=int(renderer.get("min_ram_mb", 8192)),
-            min_vram_mb=int(renderer.get("min_vram_mb", 12000)),
+            min_ram_mb=image_min_ram_mb,
+            min_vram_mb=image_min_vram_mb,
             expected_gpu=renderer["gpu_uuid"],
         )
         if measured.get("ready") is not True or not verified["ready"]:

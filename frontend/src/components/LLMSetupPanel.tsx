@@ -186,8 +186,10 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
           }));
         }
         // 只有一个模型时，连接与生成检查也自动做一次：用户不必逐个工种点。
-        await api(`/provider-profiles/${profileId}/test`, { method: 'POST' }, timeoutFor(profileId));
-        await api(`/provider-profiles/${profileId}/test-generation`, { method: 'POST' }, timeoutFor(profileId));
+        const connRes = await api<ProviderTestResult>(`/provider-profiles/${profileId}/test`, { method: 'POST' }, timeoutFor(profileId));
+        if (!connRes.ok) throw new ProviderCheckFailed(connRes);
+        const genRes = await api<ProviderTestResult>(`/provider-profiles/${profileId}/test-generation`, { method: 'POST' }, timeoutFor(profileId));
+        if (!genRes.ok) throw new ProviderCheckFailed(genRes);
         setAutoNote(missing.length > 0
           ? `只有一个模型：已自动分配给全部 ${roles.length} 个工种，并完成连接与生成检查。`
           : '只有一个模型：已自动完成连接与生成检查。');
@@ -209,7 +211,7 @@ export function LLMSetupPanel({ onChanged }: { onChanged?: () => void | Promise<
       return await api<AgentRoutePreview>('/agent-routes/preview', json('POST', { updates }));
     } catch (error) {
       setNotice('改派预览失败：' + describeFailure(error));
-      return null;
+      throw error;
     }
   }
 

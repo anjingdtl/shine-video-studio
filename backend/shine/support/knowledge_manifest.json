@@ -1,7 +1,7 @@
 {
   "api_contract_digest": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
   "api_contract_version": "openapi-normalized-2026.11-v1",
-  "api_schema_digest": "08a06da7d256b285dc5a2266e23f8eb044048153dd7f31ab3d7f41c5d31acfd3",
+  "api_schema_digest": "e99eca1a546b915b5651803e801520347f8aa20692075842f409dc21d95e9885",
   "app_version": "2.2.0",
   "capability_count": 16,
   "content_sha256": "ac1e40c37ba72be84f6e86fd6e14dd4315a4afce1fb2daaa57ad7f0d0e83b74a",

@@ -153,4 +153,31 @@ describe('文本工种事务性路由', () => {
       expected_revision: 'r'.repeat(64),
     });
   });
+
+  it('预览接口失败时透出真实错误，不再吞掉为泛化刷新提示', async () => {
+    const user = userEvent.setup();
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([
+      PROFILE, { ...PROFILE, id: 'profile-2', name: '备用模型', model: 'qwen-local' },
+    ]) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/llm\/roles$/, respond: () => jsonResponse({ route_revision: 'r'.repeat(64) }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/setup\/llm-readiness$/, respond: () => jsonResponse({
+      status: 'BLOCKED', generation_status: 'NOT_CHECKED', text_agent_ready: false,
+      roles: [{ role: 'director', code: 'LLM_ROUTE_REQUIRED' }],
+    }) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/agent-routes\/preview$/, respond: () => jsonResponse({
+      detail: '服务端拒绝了该改派请求',
+    }, 422) });
+
+    render(<LLMSetupPanel />);
+    const routingFold = await waitFor(() => document.querySelector('.llm-routing-fold > summary') as HTMLElement);
+    await user.click(routingFold);
+    await user.selectOptions(await screen.findByLabelText(/为 .* 选择模型/), 'profile-1');
+    await user.click(screen.getByRole('button', { name: /预览改派影响/ }));
+
+    await waitFor(() => {
+      const msg = document.querySelector('.route-preview-error')?.textContent ?? '';
+      expect(msg).toContain('服务端拒绝了该改派请求');
+      expect(msg).not.toContain('刷新模型和角色状态后重试');
+    });
+  });
 });

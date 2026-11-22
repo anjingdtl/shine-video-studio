@@ -62,6 +62,14 @@ REVIEW_RUNTIME_REQUIREMENTS: dict[str, dict[str, int]] = {
     "ASR": {"min_ram_mb": 2048, "min_vram_mb": 4000},
 }
 
+#: Free memory the managed image renderer (Qwen-Image-2.1) needs to start.
+#: Kept separate from the H3 video variant's 12000 MiB floor so a 12 GB GPU
+#: with normal desktop overhead is not blocked by video-only thresholds.
+IMAGE_RUNTIME_REQUIREMENTS: dict[str, int] = {
+    "min_ram_mb": 8192,
+    "min_vram_mb": 8000,
+}
+
 
 def catalog_capability(name: str, catalog: dict) -> str:
     """The capability of a catalog, from the server owned classification.

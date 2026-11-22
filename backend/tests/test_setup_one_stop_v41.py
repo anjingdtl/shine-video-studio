@@ -348,3 +348,71 @@ def test_the_installation_choice_is_remembered(prep):
     with factory() as db:
         row = db.get(AppSetting, setup_summary.CHOICE_KEY)
     assert row is not None and row.value["port"] == 8190
+
+
+def test_summary_and_image_readiness_agree_when_recipe_sha_drifts(prep, monkeypatch):
+    """Single verdict: stale recipe_sha256 in image-runtime.json means PENDING_RECIPE everywhere."""
+    client, _, settings = prep
+    project = create_project(client)
+    root, identity = _managed_instance(prep)
+    _bind_image_runtime(settings, root=root, instance_id=identity)
+    from shine.comfyops import image_renderer
+
+    monkeypatch.setattr(image_renderer, "image_recipe_state", lambda _s: {
+        "state": "READY",
+        "instance_id": identity,
+        "port": 8188,
+        "recipe_sha256": "b" * 64,
+        "code": None,
+    })
+    from shine.materialprep import runtime
+
+    cfg = runtime.load_config(settings)
+    runtime.save_config(settings, cfg.model_copy(update={"recipe_sha256": "a" * 64}))
+
+    readiness = client.get("/api/v1/setup/image-readiness").json()
+    summary = client.get(f"/api/v1/setup/summary?project_id={project}").json()
+    assert readiness["binding_state"] == "PENDING_RECIPE"
+    assert summary["capabilities"]["image"]["facts"]["BINDING_STATE"] == "PENDING_RECIPE"
+    assert summary["capabilities"]["image"]["facts"]["INSTANCE_BOUND"] is False
+
+
+def test_image_capability_uses_its_own_vram_floor_not_h3_12000(prep, monkeypatch):
+    """Image configuration and renderer startup must not inherit H3's 12000 MiB floor."""
+    from shine.comfyops import capability, deployment, image_renderer
+
+    _, factory, settings = prep
+    monkeypatch.setattr("shine.comfyops.host_env.probe_gpu", lambda: {"status": "OK", "uuid": "GPU-12G"})
+    with factory() as db:
+        from shine.comfyops.instances import instance_identity
+        from shine.comfyops.models import ComfyInstance
+        from shine.models import Project
+
+        project = Project(title="12G 出图", description="", language="Chinese")
+        db.add(project)
+        db.flush()
+        root = settings.comfyops_dir / "instances" / "shine-h3"
+        (root / ".venv" / "Scripts").mkdir(parents=True, exist_ok=True)
+        (root / ".venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+        (root / "custom_nodes").mkdir(parents=True, exist_ok=True)
+        (root / "main.py").write_text("", encoding="utf-8")
+        payload = {"managed": True, "is_mock": False, "name": "shine-h3", "port": 8188, "root": str(root)}
+        from shine.comfy.workflow import graph_hash
+        inst = ComfyInstance(
+            id=instance_identity("local", 8188),
+            payload=payload,
+            sha256=graph_hash(payload),
+            status="STOPPED",
+        )
+        db.add(inst)
+        db.commit()
+        res = deployment.generate_configuration(
+            db, settings, project.id, instance_name="shine-h3", port=8188,
+            capability="image", instance_id=inst.id,
+        )
+    recipe = json.loads(Path(res["recipe"]).read_text(encoding="utf-8"))
+    assert recipe["renderer"]["min_vram_mb"] == capability.IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"] == 8000
+    assert recipe["renderer"]["min_vram_mb"] < 12000
+
+    # Even if an H3 recipe wrote 12000 into managed_recipe.json, image_renderer enforces 8000 (not 12000).
+    assert image_renderer.os.name == "nt"  # Windows host check

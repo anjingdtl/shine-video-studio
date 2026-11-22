@@ -386,6 +386,66 @@ def _renderer_blocker(db, settings, instance_id: str, *, state: str | None = Non
     return renderer_blocker(db, settings, instance_id=instance_id, state=state)
 
 
+def image_binding_state(
+    settings,
+    *,
+    config: ImageRuntimeConfig | None = None,
+    recipe: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Single decision point for whether the image binding matches the recipe on disk."""
+    from shine.comfyops.image_renderer import image_recipe_state
+
+    cfg = config if config is not None else load_config(settings)
+    rec = recipe if recipe is not None else image_recipe_state(settings)
+    configured = bool(cfg.base_url and cfg.instance_id)
+    if not configured:
+        state = "NOT_BOUND"
+    elif rec["state"] != "READY":
+        state = "PENDING_RECIPE"
+    elif rec.get("instance_id") and rec["instance_id"] != cfg.instance_id:
+        state = "PENDING_RECIPE"
+    elif rec.get("port") and cfg.port and int(rec["port"]) != int(cfg.port):
+        state = "PENDING_RECIPE"
+    elif cfg.recipe_sha256 and rec.get("recipe_sha256") != cfg.recipe_sha256:
+        state = "PENDING_RECIPE"
+    else:
+        state = "READY"
+    return {
+        "configured": configured,
+        "binding_state": state,
+        "config": cfg,
+        "recipe": rec,
+    }
+
+
+def align_bound_recipe(
+    settings,
+    *,
+    instance_id: str,
+    port: int,
+    recipe_sha256: str,
+) -> bool:
+    """Keep an already-bound image runtime on this installation aligned with its shared recipe."""
+    if not instance_id or not recipe_sha256:
+        return False
+    config = load_config(settings)
+    if not config.base_url or config.instance_id != instance_id:
+        return False
+    if config.port and int(config.port) != int(port):
+        return False
+    if config.recipe_sha256 == recipe_sha256:
+        return False
+    updated = config.model_copy(
+        update={
+            "config_revision": config.config_revision + 1,
+            "recipe_sha256": recipe_sha256,
+            "bound_at": utcnow().isoformat(),
+        }
+    )
+    save_config(settings, updated)
+    return True
+
+
 def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dict[str, Any]:
     """The four-layer report the setup card and the generate gate both read.
 
@@ -396,23 +456,11 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
     ``IMAGE_RENDERER_RECIPE_MISSING`` show up after a page had already said the
     capability was configured.
     """
-    from shine.comfyops.image_renderer import image_recipe_state
-
-    config = load_config(settings)
-    configured = bool(config.base_url and config.instance_id)
-    recipe = image_recipe_state(settings)
-    if not configured:
-        binding_state = "NOT_BOUND"
-    elif recipe["state"] != "READY":
-        binding_state = "PENDING_RECIPE"
-    elif recipe.get("instance_id") and recipe["instance_id"] != config.instance_id:
-        binding_state = "PENDING_RECIPE"
-    elif recipe.get("port") and config.port and int(recipe["port"]) != int(config.port):
-        binding_state = "PENDING_RECIPE"
-    elif config.recipe_sha256 and recipe.get("recipe_sha256") != config.recipe_sha256:
-        binding_state = "PENDING_RECIPE"
-    else:
-        binding_state = "READY"
+    binding = image_binding_state(settings)
+    config = binding["config"]
+    configured = binding["configured"]
+    recipe = binding["recipe"]
+    binding_state = binding["binding_state"]
     files = verify_model_files(config, settings=settings) if config.model_root else {
         "files": [], "problems": [], "complete": False}
     if config.model_root:

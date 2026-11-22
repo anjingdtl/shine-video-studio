@@ -907,7 +907,7 @@ class AgentRouteAssignment(APIModel):
 
 
 class AgentRoutePreviewRequest(APIModel):
-    updates: list[AgentRouteAssignment] = Field(min_length=1, max_length=14)
+    updates: list[AgentRouteAssignment] = Field(min_length=1, max_length=32)
 
 
 class AgentRouteBatchUpdate(AgentRoutePreviewRequest):

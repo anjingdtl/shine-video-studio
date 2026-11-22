@@ -22,8 +22,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from shine.config import Settings
+from shine.llm.openai_compatible import chat_completions_url
 from shine.llm.secrets import SecretStore
 from shine.models import Project, ProjectWorkflow, ProviderProfile, utcnow
+from shine.security import is_loopback_url
 
 logger = logging.getLogger("shine.platform")
 
@@ -133,6 +135,7 @@ def list_platform_llm_profiles(db: Session, settings: Settings) -> list[dict[str
             "model": row.model,
             "base_url": row.base_url,
             "timeout_s": row.timeout_s,
+            "is_local": is_loopback_url(row.base_url),
             "secret_status": secrets.status(row.api_key_ref),
         }
         for row in rows
@@ -152,6 +155,7 @@ def resolve_platform_llm_connection(db: Session, settings: Settings, profile_id:
         "kind": row.kind,
         "model": row.model,
         "base_url": row.base_url,
+        "chat_url": chat_completions_url(row.base_url),
         "timeout_s": row.timeout_s,
         "api_key": api_key,
         "generation_options": dict(row.generation_options or {}),

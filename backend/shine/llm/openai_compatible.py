@@ -43,11 +43,15 @@ def _api_root(base_url: str) -> str:
     return base
 
 
-def _chat_url(base_url: str) -> str:
+def chat_completions_url(base_url: str) -> str:
+    """Single URL builder for OpenAI-compatible and Ollama chat endpoints."""
     root = _api_root(base_url)
     if root.endswith("/v1"):
         return f"{root}/chat/completions"
     return f"{root}/v1/chat/completions"
+
+
+_chat_url = chat_completions_url
 
 
 def _models_url(base_url: str) -> str:

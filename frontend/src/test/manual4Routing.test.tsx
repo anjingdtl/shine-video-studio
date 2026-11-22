@@ -279,4 +279,61 @@ describe('P1 平台选线与四阶隔离挂载', () => {
       expect(screen.getByTestId('manual4-workbench')).toBeInTheDocument();
     });
   });
+
+  it('分镜辅助解析对远端模型（is_local=false）显示授权勾选并随提交发送', async () => {
+    const user = userEvent.setup();
+    const m4Id = 'proj-m4-consent';
+    const projects = [
+      { id: m4Id, title: '水乡雨夜', description: '', language: 'Chinese', created_at: '2026-11-22T00:00:00Z', frozen_style_version_id: null, style_draft: null, allow_remote_review: false, auto_repair_enabled: false, quality_policy: null },
+    ];
+    const m4Overview = makeM4Overview(m4Id, '水乡雨夜');
+    const stub = new StudioStub([
+      { method: 'GET', pattern: /^\/api\/v1\/system\/status$/, respond: () => jsonResponse(SYSTEM_STATUS) },
+      { method: 'GET', pattern: /^\/api\/v1\/projects$/, respond: () => jsonResponse(projects) },
+      {
+        method: 'GET',
+        pattern: /^\/api\/v1\/platform\/projects$/,
+        respond: () => jsonResponse([
+          { id: m4Id, title: '水乡雨夜', description: '', language: 'Chinese', workflow_kind: 'manual4', selection_revision: 1, created_at: '2026-11-22T00:00:00Z' },
+        ]),
+      },
+      { method: 'GET', pattern: /^\/api\/v1\/provider-profiles$/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /^\/api\/v1\/agent-routes$/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /^\/api\/v1\/workflow-profiles/, respond: () => jsonResponse([]) },
+      { method: 'GET', pattern: /^\/api\/v1\/manual4\/system\/status$/, respond: () => jsonResponse({ runtime_version: '2.0.0', schema_version: 'm4.1', worker_online: true, environment: { installation: { ready: true }, capabilities: {} } }) },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/overview$`), respond: () => jsonResponse(m4Overview) },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/llm-options$`),
+        respond: () => jsonResponse([
+          { id: 'prof-remote', name: 'DeepSeek', kind: 'openai_compatible', model: 'deepseek-chat', base_url: 'https://api.deepseek.com', timeout_s: 180, is_local: false, secret_status: 'stored' },
+          { id: 'prof-local', name: 'Ollama', kind: 'ollama', model: 'qwen2.5:7b', base_url: 'http://127.0.0.1:11434', timeout_s: 180, is_local: true, secret_status: 'not_set' },
+        ]),
+      },
+      {
+        method: 'GET',
+        pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/storyboard/draft$`),
+        respond: () => jsonResponse({
+          project_id: m4Id, max_shot_seconds: 15,
+          draft: { revision_id: null, revision: 0, status: 'EMPTY', source_sha256: '', summary_sha256: '', max_shot_seconds: 15, payload: { episodes: [], ambiguities: [], extractor: 'manual' }, confirmed_at: null },
+          confirmed: null, source_documents: [], confirmed_episodes: [], confirmed_shots: [],
+        }),
+      },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/library`), respond: () => jsonResponse({ items: [], total: 0 }) },
+      { method: 'GET', pattern: new RegExp(`^/api/v1/manual4/projects/${m4Id}/materials/requirements$`), respond: () => jsonResponse({ confirmed_revision: null, slot_limits: { image: 6, audio: 2, video: 2 }, requirements: [], assets: [], shots: [], readiness: m4Overview.readiness }) },
+    ]);
+
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: '打开当前作品' }));
+    await screen.findByTestId('manual4-workbench');
+    await user.click(await screen.findByLabelText(/使用辅助模型解析非结构化文本/));
+    expect(await screen.findByLabelText(/确认允许将分镜文本发送至远程 LLM 接口/)).toBeInTheDocument();
+
+    // Switch to local Ollama -> remote consent checkbox disappears
+    await user.selectOptions(screen.getByLabelText('辅助模型配置'), 'prof-local');
+    await waitFor(() => {
+      expect(screen.queryByLabelText(/确认允许将分镜文本发送至远程 LLM 接口/)).toBeNull();
+    });
+    stub.restore();
+  });
 });

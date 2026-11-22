@@ -313,6 +313,90 @@ def test_p4_chunked_llm_extraction_and_strict_loopback_guard(tmp_path, monkeypat
         assert err.status_code == 502
         assert err.json()["detail"]["code"] == "M4_LLM_EXTRACT_FAILED"
 
+        # 1) llm-options must return is_local from the same loopback policy
+        with app.state.session_factory.begin() as sdb:
+            sdb.add(
+                ProviderProfile(
+                    id="llm-ollama-root",
+                    name="Ollama Root",
+                    kind="ollama",
+                    model="qwen2.5:7b-instruct-16k",
+                    base_url="http://127.0.0.1:11434",
+                )
+            )
+            sdb.add(
+                ProviderProfile(
+                    id="llm-remote",
+                    name="DeepSeek",
+                    kind="openai_compatible",
+                    model="deepseek-chat",
+                    base_url="https://api.deepseek.com",
+                )
+            )
+        opts = client.get(f"/api/v1/manual4/projects/{pid}/llm-options").json()
+        by_id = {row["id"]: row for row in opts}
+        assert by_id["llm-ollama-root"]["is_local"] is True
+        assert by_id["llm-remote"]["is_local"] is False
+        assert by_id["llm-spoof"]["is_local"] is False
+
+        # 2) Ollama root base_url (no /v1) must call /v1/chat/completions and retry transient 503 once
+        import json
+
+        seen_urls: list[str] = []
+
+        class _FakeResp:
+            def __init__(self, status_code: int, body: dict):
+                self.status_code = status_code
+                self._body = body
+                self.text = json.dumps(body)
+
+            def raise_for_status(self):
+                if self.status_code >= 400:
+                    req = httpx.Request("POST", seen_urls[-1])
+                    raise httpx.HTTPStatusError("err", request=req, response=self)
+
+            def json(self):
+                return self._body
+
+        def fake_post(url, **kwargs):
+            seen_urls.append(url)
+            if len(seen_urls) == 1:
+                return _FakeResp(503, {"error": "busy"})
+            return _FakeResp(200, {
+                "choices": [{
+                    "message": {
+                        "content": json.dumps({
+                            "episodes": [{
+                                "episode_no": 1,
+                                "title": "测试",
+                                "shots": [{
+                                    "shot_no": 1,
+                                    "target_seconds": 4.0,
+                                    "summary": "测试镜头",
+                                    "requested_assets": [],
+                                }],
+                            }]
+                        })
+                    }
+                }]
+            })
+
+        monkeypatch.setattr(httpx, "post", fake_post)
+        retried_ok = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/import",
+            headers=LOCAL_ACTION_HEADERS,
+            data={
+                "text": "纯文本无结构" * 15,
+                "use_llm": "true",
+                "llm_profile_id": "llm-ollama-root",
+            },
+        )
+        assert retried_ok.status_code == 201, retried_ok.text
+        assert seen_urls == [
+            "http://127.0.0.1:11434/v1/chat/completions",
+            "http://127.0.0.1:11434/v1/chat/completions",
+        ]
+
 
 def test_p4_stage2_ref2va_refuses_audio_only_and_enforces_slot_limits(tmp_path):
     app, _ = _setup_m4_client(tmp_path)

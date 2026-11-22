@@ -857,7 +857,14 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     # The variant contract is resolved before any transaction: an undetermined
     # startup (unknown render-time floors) is refused by name here and never
     # written into the recipe with the baseline's numbers.
-    if capability == 'image' or variant_id is None:
+    if capability == 'image':
+        from shine.comfyops.capability import IMAGE_RUNTIME_REQUIREMENTS
+
+        requirements = {
+            "min_free_ram_mb": IMAGE_RUNTIME_REQUIREMENTS["min_ram_mb"],
+            "min_free_vram_mb": IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"],
+        }
+    elif variant_id is None:
         requirements = default_variant_requirements()
     else:
         from shine.comfyops.variant_recipe import build_startup_contract
@@ -1114,6 +1121,14 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
     recipe = {"renderer": renderer, "reviews": reviews}
     from shine.comfyops.installer import durable_json
     durable_json(recipe_path, recipe)
+    from shine.materialprep.runtime import align_bound_recipe
+
+    align_bound_recipe(
+        settings,
+        instance_id=instance.id,
+        port=int(payload["port"]),
+        recipe_sha256=graph_hash(renderer),
+    )
     env_updates: dict = {}
     env_written: list = []
     if capability == 'h3':
@@ -1339,10 +1354,14 @@ def deployment_readiness(db, settings: Settings) -> dict:
                 "services are advisory",
         "advisory_reviews": service_status.get("advisory_reviews", {}),
     })
+    from shine.comfyops.runtime_configuration import real_inference_evidence, runtime_report
+
+    real_evidence = real_inference_evidence(db, settings)
     layers.append({
         "layer": "L5_real_inference",
-        "status": "NOT_VERIFIED",
+        "status": "READY" if real_evidence is not None else "NOT_VERIFIED",
         "note": "only real (is_mock=false) H3 production evidence can set this; never inferred",
+        **({"evidence": real_evidence} if real_evidence is not None else {}),
     })
     production_gates = {
         "workflow_profiles_registered": (
@@ -1355,7 +1374,6 @@ def deployment_readiness(db, settings: Settings) -> dict:
         "local_confirmation_available": True,
         "services_verified": service_status.get("status") == "READY",
     }
-    from shine.comfyops.runtime_configuration import runtime_report
     return {
         "catalog": {"id": catalog["catalog_id"], "version": catalog["catalog_version"]},
         "layers": layers,

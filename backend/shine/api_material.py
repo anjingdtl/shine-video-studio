@@ -963,10 +963,11 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
     # bump the revision, invalidate the fingerprint or force re-validation.
     if (current.instance_id == body.instance_id and current.base_url == base_url
             and current.model_root == body.model_root and current.port == (bound_port or None)):
+        readiness_report = runtime.readiness(db, settings)
         return {"config_revision": current.config_revision, "digest": runtime.config_digest(settings),
-                "binding_state": "READY" if recipe["state"] == "READY" else "PENDING_RECIPE",
+                "binding_state": readiness_report["binding_state"],
                 "recipe": recipe, "unchanged": True,
-                "readiness": runtime.readiness(db, settings)}
+                "readiness": readiness_report}
     config = runtime.ImageRuntimeConfig(
         config_revision=current.config_revision + 1,
         instance_id=body.instance_id,
@@ -986,10 +987,11 @@ def bind_image_runtime(body: ImageRuntimeBody, actor: Operator, db: DBSession, s
                "installation_id": config.installation_id, "port": config.port,
                "recipe_state": recipe["state"]})
     db.commit()
+    readiness_report = runtime.readiness(db, settings)
     return {"config_revision": config.config_revision, "digest": runtime.config_digest(settings),
-            "binding_state": "READY" if recipe["state"] == "READY" else "PENDING_RECIPE",
+            "binding_state": readiness_report["binding_state"],
             "recipe": recipe,
-            "readiness": runtime.readiness(db, settings)}
+            "readiness": readiness_report}
 
 
 def _control_operation_response(operation) -> dict:

@@ -449,29 +449,17 @@ def _component_ids_for(capability: str, catalog: dict) -> set[str]:
 
 
 def _image_binding_state(settings) -> dict[str, Any]:
-    from shine.comfyops import image_renderer
     from shine.materialprep import runtime
 
-    config = runtime.load_config(settings)
-    recipe = image_renderer.image_recipe_state(settings)
-    bound = bool(config.base_url and config.instance_id)
-    if not bound:
-        state = "NOT_BOUND"
-    elif recipe["state"] != "READY":
-        state = "PENDING_RECIPE"
-    elif recipe.get("instance_id") and recipe["instance_id"] != config.instance_id:
-        state = "PENDING_RECIPE"
-    elif recipe.get("port") and config.port and int(recipe["port"]) != int(config.port):
-        state = "PENDING_RECIPE"
-    else:
-        state = "READY"
+    verdict = runtime.image_binding_state(settings)
+    config = verdict["config"]
     return {
-        "binding_state": state,
+        "binding_state": verdict["binding_state"],
         "instance_id": config.instance_id,
         "base_url": config.base_url,
         "model_root": config.model_root,
         "port": config.port,
-        "recipe": recipe,
+        "recipe": verdict["recipe"],
     }
 
 

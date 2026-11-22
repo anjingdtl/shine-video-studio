@@ -66,9 +66,10 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
   const needsRemoteConsent = Boolean(
     useLlm &&
       selectedLlm &&
-      selectedLlm.is_local === false &&
-      selectedLlm.base_url &&
-      !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(selectedLlm.base_url),
+      (selectedLlm.is_local === false ||
+        (selectedLlm.is_local !== true &&
+          (!selectedLlm.base_url ||
+            !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(selectedLlm.base_url)))),
   );
 
   const loadDraft = useCallback(async () => {

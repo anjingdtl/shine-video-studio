@@ -12,7 +12,16 @@ from sqlalchemy import or_, select, text
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.managed_recipe import load_managed_recipe, recipe_path
 from shine.comfyops.models import ComfyInstance, InstallationAttempt, ResourceLease
-from shine.models import AgentRoute, AppSetting, Job, ProductionSeries, ProviderProfile, WorkflowProfile
+from shine.models import (
+    AgentRoute,
+    AppSetting,
+    Job,
+    JobAttempt,
+    MediaArtifact,
+    ProductionSeries,
+    ProviderProfile,
+    WorkflowProfile,
+)
 from shine.services import add_audit, require_project
 
 CANDIDATE_KEY = 'deployment-runtime-candidate'
@@ -725,6 +734,107 @@ def publish_validated_renderer(db, settings, *, previous_identity: dict, rendere
         backup.replace(path)
         raise
     backup.unlink(missing_ok=True)
+    from shine.materialprep.runtime import align_bound_recipe
+
+    align_bound_recipe(
+        settings,
+        instance_id=str(renderer.get("instance_id") or ""),
+        port=int(renderer.get("port") or 0),
+        recipe_sha256=graph_hash(renderer),
+    )
+
+
+def _artifact_matches_on_disk(storage_path: str | None, expected_bytes: int | None) -> bool:
+    if not storage_path:
+        return False
+    target = Path(storage_path)
+    if not target.is_file():
+        return False
+    if expected_bytes is not None and expected_bytes > 0:
+        try:
+            return target.stat().st_size == expected_bytes
+        except OSError:
+            return False
+    return True
+
+
+def real_inference_evidence(db, settings) -> dict | None:
+    """Single authoritative verdict for whether real (is_mock=false) H3 production succeeded.
+
+    Requires an active, service-verified runtime configuration on this host so
+    an invalidated or unactivated setup never borrows old inference evidence.
+    """
+    active = db.get(AppSetting, ACTIVE_KEY)
+    if active is None:
+        return None
+    try:
+        resolve_runtime(db, settings)
+    except HTTPException:
+        return None
+    validation = service_evidence_status(db, settings)
+    if not validation or validation.get('status') != 'READY':
+        return None
+
+    row = db.execute(
+        select(Job, MediaArtifact, JobAttempt)
+        .join(MediaArtifact, MediaArtifact.id == Job.artifact_id)
+        .join(JobAttempt, JobAttempt.job_id == Job.id)
+        .where(
+            Job.provider == 'comfyui',
+            Job.status == 'PASSED',
+            Job.stale.is_(False),
+            MediaArtifact.is_mock.is_(False),
+            JobAttempt.output_sha256 == MediaArtifact.sha256,
+        )
+        .order_by(Job.updated_at.desc())
+        .limit(1)
+    ).first()
+    if row is not None:
+        job, artifact, attempt = row
+        if _artifact_matches_on_disk(artifact.storage_path, artifact.byte_size):
+            return {
+                'source': 'director7',
+                'job_id': job.id,
+                'attempt_id': attempt.id,
+                'artifact_id': artifact.id,
+                'sha256': artifact.sha256,
+                'completed_at': job.updated_at.isoformat() if job.updated_at else None,
+            }
+
+    m4_db_path = Path(settings.data_dir) / 'manual4.sqlite'
+    if not m4_db_path.is_file():
+        return None
+    try:
+        from shine.manual4.storage.db import make_m4_session_factory
+        from shine.manual4.storage.models import M4Job, M4JobAttempt
+
+        m4_factory = make_m4_session_factory(f"sqlite:///{m4_db_path.resolve().as_posix()}")
+        with m4_factory() as m4_db:
+            m4_row = m4_db.execute(
+                select(M4Job, M4JobAttempt)
+                .join(M4JobAttempt, M4JobAttempt.job_id == M4Job.id)
+                .where(
+                    M4Job.provider == 'comfyui',
+                    M4Job.status == 'PASSED',
+                    M4Job.output_sha256.is_not(None),
+                    M4JobAttempt.output_sha256 == M4Job.output_sha256,
+                )
+                .order_by(M4Job.updated_at.desc())
+                .limit(1)
+            ).first()
+            if m4_row is not None:
+                m4_job, m4_attempt = m4_row
+                if _artifact_matches_on_disk(m4_job.output_storage_path, m4_job.output_bytes):
+                    return {
+                        'source': 'manual4',
+                        'job_id': m4_job.id,
+                        'attempt_id': m4_attempt.id,
+                        'sha256': m4_job.output_sha256,
+                        'completed_at': m4_job.updated_at.isoformat() if m4_job.updated_at else None,
+                    }
+    except Exception:  # noqa: BLE001 - optional secondary production line database
+        return None
+    return None
 
 
 def runtime_report(db, settings):
@@ -739,10 +849,12 @@ def runtime_report(db, settings):
     validation = None
     if active or candidate:
         validation = service_evidence_status(db, settings)
+    services_verified = bool(active and validation and validation.get('status') == 'READY')
+    inference_evidence = real_inference_evidence(db, settings) if services_verified else None
     return {'status': status, 'render_provider': mode, 'error': error,
             'candidate': ({'project_id': candidate.value['project_id'],
                            'recipe_sha256': candidate.value['identity']['recipe_sha256']} if candidate else None),
             'configuration_sha256': active.value.get('sha256') if active else None,
-            'services_verified': bool(active and validation and validation.get('status') == 'READY'),
+            'services_verified': services_verified,
             'service_validation': validation,
-            'real_inference_verified': False}
+            'real_inference_verified': inference_evidence is not None}

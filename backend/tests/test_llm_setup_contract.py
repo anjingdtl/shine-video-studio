@@ -568,3 +568,25 @@ def test_a_client_construction_failure_is_reported_as_not_sent(monkeypatch):
         provider.complete([ChatMessage("user", "hi")], json_mode=False)
     assert excinfo.value.details["external_outcome"] == "NOT_SENT"
     assert excinfo.value.details["error"] == "InvalidURL"
+
+
+def test_preview_and_batch_accept_all_fifteen_text_roles(api, fake_openai):
+    """All TEXT_ROLES (15 including support_agent) must preview and batch-apply together."""
+    client, factory, _ = api
+    profile = create_profile(client, fake_openai)
+    assert len(TEXT_ROLES) == 15
+    updates = [{"role": role, "provider_profile_id": profile["id"]} for role in TEXT_ROLES]
+
+    preview = client.post("/api/v1/agent-routes/preview", json={"updates": updates})
+    assert preview.status_code == 200, preview.text
+    preview_body = preview.json()
+    assert preview_body["changed_role_count"] == len(TEXT_ROLES)
+    assert preview_body["can_apply"] is True
+
+    batch = client.put("/api/v1/agent-routes/batch", json={
+        "updates": preview_body["updates"],
+        "expected_revision": preview_body["expected_revision"],
+    })
+    assert batch.status_code == 200, batch.text
+    assert len(batch.json()["changed_roles"]) == len(TEXT_ROLES)
+    assert len(client.get("/api/v1/agent-routes").json()) == len(TEXT_ROLES)

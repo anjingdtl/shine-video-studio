@@ -414,3 +414,67 @@ def test_package_metadata_counts_the_catalog_it_ships():
     # The shipped catalog's own total agrees with the per-file declarations.
     assert int(catalog["total_bytes"]) == declared_bytes
     assert re.search(r"components = \$catalogComponents\.Count", script)
+
+
+def test_l5_real_inference_reads_verified_production_evidence(prep, monkeypatch):
+    """Mock or unactivated runs stay NOT_VERIFIED; active verified real H3 PASSED run flips L5 & runtime."""
+    import hashlib
+
+    from shine.comfyops import runtime_configuration
+    from shine.models import AppSetting, Job, JobAttempt, MediaArtifact, utcnow
+    from tests.conftest import create_shot, freeze_style
+
+    client, factory, settings = prep
+    project = create_project(client, "L5 真实推理验证")
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"])
+    # Without active+verified runtime, L5 stays NOT_VERIFIED even if a Job row exists.
+    video_file = settings.data_dir / "real_shot.mp4"
+    video_file.write_bytes(b"real-mp4-bytes")
+    sha = hashlib.sha256(b"real-mp4-bytes").hexdigest()
+    with factory.begin() as db:
+        art = MediaArtifact(
+            project_id=project, job_id=None, artifact_kind="video",
+            storage_path=str(video_file), sha256=sha, byte_size=video_file.stat().st_size,
+            content_type="video/mp4", is_mock=False,
+        )
+        db.add(art)
+        db.flush()
+        job = Job(
+            project_id=project, shot_id=shot["id"], shot_revision=1, style_version_id=style["id"],
+            status="PASSED", provider="comfyui", idempotency_key="l5-real-1", request={},
+            artifact_id=art.id, stale=False,
+        )
+        db.add(job)
+        db.flush()
+        art.job_id = job.id
+        db.add(JobAttempt(
+            job_id=job.id, attempt_no=1, request_fingerprint="f" * 64, status="SUCCEEDED",
+            lease_owner="worker-1", lease_expires_at=utcnow(), output_sha256=sha,
+        ))
+
+    # Before runtime is active/service-verified -> NOT_VERIFIED
+    r1 = client.get("/api/v1/setup/readiness").json()
+    l5_before = {layer["layer"]: layer for layer in r1["layers"]}["L5_real_inference"]
+    assert l5_before["status"] == "NOT_VERIFIED"
+    assert r1["runtime_activation"]["real_inference_verified"] is False
+
+    # Activate + service-verify runtime via monkeypatched checks
+    from types import SimpleNamespace
+
+    with factory.begin() as db:
+        db.add(AppSetting(
+            key=runtime_configuration.ACTIVE_KEY,
+            value={"version": 1, "identity": {"recipe_sha256": "a" * 64}, "sha256": "s" * 64},
+        ))
+    monkeypatch.setattr(
+        runtime_configuration, "resolve_runtime",
+        lambda db, s: SimpleNamespace(render_provider="comfyui"),
+    )
+    monkeypatch.setattr(runtime_configuration, "service_evidence_status", lambda db, s: {"status": "READY"})
+
+    r2 = client.get("/api/v1/setup/readiness").json()
+    l5_after = {layer["layer"]: layer for layer in r2["layers"]}["L5_real_inference"]
+    assert l5_after["status"] == "READY"
+    assert l5_after["evidence"]["sha256"] == sha
+    assert r2["runtime_activation"]["real_inference_verified"] is True

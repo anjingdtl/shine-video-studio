@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,7 @@ from shine.manual4.storyboard.parser import (
     extract_storyboard_from_text,
     parse_m4_document,
 )
+from shine.platform_projects import chat_completions_url
 
 
 def _shot_content_sha(
@@ -312,12 +315,14 @@ def _llm_extract_chunk(
         return None
     import httpx
 
+    logger = logging.getLogger("shine.manual4.storyboard")
     base_url = str(llm_connection.get("base_url") or "").rstrip("/")
     model = str(llm_connection.get("model") or "")
     api_key = llm_connection.get("api_key") or ""
     timeout_s = float(llm_connection.get("timeout_s") or 60)
     if not base_url or not model:
         return None
+    endpoint = str(llm_connection.get("chat_url") or chat_completions_url(base_url))
     system_prompt = (
         "Extract ONLY explicit episodes, shot numbers, explicit durations in seconds (null if absent), "
         "characters, scenes, props, and dialogue lines from the user text as strict JSON: "
@@ -329,26 +334,73 @@ def _llm_extract_chunk(
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
-    try:
-        resp = httpx.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json={
-                "model": model,
-                "temperature": 0,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": chunk_text},
-                ],
-            },
-            timeout=timeout_s,
-        )
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
+    payload = {
+        "model": model,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": chunk_text},
+        ],
+    }
+    resp = None
+    last_exc: httpx.HTTPError | None = None
+    for attempt in range(2):
+        try:
+            resp = httpx.post(
+                endpoint,
+                headers=headers,
+                json=payload,
+                timeout=timeout_s,
+            )
+            if resp.status_code in {429, 502, 503} and attempt == 0:
+                logger.warning(
+                    "M4 storyboard LLM transient status=%s endpoint=%s; retrying once",
+                    resp.status_code,
+                    endpoint,
+                )
+                time.sleep(0.5)
+                continue
+            resp.raise_for_status()
+            last_exc = None
+            break
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if isinstance(exc, httpx.TransportError) and attempt == 0:
+                logger.warning(
+                    "M4 storyboard LLM transport error=%s endpoint=%s; retrying once",
+                    type(exc).__name__,
+                    endpoint,
+                )
+                time.sleep(0.5)
+                continue
+            status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) else None
+            snippet = ""
+            if isinstance(exc, httpx.HTTPStatusError):
+                try:
+                    snippet = (exc.response.text or "")[:200].replace("\n", " ").strip()
+                except Exception:  # noqa: BLE001
+                    snippet = ""
+            logger.warning(
+                "M4 storyboard LLM extract failed error=%s status=%s endpoint=%s body=%r",
+                type(exc).__name__,
+                status_code,
+                endpoint,
+                snippet,
+            )
+            detail_label = f"{type(exc).__name__} (HTTP {status_code})" if status_code else type(exc).__name__
+            raise HTTPException(
+                502,
+                {
+                    "code": "M4_LLM_EXTRACT_FAILED",
+                    "message": f"辅助分镜解析模型调用失败：{detail_label}",
+                    "status_code": status_code,
+                },
+            ) from exc
+    if last_exc is not None or resp is None:  # pragma: no cover - defensive guard
         raise HTTPException(
             502,
-            {"code": "M4_LLM_EXTRACT_FAILED", "message": f"辅助分镜解析模型调用失败：{type(exc).__name__}"},
-        ) from exc
+            {"code": "M4_LLM_EXTRACT_FAILED", "message": "辅助分镜解析模型调用失败"},
+        )
     content = resp.json()["choices"][0]["message"]["content"]
     match = content[content.find("{") : content.rfind("}") + 1] if "{" in content else ""
     if not match:
