@@ -30,7 +30,7 @@ ALLOWED_SKILL_ROLES = frozenset({
     "editor",
     "continuity_supervisor",
 })
-ALLOWED_SKILL_TOOLS = frozenset({"propose", "edit_intent", "style_proposal"})
+ALLOWED_SKILL_TOOLS = frozenset({"propose", "edit_intent", "style_proposal", "continuity_physical"})
 ALLOWED_SKILL_LICENSES = frozenset({"Apache-2.0", "MIT", "CC-BY-4.0", "Shine-Original"})
 ALLOWED_FILM_TYPES = frozenset({"live_action", "animation"})
 

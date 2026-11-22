@@ -341,6 +341,79 @@ class LLMGateway:
                          "profile_id": profile.id}
         return turn
 
+    def prepare_role_call(
+        self,
+        db: Session,
+        role: str,
+        *,
+        system: str = "",
+        user: str = "",
+        schema: dict[str, Any] | None = None,
+        task_category: str = "default",
+        precompiled: Any | None = None,
+        budget: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Resolve provider, output budget and locality once for a role call."""
+        from shine.security import is_loopback_url
+
+        if precompiled is not None:
+            system, user, schema = precompiled.system, precompiled.user, precompiled.schema
+        profile = self.profile_for_role(db, role)
+        config = self.config_for(profile)
+        budget_evidence = None
+        if precompiled is None:
+            if task_category == "creative":
+                input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
+                overflow = context_overflow(config, input_estimate)
+                if overflow is not None:
+                    raise LLMError("Creative request exceeds the shared context window",
+                                   details=dict(overflow))
+                budget_evidence = creative_completion_cap(
+                    config, estimated_input_tokens=input_estimate)
+                config = apply_output_budget(config, budget_evidence)
+            else:
+                config = agent_output_config(config)
+        elif budget is not None:
+            if budget.get("completion_cap") and not budget.get("reasoning_effort"):
+                budget = {**budget, "reasoning_effort": "low"}
+            config = apply_output_budget(config, budget)
+            budget_evidence = budget
+        config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
+        provider = self.provider_factory(config, self.mock_responder)
+        if schema is not None and precompiled is None:
+            user = (
+                f"{user}\n\n"
+                "Return one JSON object and nothing else. It must validate against "
+                "this JSON schema:\n"
+                f"{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
+            )
+        needs_local_gpu = profile.kind != "mock" and (
+            profile.kind == "ollama" or is_loopback_url(config.base_url))
+        return {
+            "profile": profile,
+            "config": config,
+            "provider": provider,
+            "messages": [ChatMessage("system", system), ChatMessage("user", user)],
+            "schema": schema,
+            "budget_evidence": budget_evidence,
+            "precompiled_fingerprint": precompiled.fingerprint if precompiled is not None else None,
+            "needs_local_gpu": needs_local_gpu,
+        }
+
+    @staticmethod
+    def execute_prepared_call(prepared: dict[str, Any]) -> LLMResponse:
+        """Execute a prepared network/provider call without touching SQLite."""
+        response = prepared["provider"].complete(
+            prepared["messages"],
+            schema=prepared["schema"],
+            json_mode=True,
+        )
+        if prepared["budget_evidence"] is not None:
+            response.raw_meta["output_budget"] = prepared["budget_evidence"]
+            if prepared["precompiled_fingerprint"] is not None:
+                response.raw_meta["precompiled_request"] = prepared["precompiled_fingerprint"]
+        return response
+
     def complete_for_role(
         self,
         db: Session,
@@ -363,73 +436,18 @@ class LLMGateway:
         single-appendix rule is what makes "追加 Schema 不改变已检验预算"
         observable.
         """
-        if precompiled is not None:
-            system, user, schema = precompiled.system, precompiled.user, precompiled.schema
-        profile = self.profile_for_role(db, role)
-        config = self.config_for(profile)
-        budget_evidence = None
-        if precompiled is None:
-            if task_category == "creative":
-                input_estimate = estimate_input_tokens(system) + estimate_input_tokens(user)
-                overflow = context_overflow(config, input_estimate)
-                if overflow is not None:
-                    # The request provably never left the workbench: the refusal
-                    # is a named, local fact, not an unknown provider outcome.
-                    raise LLMError("Creative request exceeds the shared context window",
-                                   details=dict(overflow))
-                budget_evidence = creative_completion_cap(
-                    config, estimated_input_tokens=input_estimate)
-                config = apply_output_budget(config, budget_evidence)
-            else:
-                config = agent_output_config(config)
-        elif budget is not None:
-            # A completion ceiling is only usable together with a bounded
-            # reasoning effort: a model allowed to deliberate for the whole
-            # ceiling spends it all thinking and returns no visible answer.
-            # Measured live on this provider (2026-11-15, the crew's Director
-            # on scene 2): a 6,916-token ceiling with no effort ended at
-            # finish_reason=length with zero answer characters, twice.  A
-            # precompiled structured call is a read-and-answer call, exactly
-            # like the ones ``agent_output_config`` bounds, so the bounded
-            # effort travels with the budget.  An effort named by the budget
-            # or configured on the profile still wins.
-            if budget.get("completion_cap") and not budget.get("reasoning_effort"):
-                budget = {**budget, "reasoning_effort": "low"}
-            config = apply_output_budget(config, budget)
-            budget_evidence = budget
-        # An agent step must survive a throttled provider: a 429 is a refusal
-        # that produced no answer, so waiting and asking again cannot buy a
-        # second copy of one answer.  The plain connectivity probe keeps its
-        # own stricter budget and never posts again after a refusal.
-        config = replace(config, rate_limit_retry_attempts=AGENT_RATE_LIMIT_RETRY_ATTEMPTS)
-        provider = self.provider_factory(config, self.mock_responder)
-        if schema is not None and precompiled is None:
-            # The provider validates the answer against this schema, so the model
-            # has to be told the contract it must satisfy. The schema is used
-            # for validation only otherwise, and an instruction such as "return
-            # only the supplied JSON contract" then names a contract that was
-            # never supplied. A mock provider answers from a canned payload and
-            # hides the problem; a real provider answers from the context and
-            # fails the schema check instead.
-            user = (
-                f"{user}\n\n"
-                "Return one JSON object and nothing else. It must validate against "
-                "this JSON schema:\n"
-                f"{json.dumps(schema, ensure_ascii=False, separators=(',', ':'))}"
-            )
+        prepared = self.prepare_role_call(
+            db, role, system=system, user=user, schema=schema,
+            task_category=task_category, precompiled=precompiled, budget=budget,
+        )
         from shine.comfyops.scheduler import CURRENT_RESOURCE, resource_slot
         from shine.db import make_session_factory
         from shine.llm.lifecycle import release_text_model
-        from shine.security import is_loopback_url
 
         def send() -> LLMResponse:
             if on_progress:
                 on_progress("WAITING_PROVIDER")
-            answer = provider.complete(
-                [ChatMessage("system", system), ChatMessage("user", user)],
-                schema=schema,
-                json_mode=True,
-            )
+            answer = self.execute_prepared_call(prepared)
             if on_progress:
                 on_progress("RELEASING_PROVIDER")
             return answer
@@ -441,8 +459,7 @@ class LLMGateway:
         # purely by bookkeeping, observed live with two scenes of one volume.
         # Local providers (ollama, a local OpenAI-compatible server) still take
         # the slot, because they do use the same GPU as the renderer.
-        needs_local_gpu = profile.kind != "mock" and (
-            profile.kind == "ollama" or is_loopback_url(config.base_url))
+        needs_local_gpu = prepared["needs_local_gpu"]
         if CURRENT_RESOURCE.get() is not None and needs_local_gpu:
             raise LLMNotConfigured("AGENT_STAGE_REQUIRES_PREVIOUS_MODEL_RELEASE")
         if not needs_local_gpu:
@@ -454,17 +471,13 @@ class LLMGateway:
                 make_session_factory(db.get_bind()),
                 "AGENT",
                 1,
-                release_models=partial(release_text_model, config),
+                release_models=partial(release_text_model, prepared["config"]),
                 wait_seconds=300,
                 on_acquired=(lambda _identity: on_progress("PREPARING_PROVIDER")) if on_progress else None,
             ):
                 response = send()
         if on_progress:
             on_progress("VALIDATING_RESULT")
-        if budget_evidence is not None:
-            response.raw_meta["output_budget"] = budget_evidence
-            if precompiled is not None:
-                response.raw_meta["precompiled_request"] = precompiled.fingerprint
         return response
 
     def test_profile(self, profile: ProviderProfile, *, api_key: str | None = None) -> dict[str, Any]:

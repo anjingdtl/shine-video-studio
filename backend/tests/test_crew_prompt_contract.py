@@ -291,7 +291,8 @@ def test_a_plan_built_from_the_prompt_is_accepted(studio):
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"] == "PROPOSED", body
-    assert calls == ["ScriptBreakdown", "DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan"]
+    assert calls == ["ScriptBreakdown", "DirectorialPlan", "CameraPlan",
+                     "ContinuityReport", "ContinuityReport", "EditIntentPlan"]
 
 
 def test_a_natural_tail_still_breaks_the_chain(studio):

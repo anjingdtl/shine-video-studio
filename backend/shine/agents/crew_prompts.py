@@ -514,7 +514,7 @@ def crew_prompt(
                 "server rejects."
             )
     if role == "continuity_supervisor":
-        parts.append(
+        _section_scope = (
             "You review ONE section's shots at a time, exactly as the scriptwriter breaks down "
             "only this section's brief. Your authority is the internal continuity of THIS "
             "section's own beats and shots, plus the carry-over from the preceding section's end "
@@ -530,7 +530,7 @@ def crew_prompt(
             "section's own shots are internally consistent and renderable, return an empty "
             "issues array with proceed_to_preflight even if the whole work is not yet complete."
         )
-        parts.append(
+        _policy_and_timing = (
             "The issues array is for concrete continuity CONFLICTS only: contradictions between "
             "the shots, the script and the locked story facts that make a shot unrenderable or "
             "would change the story. Style suggestions, reference-set opinions and risk notes "
@@ -552,7 +552,7 @@ def crew_prompt(
             "shot that uses that beat. Write each issue in Simplified Chinese for the user; "
             "preserve shot IDs, asset IDs and technical mode names exactly."
         )
-        parts.append(
+        _physical_rules = (
             "When judging continuity, check the physical staging: each performer's position, costume "
             "and held props carried across the boundary; feet on the ground and bodies in plausible "
             "contact with the set; left/right screen direction preserved; an action begun in one shot "
@@ -561,14 +561,51 @@ def crew_prompt(
             "(a character in two places at once, a prop that vanishes mid-action, a reversed screen "
             "direction) as a conflict with the shot ids; a mere stylistic preference is not a conflict."
         )
-        if timing:
+        _timing_rules = (
+            "A segment's duration and its cut offsets are fixed by the editorial_timing_plan and "
+            "are never a conflict by themselves. Check that every spoken line ends inside the "
+            "interval of the editorial shot that carries it: a line that does not fit is a real "
+            "conflict under rule H3_TIMING and must be reported, with the shot id and the line's "
+            "timecodes."
+        )
+        if tool == "continuity_timing":
+            parts.append(_section_scope)
+            parts.append(_policy_and_timing)
             parts.append(
-                "A segment's duration and its cut offsets are fixed by the editorial_timing_plan and "
-                "are never a conflict by themselves. Check that every spoken line ends inside the "
-                "interval of the editorial shot that carries it: a line that does not fit is a real "
-                "conflict under rule H3_TIMING and must be reported, with the shot id and the line's "
-                "timecodes."
+                "Your scope in this parallel pass is ONLY dialogue timing, segment cut offsets, "
+                "speaker-to-asset coverage, and reference-set policy compliance. Do NOT evaluate "
+                "camera framing, lighting, movement, axis, or physical/prop continuity — a parallel "
+                "reviewer checks those. Order and prefix every reported issue with its shot id "
+                "(for example '[I1] ...') in shot sequence order."
             )
+            if timing:
+                parts.append(_timing_rules)
+        elif tool == "continuity_physical":
+            parts.append(_section_scope)
+            parts.append(
+                "The issues array is for concrete physical and spatial continuity CONFLICTS only. "
+                "Style suggestions and risk notes are not conflicts: report an empty issues array "
+                "with proceed_to_preflight when the sequence is physically coherent. For "
+                "continuity.mode=last_frame, the renderer later derives a soft opening reference from "
+                "the passed predecessor. With continuity.mode=cut, judge continuity of the story and "
+                "visual geography while allowing the planned change of framing. Write each issue in "
+                "Simplified Chinese for the user; preserve shot IDs, asset IDs and technical mode "
+                "names exactly."
+            )
+            parts.append(_physical_rules)
+            parts.append(
+                "Your scope in this parallel pass is ONLY physical staging, props, costumes, spatial "
+                "geography, gaze/axis and CameraPlan alignment. Do NOT evaluate dialogue timecodes, "
+                "reference-set policy or missing masters — a parallel reviewer checks those. Order and "
+                "prefix every reported issue with the shot id(s) in shot sequence order (for example "
+                "'[I1] ...' or '[I1->I2] ...')."
+            )
+        else:
+            parts.append(_section_scope)
+            parts.append(_policy_and_timing)
+            parts.append(_physical_rules)
+            if timing:
+                parts.append(_timing_rules)
     if role == "qc_reviewer":
         parts.append(
             "Compare ONLY the two text inputs, frozen Style and ShotSpec. No images or audio are "

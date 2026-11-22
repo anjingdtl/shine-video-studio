@@ -415,8 +415,10 @@ def test_conflict_repair_creates_new_plan_then_rechecks_without_mutating_origina
     client.app.state.mock_llm_responder = respond
     response = _storyboard_request(client, project_id)
     assert response.json()["status"] == "PROPOSED", response.text
-    assert calls == ["ScriptBreakdown", "DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan",
-                     "ContinuityArbitration", "DirectorialPlan", "CameraPlan", "ContinuityReport", "EditIntentPlan"]
+    assert calls == ["ScriptBreakdown", "DirectorialPlan", "CameraPlan",
+                     "ContinuityReport", "ContinuityReport", "EditIntentPlan",
+                     "ContinuityArbitration", "DirectorialPlan", "CameraPlan",
+                     "ContinuityReport", "ContinuityReport", "EditIntentPlan"]
     with factory() as db:
         plans = list(db.scalars(select(AgentArtifact).where(AgentArtifact.project_id == project_id,
                                                             AgentArtifact.kind == "DirectorialPlan")))
@@ -819,8 +821,10 @@ def test_continuity_reviewer_receives_the_checked_reference_set_policy(studio):
                 shot["asset_ids"] = [registry["lin_asset"], registry["scene_asset"],
                                      registry["voice_asset"]]
         if title == "ContinuityReport":
-            captured["system"] = messages[0].content
-            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            ctx = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            if "continuity_policy" in ctx:
+                captured["system"] = messages[0].content
+                captured["context"] = ctx
         return payload
 
     client.app.state.mock_llm_responder = respond
@@ -864,7 +868,9 @@ def test_reference_set_policy_treats_the_voice_master_as_optional(studio):
             for shot in payload["shots"]:
                 shot["asset_ids"] = [registry["lin_asset"], registry["scene_asset"]]
         if schema.get("title") == "ContinuityReport":
-            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            ctx = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            if "continuity_policy" in ctx:
+                captured["context"] = ctx
         return payload
 
     client.app.state.mock_llm_responder = respond
@@ -993,12 +999,15 @@ def test_a_missing_master_is_a_material_request_and_never_blocks_the_unit(studio
     def respond(messages, schema):
         title = schema.get("title")
         if title == "ContinuityReport":
-            captured["context"] = json.JSONDecoder().raw_decode(messages[1].content)[0]
-            return {
-                "issues": ["shot_I1：reference_set_status.policy_compliant=false，asset_ids 为空："
-                           "缺少主素材 character 与 scene|picture，无法形成参考 H3 Ref2VA 的开场参考绑定"],
-                "recommendation": "needs_review",
-            }
+            ctx = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            if "continuity_policy" in ctx:
+                captured["context"] = ctx
+                return {
+                    "issues": ["shot_I1：reference_set_status.policy_compliant=false，asset_ids 为空："
+                               "缺少主素材 character 与 scene|picture，无法形成参考 H3 Ref2VA 的开场参考绑定"],
+                    "recommendation": "needs_review",
+                }
+            return {"issues": [], "recommendation": "proceed_to_preflight"}
         payload = original(messages, schema)
         if title == "DirectorialPlan":
             # The shot has no master yet: the material stage still owes it.
@@ -1054,3 +1063,88 @@ def test_a_real_continuity_conflict_still_blocks_the_unit(studio):
     body = response.json()
     assert body["status"] == "NEEDS_REVIEW", body
     assert body.get("continuity_issues"), body
+
+
+def test_continuity_splits_into_two_parallel_lanes_with_slim_contexts_and_shot_ordered_merge(studio, monkeypatch):
+    """continuity_supervisor runs two orthogonal passes in parallel on remote routes,
+    each seeing only its own inputs, then merges issues deterministically in shot order."""
+    import threading
+
+    from shine.llm.base import LLMResponse
+    from shine.llm.openai_compatible import OpenAICompatibleProvider
+
+    client, factory, _tmp_path, _settings = studio
+    project_id, _style, registry = _studio_with_chain(client)
+    remote = client.post("/api/v1/provider-profiles", json={
+        "name": "remote-continuity",
+        "kind": "openai_compatible",
+        "base_url": "https://continuity.example.invalid/v1",
+        "model": "MiniMax-M3.1-Flash",
+        "timeout_s": 60.0,
+        "max_retries": 0,
+        "temperature": 0.2,
+        "enabled": True,
+    })
+    assert remote.status_code == 201, remote.text
+    assert client.put("/api/v1/agent-routes", json={
+        "role": "continuity_supervisor", "provider_profile_id": remote.json()["id"],
+    }).status_code == 200
+
+    barrier = threading.Barrier(2, timeout=3.0)
+    captured_contexts: dict[str, dict] = {}
+    lock = threading.Lock()
+
+    def fake_complete(self, messages, *, schema=None, json_mode=True):
+        sys_text = messages[0].content
+        ctx = json.JSONDecoder().raw_decode(messages[1].content)[0]
+        barrier.wait()
+        with lock:
+            if "ONLY dialogue timing" in sys_text:
+                captured_contexts["timing"] = ctx
+                parsed = {
+                    "issues": [
+                        "[I2] 台词结束时间超出镜头窗口",
+                        "[I1] 说话人缺少角色绑定",
+                    ],
+                    "recommendation": "needs_review",
+                }
+            else:
+                captured_contexts["physical"] = ctx
+                parsed = {
+                    "issues": [
+                        "[I2] 手持信件在镜头切换后消失",
+                        "[I1] 人物视线方向前后矛盾",
+                        "[I1] 说话人缺少角色绑定",
+                    ],
+                    "recommendation": "needs_review",
+                }
+        return LLMResponse(
+            text=json.dumps(parsed, ensure_ascii=False),
+            parsed=parsed,
+            model=self.config.model,
+            latency_ms=120,
+            usage={"prompt_tokens": 100, "completion_tokens": 30},
+            raw_meta={"http_status": 200, "is_mock": True},
+        )
+
+    monkeypatch.setattr(OpenAICompatibleProvider, "complete", fake_complete)
+    client.app.state.mock_llm_responder = _responder(registry)
+
+    response = _storyboard_request(client, project_id)
+    assert response.status_code == 201, response.text
+    body = response.json()
+
+    timing_kinds = {item["kind"] for item in captured_contexts["timing"]["inputs"]}
+    physical_kinds = {item["kind"] for item in captured_contexts["physical"]["inputs"]}
+    assert timing_kinds == {"ScriptBreakdown", "DirectorialPlan"}
+    assert "continuity_policy" in captured_contexts["timing"]
+    assert physical_kinds == {"DirectorialPlan", "CameraPlan"}
+    assert "continuity_policy" not in captured_contexts["physical"]
+
+    assert body["continuity_issues"] == [
+        "[I1] 说话人缺少角色绑定",
+        "[I1] 人物视线方向前后矛盾",
+        "[I2] 台词结束时间超出镜头窗口",
+        "[I2] 手持信件在镜头切换后消失",
+    ]
+

@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -24,6 +25,7 @@ from shine.agents.editorial_timing import (
 from shine.agents.film_contracts import (
     CameraPlan,
     ContinuityArbitration,
+    ContinuityReport,
     DirectorialPlan,
     EditDecisionList,
     EditIntentPlan,
@@ -704,6 +706,266 @@ def _storyboard_memory_view(db, project_id: str, *, role: str) -> dict | None:
         return None
 
 
+def merge_continuity_reports(
+    directorial_plan: dict,
+    timing_report: ContinuityReport,
+    physical_report: ContinuityReport,
+) -> ContinuityReport:
+    """Deterministically merge the two parallel continuity passes in shot order."""
+    shots = list((directorial_plan or {}).get("shots") or [])
+    shot_order = {str(s["id"]): idx for idx, s in enumerate(shots) if s.get("id")}
+    beat_to_shot: dict[str, int] = {}
+    for idx, shot in enumerate(shots):
+        if shot.get("beat_id"):
+            beat_to_shot.setdefault(str(shot["beat_id"]), idx)
+        for cut in shot.get("cuts") or []:
+            if cut.get("beat_id"):
+                beat_to_shot.setdefault(str(cut["beat_id"]), idx)
+
+    shot_patterns = [(sid, re.compile(rf"(?<![A-Za-z0-9_]){re.escape(sid)}(?![A-Za-z0-9_])"), idx)
+                     for sid, idx in shot_order.items()]
+    beat_patterns = [(bid, re.compile(rf"(?<![A-Za-z0-9_]){re.escape(bid)}(?![A-Za-z0-9_])"), idx)
+                     for bid, idx in beat_to_shot.items()]
+    fallback_idx = len(shots)
+
+    def _sort_key(item: tuple[str, int, int]) -> tuple[int, int, int]:
+        issue, lane_rank, pos = item
+        matched_shots = [idx for _sid, pat, idx in shot_patterns if pat.search(issue)]
+        if matched_shots:
+            return (min(matched_shots), lane_rank, pos)
+        matched_beats = [idx for _bid, pat, idx in beat_patterns if pat.search(issue)]
+        if matched_beats:
+            return (min(matched_beats), lane_rank, pos)
+        return (fallback_idx, lane_rank, pos)
+
+    tagged: list[tuple[str, int, int]] = []
+    for lane_rank, report in ((0, timing_report), (1, physical_report)):
+        for pos, raw in enumerate(report.issues):
+            text_val = raw.strip()
+            if text_val:
+                tagged.append((text_val, lane_rank, pos))
+    tagged.sort(key=_sort_key)
+
+    merged_issues: list[str] = []
+    seen_norm: set[str] = set()
+    for text_val, _lane, _pos in tagged:
+        norm = re.sub(r"\s+", " ", text_val).strip()
+        if norm in seen_norm:
+            continue
+        seen_norm.add(norm)
+        merged_issues.append(text_val)
+
+    needs_review = (
+        bool(merged_issues)
+        or timing_report.recommendation == "needs_review"
+        or physical_report.recommendation == "needs_review"
+    )
+    return ContinuityReport(
+        issues=merged_issues,
+        recommendation="needs_review" if needs_review else "proceed_to_preflight",
+    )
+
+
+def _load_script_from_director(
+    db: Session,
+    project_id: str,
+    inputs: list[AgentArtifact],
+) -> AgentArtifact | None:
+    """Resolve ScriptBreakdown from inputs, or via DirectorialPlan's upstream revision."""
+    script = next((a for a in inputs if a.kind == "ScriptBreakdown"), None)
+    if script is not None:
+        return script
+    director = next((a for a in inputs if a.kind == "DirectorialPlan"), None)
+    if director is None:
+        return None
+    for rev_id in director.input_revision_ids or []:
+        cand = db.get(AgentArtifact, rev_id)
+        if cand is not None and cand.project_id == project_id and not cand.stale and cand.kind == "ScriptBreakdown":
+            if digest(cand.payload_json) == cand.sha256:
+                return cand
+    return None
+
+
+def _continuity_lane_context(
+    db: Session,
+    project_id: str,
+    base_context: dict,
+    inputs: list[AgentArtifact],
+    lane_tool: str,
+) -> tuple[dict, list[str]]:
+    """Build a focused, slim context for one orthogonal continuity sub-agent."""
+    script = _load_script_from_director(db, project_id, inputs)
+    director = next(a for a in inputs if a.kind == "DirectorialPlan")
+    camera = next((a for a in inputs if a.kind == "CameraPlan"), None)
+
+    if lane_tool == "continuity_timing":
+        lane_artifacts = [a for a in (script, director) if a is not None]
+        lane_ctx = {
+            "brief": base_context["brief"],
+            "locked_story_facts": base_context["locked_story_facts"],
+            "style_version_id": base_context["style_version_id"],
+            "style": base_context["style"],
+            "style_hash": base_context["style_hash"],
+            "assets": base_context["assets"],
+            "inputs": [{"id": a.id, "kind": a.kind, "sha256": a.sha256, "payload": a.payload_json}
+                       for a in lane_artifacts],
+            "rules": base_context["rules"],
+            "rulepack_id": base_context["rulepack_id"],
+            "rulepack_hash": base_context["rulepack_hash"],
+            "eligible_edits": [],
+            "continuity_policy": base_context.get("continuity_policy"),
+            **({"max_shot_seconds": base_context["max_shot_seconds"]}
+               if "max_shot_seconds" in base_context else {}),
+            **({"editorial_timing": base_context["editorial_timing"],
+                "editorial_timing_plan": base_context["editorial_timing_plan"]}
+               if "editorial_timing_plan" in base_context else {}),
+            **({"production_context": base_context["production_context"]}
+               if "production_context" in base_context else {}),
+            **({"unit_target_seconds": base_context["unit_target_seconds"]}
+               if "unit_target_seconds" in base_context else {}),
+        }
+        return lane_ctx, [a.id for a in lane_artifacts]
+
+    if lane_tool == "continuity_physical":
+        lane_artifacts = [a for a in (director, camera) if a is not None]
+        lane_ctx = {
+            "brief": base_context["brief"],
+            "locked_story_facts": base_context["locked_story_facts"],
+            "style_version_id": base_context["style_version_id"],
+            "style": base_context["style"],
+            "style_hash": base_context["style_hash"],
+            "director_style": base_context.get("director_style"),
+            "assets": base_context["assets"],
+            "inputs": [{"id": a.id, "kind": a.kind, "sha256": a.sha256, "payload": a.payload_json}
+                       for a in lane_artifacts],
+            "rules": base_context["rules"],
+            "rulepack_id": base_context["rulepack_id"],
+            "rulepack_hash": base_context["rulepack_hash"],
+            "eligible_edits": [],
+            **({"max_shot_seconds": base_context["max_shot_seconds"]}
+               if "max_shot_seconds" in base_context else {}),
+            **({"production_context": base_context["production_context"]}
+               if "production_context" in base_context else {}),
+            **({"unit_target_seconds": base_context["unit_target_seconds"]}
+               if "unit_target_seconds" in base_context else {}),
+        }
+        return lane_ctx, [a.id for a in lane_artifacts]
+
+    raise ValueError("ROLE_OR_TOOL_DENIED")
+
+
+def _record_task_failure(db: Session, task_id: str, role: str, exc: Exception) -> ValueError:
+    """Persist the authoritative failure classification for a crew task and raise its named code."""
+    from shine.agents.execution import UNKNOWN_CODES, AgentRequestBlocked, rejection_reason
+
+    db.rollback()
+    task = db.get(AgentTaskRecord, task_id)
+    if isinstance(exc, ValueError | ValidationError | LLMError):
+        external_outcome = (
+            exc.details.get("external_outcome")
+            if isinstance(exc, LLMError) else None
+        )
+        phase = task.trace.get("phase")
+        if (isinstance(exc, LLMError) and exc.code in UNKNOWN_CODES
+                and external_outcome != "NOT_SENT"):
+            external_outcome = "UNKNOWN"
+        elif external_outcome not in {"NOT_SENT", "UNKNOWN", "RESPONSE_RECEIVED"}:
+            if (task.trace.get("received_result_sha256")
+                    or phase == "VALIDATING_RESULT"
+                    or isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int)
+                    or isinstance(exc, LLMError) and isinstance(exc.details.get("http_status"), int)):
+                external_outcome = "RESPONSE_RECEIVED"
+            elif phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}:
+                external_outcome = "NOT_SENT"
+            else:
+                external_outcome = "UNKNOWN"
+        uncertain = external_outcome == "UNKNOWN" and not task.trace.get("is_mock")
+        task.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
+        task.state_version += 1
+        task.error_code = exc.code if isinstance(exc, LLMError) else "CONTRACT_OR_POLICY_REJECTED"
+        diagnostic = ("schema_validation" if isinstance(exc, ValidationError) else
+                      "provider_format" if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT" else
+                      "provider_error" if isinstance(exc, LLMError) else "contract_or_policy")
+        schema_errors = None
+        if isinstance(exc, ValidationError):
+            schema_errors = [
+                {"path": ".".join(str(part) for part in err.get("loc", ())),
+                 "type": err.get("type")}
+                for err in exc.errors()[:20]
+            ]
+        _transport_evidence = {}
+        if isinstance(exc, LLMError):
+            _transport_evidence = {key: exc.details[key] for key in (
+                "error_type", "streamed", "first_event_ms", "last_event_ms",
+                "partial", "headers_received") if key in exc.details}
+        task.trace = {**task.trace, "automatic_replay": False,
+                      "diagnostic_category": diagnostic,
+                      **({"transport": _transport_evidence} if _transport_evidence else {}),
+                      **({"schema_errors": schema_errors} if schema_errors else {}),
+                      **({"http_status": exc.details["status"]}
+                         if isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int) else {}),
+                      **({"provider_code": exc.details["provider_code"]}
+                         if isinstance(exc, LLMError)
+                         and isinstance(exc.details.get("provider_code"), int) else {}),
+                      **({"provider_schema_path": exc.details["path"],
+                          "provider_schema_validator": exc.details["validator"]}
+                         if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
+                         and isinstance(exc.details.get("path"), str) else {}),
+                      **({"visual_field": exc.details["visual_field"]}
+                         if isinstance(getattr(exc, "details", None), dict)
+                         and isinstance(exc.details.get("visual_field"), str) else {}),
+                      **({"offending_line": exc.details["offending_line"][:200],
+                          "offending_speaker": exc.details.get("speaker")}
+                         if isinstance(getattr(exc, "details", None), dict)
+                         and isinstance(exc.details.get("offending_line"), str) else {}),
+                      **({"provider_finish_reason": exc.details["finish_reason"]}
+                         if isinstance(exc, LLMError)
+                         and isinstance(exc.details.get("finish_reason"), str) else {}),
+                      **({"provider_text_chars": len(exc.details["provider_text"])}
+                         if isinstance(exc, LLMError)
+                         and isinstance(exc.details.get("provider_text"), str) else {}),
+                      "external_outcome": external_outcome,
+                      **({"blocking_task": exc.blocking}
+                         if isinstance(exc, AgentRequestBlocked) else {}),
+                      "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
+        db.commit()
+        out = ValueError(task.error_code)
+        out.task_id = task.id
+        return out
+
+    phase = task.trace.get("phase")
+    pre_request = phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
+    unknown = (not pre_request and not task.trace.get("is_mock")
+               and not task.trace.get("received_result_sha256"))
+    if pre_request:
+        detail = getattr(exc, "detail", None)
+        safe_detail = (
+            detail if isinstance(detail, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", detail) else None
+        )
+        logger.warning("film_crew_pre_request_failed role=%s safe_detail=%s exc_type=%s",
+                       role, safe_detail, type(exc).__name__, exc_info=True)
+        task.status = "REJECTED"
+        task.state_version += 1
+        task.error_code = "AGENT_PRE_REQUEST_FAILED"
+        task.trace = {**task.trace, "automatic_replay": False,
+                      "diagnostic_category": "pre_request_resource",
+                      "external_outcome": "NOT_SENT",
+                      "rejection_reason_code": task.error_code,
+                      **({"pre_request_error_code": safe_detail} if safe_detail else {})}
+    else:
+        logger.exception("film_crew_fault role=%s task=%s phase=%s", role, task.id, phase)
+        task.status = "NEEDS_REVIEW" if unknown else "FAILED"
+        task.state_version += 1
+        task.error_code = "AGENT_CALL_FAILED"
+        task.trace = {**task.trace, "automatic_replay": False,
+                      "error_type": type(exc).__name__,
+                      **({"external_outcome": "UNKNOWN"} if unknown else {})}
+    db.commit()
+    out = ValueError(task.error_code)
+    out.task_id = task.id
+    return out
+
+
 class FilmAgentDispatcher:
     def __init__(self, gateway: LLMGateway, data_dir: Path | None = None,
                  asset_root: Path | None = None):
@@ -967,6 +1229,28 @@ class FilmAgentDispatcher:
                               or bounded_config.generation_options.get("max_tokens"))
         if bounded_config.kind == "anthropic":
             agent_output_limit = min(4096, bounded_config.max_output_tokens or 4096)
+
+        if role == "continuity_supervisor" and body.tool == "propose":
+            return self._run_parallel_continuity(
+                db,
+                project_id,
+                project=project,
+                body=body,
+                inputs=inputs,
+                base_context=context,
+                pack=pack,
+                profile=profile,
+                bounded_config=bounded_config,
+                model_context_metadata=model_context_metadata,
+                agent_output_limit=agent_output_limit,
+                cache_state=cache_state,
+                storyboard_request_sha256=storyboard_request_sha256,
+                repair_contract_note=repair_contract_note,
+                authorize_replay_task_id=authorize_replay_task_id,
+                escalate_output_budget=escalate_output_budget,
+                refusal=refusal,
+            )
+
         context_payload_utf8_bytes = len(
             json.dumps(model_context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
@@ -1297,143 +1581,441 @@ class FilmAgentDispatcher:
             )
             db.commit()
             return artifact
-        except (ValueError, ValidationError, LLMError) as exc:
-            from shine.agents.execution import UNKNOWN_CODES, AgentRequestBlocked, rejection_reason
+        except Exception as exc:  # noqa: BLE001 - classified in _record_task_failure
+            raise _record_task_failure(db, task.id, role, exc) from None
 
-            db.rollback()
-            task = db.get(AgentTaskRecord, task.id)
-            external_outcome = (
-                exc.details.get("external_outcome")
-                if isinstance(exc, LLMError) else None
+    @staticmethod
+    def _find_reusable_continuity_lane(
+        db: Session,
+        project_id: str,
+        *,
+        lane_kind: str,
+        lane_tool: str,
+        input_hash: str,
+        style_version_id: str | None,
+        asset_manifest_hash: str,
+        rulepack_hash: str,
+        contract_hash: str,
+        provider_snapshot: dict,
+    ) -> tuple[AgentArtifact, AgentTaskRecord] | None:
+        """Return an intact, non-stale sub-artifact when the exact lane input already succeeded."""
+        candidates = db.scalars(
+            select(AgentArtifact)
+            .where(
+                AgentArtifact.project_id == project_id,
+                AgentArtifact.kind == lane_kind,
+                AgentArtifact.stale.is_(False),
             )
-            phase = task.trace.get("phase")
-            if (isinstance(exc, LLMError) and exc.code in UNKNOWN_CODES
-                    and external_outcome != "NOT_SENT"):
-                external_outcome = "UNKNOWN"
-            elif external_outcome not in {"NOT_SENT", "UNKNOWN", "RESPONSE_RECEIVED"}:
-                if (task.trace.get("received_result_sha256")
-                        or phase == "VALIDATING_RESULT"
-                        or isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int)
-                        or isinstance(exc, LLMError) and isinstance(exc.details.get("http_status"), int)):
-                    # The streamed transport meta keys the answer by
-                    # ``http_status`` (not ``status``): a 200 stream that ended
-                    # with finish_reason=length is a received, decided refusal.
-                    # Without this the 2026-11-15 journey's truncated answer was
-                    # mis-classified UNKNOWN and its episode retry had no lawful
-                    # path forward.
-                    external_outcome = "RESPONSE_RECEIVED"
-                elif phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}:
-                    external_outcome = "NOT_SENT"
-                else:
-                    external_outcome = "UNKNOWN"
-            uncertain = external_outcome == "UNKNOWN" and not task.trace.get("is_mock")
-            task.status = "NEEDS_REVIEW" if uncertain else "REJECTED"
-            task.state_version += 1
-            # Never persist provider text, prompts or exception strings that can contain secrets.
-            task.error_code = exc.code if isinstance(exc, LLMError) else "CONTRACT_OR_POLICY_REJECTED"
-            diagnostic = ("schema_validation" if isinstance(exc, ValidationError) else
-                          "provider_format" if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT" else
-                          "provider_error" if isinstance(exc, LLMError) else "contract_or_policy")
-            # The failing field paths make a schema refusal diagnosable and let a
-            # bounded retry target exactly them.  Only the location and the rule
-            # type are kept — never the rejected value or any provider text.
-            schema_errors = None
-            if isinstance(exc, ValidationError):
-                schema_errors = [
-                    {"path": ".".join(str(part) for part in err.get("loc", ())),
-                     "type": err.get("type")}
-                    for err in exc.errors()[:20]
-                ]
-            # Durable transport evidence (no provider text, no secret): the
-            # underlying error class and the event timings tell a read-ceiling
-            # cut apart from a peer/proxy close, so the next occurrence is
-            # diagnosable from the ledger instead of guesswork.
-            _transport_evidence = {}
-            if isinstance(exc, LLMError):
-                _transport_evidence = {key: exc.details[key] for key in (
-                    "error_type", "streamed", "first_event_ms", "last_event_ms",
-                    "partial", "headers_received") if key in exc.details}
-            task.trace = {**task.trace, "automatic_replay": False,
-                          "diagnostic_category": diagnostic,
-                          **({"transport": _transport_evidence} if _transport_evidence else {}),
-                          **({"schema_errors": schema_errors} if schema_errors else {}),
-                          **({"http_status": exc.details["status"]}
-                             if isinstance(exc, LLMError) and isinstance(exc.details.get("status"), int) else {}),
-                          **({"provider_code": exc.details["provider_code"]}
-                             if isinstance(exc, LLMError)
-                             and isinstance(exc.details.get("provider_code"), int) else {}),
-                          **({"provider_schema_path": exc.details["path"],
-                              "provider_schema_validator": exc.details["validator"]}
-                             if isinstance(exc, LLMError) and exc.code == "LLM_FORMAT"
-                             and isinstance(exc.details.get("path"), str) else {}),
-                          **({"visual_field": exc.details["visual_field"]}
-                             if isinstance(getattr(exc, "details", None), dict)
-                             and isinstance(exc.details.get("visual_field"), str) else {}),
-                          # The single refused line is the repair target: without
-                          # it a retry cannot know which line to copy or drop.
-                          **({"offending_line": exc.details["offending_line"][:200],
-                              "offending_speaker": exc.details.get("speaker")}
-                             if isinstance(getattr(exc, "details", None), dict)
-                             and isinstance(exc.details.get("offending_line"), str) else {}),
-                          # Why the envelope failed is diagnosable without
-                          # storing the answer: a length stop means the budget
-                          # truncated it, an empty path means malformed JSON.
-                          # Neither the text nor a prompt is ever persisted.
-                          **({"provider_finish_reason": exc.details["finish_reason"]}
-                             if isinstance(exc, LLMError)
-                             and isinstance(exc.details.get("finish_reason"), str) else {}),
-                          **({"provider_text_chars": len(exc.details["provider_text"])}
-                             if isinstance(exc, LLMError)
-                             and isinstance(exc.details.get("provider_text"), str) else {}),
-                          "external_outcome": external_outcome,
-                          # The gate names the record that holds the identity;
-                          # without it the panel could only offer a retry the
-                          # gate would refuse again.
-                          **({"blocking_task": exc.blocking}
-                             if isinstance(exc, AgentRequestBlocked) else {}),
-                          "rejection_reason_code": exc.code if isinstance(exc, LLMError) else rejection_reason(exc)}
-            db.commit()
-            raise ValueError(task.error_code) from None
-        except Exception as exc:
-            db.rollback()
-            task = db.get(AgentTaskRecord, task.id)
-            phase = task.trace.get("phase")
-            # The gateway persists WAITING_RESOURCE before queuing and only
-            # advances to WAITING_PROVIDER after the local resource slot has
-            # been admitted and pre-call release has completed.  A failure
-            # before that durable boundary cannot have reached the provider.
-            pre_request = phase in {"PREPARING", "WAITING_RESOURCE", "PREPARING_PROVIDER"}
-            unknown = (not pre_request and not task.trace.get("is_mock")
-                       and not task.trace.get("received_result_sha256"))
-            if pre_request:
-                detail = getattr(exc, "detail", None)
-                safe_detail = (
-                    detail if isinstance(detail, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{1,79}", detail) else None
+            .order_by(AgentArtifact.created_at.desc())
+        ).all()
+        for art in candidates:
+            if digest(art.payload_json) != art.sha256:
+                continue
+            task = db.get(AgentTaskRecord, art.source_task_id)
+            if (
+                not task
+                or task.status != "SUCCEEDED"
+                or task.role_id != "continuity_supervisor"
+                or (task.trace or {}).get("tool") != lane_tool
+                or task.input_hash != input_hash
+                or task.style_version_id != style_version_id
+                or task.asset_manifest_hash != asset_manifest_hash
+                or task.rulepack_hash != rulepack_hash
+                or (task.trace or {}).get("review_contract_sha256") != contract_hash
+                or (task.trace or {}).get("review_provider") != provider_snapshot
+            ):
+                continue
+            return art, task
+        return None
+
+    def _run_parallel_continuity(
+        self,
+        db: Session,
+        project_id: str,
+        *,
+        project,
+        body: FilmRunRequest,
+        inputs: list[AgentArtifact],
+        base_context: dict,
+        pack,
+        profile,
+        bounded_config,
+        model_context_metadata: dict,
+        agent_output_limit: int | None,
+        cache_state: list[dict],
+        storyboard_request_sha256: str | None,
+        repair_contract_note: str | None,
+        authorize_replay_task_id: str | None,
+        escalate_output_budget: bool,
+        refusal: dict | None,
+    ) -> AgentArtifact:
+        """Run orthogonal timing/policy and physical/camera continuity passes in parallel,
+        then merge deterministically in shot sequence order into one ContinuityReport."""
+        from shine.agents.crew_salvage import parse_with_salvage
+        from shine.agents.execution import guard_request
+        from shine.literary.budget import plan_call_budget
+        from shine.literary.requests import compile_request
+        from shine.llm.transport_policy import policy_for
+
+        contract_hash = digest(ContinuityReport.model_json_schema())
+        provider_snapshot = text_provider_snapshot(profile)
+        asset_manifest_hash = digest(base_context["assets"])
+        _transport_policy = policy_for(bounded_config)
+        _effective_timeout_s = (max(_transport_policy.first_event_s, _transport_policy.idle_s)
+                                if _transport_policy.streaming else profile.timeout_s)
+
+        lanes_meta = (
+            ("continuity_timing", "ContinuityTimingReport"),
+            ("continuity_physical", "ContinuityPhysicalReport"),
+        )
+        reused: dict[str, tuple[AgentArtifact, AgentTaskRecord]] = {}
+        pending: list[dict] = []
+
+        for lane_tool, lane_kind in lanes_meta:
+            lane_ctx, lane_rev_ids = _continuity_lane_context(db, project_id, base_context, inputs, lane_tool)
+            lane_input_hash = digest(lane_ctx)
+            if not body.supersedes_artifact_id:
+                hit = self._find_reusable_continuity_lane(
+                    db,
+                    project_id,
+                    lane_kind=lane_kind,
+                    lane_tool=lane_tool,
+                    input_hash=lane_input_hash,
+                    style_version_id=project.frozen_style_version_id,
+                    asset_manifest_hash=asset_manifest_hash,
+                    rulepack_hash=pack.sha256,
+                    contract_hash=contract_hash,
+                    provider_snapshot=provider_snapshot,
                 )
-                # The refusal is persisted without the exception text, but the
-                # operator log still needs the cause: an undiagnosable
-                # NOT_SENT used to hide the real broken step.
-                logger.warning("film_crew_pre_request_failed role=%s safe_detail=%s exc_type=%s",
-                               role, safe_detail, type(exc).__name__, exc_info=True)
-                task.status = "REJECTED"
-                task.state_version += 1
-                task.error_code = "AGENT_PRE_REQUEST_FAILED"
-                task.trace = {**task.trace, "automatic_replay": False,
-                              "diagnostic_category": "pre_request_resource",
-                              "external_outcome": "NOT_SENT",
-                              "rejection_reason_code": task.error_code,
-                              **({"pre_request_error_code": safe_detail} if safe_detail else {})}
-            else:
-                # The answer arrived but something after it broke.  Only the
-                # exception *type* is persisted: a class name carries no prompt
-                # and no secret, and without it this record used to say nothing
-                # more useful than "the call failed".
-                logger.exception("film_crew_fault role=%s task=%s phase=%s", role, task.id, phase)
-                task.status = "NEEDS_REVIEW" if unknown else "FAILED"
-                task.state_version += 1
-                task.error_code = "AGENT_CALL_FAILED"
-                task.trace = {**task.trace, "automatic_replay": False,
-                              "error_type": type(exc).__name__,
-                              **({"external_outcome": "UNKNOWN"} if unknown else {})}
+                if hit is not None:
+                    reused[lane_tool] = hit
+                    continue
+            skill_selection = select_skills_for_role(
+                "continuity_supervisor",
+                tool=lane_tool,
+                brief=body.brief,
+                style=lane_ctx.get("style"),
+                inputs=lane_ctx.get("inputs"),
+                assets=lane_ctx.get("assets"),
+                editorial_timing_plan=lane_ctx.get("editorial_timing_plan"),
+                production_context=lane_ctx.get("production_context"),
+            )
+            ctx_bytes = len(json.dumps(lane_ctx, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+            pending.append({
+                "tool": lane_tool,
+                "kind": lane_kind,
+                "context": lane_ctx,
+                "input_revision_ids": lane_rev_ids,
+                "input_hash": lane_input_hash,
+                "ctx_bytes": ctx_bytes,
+                "skill_selection": skill_selection,
+            })
+
+        if pending:
             db.commit()
-            raise ValueError(task.error_code) from None
+            for attempt in range(5):
+                try:
+                    db.execute(text("BEGIN IMMEDIATE"))
+                    break
+                except Exception as exc:  # noqa: BLE001 - sqlite lock race
+                    if "database is locked" not in str(exc).lower() or attempt == 4:
+                        raise
+                    time.sleep(0.4 * (attempt + 1))
+            for item in pending:
+                guard_request(
+                    db, project_id, "continuity_supervisor", item["input_hash"], profile,
+                    contract_hash=contract_hash,
+                    authorize_replay_task_id=authorize_replay_task_id,
+                )
+            for item in pending:
+                task = AgentTaskRecord(
+                    project_id=project_id,
+                    role_id="continuity_supervisor",
+                    input_hash=item["input_hash"],
+                    style_version_id=project.frozen_style_version_id,
+                    asset_manifest_hash=asset_manifest_hash,
+                    rulepack_id=pack.id,
+                    rulepack_hash=pack.sha256,
+                    model_profile_id=profile.id,
+                    model_id=profile.model,
+                    schema_version=ContinuityReport.model_fields["schema_version"].default,
+                    status="RUNNING",
+                    trace={
+                        "tool": item["tool"],
+                        "parent_tool": "propose",
+                        "phase": "PREPARING",
+                        "offline_preview": body.offline_preview,
+                        "remote_text_consent": body.allow_remote_text,
+                        "is_mock": profile.kind == "mock",
+                        "input_revision_ids": item["input_revision_ids"],
+                        **({"production_context": item["context"]["production_context"]}
+                           if body.production_context is not None else {}),
+                        "schema": ContinuityReport.__name__,
+                        "review_contract_sha256": contract_hash,
+                        "model_context": {
+                            **model_context_metadata,
+                            "context_payload_utf8_bytes": item["ctx_bytes"],
+                            "agent_output_limit_tokens": agent_output_limit,
+                            "input_policy": "full_context_without_fixed_truncation",
+                        },
+                        **({"storyboard_request_sha256": storyboard_request_sha256}
+                           if storyboard_request_sha256 else {}),
+                        "review_provider": provider_snapshot,
+                        "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]}
+                                         for s in cache_state],
+                        **({"editorial_refusal": refusal} if refusal else {}),
+                        "cinema_skills": item["skill_selection"].as_trace(),
+                    },
+                )
+                db.add(task)
+                item["task"] = task
+            if authorize_replay_task_id:
+                previous = db.get(AgentTaskRecord, authorize_replay_task_id)
+                if previous is not None and previous.status in {"REJECTED", "FAILED"}:
+                    previous.status = "SUPERSEDED"
+                    previous.state_version += 1
+            db.commit()
+
+            def _build_lane_prompt(item: dict, skills_block: str) -> str:
+                prompt_text = crew_prompt(
+                    "continuity_supervisor",
+                    tool=item["tool"],
+                    plan=item["context"].get("editorial_timing_plan"),
+                    max_shot_seconds=item["context"].get("max_shot_seconds"),
+                    unit_target_seconds=item["context"].get("unit_target_seconds"),
+                    cinema_skills_block=skills_block,
+                )
+                if repair_contract_note:
+                    prompt_text += repair_contract_note
+                return prompt_text
+
+            for item in pending:
+                task = item["task"]
+                try:
+                    if refusal:
+                        raise ValueError(refusal["code"])
+                    if body.consent_document_id or body.production_context is not None:
+                        from shine.materialprep import text_consent
+                        source = item["context"].get("production_context") or {}
+                        text_consent.guard(
+                            project_id,
+                            source.get("document_id") or body.consent_document_id,
+                            source.get("document_sha256") or body.consent_document_sha256,
+                            "continuity_supervisor",
+                            text_consent.fingerprint(profile),
+                            self.gateway,
+                        )(db)
+                    sys_prompt = _build_lane_prompt(item, item["skill_selection"].prompt_block)
+                    user_json = json.dumps(item["context"], ensure_ascii=False, separators=(",", ":"))
+                    crew_request = compile_request(
+                        system=sys_prompt, user=user_json, schema=ContinuityReport.model_json_schema(),
+                    )
+                    crew_budget = plan_call_budget(
+                        bounded_config, crew_request, purpose="observation",
+                        output_ceiling=agent_output_limit,
+                        output_floor_tokens=agent_output_limit if escalate_output_budget else None,
+                    )
+                    if not crew_budget.fits and item["skill_selection"].prompt_block:
+                        sys_prompt = _build_lane_prompt(item, "")
+                        crew_request = compile_request(
+                            system=sys_prompt, user=user_json, schema=ContinuityReport.model_json_schema(),
+                        )
+                        crew_budget = plan_call_budget(
+                            bounded_config, crew_request, purpose="observation",
+                            output_ceiling=agent_output_limit,
+                            output_floor_tokens=agent_output_limit if escalate_output_budget else None,
+                        )
+                        task.trace = {
+                            **task.trace,
+                            "cinema_skills": {
+                                **task.trace["cinema_skills"],
+                                "budget_trimmed_to_zero": True,
+                                "selected": [],
+                                "estimated_tokens": 0,
+                            },
+                        }
+                    task.trace = {
+                        **task.trace,
+                        "call_budget": crew_budget.as_dict(),
+                        **({"output_budget_escalated": True} if escalate_output_budget else {}),
+                    }
+                    db.commit()
+                    if not crew_budget.fits:
+                        raise ValueError(str((crew_budget.refusal or {}).get("code")
+                                             or "LLM_CREATIVE_CONTEXT_OVERFLOW"))
+                    budget_arg = {"completion_cap": crew_budget.output_request_tokens,
+                                  "streaming": crew_budget.streaming}
+                    item["crew_request"] = crew_request
+                    item["budget"] = budget_arg
+                    item["prepared"] = self.gateway.prepare_role_call(
+                        db, "continuity_supervisor", precompiled=crew_request, budget=budget_arg,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    raise _record_task_failure(db, task.id, "continuity_supervisor", exc) from None
+
+            can_parallel_remote = (
+                len(pending) > 1
+                and getattr(self.gateway.complete_for_role, "__qualname__", "") == "LLMGateway.complete_for_role"
+                and all(not item["prepared"]["needs_local_gpu"] and item["prepared"]["profile"].kind != "mock"
+                        for item in pending)
+            )
+            outcomes: dict[str, tuple[object | None, Exception | None]] = {}
+            if can_parallel_remote:
+                for item in pending:
+                    task = item["task"]
+                    task.trace = {
+                        **task.trace,
+                        "phase": "WAITING_PROVIDER",
+                        "phase_started_at": utcnow().isoformat(),
+                        "network_timeout_s": _effective_timeout_s,
+                    }
+                db.commit()
+
+                def _call_remote(prepared_call):
+                    return self.gateway.execute_prepared_call(prepared_call)
+
+                with ThreadPoolExecutor(max_workers=len(pending)) as pool:
+                    futures = {item["tool"]: pool.submit(_call_remote, item["prepared"]) for item in pending}
+                    for tool_name, fut in futures.items():
+                        try:
+                            outcomes[tool_name] = (fut.result(), None)
+                        except Exception as exc:  # noqa: BLE001
+                            outcomes[tool_name] = (None, exc)
+            else:
+                for item in pending:
+                    task = item["task"]
+
+                    def _progress(phase: str, _task=task) -> None:
+                        _task.trace = {**_task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
+                                       "network_timeout_s": _effective_timeout_s}
+                        db.commit()
+
+                    try:
+                        resp = self.gateway.complete_for_role(
+                            db,
+                            "continuity_supervisor",
+                            precompiled=item["crew_request"],
+                            budget=item["budget"],
+                            on_progress=_progress,
+                        )
+                        outcomes[item["tool"]] = (resp, None)
+                    except Exception as exc:  # noqa: BLE001
+                        outcomes[item["tool"]] = (None, exc)
+
+            first_error: ValueError | None = None
+            for item in pending:
+                task = item["task"]
+                resp, call_exc = outcomes[item["tool"]]
+                if call_exc is not None:
+                    recorded = _record_task_failure(db, task.id, "continuity_supervisor", call_exc)
+                    if first_error is None:
+                        first_error = recorded
+                    continue
+                try:
+                    task.trace = {
+                        **task.trace,
+                        "phase": "VALIDATING_RESULT",
+                        "received_result_sha256": digest(resp.parsed),
+                        "response_latency_ms": resp.latency_ms,
+                        **{key: resp.raw_meta[key] for key in ("http_status", "provider_code")
+                           if isinstance(resp.raw_meta.get(key), int)},
+                        "response_model_sha256": hashlib.sha256((resp.model or "").encode()).hexdigest(),
+                        "is_mock": bool(task.trace.get("is_mock") or resp.raw_meta.get("is_mock")
+                                        or resp.raw_meta.get("mock")),
+                    }
+                    db.commit()
+                    if body.production_context is not None:
+                        db.expire_all()
+                        from shine.materialprep.story import verified_production_context
+                        verified_production_context(db, project_id, body.brief, body.production_context)
+                    proposal, salvage_notes = parse_with_salvage(resp.parsed, ContinuityReport)
+                    if salvage_notes:
+                        task.trace = {**task.trace, "salvage_notes": salvage_notes}
+                        db.commit()
+                    payload = proposal.model_dump(mode="json")
+                    sub_artifact = AgentArtifact(
+                        project_id=project_id,
+                        kind=item["kind"],
+                        schema_version=proposal.schema_version,
+                        payload_json=payload,
+                        sha256=digest(payload),
+                        producer_role="continuity_supervisor",
+                        source_task_id=task.id,
+                        input_revision_ids=item["input_revision_ids"],
+                    )
+                    db.add(sub_artifact)
+                    task.status = "SUCCEEDED"
+                    task.trace = {
+                        **task.trace,
+                        "phase": "SUCCEEDED",
+                        "is_mock": bool(task.trace.get("is_mock") or resp.raw_meta.get("is_mock")
+                                        or resp.raw_meta.get("mock")),
+                        "latency_ms": resp.latency_ms,
+                        "usage": resp.usage,
+                        "output_hash": sub_artifact.sha256,
+                        "schema_valid": True,
+                    }
+                    db.commit()
+                    reused[item["tool"]] = (sub_artifact, task)
+                except Exception as exc:  # noqa: BLE001
+                    recorded = _record_task_failure(db, task.id, "continuity_supervisor", exc)
+                    if first_error is None:
+                        first_error = recorded
+            if first_error is not None:
+                raise first_error
+
+        timing_art, timing_task = reused["continuity_timing"]
+        physical_art, physical_task = reused["continuity_physical"]
+
+        db.expire_all()
+        project = require_project(db, project_id)
+        if (
+            project.frozen_style_version_id != physical_task.style_version_id
+            or digest(asset_context(db, project_id)) != physical_task.asset_manifest_hash
+        ):
+            raise ValueError("INPUT_CONTEXT_CHANGED_DURING_CALL")
+        load_inputs(db, project_id, body.input_revision_ids)
+
+        director_art = next(a for a in inputs if a.kind == "DirectorialPlan")
+        merged = merge_continuity_reports(
+            director_art.payload_json,
+            ContinuityReport.model_validate(timing_art.payload_json),
+            ContinuityReport.model_validate(physical_art.payload_json),
+        )
+        merged_payload = merged.model_dump(mode="json")
+        artifact = AgentArtifact(
+            project_id=project_id,
+            kind=ContinuityReport.__name__,
+            schema_version=merged.schema_version,
+            payload_json=merged_payload,
+            sha256=digest(merged_payload),
+            producer_role="continuity_supervisor",
+            source_task_id=physical_task.id,
+            input_revision_ids=body.input_revision_ids,
+        )
+        db.add(artifact)
+        physical_task.trace = {
+            **physical_task.trace,
+            "sub_artifacts": {
+                "continuity_timing": timing_art.id,
+                "continuity_physical": physical_art.id,
+            },
+            "sub_tasks": {
+                "continuity_timing": timing_task.id,
+                "continuity_physical": physical_task.id,
+            },
+            "merged_output_hash": artifact.sha256,
+        }
+        if body.supersedes_artifact_id:
+            invalidate_artifact(db, project_id, body.supersedes_artifact_id)
+        add_audit(
+            db,
+            "film-agent",
+            "FILM_PROPOSAL_CREATED",
+            "agent_task",
+            physical_task.id,
+            {"role": "continuity_supervisor", "kind": artifact.kind, "output_hash": artifact.sha256},
+            project_id=project_id,
+        )
+        db.commit()
+        return artifact

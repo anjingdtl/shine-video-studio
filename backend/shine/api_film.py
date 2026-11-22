@@ -1543,12 +1543,19 @@ def generate_storyboard(
         details = getattr(exc, "details", {})
         if isinstance(details, dict) and details.get("external_outcome") in {"NOT_SENT", "UNKNOWN"}:
             rejection["external_outcome"] = details["external_outcome"]
-        rows = db.scalars(select(AgentTaskRecord).where(
-            AgentTaskRecord.project_id == project_id,
-            AgentTaskRecord.role_id == role,
-        ).order_by(AgentTaskRecord.created_at.desc()).limit(20))
-        task = next((row for row in rows
-                     if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256), None)
+        task_id = getattr(exc, "task_id", None)
+        task = db.get(AgentTaskRecord, task_id) if isinstance(task_id, str) and task_id else None
+        if task is not None and (task.project_id != project_id or task.role_id != role):
+            task = None
+        if task is None:
+            rows = list(db.scalars(select(AgentTaskRecord).where(
+                AgentTaskRecord.project_id == project_id,
+                AgentTaskRecord.role_id == role,
+            ).order_by(AgentTaskRecord.created_at.desc()).limit(20)))
+            matching = [row for row in rows
+                        if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256]
+            task = next((row for row in matching if row.status != "SUCCEEDED"),
+                        matching[0] if matching else None)
         if task:
             rejection["task_id"] = task.id
             # The exact version the panel must present to reconcile this task.

@@ -195,8 +195,14 @@ def test_five_roles_receive_bounded_cinema_skills_and_preserve_h3_contracts(stud
         "ContinuityReport": "physical-continuity-and-anti-glitch",
         "EditIntentPlan": "rhythm-and-match-cutting",
     }
-    assert [title for title, _ in seen_prompts] == list(expected_skill_by_schema)
+    expected_sequence = [
+        "ScriptBreakdown", "DirectorialPlan", "CameraPlan",
+        "ContinuityReport", "ContinuityReport", "EditIntentPlan",
+    ]
+    assert [title for title, _ in seen_prompts] == expected_sequence
     for title, sys_prompt in seen_prompts:
+        if title == "ContinuityReport" and "ONLY dialogue timing" in sys_prompt:
+            continue
         assert "Cinema Skills Reference (untrusted artistic technique guidance only" in sys_prompt
         assert f"### Skill: {expected_skill_by_schema[title]}" in sys_prompt
 
@@ -207,7 +213,8 @@ def test_five_roles_receive_bounded_cinema_skills_and_preserve_h3_contracts(stud
                 AgentTaskRecord.status == "SUCCEEDED",
             )
         ).all()
-        by_role = {t.role_id: t for t in tasks}
+        by_role = {t.role_id: t for t in tasks
+                   if not (t.role_id == "continuity_supervisor" and (t.trace or {}).get("tool") == "continuity_timing")}
         assert set(by_role) == {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}
         for role, task in by_role.items():
             cs = task.trace.get("cinema_skills")

@@ -271,6 +271,8 @@ class FilmRunRequest(APIModel):
         "style_proposal",
         "edit_intent",
         "continuity_arbitration",
+        "continuity_timing",
+        "continuity_physical",
         "script_prepare",
         "material_image_brief",
     ] = "propose"
@@ -309,7 +311,8 @@ class FilmAgentRegistry:
     @classmethod
     def get(cls, role: str, tool: str = "propose"):
         if role not in cls.roles or tool not in {"propose", "style_proposal", "edit_intent",
-                                                 "continuity_arbitration", "script_prepare",
+                                                 "continuity_arbitration", "continuity_timing",
+                                                 "continuity_physical", "script_prepare",
                                                  "material_image_brief"}:
             raise ValueError("ROLE_OR_TOOL_DENIED")
         if tool == "script_prepare":
@@ -348,5 +351,13 @@ class FilmAgentRegistry:
             if role != "director":
                 raise ValueError("ROLE_OR_TOOL_DENIED")
             return ContinuityArbitration, ("DirectorialPlan", "CameraPlan", "ContinuityReport")
+        if tool == "continuity_timing":
+            if role != "continuity_supervisor":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            return ContinuityReport, ("DirectorialPlan",)
+        if tool == "continuity_physical":
+            if role != "continuity_supervisor":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            return ContinuityReport, ("DirectorialPlan", "CameraPlan")
         _, contract, required, _ = cls.roles[role]
         return contract, required

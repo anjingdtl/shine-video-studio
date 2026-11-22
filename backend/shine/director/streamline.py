@@ -1077,16 +1077,27 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         lesson: dict | None = None
         if retrying and state.get("failed_task_id"):
             failed = db.get(AgentTaskRecord, state["failed_task_id"])
-            if failed is None or failed.status == "SUPERSEDED":
+            failed_trace = (failed.trace or {}) if failed is not None else {}
+            reconciliation = (failed_trace.get("reconciliation") or {}).get("outcome")
+            authorized_unknown = (
+                failed is not None
+                and failed.status == "SUPERSEDED"
+                and reconciliation in {"USER_AUTHORIZED_NEW_REQUEST", "NOT_SENT_PROVEN"}
+            )
+            if failed is None or (failed.status == "SUPERSEDED" and not authorized_unknown):
                 # The pointer names a request an earlier retry already replaced:
                 # its successor is the current truth, so there is no open
                 # refusal to replay and no unknown outcome to reconcile.  Live
                 # evidence (2026-11-15, scene 2): after a landing fault the run
                 # kept this predecessor and every retry died on the replay gate
-                # against a record it had superseded itself.
+                # against a record it had superseded itself.  An UNKNOWN task
+                # superseded by USER_AUTHORIZED_NEW_REQUEST is NOT obsolete: it
+                # preserves failed_role and resume_steps so the retry continues
+                # from the failed role instead of restarting from scriptwriter.
                 state = {**state, "failed_task_id": None, "failed_role": None}
                 failed = None
-            failed_trace = (failed.trace or {}) if failed is not None else {}
+                failed_trace = {}
+                reconciliation = None
             if failed_trace.get("rejection_reason_code"):
                 # The refusal's name is prompt guidance, never an authorisation:
                 # every retry carries it so its first call does not buy the same
@@ -1098,7 +1109,6 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
             # authorisation; a mock record never replays through that gate
             # (the API boundary refuses mock targets by design).
             if failed is not None and failed_trace.get("is_mock") is not True:
-                reconciliation = (failed_trace.get("reconciliation") or {}).get("outcome")
                 # A received response is a decided refusal even when the fault
                 # was post-processing (e.g. a validation error): the durable
                 # received_result_sha256 proves the answer arrived, so one new

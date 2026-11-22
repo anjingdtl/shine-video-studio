@@ -1280,3 +1280,81 @@ def test_storyboard_book_exceeding_sections_returns_chinese_guidance(api):
     assert detail["code"] == "EPISODE_COUNT_EXCEEDS_SECTIONS"
     assert "共 2 个场次" in detail["message"]
 
+
+def test_unknown_continuity_resend_preserves_failed_role_and_reuses_succeeded_lane(api):
+    """Regression for live 2026-11-22: after reconcile + resend-unknown marks the
+    failed continuity task SUPERSEDED, episode retry must resume at continuity_supervisor
+    (never restarting from scriptwriter) and reuse the already-succeeded sub-lane."""
+    import json
+
+    from shine.llm.base import LLMConnectionError
+
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=1)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    base = _chain_responder({"asset": master})
+
+    def fail_physical(messages, schema):
+        title = schema.get("title")
+        if title == "ContinuityReport":
+            ctx = json.JSONDecoder().raw_decode(messages[1].content)[0]
+            if "continuity_policy" not in ctx:
+                raise LLMConnectionError(
+                    "Provider stream broke",
+                    details={"external_outcome": "UNKNOWN", "streamed": True,
+                             "first_event_ms": 4000, "last_event_ms": 13000},
+                )
+        return base(messages, schema)
+
+    _run_storyboard_to_rest(client, settings, project, responder=fail_physical)
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "NEEDS_REVIEW"
+    blocked = state["episodes"][0]
+    assert blocked["status"] == "BLOCKED"
+    failed_task_id = blocked["blocker"]["reconcile_task_id"]
+    task_version = blocked["blocker"]["reconcile_state_version"]
+    assert failed_task_id
+
+    # Pretend the task came from a non-mock provider so resend-unknown runs the exact
+    # production reconciliation path that sets status = SUPERSEDED.
+    with factory.begin() as db:
+        row = db.get(AgentTaskRecord, failed_task_id)
+        row.trace = {**row.trace, "is_mock": False}
+
+    checked = client.post(
+        f"/api/v1/projects/{project}/film-runs/{failed_task_id}/reconcile",
+        json={"expected_state_version": task_version}, headers=LOCAL)
+    assert checked.status_code == 200, checked.text
+    assert checked.json()["outcome"] == "UNKNOWN_REQUIRES_NEW_ATTEMPT"
+    resent = client.post(
+        f"/api/v1/projects/{project}/film-runs/{failed_task_id}/resend-unknown",
+        json={"expected_state_version": checked.json()["state_version"]}, headers=LOCAL)
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["outcome"] == "USER_AUTHORIZED_NEW_REQUEST"
+
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/retry",
+        json={"expected_state_version": state["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+
+    resumed_calls: list[str] = []
+
+    def tracking_responder(messages, schema):
+        resumed_calls.append(schema.get("title") or "")
+        return base(messages, schema)
+
+    _run_storyboard_to_rest(client, settings, project, responder=tracking_responder)
+    final_state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert final_state["status"] == "SUCCEEDED", final_state
+    assert final_state["episodes"][0]["status"] == "APPLIED"
+    # Only the failed continuity_physical lane and downstream EditIntentPlan run;
+    # ScriptBreakdown, DirectorialPlan, CameraPlan, and continuity_timing are reused.
+    assert resumed_calls == ["ContinuityReport", "EditIntentPlan"]
+
+
