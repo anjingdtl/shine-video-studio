@@ -399,7 +399,7 @@ export default function StylePanel({
 
       <div className="director-style-picker" aria-label="导演风格模板">
         <div className="director-style-picker-heading">
-          <div><b>导演风格</b><span>服务端模板 · 预览后采用到草稿</span></div>
+          <div><b>导演风格</b><span>可选历史模板 · 新创作默认由电影 Skills 自动增强</span></div>
           {directorState?.frozen_source && <small>
             当前冻结：{directorStyles?.find((row) => row.id === directorState.frozen_source?.profile_id)?.name_zh ?? '历史导演风格'}
             · {strengthLabel(directorState.frozen_source.strength)}

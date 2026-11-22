@@ -240,6 +240,7 @@ def crew_prompt(
     narration_level: str | None = None,
     max_shot_seconds: float | None = None,
     unit_target_seconds: float | None = None,
+    cinema_skills_block: str = "",
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "script_prepare":
@@ -584,4 +585,6 @@ def crew_prompt(
             "Conflicts, uncertainty or low confidence require needs_review. A proceed recommendation "
             "only permits consideration at preflight; it never approves a render or asset."
         )
+    if cinema_skills_block:
+        parts.append(cinema_skills_block)
     return " ".join(part for part in parts if part)

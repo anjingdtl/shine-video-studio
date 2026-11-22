@@ -49,7 +49,7 @@ import {
   type StyleDimension,
   type StyleVersion,
 } from '../api';
-import { emptyStyle, styleFields } from '../constants';
+import { styleFields } from '../constants';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { assignLibraryVersion, searchLibraryForProject, type LibraryAsset, type LibraryVersion } from '../asset-center/api';
 import {
@@ -115,7 +115,7 @@ export function StoryboardBookPanel({
   const [maxShotSeconds, setMaxShotSeconds] = useState(15);
   const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
-  const [dimensions, setDimensions] = useState<Style>(emptyStyle);
+  const [dimensions, setDimensions] = useState<Style>(() => ({ ...STYLE_PRESETS[0].values }));
   const [dimensionsTouched, setDimensionsTouched] = useState(false);
   const [customFields, setCustomFields] = useState<Set<StyleDimension>>(new Set());
   const [book, setBook] = useState<StoryboardBook | null>(null);
@@ -157,24 +157,19 @@ export function StoryboardBookPanel({
   // 挂载/换作品/冻结版本变化时读回，切页回来不再掉回硬编码默认值。
   useEffect(() => {
     let cancelled = false;
-    let resolvedCatalogId = '';
     let resolvedServerProfileId = '';
     let hasServerDimensions = false;
     const isCancelled = () => cancelled;
 
     const maybeSyncDefaultDimensions = () => {
       if (cancelled || hasServerDimensions) return;
-      const targetId = resolvedServerProfileId || resolvedCatalogId;
-      if (targetId) void loadProfileDimensions(targetId, isCancelled);
+      if (resolvedServerProfileId) void loadProfileDimensions(resolvedServerProfileId, isCancelled);
     };
 
     api<StyleCatalogEntry[]>('/director-styles')
       .then((rows) => {
         if (cancelled) return;
         setCatalog(rows);
-        resolvedCatalogId = rows[0]?.id ?? '';
-        setProfileId((current) => current || resolvedCatalogId);
-        maybeSyncDefaultDimensions();
       })
       .catch(() => setCatalog([]));
     fetchLatestStoryboardBook(projectId)
@@ -274,6 +269,12 @@ export function StoryboardBookPanel({
 
   function handleProfileChange(nextId: string) {
     setProfileId(nextId);
+    if (!nextId) {
+      setDimensions({ ...STYLE_PRESETS[0].values });
+      setCustomFields(new Set());
+      setDimensionsTouched(false);
+      return;
+    }
     void loadProfileDimensions(nextId);
   }
 
@@ -389,8 +390,7 @@ export function StoryboardBookPanel({
     persistedStyle && styleFields.every(([field]) => String(persistedStyle[field] ?? '').trim().length > 0),
   );
   const styleDirty = Boolean(confirmedPlan && persistedStyle && (
-    (typeof persistedStyle.profile_id === 'string' && persistedStyle.profile_id !== ''
-      && profileId !== persistedStyle.profile_id)
+    (typeof persistedStyle.profile_id === 'string' && profileId !== persistedStyle.profile_id)
     || (typeof persistedStyle.strength === 'string' && persistedStyle.strength !== ''
       && strength !== persistedStyle.strength)
     || (persistedStyle.film_type === 'live_action' || persistedStyle.film_type === 'animation'
@@ -441,10 +441,10 @@ export function StoryboardBookPanel({
     <div className="book-settings">
       <label>导演风格
         <select value={profileId} onChange={(event) => handleProfileChange(event.target.value)}>
-          {catalog.length === 0 && <option value="">（目录未加载）</option>}
+          <option value="">电影专业 Skills 自动（默认，不绑名导模板）</option>
           {catalog.map((entry) => (
             <option key={entry.id} value={entry.id}>
-              {entry.name_zh}（{entry.summary_zh.slice(0, 18)}…）
+              历史模板：{entry.name_zh}（{entry.summary_zh.slice(0, 14)}…）
             </option>
           ))}
         </select>
@@ -467,7 +467,7 @@ export function StoryboardBookPanel({
           title="第③步镜头拆解里每个渲染镜头的时长上限；H3 单镜最短 4 秒，故可调范围 4–15 秒"
           onChange={(event) => setMaxShotSeconds(Math.min(15, Math.max(4, Number(event.target.value) || 15)))} />
       </label>
-      <button type="button" className="btn-secondary" disabled={busy || !profileId} onClick={() => void generate()}>
+      <button type="button" className="btn-secondary" disabled={busy} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书
       </button>
     </div>

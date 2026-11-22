@@ -36,7 +36,7 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
   const user = userEvent.setup();
   render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
 
-  await screen.findByRole('option', { name: /黑色电影/ });
+  await screen.findByRole('option', { name: /电影专业 Skills 自动/ });
   await user.click(screen.getByRole('button', { name: '多对白' }));
   await user.click(screen.getByRole('button', { name: '多旁白' }));
   await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
@@ -45,7 +45,7 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
 
   await waitFor(() => expect(confirms).toHaveLength(1));
   expect(confirms[0].style).toMatchObject({
-    profile_id: 'noir',
+    profile_id: '',
     dialogue_ratio_percent: 70,
     narration_level: 'high',
   });
@@ -67,13 +67,13 @@ it('单镜秒数上限随分镜书确认进入冻结风格（同一控制链路�
   ]);
   const user = userEvent.setup();
   render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
-  await screen.findByRole('option', { name: /黑色电影/ });
+  await screen.findByRole('option', { name: /电影专业 Skills 自动/ });
   fireEvent.change(screen.getByLabelText('单镜秒数上限'), { target: { value: '10' } });
   await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
   await screen.findByText(/计划总时长/);
   await user.click(screen.getByRole('button', { name: /确认分镜书/ }));
   await waitFor(() => expect(confirms).toHaveLength(1));
-  expect(confirms[0].style).toMatchObject({ profile_id: 'noir', max_shot_seconds: 10 });
+  expect(confirms[0].style).toMatchObject({ profile_id: '', max_shot_seconds: 10 });
   stub.restore();
 });
 

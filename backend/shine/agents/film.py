@@ -13,6 +13,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from shine.agents.cinema_skills import select_skills_for_role
 from shine.agents.crew_prompts import arbiter_prompt, crew_prompt
 from shine.agents.editorial_timing import (
     MAX_SEGMENT_S,
@@ -969,6 +970,16 @@ class FilmAgentDispatcher:
         context_payload_utf8_bytes = len(
             json.dumps(model_context, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         )
+        skill_selection = select_skills_for_role(
+            role,
+            tool=body.tool,
+            brief=body.brief,
+            style=context.get("style"),
+            inputs=context.get("inputs"),
+            assets=context.get("assets"),
+            editorial_timing_plan=context.get("editorial_timing_plan"),
+            production_context=context.get("production_context"),
+        )
         # Claim the request while holding SQLite's writer lock, then release it
         # with the durable intent before any network call. Concurrent identical
         # requests cannot both pass the guard. A busy local writer (heartbeats,
@@ -1022,6 +1033,7 @@ class FilmAgentDispatcher:
                 "review_provider": text_provider_snapshot(profile),
                 "source_cache": [{"sha256": s["sha256"], "status": s["local_cache_status"]} for s in cache_state],
                 **({"editorial_refusal": refusal} if refusal else {}),
+                "cinema_skills": skill_selection.as_trace(),
                 **({"scope": "TEXT_INPUT_CONSISTENCY_ONLY_NOT_MEDIA_QC",
                     "shot_spec_snapshot": context["shot_spec"],
                     "shot_spec_sha256": digest(context["shot_spec"]),
@@ -1039,20 +1051,39 @@ class FilmAgentDispatcher:
                 previous.status = "SUPERSEDED"
                 previous.state_version += 1
         db.commit()  # Durable intent before the model call. Interrupted calls are never auto-replayed.
-        if body.tool == "continuity_arbitration":
-            system_prompt = arbiter_prompt()
-        else:
-            system_prompt = crew_prompt(
-                role,
-                tool=body.tool,
-                plan=context.get("editorial_timing_plan"),
-                reference_budget_note=reference_budget_note(context.get("workflow_reference_budget") or []),
-                repair_director=repair_director,
-                dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
-                narration_level=context.get("narration_level"),
-                max_shot_seconds=context.get("max_shot_seconds"),
-                unit_target_seconds=context.get("unit_target_seconds"),
-            )
+        def _build_system_prompt(skills_block: str) -> str:
+            if body.tool == "continuity_arbitration":
+                prompt_text = arbiter_prompt()
+            else:
+                prompt_text = crew_prompt(
+                    role,
+                    tool=body.tool,
+                    plan=context.get("editorial_timing_plan"),
+                    reference_budget_note=reference_budget_note(context.get("workflow_reference_budget") or []),
+                    repair_director=repair_director,
+                    dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
+                    narration_level=context.get("narration_level"),
+                    max_shot_seconds=context.get("max_shot_seconds"),
+                    unit_target_seconds=context.get("unit_target_seconds"),
+                    cinema_skills_block=skills_block,
+                )
+            if repair_visual_language:
+                prompt_text += (
+                    " The previous proposal failed the visual language check. Rewrite all visual and camera "
+                    "descriptions in English, including every segment's cuts. Never copy a Chinese name, title, "
+                    "stage direction or lyric into a visual or camera field: refer to a person by an English "
+                    "role label such as 'the lead performer', 'the woman in the grey cloak' or 'the guard', and "
+                    "describe what they do instead of naming them. A name belongs in the asset ids and the "
+                    "character fields, never in the prose the renderer reads. Keep the original timeline, "
+                    "approved references and dialogue contract exactly."
+                )
+            if repair_contract_note:
+                # The refusal is named by the server, never by the provider's text:
+                # one targeted instruction, no answer text, no secret.
+                prompt_text += repair_contract_note
+            return prompt_text
+
+        system_prompt = _build_system_prompt(skill_selection.prompt_block)
 
         from shine.llm.transport_policy import policy_for
         _transport_policy = policy_for(bounded_config)
@@ -1069,21 +1100,6 @@ class FilmAgentDispatcher:
             task.trace = {**task.trace, "phase": phase, "phase_started_at": utcnow().isoformat(),
                           "network_timeout_s": _effective_timeout_s}
             db.commit()
-
-        if repair_visual_language:
-            system_prompt += (
-                " The previous proposal failed the visual language check. Rewrite all visual and camera "
-                "descriptions in English, including every segment's cuts. Never copy a Chinese name, title, "
-                "stage direction or lyric into a visual or camera field: refer to a person by an English "
-                "role label such as 'the lead performer', 'the woman in the grey cloak' or 'the guard', and "
-                "describe what they do instead of naming them. A name belongs in the asset ids and the "
-                "character fields, never in the prose the renderer reads. Keep the original timeline, "
-                "approved references and dialogue contract exactly."
-            )
-        if repair_contract_note:
-            # The refusal is named by the server, never by the provider's text:
-            # one targeted instruction, no answer text, no secret.
-            system_prompt += repair_contract_note
 
         try:
             if refusal:
@@ -1124,6 +1140,29 @@ class FilmAgentDispatcher:
                 output_ceiling=agent_output_limit,
                 output_floor_tokens=agent_output_limit if escalate_output_budget else None,
             )
+            if not crew_budget.fits and skill_selection.prompt_block:
+                # Cinema Skills are optional guidance and must never push a request
+                # over the provider's context window; drop them and re-measure once.
+                system_prompt = _build_system_prompt("")
+                crew_request = compile_request(
+                    system=system_prompt,
+                    user=json.dumps(model_context, ensure_ascii=False, separators=(",", ":")),
+                    schema=wire_contract.model_json_schema(),
+                )
+                crew_budget = plan_call_budget(
+                    bounded_config, crew_request, purpose=crew_purpose,
+                    output_ceiling=agent_output_limit,
+                    output_floor_tokens=agent_output_limit if escalate_output_budget else None,
+                )
+                task.trace = {
+                    **task.trace,
+                    "cinema_skills": {
+                        **task.trace["cinema_skills"],
+                        "budget_trimmed_to_zero": True,
+                        "selected": [],
+                        "estimated_tokens": 0,
+                    },
+                }
             task.trace = {**task.trace, "call_budget": crew_budget.as_dict(),
                           **({"output_budget_escalated": True} if escalate_output_budget else {})}
             db.commit()  # the approved budget is durable evidence before the call

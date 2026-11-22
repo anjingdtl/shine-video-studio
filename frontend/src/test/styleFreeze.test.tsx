@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
-import { STYLE_DIMENSION_OPTIONS } from '../styleCatalog';
+import { STYLE_DIMENSION_OPTIONS, STYLE_PRESETS } from '../styleCatalog';
 import { DIRECTOR_STYLE_CATALOG, FROZEN_STYLE, StudioStub, baseProject, baseRoutes, jsonResponse } from './studioStub';
 
 let stub: StudioStub;
@@ -101,16 +101,17 @@ describe('第 2 阶段风格归一化合并（三原则）', () => {
     render(<App />);
     await user.click(await screen.findByText('逐项微调七个风格维度（高级）'));
 
-    // 导演风格模板加载的七维内容直接出现在微调框中
-    await waitFor(() => {
-      expect(screen.getByLabelText('摄影语言（自定义）')).toHaveValue(TEMPLATE_BIBLE.photography_language);
-    });
+    // 新创作默认不绑名导模板，直接带出中性七维预设
+    const defaultValues = STYLE_PRESETS[0].values;
+    expect((screen.getByLabelText('导演风格') as HTMLSelectElement).value).toBe('');
 
-    // 用户直接修改其中一维为目录选项，另一维保持自定义并改写文本
+    // 用户直接修改其中一维为目录选项，另一维切到自定义并改写文本
     const blockingSelect = screen.getByLabelText('镜头调度') as HTMLSelectElement;
-    const firstBlockingOption = STYLE_DIMENSION_OPTIONS.shot_blocking[0];
-    await user.selectOptions(blockingSelect, firstBlockingOption.id);
+    const secondBlockingOption = STYLE_DIMENSION_OPTIONS.shot_blocking[1];
+    await user.selectOptions(blockingSelect, secondBlockingOption.id);
 
+    const photoSelect = screen.getByLabelText('摄影语言') as HTMLSelectElement;
+    await user.selectOptions(photoSelect, 'custom');
     const photoTextarea = screen.getByLabelText('摄影语言（自定义）');
     await user.clear(photoTextarea);
     await user.type(photoTextarea, '固定远景，缓慢推近。（用户微调）');
@@ -126,16 +127,16 @@ describe('第 2 阶段风格归一化合并（三原则）', () => {
       plan_version: 1,
       expected_sha256: BOOK.plan_sha256,
       style: {
-        profile_id: 'wong-kar-wai',
+        profile_id: '',
         film_type: 'animation',
         dimensions: {
           photography_language: '固定远景，缓慢推近。（用户微调）',
-          shot_blocking: firstBlockingOption.text,
-          color_palette: TEMPLATE_BIBLE.color_palette,
-          lighting_tone: TEMPLATE_BIBLE.lighting_tone,
-          lens_texture: TEMPLATE_BIBLE.lens_texture,
-          editing_rhythm: TEMPLATE_BIBLE.editing_rhythm,
-          sound_performance: TEMPLATE_BIBLE.sound_performance,
+          shot_blocking: secondBlockingOption.text,
+          color_palette: defaultValues.color_palette,
+          lighting_tone: defaultValues.lighting_tone,
+          lens_texture: defaultValues.lens_texture,
+          editing_rhythm: defaultValues.editing_rhythm,
+          sound_performance: defaultValues.sound_performance,
         },
       },
     });
@@ -160,11 +161,8 @@ describe('第 2 阶段风格归一化合并（三原则）', () => {
     window.location.hash = '#d/assets';
     render(<App />);
     await user.click(await screen.findByText('逐项微调七个风格维度（高级）'));
-    await waitFor(() => {
-      expect(screen.getByLabelText('摄影语言（自定义）')).toHaveValue(TEMPLATE_BIBLE.photography_language);
-    });
     const photoSelect = screen.getByLabelText('摄影语言') as HTMLSelectElement;
-    const option = STYLE_DIMENSION_OPTIONS.photography_language[0];
+    const option = STYLE_DIMENSION_OPTIONS.photography_language[1];
     await user.selectOptions(photoSelect, option.id);
 
     await user.click(screen.getAllByRole('button', { name: /生成分镜书/ })[0]);

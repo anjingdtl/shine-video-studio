@@ -532,20 +532,24 @@ def confirm_storyboard_book(
 
 
 def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -> dict[str, Any]:
-    """Adopt a director template + film type into the draft, then freeze it.
+    """Adopt optional legacy director template or neutral StyleBible + film type, then freeze it.
 
-    Mirrors the apply-draft endpoint's contract (template selection, film type
-    carried as a project-level H3 contract) and then calls the same freeze
-    service the expert path uses.  An identical frozen style is a no-op success
-    rather than an error, so re-confirming a book never fails on style alone.
+    New creations default to native Cinema Skills without a famous-director
+    template (``profile_id`` omitted or empty), preserving FilmType and the
+    seven-field frozen StyleBible contract. Explicit legacy ``profile_id``
+    selections remain supported for historical compatibility.
     """
     from shine.director_styles.catalog import DirectorStyleCatalog, DirectorStyleCatalogError
-    from shine.director_styles.service import make_binding, register_profile_revision
+    from shine.director_styles.service import (
+        default_style_bible_for_film_type,
+        make_binding,
+        register_profile_revision,
+    )
     from shine.models import StyleVersion
     from shine.schemas import STYLE_BIBLE_FIELDS, FilmType, StyleBible
     from shine.services import freeze_style, update_style_draft
 
-    profile_id = style.get("profile_id")
+    profile_id = str(style.get("profile_id") or "").strip() or None
     strength = style.get("strength") or "balanced"
     if strength not in {"subtle", "balanced", "strong"}:
         raise HTTPException(422, "STYLE_STRENGTH_INVALID")
@@ -554,12 +558,12 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     narration_level = style.get("narration_level")
     max_shot_seconds = style.get("max_shot_seconds")
     dimensions = style.get("dimensions")
-    if not profile_id:
-        raise HTTPException(422, "STYLE_PROFILE_REQUIRED")
-    try:
-        entry = DirectorStyleCatalog().get(profile_id, style.get("profile_version"))
-    except DirectorStyleCatalogError as exc:
-        raise HTTPException(404, str(exc)) from exc
+    entry = None
+    if profile_id:
+        try:
+            entry = DirectorStyleCatalog().get(profile_id, style.get("profile_version"))
+        except DirectorStyleCatalogError as exc:
+            raise HTTPException(404, str(exc)) from exc
     frozen_current = (
         db.get(StyleVersion, project.frozen_style_version_id)
         if project.frozen_style_version_id else None
@@ -587,16 +591,24 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
                         "message": f"风格维度「{field}」不能为空",
                     })
                 updates[field] = value
-    style_bible = StyleBible.model_validate({
-        **entry.profile.style_bible.model_dump(mode="json"),
-        **updates,
-    })
-    register_profile_revision(db, entry)
-    update_style_draft(db, project, style_bible, preserve_director_style=False)
-    project.director_style_draft = make_binding(entry, strength, style_bible)
-    add_audit(db, actor, "DIRECTOR_STYLE_DRAFT_APPLIED", "project", project.id,
-              {"profile_id": entry.profile.id, "strength": strength,
-               "film_type": film_type, "streamline": True}, project_id=project.id)
+    if entry is not None:
+        base_fields = entry.profile.style_bible.model_dump(mode="json")
+        style_bible = StyleBible.model_validate({**base_fields, **updates})
+        register_profile_revision(db, entry)
+        update_style_draft(db, project, style_bible, preserve_director_style=False)
+        project.director_style_draft = make_binding(entry, strength, style_bible)
+        add_audit(db, actor, "DIRECTOR_STYLE_DRAFT_APPLIED", "project", project.id,
+                  {"profile_id": entry.profile.id, "strength": strength,
+                   "film_type": film_type, "streamline": True}, project_id=project.id)
+    else:
+        has_current_seven = all(str(current.get(field) or "").strip() for field in STYLE_BIBLE_FIELDS)
+        base_bible = (
+            {field: str(current[field]).strip() for field in STYLE_BIBLE_FIELDS}
+            if has_current_seven
+            else default_style_bible_for_film_type(updates.get("film_type")).model_dump(mode="json")
+        )
+        style_bible = StyleBible.model_validate({**base_bible, **updates})
+        update_style_draft(db, project, style_bible, preserve_director_style=False)
     try:
         frozen, impact = freeze_style(db, project, approval_note="streamline storyboard book", actor=actor)
     except HTTPException as exc:

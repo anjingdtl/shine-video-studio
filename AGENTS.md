@@ -2524,3 +2524,10 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 - 回归与实机：8 分片 303 文件全绿（`shards-20261122-020135-231`）、前端 94 文件 472 测试与构建通过；
   RTX 5080 独立目录验证外部 ComfyUI 43.98 GB 零下载核验接管、服务核验与七/四阶段共享出片均通过。
   验收记录见 `docs/ACCEPTANCE_20261122_V3_P3_SETUP_PRODUCTION_CONVERGENCE.md`。
+
+## 2026-11-22 V3 P4 原生电影 Skills 与旧名导风格安全退出
+
+- **可审阅 `SKILL.md` 包与唯一选择器**：在 `config/cinema_skills/` 建立 `manifest.json`（`shine-cinema-skills-manifest/1`、`1.0.0`、`Apache-2.0`）及 6 套内置电影专业 Skill（覆盖 `scriptwriter`/`director`/`cinematographer`/`editor`/`continuity_supervisor`，含 `references/*.md` 与归一化 SHA-256）；由 `shine/agents/cinema_skills.py::CinemaSkillRegistry` 与 `select_skills_for_role` 统一做路径禁闭、32 KiB 限额、许可/角色白名单与指令注入/外链/shell 扫描，运行时（`strict=False`）缺失或损坏自动降级跳过、绝不阻塞生产。
+- **不新增 Agent/执行器/阻滞**：`FilmAgentDispatcher.run` 按任务标签与 `FilmType` 从唯一入口检索最多 2 项 Skill（`DEFAULT_SKILL_TOKEN_BUDGET=1200`）作为不可信参考注入 `crew_prompt`，结果记录进 `AgentTaskRecord.trace["cinema_skills"]`；若上下文窗口紧张则自动将 Skill 裁为 0（`budget_trimmed_to_zero=True`），不触发 `LLM_CREATIVE_CONTEXT_OVERFLOW`；支持 `SHINE_CINEMA_SKILLS_ENABLED=0` 零迁移回滚。
+- **渐进退出强制名导模板**：`StoryboardBookPanel` 默认 `profileId=""`（`电影专业 Skills 自动`）与中性七维预设，`director/streamline.py::_apply_and_freeze_style` 允许省略 `profile_id` 冻结中性 `StyleBible`（`director_style_binding=None`），`services.py::make_render_request` 通过 `director_styles/service.py::default_english_style_bible` 为无绑定中文 `StyleBible` 镜头投影合法英文 H3 风格约束；保留 `FilmType`（真人/2D 动画）、历史 `director_style_binding` 与 `/director-styles*` 只读/重放兼容，未改 `worker.py`/`preproduction.py`。
+- **回归与 RTX 5080 实机 A/B**：`test_v3_p4_cinema_skills.py`（13 例）及定向 7 模块全绿、Ruff/Copilot 契约（475）/Alembic/`test_isolation_static.py` 全绿；后端 8 分片 304 文件全绿（`shards-20261122-082210-861`，0 失败）、前端 94 文件 472 测试与 `tsc`/Vite build 全绿；RTX 5080 隔离出片完成 `animation` 与 `live_action` 共 4 组 8 镜真实 A/B（`pdd8`、`1344x768`、`5.166s` 全片解码 exit 0，GPU 租约全部 `RELEASED`），实证无对白镜闭口与音量抑制（B 相比 A 峰值降低 16.1–24.4 dB）及双人轴线/道具接续提升；远程实机 LLM 链路与多评审员人工盲听留为诚实未测边界。验收报告见 `docs/ACCEPTANCE_20261122_V3_P4_NATIVE_CINEMA_SKILLS.md`。

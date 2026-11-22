@@ -1060,14 +1060,14 @@ def make_render_request(
 
     style_model = StyleBible.model_validate(style.snapshot)
     if spec.prompt_style is None and _style_has_cjk(style_model):
-        # A manually created shot has no per-shot English prompt style.  The
-        # frozen director template already declares English techniques; attach
-        # that faithful projection to the request's shot spec so both the
-        # compiler and the provenance verifier see the same bytes.  The frozen
-        # style id/hash are unchanged.
-        from shine.director_styles.service import english_style_bible
+        # A manually created shot (or a project created with native Cinema Skills
+        # and no legacy director template) has no per-shot English prompt style.
+        # Prefer any frozen director-template projection for historical rows, and
+        # fall back to the deterministic director-neutral English projection so
+        # Chinese Style Bibles always compile cleanly under H3_ENGLISH.
+        from shine.director_styles.service import default_english_style_bible, english_style_bible
 
-        projected = english_style_bible(style.director_style_binding)
+        projected = english_style_bible(style.director_style_binding) or default_english_style_bible(style_model)
         if projected is not None:
             projected = projected.model_copy(update={"film_type": style_model.film_type})
             spec = spec.model_copy(update={"prompt_style": projected})

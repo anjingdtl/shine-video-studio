@@ -1,0 +1,282 @@
+{
+  "schema_version": "shine-cinema-skills-manifest/1",
+  "version": "1.0.0",
+  "license": "Apache-2.0",
+  "source": "shine-original",
+  "skills": [
+    {
+      "id": "observable-action-performance",
+      "version": "1.0.0",
+      "title": "Observable Action & Physical Performance Breakdown",
+      "roles": [
+        "scriptwriter"
+      ],
+      "target_fields": [
+        "beats.description",
+        "beats.characters",
+        "beats.dialogue"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "action",
+        "emotion",
+        "prop",
+        "dialogue",
+        "silent",
+        "single_character",
+        "multi_character"
+      ],
+      "priority": 95,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "observable-action-performance/SKILL.md",
+      "references": [
+        {
+          "path": "observable-action-performance/references/prop-and-posture-anchoring.md",
+          "tags": [
+            "prop",
+            "action",
+            "single_character",
+            "multi_character"
+          ],
+          "sha256": "db149cd8cd0ecea92765a33dc4e8b78c14c5016af5ab8c03e66055742461b2b7"
+        }
+      ],
+      "sha256": "6475ff16685315a5c813f53f6d7a101982d6dd397da91938c2d78f2e089e21be"
+    },
+    {
+      "id": "staging-and-narrative-reveal",
+      "version": "1.0.0",
+      "title": "Staging, Blocking & Narrative Reveal",
+      "roles": [
+        "director"
+      ],
+      "target_fields": [
+        "shots.visual_description",
+        "shots.continuity",
+        "shots.cuts",
+        "shots.asset_ids"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "blocking",
+        "reveal",
+        "continuation",
+        "internal_cut",
+        "two_shot",
+        "single_character",
+        "multi_character",
+        "prop",
+        "silent",
+        "dialogue"
+      ],
+      "priority": 95,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "staging-and-narrative-reveal/SKILL.md",
+      "references": [
+        {
+          "path": "staging-and-narrative-reveal/references/two-person-blocking-and-cuts.md",
+          "tags": [
+            "two_shot",
+            "multi_character",
+            "internal_cut",
+            "continuation",
+            "prop"
+          ],
+          "sha256": "91ce3bed258c2b0d9e11c7861fb98165e40e8366852cd0995956616e2819bfa0"
+        }
+      ],
+      "sha256": "4a66013381ae832cb4ee124d09950b99afd7c27f7cce5ae29adb5255033a31c8"
+    },
+    {
+      "id": "motivated-camera-and-composition",
+      "version": "1.0.0",
+      "title": "Motivated Camera, Composition & Directional Lighting",
+      "roles": [
+        "cinematographer"
+      ],
+      "target_fields": [
+        "shots.composition",
+        "shots.movement",
+        "shots.lighting",
+        "shots.axis"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "composition",
+        "camera_movement",
+        "lighting",
+        "suspense",
+        "emotion",
+        "action",
+        "two_shot",
+        "prop"
+      ],
+      "priority": 94,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "motivated-camera-and-composition/SKILL.md",
+      "references": [
+        {
+          "path": "motivated-camera-and-composition/references/movement-motives-and-lighting.md",
+          "tags": [
+            "camera_movement",
+            "lighting",
+            "composition",
+            "suspense",
+            "emotion"
+          ],
+          "sha256": "a6c2811ffd22065197cee2b1bcebfccbaf5ca0db71b2ade7dd6501706c854a89"
+        }
+      ],
+      "sha256": "89d1ab6b860cb4b65f846ea999024633a68bb972d250e91b0ce80810640a1078"
+    },
+    {
+      "id": "medium-craft-live-and-cel",
+      "version": "1.0.0",
+      "title": "Medium Craft for Live-Action & 2D Cel Animation",
+      "roles": [
+        "director",
+        "cinematographer"
+      ],
+      "target_fields": [
+        "shots.visual_description",
+        "shots.composition",
+        "shots.lighting"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "live_action",
+        "animation",
+        "lighting",
+        "composition",
+        "action"
+      ],
+      "priority": 88,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "medium-craft-live-and-cel/SKILL.md",
+      "references": [
+        {
+          "path": "medium-craft-live-and-cel/references/cel-animation-pose-and-silhouette.md",
+          "tags": [
+            "animation",
+            "action",
+            "lighting"
+          ],
+          "sha256": "178d48d579ab36189d0504b8fc39e7420a6cb3981e3f22fe512421e293b1feb9"
+        },
+        {
+          "path": "medium-craft-live-and-cel/references/live-action-lens-and-practical-light.md",
+          "tags": [
+            "live_action",
+            "lighting",
+            "composition"
+          ],
+          "sha256": "95d8c441dc8201643fd61a69e98ef84a14a18a9f83c16ac42a2f1a893d4ea3ea"
+        }
+      ],
+      "sha256": "c5be00d8e4a98ee505c0df9f6e58eab51f25c5fc719fbe7cd13cb855c845f6fb"
+    },
+    {
+      "id": "rhythm-and-match-cutting",
+      "version": "1.0.0",
+      "title": "Pre-Production Rhythm & Match-Cutting Intent",
+      "roles": [
+        "editor"
+      ],
+      "target_fields": [
+        "clips.continuity_note",
+        "rhythm",
+        "dialogue_pace"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "rhythm",
+        "continuation",
+        "internal_cut",
+        "dialogue",
+        "silent",
+        "action",
+        "emotion"
+      ],
+      "priority": 92,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "rhythm-and-match-cutting/SKILL.md",
+      "references": [
+        {
+          "path": "rhythm-and-match-cutting/references/cut-vs-continuation-pacing.md",
+          "tags": [
+            "continuation",
+            "internal_cut",
+            "dialogue",
+            "rhythm"
+          ],
+          "sha256": "d3e2200a93141830934d52955d8dd5523ac61a63a275fc76607e81e6b7dca248"
+        }
+      ],
+      "sha256": "8da300d62570e166163f43ddec024e54da71c9ebb88e503d77af982eeefd5e9e"
+    },
+    {
+      "id": "physical-continuity-and-anti-glitch",
+      "version": "1.0.0",
+      "title": "Physical Continuity & Anti-Glitch Inspection",
+      "roles": [
+        "continuity_supervisor"
+      ],
+      "target_fields": [
+        "issues",
+        "recommendation"
+      ],
+      "film_types": [
+        "live_action",
+        "animation"
+      ],
+      "tags": [
+        "continuity",
+        "prop",
+        "two_shot",
+        "multi_character",
+        "continuation",
+        "internal_cut",
+        "action",
+        "dialogue"
+      ],
+      "priority": 95,
+      "license": "Apache-2.0",
+      "source": "shine-original",
+      "entry": "physical-continuity-and-anti-glitch/SKILL.md",
+      "references": [
+        {
+          "path": "physical-continuity-and-anti-glitch/references/common-h3-continuity-anomalies.md",
+          "tags": [
+            "continuity",
+            "prop",
+            "two_shot",
+            "multi_character",
+            "dialogue"
+          ],
+          "sha256": "d80737e08f4612fca01e30a6a674e08c817628374d849f1e2c54c69d1e2ed901"
+        }
+      ],
+      "sha256": "15d9bcab543bdbb7235adb9b2c82aee281f69b38e7e6c4345b65a955b33e2498"
+    }
+  ]
+}
