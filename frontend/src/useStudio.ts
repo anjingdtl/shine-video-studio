@@ -554,11 +554,11 @@ export function useStudio() {
     })();
     const profile = queueProvider === 'comfyui' ? autoProfile : undefined;
     if (queueProvider === 'comfyui') {
-      if (!profile) {
-        report('本机还没有可用的生成方案：先到「制片准备」一键登记，再去基础配置完成安装。', 'error');
-        return;
+      if (profile) {
+        report(`已自动选用「${profile.name}」方案：整片拍摄的档位可在导演包页调整。`);
+      } else {
+        report('已按内置 Ref2VA 默认策略加入队列：整片拍摄的档位可在导演包页调整。');
       }
-      report(`已自动选用「${profile.name}」方案：整片拍摄的档位可在导演包页调整。`);
       // 真实生成是花钱花时间的动作：确认放在按钮上（点一次展开、再点一次提交），
       // 不用系统对话框打断页面，也不会因为浏览器自动关闭对话框而误提交。
     }

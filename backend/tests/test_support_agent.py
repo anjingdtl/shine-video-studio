@@ -795,8 +795,13 @@ def test_private_project_workflow_cannot_be_copied_into_another_project(api):
 
 
 def test_windows_install_path_is_redacted_for_display_but_used_verbatim(api, monkeypatch):
+    import os
+
+    from shine.support import privacy
+
     client, _, _ = api
-    windows_path = "C:\\Users\\alice\\ComfyUI"
+    assert privacy.redact_text("C:\\Users\\alice\\ComfyUI") == "<用户目录>\\ComfyUI"
+    install_path = "C:\\Users\\alice\\ComfyUI" if os.name == "nt" else "/home/alice/ComfyUI"
     calls: list[dict] = []
 
     def fake_enqueue(db, **kwargs):
@@ -807,13 +812,13 @@ def test_windows_install_path_is_redacted_for_display_but_used_verbatim(api, mon
     preview = client.post(
         "/api/v1/support/actions/preview",
         json={"kind": "setup_repair", "params": {
-            "capabilities": ["h3"], "installation_path": windows_path,
+            "capabilities": ["h3"], "installation_path": install_path,
         }},
         headers=HEADERS,
     )
     assert preview.status_code == 200, preview.text
     action = preview.json()["action"]
-    assert windows_path not in json.dumps(action["preview"], ensure_ascii=False)
+    assert install_path not in json.dumps(action["preview"], ensure_ascii=False)
     assert "<用户目录>" in json.dumps(action["preview"], ensure_ascii=False)
     approved = client.post(
         f"/api/v1/support/actions/{action['id']}/approve",
@@ -821,7 +826,7 @@ def test_windows_install_path_is_redacted_for_display_but_used_verbatim(api, mon
         headers=HEADERS,
     )
     assert approved.status_code == 200, approved.text
-    assert calls and calls[0]["installation_path"] == windows_path
+    assert calls and calls[0]["installation_path"] == install_path
 
 
 def test_llm_failure_falls_back_to_local_diagnosis(api):

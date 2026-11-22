@@ -141,13 +141,22 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         assert "must only use the uploaded cache" in str(exc)
     else:
         raise AssertionError("Failed-install fixture unexpectedly completed")
-    qa_engine.dispose()
 
     from shine.comfyops.assets import fake_image
+    from shine.comfyops.models import (
+        PLAN_PURPOSE_ASSET_PREPARATION,
+        AssetRequirement,
+        PreProductionPlan,
+    )
+    from shine.models import AgentArtifact, AgentTaskRecord
 
     imported = c.post(
         base + f"/projects/{p}/assets",
-        data={"asset_kind": "image"},
+        data={
+            "asset_kind": "image",
+            "role": "character",
+            "entity_id": "BrowserUpload",
+        },
         files={
             "file": (
                 "isolated-browser-upload.png",
@@ -158,27 +167,122 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
     )
     imported.raise_for_status()
     legacy_asset_id = imported.json()["id"]
-    fields = [
-        "photography_language",
-        "shot_blocking",
-        "color_palette",
-        "lighting_tone",
-        "lens_texture",
-        "editing_rhythm",
-        "sound_performance",
-    ]
-    r = c.put(
-        base + f"/projects/{p}/style/draft",
-        json={f: "Restrained natural cinematic treatment" for f in fields},
-    )
-    r.raise_for_status()
+    script_head = "第1场\nBrowserUpload：你好。\nBrowserCharacter：你好。"
+    script_text = script_head + "。" * (200 - len(script_head) - 1) + "\n"
     doc = c.post(
         base + f"/projects/{p}/documents",
         files={
-            "file": ("script.txt", "BrowserCharacter：你好。".encode(), "text/plain")
+            "file": ("script.txt", script_text.encode("utf-8"), "text/plain")
         },
     ).json()
     post(f"/projects/{p}/preproduction/analyze", {"document_id": doc["id"]})
+
+    outline_payload = {
+        "production_sections": [
+            {
+                "production_section_id": "sec-01",
+                "order": 1,
+                "title": "第1场",
+                "estimated_duration_s": 15.0,
+                "start_offset": 0,
+                "end_offset": len(script_text) - 1,
+            }
+        ],
+        "document_id": doc["id"],
+        "document_sha256": doc["sha256"],
+        "summary": "BrowserUpload 与 BrowserCharacter 在第 1 场相遇。",
+        "story_line": ["两人在第 1 场完成对话"],
+        "timeline": ["第 1 场"],
+        "relationships": ["BrowserUpload 与 BrowserCharacter 相识"],
+        "questions": [],
+        "characters": [
+            {"name": "BrowserUpload", "entity_id": "BrowserUpload", "identity": "QA fixture"}
+        ],
+        "locked_facts": [],
+    }
+    outline_sha = hashlib.sha256(
+        json.dumps(outline_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    mat_plan_payload = {
+        "kind": "SHOT_MATERIALS",
+        "source": "director_shots",
+        "scene_preparations": [],
+        "conflicts": [],
+        "visual_direction": None,
+        "requirements": [],
+    }
+    mat_plan_sha = hashlib.sha256(
+        json.dumps(mat_plan_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    req_payload = {
+        "family": "character",
+        "entity_id": "BrowserUpload",
+        "description": "QA upload fixture",
+        "critical": True,
+        "optional": False,
+        "strategy": "generate",
+        "used_shot_ids": [],
+        "used_episodes": ["ep-01"],
+    }
+    req_sha = hashlib.sha256(
+        json.dumps(req_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+    with qa_factory.begin() as db:
+        outline_task = AgentTaskRecord(
+            project_id=p,
+            role_id="story_outline_run",
+            request_identity=f"qa-outline-{doc['id']}",
+            input_hash=doc["sha256"],
+            asset_manifest_hash="0" * 64,
+            rulepack_id="qa",
+            rulepack_hash="0" * 64,
+            model_profile_id="qa",
+            model_id="qa",
+            status="SUCCEEDED",
+            trace={},
+        )
+        db.add(outline_task)
+        db.flush()
+        db.add(
+            AgentArtifact(
+                project_id=p,
+                kind="StoryOutline",
+                schema_version="1.0",
+                payload_json=outline_payload,
+                sha256=outline_sha,
+                producer_role="scriptwriter",
+                source_task_id=outline_task.id,
+            )
+        )
+        mat_plan = PreProductionPlan(
+            project_id=p,
+            purpose=PLAN_PURPOSE_ASSET_PREPARATION,
+            status="DRAFT",
+            payload=mat_plan_payload,
+            sha256=mat_plan_sha,
+        )
+        db.add(mat_plan)
+        db.flush()
+        req_row = AssetRequirement(
+            project_id=p,
+            plan_id=mat_plan.id,
+            status="DRAFT",
+            payload=req_payload,
+            sha256=req_sha,
+        )
+        db.add(req_row)
+        db.flush()
+        updated_mat_payload = {
+            **mat_plan_payload,
+            "requirements": [{**req_payload, "requirement_id": req_row.id}],
+        }
+        mat_plan.payload = updated_mat_payload
+        mat_plan.sha256 = hashlib.sha256(
+            json.dumps(
+                updated_mat_payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+            ).encode("utf-8")
+        ).hexdigest()
+    qa_engine.dispose()
     right = post(
         "/preparation/rights",
         {
@@ -266,62 +370,72 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             else None,
         )
         page.goto(ui_base, wait_until="networkidle")
-        # The project switcher lives on the production board; the default
-        # director page has its own document selectors, so "the first select"
-        # is not a stable way to choose a project.
-        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
-        page.get_by_label("切换项目").select_option(p)
-        # The outline step is on stage 1, next to the import: an imported script
-        # is not "done" until its outline is confirmed, and the workbench must
-        # not send the person to the stage-4 material panel to find it.
+        # With a single project loaded, the topbar shows the project chip.
+        expect(page.locator(".project-chip")).to_contain_text(
+            "V1.3 Browser QA fixture", timeout=15000
+        )
+        # Stage 1 (#d/creative): active document + outline confirmation via stage rail.
         page.goto(f"{ui_base}#d/creative", wait_until="networkidle")
         outline_panel = page.locator("#outline-confirm")
         expect(outline_panel).to_contain_text("先把这版故事定下来", timeout=15000)
-        # The convergence round moved each page's single primary action into the
-        # page-level stage rail (one action per page), so the extract button is
-        # rendered in the rail, not inside the panel body.  All seven stage pages
-        # stay mounted (hidden switching), each with its own rail, so the locator
-        # must be scoped to the active stage's container: the global class alone
-        # resolves to seven elements and violates strict mode.
         creative_rail = page.locator("#creative").get_by_label("本阶段操作")
         expect(creative_rail).to_be_visible(timeout=15000)
-        expect(creative_rail).to_contain_text("后台提取并归并总体大纲", timeout=15000)
+        expect(page.locator(".script-doc.active")).to_contain_text("当前依据")
+        with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/director/outline/confirm"),
+            timeout=15000,
+        ):
+            creative_rail.get_by_role("button", name="确认这版总体大纲", exact=True).click()
+        expect(outline_panel).to_contain_text("大纲已确认", timeout=15000)
+        expect(creative_rail).to_contain_text("补充锁定事实后重新提取大纲", timeout=15000)
         extract_action = creative_rail.get_by_role(
-            "button", name="后台提取并归并总体大纲", exact=True
+            "button", name="补充锁定事实后重新提取大纲", exact=True
         )
         expect(extract_action).to_have_count(1)
-        # The isolated fixture has no scriptwriter consent, so the action may be
-        # legitimately disabled; the product contract requires a named reason
-        # whenever it is, never a silently dead button.
-        if extract_action.is_disabled():
-            expect(creative_rail.locator(".rail-disabled-reason")).to_be_visible()
-        expect(page.locator(".script-doc.active")).to_contain_text("当前依据")
-        # After the director-journey convergence the style panel lives in the
-        # expert production board; the director plan page freezes style through
-        # the storyboard-book confirmation instead.  The personal-desktop build
-        # approves with the same-origin CSRF marker and no operator password, so
-        # the style panel has no credential field.
-        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
-        page.reload(wait_until="networkidle")
-        page.locator("#style").get_by_role(
-            "button", name="批准并冻结", exact=True
-        ).click()
-        expect(page.locator("#style")).to_contain_text("已冻结 V1", timeout=15000)
-        # Confirming a master lives on the same production board's asset panel;
-        # the director pages use their own material workflow.  ``#assets`` must
-        # therefore stay unique (the plan page was renamed to ``#plan-stage``).
-        masters = page.locator("#assets")
-        master = masters.locator(".asset-row").filter(
-            has_text="isolated-browser-upload.png"
+        expect(extract_action).to_be_disabled()
+
+        # Stage 2 (#d/assets -> #plan-stage): generate storyboard book & confirm (freezes Style V1).
+        page.goto(f"{ui_base}#d/assets", wait_until="networkidle")
+        plan_stage = page.locator("#plan-stage")
+        book_panel = plan_stage.locator("#storyboard-book")
+        book_panel.get_by_label("集数", exact=True).fill("1")
+        book_panel.get_by_label("每集目标秒数", exact=True).fill("15")
+        plan_rail = plan_stage.get_by_label("本阶段操作")
+        with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/director/storyboard-book"),
+            timeout=15000,
+        ):
+            plan_rail.get_by_role("button", name="生成分镜书", exact=True).click()
+        expect(book_panel.locator(".book-preview")).to_be_visible(timeout=15000)
+        with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith("/director/storyboard-book/confirm"),
+            timeout=15000,
+        ):
+            plan_rail.locator("button").first.click()
+        expect(plan_stage).to_contain_text("当前冻结风格第 1 版", timeout=15000)
+
+        # Stage 4 (#d/materials -> #shot-materials): upload + approve + lock + bind BrowserUpload.
+        page.goto(f"{ui_base}#d/materials", wait_until="networkidle")
+        materials = page.locator("#shot-materials")
+        upload_row = materials.locator("tr").filter(has_text="BrowserUpload")
+        expect(upload_row).to_be_visible(timeout=15000)
+        upload_row.locator('input[type="file"]').set_input_files(
+            {
+                "name": "isolated-browser-upload.png",
+                "mimeType": "image/png",
+                "buffer": fake_image("browser-legacy-approval"),
+            }
         )
-        # The personal-desktop build confirms a master in one action; the
-        # separate approve and lock buttons are gone.
-        master.get_by_role("button", name="确认使用", exact=True).click()
-        expect(master).to_contain_text("可用于分镜", timeout=15000)
-        # The pre-production panel lives in the expert layer.
-        page.goto(f"{ui_base}#v/production/preproduction", wait_until="networkidle")
+        expect(upload_row).to_contain_text("已匹配，可复用", timeout=15000)
+
+        # Stage 5 (#d/package -> details#preproduction): advanced preparation console.
+        page.goto(f"{ui_base}#d/package", wait_until="networkidle")
         page.reload(wait_until="networkidle")
-        prep = page.locator("#preproduction")
+        page.locator("details#preproduction > summary").click()
+        prep = page.locator("section#preproduction")
         # The evidence field lives in a collapsed advanced section.
         prep.get_by_text("展开高级准备").click()
         prep.get_by_label("核验证据").fill(
@@ -444,11 +558,11 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         # promotion is gated by the candidate's review state, not a checkbox.
         card = prep.locator("article").filter(has_text="BrowserCharacter")
         expect(card).to_contain_text("待人工复核")
-        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("本次维护请求的执行器").select_option("local")
         expect(card).to_contain_text("待人工复核")
         # Merely selecting local mode cannot relabel the existing Fake candidate.
         assert asset["payload"]["provenance"]["is_mock"]
-        prep.get_by_label("操作模式").select_option("fake")
+        prep.get_by_label("本次维护请求的执行器").select_option("fake")
         card.get_by_role("button", name="按选定模式人工晋升", exact=True).click()
         expect(card).to_contain_text("已转正", timeout=15000)
         prep.get_by_role("button", name="Voice Studio", exact=True).click()
@@ -468,7 +582,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(failed_card).to_contain_text("失败，需人工对账")
         # Fake request mode cannot authorize real filesystem reconciliation.
         expect(failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True)).to_be_disabled()
-        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("本次维护请求的执行器").select_option("local")
         prep.get_by_label("我已核对本机维护的路径范围和操作内容").check()
         failed_card.get_by_role("button", name="核对安装失败（不重试）", exact=True).click()
         expect(failed_card).to_contain_text("已对账收尾", timeout=15000)
@@ -526,41 +640,48 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             route.fulfill(json=body)
 
         page.route("**/api/v1/system/status", ready_status)
+        page.goto(f"{ui_base}#d/produce", wait_until="networkidle")
         page.reload(wait_until="networkidle")
-        page.locator("select").first.select_option(p)
-        production = page.locator("#production")
-        production.get_by_label("生成方式").select_option("comfyui")
-        # The basic self-review scope checks the expected output size, so the
-        # workbench only offers the real-generation confirmation once the
-        # operator declares the width and height. Fill them exactly as an
-        # operator would before expecting the armed confirmation.
-        production.get_by_label("审片建议（可选）").select_option("basic")
-        production.get_by_label("预期画面宽度").fill("768")
-        production.get_by_label("预期画面高度").fill("1344")
-        for mode in ("T2VA", "Ref2VA"):
-            production.get_by_label("生成模板").select_option(f"ui-only-{mode}")
-            before = len(submissions)
-            # Real generation uses a two-click armed button instead of a native
-            # dialog: the first click only reveals the confirmation, cancelling
-            # must submit nothing, and confirming submits exactly one job.
-            production.get_by_role("button", name="加入队列", exact=True).first.click()
-            armed = production.locator(".queue-confirm")
-            expect(armed).to_have_count(1)
-            armed.get_by_role("button", name="取消", exact=True).click()
-            expect(armed).to_have_count(0)
-            assert len(submissions) == before, submissions
-            production.get_by_role("button", name="加入队列", exact=True).first.click()
-            with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/projects/{p}/jobs")):
-                production.locator(".queue-confirm").get_by_role(
-                    "button", name="确认真实生成", exact=True
-                ).click()
-            assert len(submissions) == before + 1, submissions
-            assert submissions[-1]["generation_mode"] == mode
-            assert submissions[-1]["workflow_profile_id"] == f"ui-only-{mode}"
+        page.locator("details#manual-storyboard > summary").click()
+        shots_panel = page.locator("#shots")
+        shot_block = shots_panel.locator(".shot-block").filter(
+            has_text="Mode routing UI fixture"
+        )
+        expect(shot_block).to_be_visible(timeout=15000)
+        # Under V3 P1 (Ref2VA only), READY mode routes single shots to comfyui + Ref2VA
+        # automatically (never T2VA) with two-click armed confirmation.
+        shot_block.get_by_role("button", name="加入队列", exact=True).click()
+        armed = shot_block.locator(".queue-confirm")
+        expect(armed).to_have_count(1)
+        armed.get_by_role("button", name="取消", exact=True).click()
+        expect(armed).to_have_count(0)
+        assert len(submissions) == 0, submissions
+        shot_block.get_by_role("button", name="加入队列", exact=True).click()
+        with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith(f"/projects/{p}/jobs")
+        ):
+            shot_block.locator(".queue-confirm").get_by_role(
+                "button", name="确认真实生成", exact=True
+            ).click()
+        assert len(submissions) == 1, submissions
+        assert submissions[-1]["provider"] == "comfyui", submissions
+        assert submissions[-1]["generation_mode"] == "Ref2VA", submissions
+        assert submissions[-1]["workflow_profile_id"] == "ui-only-Ref2VA", submissions
+        page.unroute("**/api/v1/system/status")
+        page.reload(wait_until="networkidle")
+        page.locator("details#manual-storyboard > summary").click()
+        shot_block.get_by_role("button", name="加入队列", exact=True).click()
+        with page.expect_response(
+            lambda response: response.request.method == "POST"
+            and response.url.endswith(f"/projects/{p}/jobs")
+        ):
+            shot_block.locator(".queue-confirm").get_by_role(
+                "button", name="确认真实生成", exact=True
+            ).click()
+        assert len(submissions) == 2, submissions
+        assert submissions[-1]["provider"] == "mock", submissions
         assert c.get(base + f"/projects/{p}/jobs").json() == [], "UI routing probe must create no backend jobs"
-        production.get_by_label("生成方式").select_option("mock")
-        # Hold an old project's asset response until a different project has
-        # finished loading. A late callback must not replace the new selection.
         # Protocol-only UI fixtures. These requests never become real capabilities or jobs.
         workflow_fixtures = [
             {"id": "ui-native-draft", "status": "DRAFT", "sha256": "a" * 64,
@@ -590,12 +711,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         ]
         for path in workflow_paths:
             page.route(path, workflow_request)
-        # The reload above collapsed the panel's advanced <details> section
-        # again; an operator reopens it before switching views, and the nav
-        # buttons live inside that section.
+        # Return to #d/package and reopen the preproduction StageDock + advanced fold.
+        page.goto(f"{ui_base}#d/package", wait_until="networkidle")
+        page.locator("details#preproduction > summary").click()
+        prep = page.locator("section#preproduction")
         prep.get_by_text("展开高级准备").click()
         prep.get_by_role("button", name="工作流能力", exact=True).click()
-        prep.get_by_label("操作模式").select_option("local")
+        prep.get_by_label("本次维护请求的执行器").select_option("local")
         prep.get_by_label("核验证据").fill("Mock UI protocol check only; no real acceptance")
         prep.get_by_label("我已核对本机维护的路径范围和操作内容").check()
         # The card shows only the id prefix, and both native fixtures share the
@@ -645,12 +767,13 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             route.fulfill(status=201, json={"scope": "MOCK_UI_NO_MODEL_CALL"})
 
         page.route(critic_url, capture_critic)
-        # The crew panel lives on the expert 'pro' view, a different page from
-        # the preproduction anchor this run is on. Navigate there, then reload
-        # so the panel refetches its roles through the fixture route above.
-        page.goto(f"{ui_base}#v/pro", wait_until="networkidle")
+        # The crew panel lives inside a StageDock on #d/advanced. Navigate there,
+        # reload so the panel refetches its roles through the fixture route above,
+        # and expand the StageDock.
+        page.goto(f"{ui_base}#d/advanced", wait_until="networkidle")
         page.reload(wait_until="networkidle")
-        crew = page.locator("#film-crew")
+        page.locator("details#film-crew > summary").click()
+        crew = page.locator("section#film-crew")
         crew.get_by_label("执行工种").select_option("qc_reviewer")
         expect(crew.get_by_role("button", name="运行工种", exact=True)).to_be_disabled()
         crew.get_by_label("检查镜头输入").select_option(routing_shot["id"])
@@ -688,7 +811,9 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         page.route(grants_url, capture_text_grant)
         page.route(abandon_url, capture_abandonment)
         page.reload(wait_until="networkidle")
+        page.locator("details#film-crew > summary").click()
         crew.locator("details").filter(has_text="ui-unknown-text-task").locator("summary").click()
+        crew.locator("details.advanced-fold > summary").click()
         abandon_button = crew.get_by_role("button", name="放弃远端未知响应（不重试）", exact=True)
         expect(abandon_button).to_be_disabled()
         crew.get_by_label("远端响应对账凭据").fill(TEST_CREDENTIAL)
@@ -713,11 +838,10 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
             page.unroute(path)
         for path in [roles_url, lock_url, critic_url]:
             page.unroute(path)
-        # The text-provider settings live on the setup view.  The convergence
-        # round moved the AI model manager into the setup panel's production
-        # environment section; #settings deliberately carries no second copy.
-        page.goto(f"{ui_base}#v/setup", wait_until="networkidle")
-        settings = page.locator("#setup")
+        # The text-provider settings live on #d/setup (#director-setup) under tab ② 文本模型.
+        page.goto(f"{ui_base}#d/setup", wait_until="networkidle")
+        settings = page.locator("#director-setup")
+        settings.get_by_role("button", name="② 文本模型", exact=True).click()
         add_model = settings.locator(".llm-add-model")
         add_model.get_by_label("模型配置名称", exact=True).fill("UI bounded text fixture")
         add_model.get_by_label("服务平台", exact=True).select_option("openai_compatible")
@@ -744,44 +868,42 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
         expect(add_model.get_by_label("回复上限 token", exact=True)).to_have_count(0)
         other = post("/projects", {"title": "Late-response isolation fixture"})["id"]
         page.unroute("**/api/v1/workflow-profiles?*")
-        # Back to the production view: the asset-isolation assertions below
-        # must run against a visible assets section, not a hidden page.
-        page.goto(f"{ui_base}#v/production/assets", wait_until="networkidle")
+        # Late-response isolation across topbar 快速切换作品 on #d/produce (#manual-storyboard).
+        page.goto(f"{ui_base}#d/produce", wait_until="networkidle")
         page.reload(wait_until="networkidle")
-        selector = page.locator("select").first
+        page.locator("details#manual-storyboard > summary").click()
+        selector = page.get_by_label("快速切换作品")
         selector.select_option(other)
         page.wait_for_load_state("networkidle")
-        expect(page.locator("#assets .asset-row")).to_have_count(0)
+        expect(page.locator("#shots .shot-block")).to_have_count(0)
         delayed = []
-        old_assets_url = f"**/api/v1/projects/{p}/assets"
-        page.route(old_assets_url, lambda route: delayed.append(route))
-        with page.expect_request(lambda request: request.url.endswith(f"/projects/{p}/assets")):
+        old_shots_url = f"**/api/v1/projects/{p}/shots"
+        page.route(old_shots_url, lambda route: delayed.append(route))
+        with page.expect_request(lambda request: request.url.endswith(f"/projects/{p}/shots")):
             selector.select_option(p)
         with page.expect_response(lambda response: response.url.endswith(f"/projects/{other}/jobs")):
             selector.select_option(other)
         assert delayed, "Old project request was not held"
         for route in delayed:
-            route.fulfill(json=c.get(base + f"/projects/{p}/assets").json())
+            route.fulfill(json=c.get(base + f"/projects/{p}/shots").json())
         page.wait_for_load_state("networkidle")
         expect(selector).to_have_value(other)
-        expect(page.locator("#assets .asset-row")).to_have_count(0)
+        expect(page.locator("#shots .shot-block")).to_have_count(0)
         expect(page.get_by_text("Mode routing UI fixture", exact=True)).to_have_count(0)
-        page.unroute(old_assets_url)
+        page.unroute(old_shots_url)
         # Director run scope: a project with no run shows "not started" and no
         # controls borrowed from another package.  A disconnected journey
         # request must recover on reload instead of leaving a dead page (J11).
-        # The seven-stage split moved the run-scope/post panel to the deliver
-        # page (成片中心); the run page now carries the shoot controls.
-        page.goto(f"{ui_base}#v/production", wait_until="networkidle")
-        page.get_by_label("切换项目").select_option(other)
         page.goto(f"{ui_base}#d/deliver", wait_until="networkidle")
-        expect(page.get_by_text("还没有整部作品的运行记录", exact=False)).to_be_visible(timeout=15000)
+        selector.select_option(other)
+        page.wait_for_load_state("networkidle")
+        expect(page.get_by_text("还没有可预览的集", exact=False)).to_be_visible(timeout=15000)
         expect(page.get_by_role("button", name="暂停", exact=True)).to_have_count(0)
         page.route("**/api/v1/projects/*/journey*", lambda route: route.abort())
         page.reload(wait_until="domcontentloaded")
         page.unroute("**/api/v1/projects/*/journey*")
         page.reload(wait_until="networkidle")
-        expect(page.get_by_text("还没有整部作品的运行记录", exact=False)).to_be_visible(timeout=15000)
+        expect(page.get_by_text("还没有可预览的集", exact=False)).to_be_visible(timeout=15000)
         if screenshot:
             page.screenshot(path=str(screenshot), full_page=True)
         browser.close()
@@ -820,7 +942,7 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                     "TTS/ASR/alignment",
                     "SRT download",
                     "no browser credential persistence",
-                    "T2VA/Ref2VA selection and cancel/confirm payload routing (intercepted; zero backend jobs)",
+                    "Ref2VA-only single-shot cancel/confirm payload routing under READY/DEMO (intercepted; zero backend jobs)",
                     "failed-install history, authenticated reconciliation, fresh unapproved plan; no replay or package writes",
                     "late old-project responses cannot overwrite selected-project assets/shots",
                     "independent text critic requires selected shot, routes exact spec under project-level text consent (intercepted)",

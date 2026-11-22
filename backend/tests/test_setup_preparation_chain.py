@@ -320,6 +320,7 @@ def test_bare_image_download_and_instance_steps_avoid_h3_qualification_gate(env,
     from shine.comfyops import deployment, host_env, variants
 
     _client, factory, tmp_path, settings = env
+    monkeypatch.setattr("shine.comfyops.storage.on_system_drive", lambda *_a, **_k: False)
     monkeypatch.setattr("shine.comfyops.storage.disk_info", lambda *_a, **_k: {"free_bytes": 10**12})
     monkeypatch.setattr(
         host_env, "probe_host_facts",

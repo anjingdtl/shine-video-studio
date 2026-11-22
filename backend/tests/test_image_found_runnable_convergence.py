@@ -11,6 +11,8 @@
 
 from __future__ import annotations
 
+import os
+
 import httpx
 import pytest
 from fastapi import HTTPException
@@ -150,6 +152,7 @@ def _live_port(monkeypatch, port=8196):
     monkeypatch.setattr(httpx, "get", lambda *a, **k: Resp())
 
 
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_adopted_live_renderer_is_reused_read_only(env, monkeypatch):
     """用户自己的活体 ComfyUI 是这套安装的渲染器：只读复用，不启动不停止。"""
     _, factory, tmp_path, settings = env
@@ -186,6 +189,7 @@ def test_non_adopted_instance_never_reuses_an_external_listener(env, monkeypatch
         assert image_renderer.adopted_live_renderer(db, settings, "managed-1") is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="managed image renderer start is Windows-only")
 def test_image_verify_step_reuses_adopted_live_and_persists_evidence(env, monkeypatch):
     _, factory, tmp_path, settings = env
     from shine.comfyops import image_renderer

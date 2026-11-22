@@ -156,17 +156,17 @@ def _workbench_pin_names(settings) -> set[str]:
     names: set[str] = set()
     renderer = recipe.get('renderer')
     if isinstance(renderer, dict) and renderer.get('bootstrap'):
-        names.add(Path(str(renderer['bootstrap'])).name)
+        names.add(Path(str(renderer['bootstrap']).replace('\\', '/')).name)
     for spec in (recipe.get('reviews') or {}).values():
         argv = (spec or {}).get('argv') or []
         if len(argv) > 1:
-            names.add(Path(str(argv[1])).name)
+            names.add(Path(str(argv[1]).replace('\\', '/')).name)
     return {name for name in names if name}
 
 
 def _production_digests(identity: dict, workbench: set[str]) -> list[str]:
     return sorted(digest for path, digest in (identity.get('files') or {}).items()
-                  if Path(str(path)).name not in workbench)
+                  if Path(str(path).replace('\\', '/')).name not in workbench)
 
 
 def _same_configuration(stored: dict, current: dict, *, workbench: set[str]) -> bool:

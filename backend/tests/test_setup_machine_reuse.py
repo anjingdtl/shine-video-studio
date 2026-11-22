@@ -57,6 +57,7 @@ def installed(studio, monkeypatch):
     monkeypatch.setattr("shine.comfyops.host_env.probe_gpu", lambda: {"status": "OK", "uuid": "GPU-test"})
     monkeypatch.setattr("shine.comfyops.adoption.probe_comfy_service",
                         lambda port: {"is_comfyui": False, "version": None})
+    monkeypatch.setattr("shine.comfyops.renderer_supervisor.windows_port_listeners", lambda _port: [])
     return factory, settings, root, catalogs
 
 

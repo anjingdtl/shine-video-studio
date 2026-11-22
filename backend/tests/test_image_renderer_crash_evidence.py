@@ -143,6 +143,7 @@ def test_a_failed_start_keeps_its_own_named_reason(api, monkeypatch):
         ))
         db.commit()
     monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "STOPPED")
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
     with factory() as db:
         evidence = image_renderer.renderer_crash_evidence(db, settings, instance_id="fake-instance")
     assert evidence["crashed"] is True
@@ -197,6 +198,7 @@ def test_the_crash_stays_visible_after_the_record_is_normalized(api, monkeypatch
         ))
         db.commit()
     monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "STOPPED")
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
     with factory() as db:
         evidence = image_renderer.renderer_crash_evidence(db, settings, instance_id="fake-instance")
     assert evidence["crashed"] is True
@@ -219,6 +221,7 @@ def test_an_operator_stop_is_not_reported_as_a_crash(api, monkeypatch):
         ))
         db.commit()
     monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "STOPPED")
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
     with factory() as db:
         evidence = image_renderer.renderer_crash_evidence(db, settings, instance_id="fake-instance")
     assert evidence["crashed"] is False
@@ -491,6 +494,7 @@ def test_resolved_recipe_mismatch_no_longer_blocks_image_readiness(api, tmp_path
             },
         ))
     monkeypatch.setattr(image_renderer, "managed_process_state", lambda record: "STOPPED")
+    monkeypatch.setattr(image_renderer, "windows_port_listeners", lambda port: [])
     with factory() as db:
         report = runtime.readiness(db, settings, object_info=object_info_fixture())
     assert report["binding_state"] == "READY"

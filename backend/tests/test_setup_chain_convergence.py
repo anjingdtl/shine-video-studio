@@ -102,7 +102,7 @@ def test_a_rescan_finds_a_file_that_arrived_after_the_first_round(tmp_path, api,
     assert [row["path"] for row in candidates] == [str(folder / "arrived-later.safetensors")]
 
 
-def test_a_verified_search_candidate_is_reused_instead_of_downloaded(tmp_path, api, monkeypatch):
+def test_a_verified_search_candidate_is_reused_instead_of_downloaded(tmp_path, api, monkeypatch, fake_deployment_host):
     client, factory, settings = api
     _stub_scan_catalog(monkeypatch)
     catalog = _catalog()
@@ -166,7 +166,7 @@ def test_a_moved_verified_file_stops_counting_as_found(tmp_path, api, monkeypatc
     assert [row["relative_path"] for row in after["missing_files"]] == ["w.safetensors"]
 
 
-def test_manual_staging_is_consumed_by_the_same_reconcile_executor(tmp_path, api, monkeypatch):
+def test_manual_staging_is_consumed_by_the_same_reconcile_executor(tmp_path, api, monkeypatch, fake_deployment_host):
     """手动收料目录必须被整备链的核验执行者消费，而不是只有独立 API 认识它。
 
     真机复现（2026-11-17）：用户把完整权重放进 manual-downloads 后点一键整备，
