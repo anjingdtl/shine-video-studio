@@ -99,6 +99,8 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
   const [loading, setLoading] = useState(true);
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [draftTexts, setDraftTexts] = useState<Record<string, string>>({});
+  const [retakeConfirmShotId, setRetakeConfirmShotId] = useState<string | null>(null);
+  const promptTextareaRefs = useRef<Record<string, HTMLTextAreaElement | null>>({});
   const [batchNotice, setBatchNotice] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
 
   // Batch schedule configuration (hydrated from project snapshot or latest execution snapshot)
@@ -359,10 +361,14 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
     }
   };
 
-  const handleRetakeShot = async (shotId: string) => {
+  const handleRetakeShot = async (shotId: string, opts?: { freezeFirst?: boolean }) => {
     setBusyKey(`retake:${shotId}`);
     try {
+      if (opts?.freezeFirst) {
+        await freezeM4Prompt(projectId, shotId, draftTexts[shotId] ?? '');
+      }
       const res = await retakeM4Shot(projectId, shotId, buildConfig('shot', [shotId]));
+      setRetakeConfirmShotId(null);
       await applyState(res.state);
       onMessage?.('已建立单镜重拍任务，历史成片产物均完整保留。');
     } catch (err) {
@@ -646,6 +652,10 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
 
             {ep.shots.map((sh) => {
               const lj = sh.latest_job;
+              const currentText = draftTexts[sh.id] ?? sh.active_prompt?.prompt_text ?? '';
+              const frozenText = sh.frozen_prompt?.prompt_text ?? '';
+              const hasUnfrozenEdits = currentText.trim() !== frozenText.trim();
+              const isRetake = lj !== null;
               return (
                 <div key={sh.id} className="m4-mat-card">
                   <div className="m4-ep-head">
@@ -698,10 +708,28 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                     </label>
                   </div>
 
+                  {sh.reference_manifest.length > 0 && (
+                    <div className="m4-bound-preview" aria-label={`${sh.shot_code} 参考素材核对`}>
+                      {sh.reference_manifest.map((m) => (
+                        <span key={`${sh.id}-${m.asset_version_id}`} className="m4-badge">
+                          {m.use_as === 'image' && m.media_url && (
+                            <img src={m.media_url} alt={m.role_label} className="m4-thumb-sm" />
+                          )}
+                          <span>
+                            {m.h3_label} = {m.role_label}
+                          </span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
                   <textarea
+                    ref={(el) => {
+                      promptTextareaRefs.current[sh.id] = el;
+                    }}
                     className="m4-textarea"
                     placeholder="填写这一镜提交给 MiniMax-H3 的人工原文提示词（如 subject_definitions / detailed_description 等）"
-                    value={draftTexts[sh.id] ?? sh.active_prompt?.prompt_text ?? ''}
+                    value={currentText}
                     onChange={(e) => setDraftTexts((prev) => ({ ...prev, [sh.id]: e.target.value }))}
                   />
 
@@ -734,7 +762,13 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                         type="button"
                         className="btn-secondary"
                         disabled={busyKey !== null}
-                        onClick={() => void handleRetakeShot(sh.id)}
+                        onClick={() => {
+                          if (isRetake || hasUnfrozenEdits) {
+                            setRetakeConfirmShotId(sh.id);
+                          } else {
+                            void handleRetakeShot(sh.id);
+                          }
+                        }}
                       >
                         单镜开拍 / 重拍
                       </button>
@@ -760,6 +794,55 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                       </>
                     )}
                   </div>
+
+                  {retakeConfirmShotId === sh.id && (
+                    <div className="m4-blocker-box" role="alertdialog" aria-label={`重拍 ${sh.shot_code} 提示词确认`}>
+                      <div>
+                        {hasUnfrozenEdits
+                          ? `重拍 ${sh.shot_code} 前提示：提示词文本框有尚未冻结的修改，是否先冻结当前提示词后再重拍，或继续调整？`
+                          : `重拍 ${sh.shot_code} 前提示：将沿用已冻结的 H3 提示词（版本 v${sh.frozen_prompt?.revision ?? '?'}），重拍前是否需要调整提示词？`}
+                      </div>
+                      <div className="m4-toolbar">
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={busyKey !== null}
+                          onClick={() => {
+                            setRetakeConfirmShotId(null);
+                            promptTextareaRefs.current[sh.id]?.focus();
+                          }}
+                        >
+                          去调整提示词
+                        </button>
+                        {hasUnfrozenEdits && (
+                          <button
+                            type="button"
+                            className="btn-primary"
+                            disabled={busyKey !== null || !currentText.trim()}
+                            onClick={() => void handleRetakeShot(sh.id, { freezeFirst: true })}
+                          >
+                            冻结修改并重拍
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          className={hasUnfrozenEdits ? 'btn-secondary' : 'btn-primary'}
+                          disabled={busyKey !== null}
+                          onClick={() => void handleRetakeShot(sh.id)}
+                        >
+                          {hasUnfrozenEdits ? '按原冻结版本重拍' : '无需调整，继续重拍'}
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-secondary"
+                          disabled={busyKey !== null}
+                          onClick={() => setRetakeConfirmShotId(null)}
+                        >
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {lj?.failure_detail && (
                     <div className="m4-footer-note">

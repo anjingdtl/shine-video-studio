@@ -262,3 +262,73 @@ def test_p5_real_ffmpeg_assembly_retake_replace_and_sha_bound_acceptance(tmp_pat
 
     with sqlite3.connect(data_dir / "shine.db") as conn:
         assert conn.execute("SELECT COUNT(*) FROM media_artifacts").fetchone()[0] == 0
+
+
+def test_p5_subtitle_font_size_validation_and_ass_conversion(tmp_path):
+    from shine.manual4.delivery.assembler import srt_to_ass
+
+    ass_small = srt_to_ass("1\n00:00:00,000 --> 00:00:02,500\n林晚：今晚风好大。\n", font_size=24)
+    ass_large = srt_to_ass("1\n00:00:00,000 --> 00:00:02,500\n林晚：今晚风好大。\n", font_size=68)
+    assert "PlayResX: 1280" in ass_small
+    assert "PlayResY: 720" in ass_small
+    assert "Style: Default,Arial,24," in ass_small
+    assert "Style: Default,Arial,68," in ass_large
+    assert "Dialogue: 0,0:00:00.00,0:00:02.50,Default,,0,0,0,,林晚：今晚风好大。" in ass_small
+
+    app, _data_dir = _setup_m4_client(tmp_path)
+    seen_font_sizes: list[int] = []
+
+    def _stub_asm(*, episode_code, subtitle_font_size=40, **_kw):
+        seen_font_sizes.append(subtitle_font_size)
+        return {
+            "bytes": make_mp4_fixture(duration_s=10.0, width=672, height=384, fps=24)
+            + f"-fs{subtitle_font_size}".encode(),
+            "is_mock": True,
+        }
+
+    app.state.m4_delivery_assembler_stub = _stub_asm
+    with TestClient(app) as client:
+        pid, ep_id, _shots = _setup_ready_two_shot_project(client)
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "project", "provider": "mock", "resolution_scale": 0.5},
+        )
+        execute_next_m4_run(
+            app.state.session_factory,
+            app.state.m4_session_factory,
+            app.state.settings,
+            app.state.m4_root,
+            worker_id="p5-font-w",
+            video_stub=lambda *, shot_code, duration_s, width, height, **_kw: {
+                "bytes": make_mp4_fixture(duration_s=duration_s, width=width, height=height, fps=24),
+                "filename": f"{shot_code}.mp4",
+                "is_mock": True,
+            },
+        )
+
+        # Out-of-range font size refused with 422
+        bad = client.post(
+            f"/api/v1/manual4/projects/{pid}/episodes/{ep_id}/deliveries/assemble",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"include_subtitles": True, "burn_subtitles": True, "subtitle_font_size": 8},
+        )
+        assert bad.status_code == 422
+
+        d1 = client.post(
+            f"/api/v1/manual4/projects/{pid}/episodes/{ep_id}/deliveries/assemble",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"include_subtitles": True, "burn_subtitles": True, "subtitle_font_size": 28},
+        )
+        assert d1.status_code == 201
+        assert d1.json()["delivery"]["version"] == 1
+
+        # Changing font size busts shots_digest and produces v2
+        d2 = client.post(
+            f"/api/v1/manual4/projects/{pid}/episodes/{ep_id}/deliveries/assemble",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"include_subtitles": True, "burn_subtitles": True, "subtitle_font_size": 64},
+        )
+        assert d2.status_code == 201
+        assert d2.json()["delivery"]["version"] == 2
+        assert seen_font_sizes == [28, 64]

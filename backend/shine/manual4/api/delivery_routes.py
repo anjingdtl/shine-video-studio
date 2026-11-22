@@ -34,6 +34,7 @@ class M4AssembleDeliveryBody(BaseModel):
     job_overrides: dict[str, str] = Field(default_factory=dict)
     include_subtitles: bool = True
     burn_subtitles: bool = False
+    subtitle_font_size: int = Field(default=40, ge=12, le=96)
 
 
 class M4AcceptDeliveryBody(BaseModel):
@@ -77,6 +78,7 @@ def m4_assemble_delivery(
         job_overrides=body.job_overrides if body else None,
         include_subtitles=body.include_subtitles if body else True,
         burn_subtitles=body.burn_subtitles if body else False,
+        subtitle_font_size=body.subtitle_font_size if body else 40,
         assembler_stub=stub,
     )
     m4_db.commit()

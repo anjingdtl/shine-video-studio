@@ -380,3 +380,184 @@ def test_p3_batch_operations_generate_promote_and_decline(tmp_path):
         assert dec_resp.json()["applied_ids"] == [prop_req["id"]]
         prop_after = next(r for r in dec_resp.json()["state"]["requirements"] if r["id"] == prop_req["id"])
         assert prop_after["user_declined"] is True
+
+
+def test_p3_canonical_reference_manifest_orders_subjects_by_cast_before_scenes(tmp_path):
+    from shine.manual4.comfy.h3_adapter import compile_m4_ref2va_workflow
+    from shine.manual4.storage.models import M4ExecutionSnapshot, M4ProductionRun
+    from shine.manual4.worker import _execute_single_job
+
+    app, _ = _setup_m4_client(tmp_path)
+    linwan_png = _minimal_png(16, 16)
+    guyan_png = _minimal_png(24, 24)
+    alley_png = _minimal_png(32, 32)
+    linwan_v2_png = _minimal_png(20, 20)
+
+    with TestClient(app) as client:
+        pid = client.post(
+            "/api/v1/platform/manual4-projects",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"title": "第一镜角色顺序与素材衔接测试", "max_shot_seconds": 15.0},
+        ).json()["id"]
+        raw_text = (
+            "第1集：试映（目标总时长：10s）\n"
+            "第1镜（5s）：林晚与顾言在雨夜窄巷对峙。\n"
+            "人物：林晚、顾言\n"
+            "场景：雨夜窄巷\n"
+            "第2镜（5s）：林晚独自离开。\n"
+            "人物：林晚\n"
+        )
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/import",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"text": raw_text, "filename": "plan.txt"},
+        )
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/confirm",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"acknowledge_duration_mismatch": False},
+        )
+        mat = client.get(f"/api/v1/manual4/projects/{pid}/materials/requirements").json()
+        reqs = {(r["family"], r["entity_name"]): r for r in mat["requirements"]}
+
+        # Deliberately promote in reverse order: scene -> char2 (顾言) -> char1 (林晚)
+        for fam, name, fname, data in [
+            ("scene", "雨夜窄巷", "alley.png", alley_png),
+            ("character", "顾言", "guyan.png", guyan_png),
+            ("character", "林晚", "linwan.png", linwan_png),
+        ]:
+            up = client.post(
+                f"/api/v1/manual4/projects/{pid}/assets/upload",
+                headers=LOCAL_ACTION_HEADERS,
+                data={"family": fam, "entity_name": name, "requirement_id": reqs[(fam, name)]["id"]},
+                files={"file": (fname, data, "image/png")},
+            )
+            assert up.status_code == 200
+            prom = client.post(
+                f"/api/v1/manual4/projects/{pid}/assets/{up.json()['asset']['id']}/promote",
+                headers=LOCAL_ACTION_HEADERS,
+                json={},
+            )
+            assert prom.status_code == 200
+
+        # Replace 林晚 with a new version -> must STILL stay <Subject 1>!
+        up2 = client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/upload",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"family": "character", "entity_name": "林晚", "requirement_id": reqs[("character", "林晚")]["id"]},
+            files={"file": ("linwan_v2.png", linwan_v2_png, "image/png")},
+        )
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/{up2.json()['asset']['id']}/promote",
+            headers=LOCAL_ACTION_HEADERS,
+            json={},
+        )
+
+        # Stage 2 bindings and Stage 3 reference_manifest must agree on cast-first order
+        mat2 = client.get(f"/api/v1/manual4/projects/{pid}/materials/requirements").json()
+        s1_bindings = mat2["shots"][0]["bindings"]
+        assert [(b["h3_label"], b["role_label"]) for b in s1_bindings] == [
+            ("<Subject 1>", "林晚"),
+            ("<Subject 2>", "顾言"),
+            ("<Picture 3>", "雨夜窄巷"),
+        ]
+
+        prod = client.get(f"/api/v1/manual4/projects/{pid}/production/state").json()
+        s1_manifest = prod["episodes"][0]["shots"][0]["reference_manifest"]
+        assert [(m["h3_label"], m["role_label"]) for m in s1_manifest] == [
+            ("<Subject 1>", "林晚"),
+            ("<Subject 2>", "顾言"),
+            ("<Picture 3>", "雨夜窄巷"),
+        ]
+
+        # Freeze both shots and verify ComfyUI upload order for Shot 1 matches [林晚, 顾言, 雨夜窄巷]
+        for sh in prod["episodes"][0]["shots"]:
+            fr = client.post(
+                f"/api/v1/manual4/projects/{pid}/shots/{sh['id']}/prompt/freeze",
+                headers=LOCAL_ACTION_HEADERS,
+                json={
+                    "prompt_text": (
+                        "subject_definitions:\n<Subject 1> is 林晚, shown in <Picture 1>.\n"
+                        "detailed_description:\n<Subject 1> stands in the alley."
+                    )
+                },
+            )
+            assert fr.status_code == 200
+            if sh["shot_no"] == 1:
+                # <Picture 1> referenced in subject_definitions should NOT trigger false unresolved warning
+                assert not any(w["code"] == "H3_LABELS" for w in fr.json()["prompt"]["warnings"])
+
+        run = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "project", "provider": "comfyui"},
+        ).json()["run"]
+
+        class _OrderSpyComfy:
+            def __init__(self):
+                self.uploads: list[tuple[str, bytes]] = []
+                self.submitted: list[dict] = []
+
+            def object_info(self):
+                cw = compile_m4_ref2va_workflow(image_count=3)
+                info = {}
+                for node in cw.graph.values():
+                    ct = str(node["class_type"])
+                    req = info.setdefault(ct, {"input": {"required": {}, "optional": {}}})["input"]["required"]
+                    for k in (node.get("inputs") or {}):
+                        req.setdefault(k, ["STRING"])
+                        req.setdefault(k.split(".", 1)[0], ["STRING"])
+                return info
+
+            def upload_file(self, filename: str, content: bytes, **_kw):
+                self.uploads.append((filename, content))
+                return {"name": filename, "subfolder": "shine"}
+
+            def queue_prompt(self, prompt: dict, **_kw):
+                self.submitted.append(prompt)
+                return {"prompt_id": "pid-order-1"}
+
+            def history(self, prompt_id=None):
+                return {
+                    "pid-order-1": {
+                        "status": {"status_str": "success", "completed": True},
+                        "outputs": {"57": {"videos": [{"filename": "out.mp4", "subfolder": "", "type": "output"}]}},
+                    }
+                }
+
+            def queue(self):
+                return {"queue_running": [], "queue_pending": []}
+
+            def view(self, *_args, **_kw):
+                return b"\x00\x00\x00\x18ftypmp42fake"
+
+        spy = _OrderSpyComfy()
+        with app.state.m4_session_factory() as m4_db:
+            r_row = m4_db.get(M4ProductionRun, run["id"])
+            snap = m4_db.get(M4ExecutionSnapshot, r_row.execution_snapshot_id)
+            s1_item = snap.items_json[0]
+            run_info = {
+                "id": r_row.id,
+                "project_id": pid,
+                "provider": "comfyui",
+                "execution_generation": 2,
+                "config": snap.config_json,
+            }
+        _execute_single_job(
+            app.state.m4_session_factory,
+            app.state.m4_root,
+            run_info,
+            run["jobs"][0]["id"],
+            s1_item,
+            worker_id="w-order",
+            comfy_client=spy,
+            platform_factory=app.state.session_factory,
+            settings=app.state.settings,
+        )
+        assert [content for _name, content in spy.uploads] == [linwan_v2_png, guyan_png, alley_png]
+        assert all(name.startswith("shine_m4_") and name.isascii() for name, _ in spy.uploads)
+        # LoadImage nodes 40, 41, 42 correspond to ref_images.ref_image_0, 1, 2
+        graph = spy.submitted[0]
+        assert graph["40"]["inputs"]["image"] == f"shine/{spy.uploads[0][0]}"
+        assert graph["41"]["inputs"]["image"] == f"shine/{spy.uploads[1][0]}"
+        assert graph["42"]["inputs"]["image"] == f"shine/{spy.uploads[2][0]}"

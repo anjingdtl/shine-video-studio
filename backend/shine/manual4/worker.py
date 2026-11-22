@@ -592,18 +592,20 @@ def _execute_single_job(
                     code="M4_REFERENCE_SHA_MISMATCH",
                     detail=f"参考素材字节校验不一致：{item.get('role_label')}",
                 )
+            ext = (p.suffix or ".png").lower()
+            upload_name = f"shine_m4_{str(item['sha256'])[:16]}{ext}"
             h3_refs.append(
                 H3ReferenceInput(
                     family="image",
                     path=p,
-                    filename=safe_m4_filename(p.name),
+                    filename=upload_name,
                     content_type=str(item.get("content_type") or "image/png"),
                     sha256=str(item["sha256"]),
                     role_label=str(item.get("role_label") or ""),
                 )
             )
             ref_files_to_upload.append(
-                (f"reference_image_{idx + 1}", safe_m4_filename(p.name), raw, item["content_type"])
+                (f"reference_image_{idx + 1}", upload_name, raw, item["content_type"])
             )
 
         if prev_video_rel is not None and prev_output_sha is not None:
@@ -657,11 +659,13 @@ def _execute_single_job(
                     code="M4_REFERENCE_AUDIO_INVALID",
                     detail=f"参考音频哈希不匹配：{item.get('role_label')}",
                 )
+            aud_ext = (p.suffix or ".wav").lower()
+            aud_upload_name = f"shine_m4_{str(item['sha256'])[:16]}{aud_ext}"
             h3_refs.append(
                 H3ReferenceInput(
                     family="audio",
                     path=p,
-                    filename=safe_m4_filename(p.name),
+                    filename=aud_upload_name,
                     content_type=str(item.get("content_type") or "audio/wav"),
                     sha256=str(item["sha256"]),
                     role_label=str(item.get("role_label") or ""),
@@ -669,7 +673,7 @@ def _execute_single_job(
                 )
             )
             ref_files_to_upload.append(
-                (f"reference_audio_{idx + 1}", safe_m4_filename(p.name), raw_aud, item["content_type"])
+                (f"reference_audio_{idx + 1}", aud_upload_name, raw_aud, item["content_type"])
             )
 
         for idx, item in enumerate(vid_items):
@@ -693,15 +697,17 @@ def _execute_single_job(
                     code="M4_REFERENCE_SHA_MISMATCH",
                     detail=f"参考视频字节校验不一致：{item.get('role_label')}",
                 )
+            vid_ext = (p.suffix or ".mp4").lower()
+            vid_upload_name = f"shine_m4_{str(item['sha256'])[:16]}{vid_ext}"
             h3_refs.append(
                 H3ReferenceInput(
-                    family="video", path=p, filename=safe_m4_filename(p.name),
+                    family="video", path=p, filename=vid_upload_name,
                     content_type=str(item.get("content_type") or "video/mp4"), sha256=str(item["sha256"]),
                     role_label=str(item.get("role_label") or ""),
                 )
             )
             ref_files_to_upload.append(
-                (f"reference_video_{idx + 1}", safe_m4_filename(p.name), raw_vid, item["content_type"])
+                (f"reference_video_{idx + 1}", vid_upload_name, raw_vid, item["content_type"])
             )
 
         if video_stub is not None:

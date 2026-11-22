@@ -15,6 +15,25 @@ type Props = {
   onMessage?: (msg: string, kind?: 'success' | 'error') => void;
 };
 
+const DEFAULT_SUBTITLE_FONT_SIZE = 40;
+
+function fontSizeStorageKey(projectId: string): string {
+  return `shine.m4.deliverySubtitleFontSize.${projectId}`;
+}
+
+function readStoredFontSize(projectId: string): number {
+  try {
+    const raw = window.localStorage.getItem(fontSizeStorageKey(projectId));
+    const num = Number(raw);
+    if (Number.isFinite(num) && num >= 12 && num <= 96) {
+      return Math.round(num);
+    }
+  } catch {
+    // Ignore storage quota or SSR/test restrictions
+  }
+  return DEFAULT_SUBTITLE_FONT_SIZE;
+}
+
 export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Props) {
   const projectId = overview.project.id;
   const [state, setState] = useState<M4DeliveryState | null>(null);
@@ -23,8 +42,26 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
   const [jobOverridesByEp, setJobOverridesByEp] = useState<Record<string, Record<string, string>>>({});
   const [includeSubtitles, setIncludeSubtitles] = useState(true);
   const [burnSubtitles, setBurnSubtitles] = useState(false);
+  const [subtitleFontSize, setSubtitleFontSize] = useState<number>(() => readStoredFontSize(projectId));
   const [watchedByDeliv, setWatchedByDeliv] = useState<Record<string, boolean>>({});
   const [evidenceByDeliv, setEvidenceByDeliv] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setSubtitleFontSize(readStoredFontSize(projectId));
+  }, [projectId]);
+
+  const updateFontSize = (nextSize: number) => {
+    const valid = Number.isFinite(nextSize) ? nextSize : DEFAULT_SUBTITLE_FONT_SIZE;
+    setSubtitleFontSize(valid);
+    const clamped = Math.max(12, Math.min(96, Math.round(valid)));
+    try {
+      window.localStorage.setItem(fontSizeStorageKey(projectId), String(clamped));
+    } catch {
+      // Ignore storage restrictions
+    }
+  };
+
+  const normalizedFontSize = Math.max(12, Math.min(96, Math.round(subtitleFontSize) || DEFAULT_SUBTITLE_FONT_SIZE));
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,6 +92,7 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
         job_overrides: overrides,
         include_subtitles: includeSubtitles,
         burn_subtitles: burnSubtitles,
+        subtitle_font_size: normalizedFontSize,
       });
       await applyState(res.state);
       onMessage?.(`已合成成片版本 v${res.delivery.version}（SHA ${res.delivery.sha256.slice(0, 10)}）。`, 'success');
@@ -75,6 +113,7 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
           job_overrides: jobOverridesByEp[ep.id] ?? {},
           include_subtitles: includeSubtitles,
           burn_subtitles: burnSubtitles,
+          subtitle_font_size: normalizedFontSize,
         });
         setState(res.state);
       }
@@ -149,6 +188,20 @@ export function DeliveryStagePage({ overview, stage, onRefresh, onMessage }: Pro
                 onChange={(e) => setBurnSubtitles(e.target.checked)}
               />
               烧录字幕进画面
+            </label>
+            <label className="m4-toolbar">
+              字幕字号（12–96）
+              <input
+                type="number"
+                className="m4-input"
+                style={{ width: 76 }}
+                min={12}
+                max={96}
+                disabled={!includeSubtitles}
+                value={subtitleFontSize}
+                onChange={(e) => updateFontSize(Number(e.target.value))}
+                onBlur={() => setSubtitleFontSize(normalizedFontSize)}
+              />
             </label>
             <button
               type="button"

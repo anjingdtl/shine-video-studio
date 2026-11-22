@@ -632,3 +632,229 @@ it('远程分镜解析未勾选授权前直接提示并阻止 409 往返，且�
   expect(screen.getByRole('button', { name: '人工对账重排' })).toBeEnabled();
   expect(screen.getByRole('button', { name: '确认失败' })).toBeEnabled();
 });
+
+it('四阶排片重拍前提示用户是否需要调整提示词，产出成片允许设置字幕字号', async () => {
+  let retakeCalls = 0;
+  let freezeCalls = 0;
+  let assemblePayload: Record<string, unknown> | null = null;
+
+  const baseShot = {
+    id: 'shot-1',
+    episode_id: 'ep-1',
+    shot_no: 1,
+    shot_code: 'ep01-s01',
+    revision: 1,
+    target_seconds: 5,
+    summary: '林晚撑伞走入雨巷',
+    dialogue: [],
+    aspect_ratio: '16:9',
+    continuity_mode: 'cut',
+    reference_manifest: [
+      {
+        asset_version_id: 'av-1',
+        h3_label: '<Subject 1>',
+        role_label: '林晚',
+        use_as: 'image',
+        media_url: '/api/v1/manual4/projects/p1/assets/av-1/media',
+        sha256: 'c'.repeat(64),
+      },
+    ],
+    frozen_prompt: {
+      id: 'pr-1',
+      shot_id: 'shot-1',
+      revision: 1,
+      status: 'FROZEN',
+      prompt_text: 'subject_definitions:\n<Subject 1>: 林晚',
+      prompt_sha256: 'a'.repeat(64),
+      shot_revision: 1,
+      target_seconds: 5,
+      generation_mode: 'Ref2VA',
+      reference_manifest: [],
+      reference_manifest_sha256: 'b'.repeat(64),
+      warnings: [],
+      frozen_by: 'local-user',
+      frozen_at: '2026-11-22T06:00:00Z',
+      invalidated_reason: null,
+      updated_at: '2026-11-22T06:00:00Z',
+    },
+    draft_prompt: null,
+    active_prompt: {
+      id: 'pr-1',
+      shot_id: 'shot-1',
+      revision: 1,
+      status: 'FROZEN',
+      prompt_text: 'subject_definitions:\n<Subject 1>: 林晚',
+      prompt_sha256: 'a'.repeat(64),
+      shot_revision: 1,
+      target_seconds: 5,
+      generation_mode: 'Ref2VA',
+      reference_manifest: [],
+      reference_manifest_sha256: 'b'.repeat(64),
+      warnings: [],
+      frozen_by: 'local-user',
+      frozen_at: '2026-11-22T06:00:00Z',
+      invalidated_reason: null,
+      updated_at: '2026-11-22T06:00:00Z',
+    },
+    prompt_valid_for_run: true,
+    prompt_invalid_reason: null,
+    latest_job: {
+      id: 'job-1',
+      run_id: 'run-1',
+      episode_id: 'ep-1',
+      shot_id: 'shot-1',
+      shot_revision: 1,
+      ordinal: 0,
+      status: 'PASSED',
+      attempt_count: 1,
+      target_seconds: 5,
+      continuity_mode: 'cut',
+      provider: 'comfyui',
+      output_sha256: 'd'.repeat(64),
+      output_bytes: 1024,
+      measured_duration_s: 5,
+      measured_width: 672,
+      measured_height: 384,
+      measured_fps: 24,
+      qc_result: {},
+      failure_code: null,
+      failure_detail: '',
+      media_url: null,
+    },
+  };
+
+  const prodState = {
+    confirmed_revision: { id: 'sb-1', revision: 1 },
+    episodes: [
+      { id: 'ep-1', episode_no: 1, episode_code: 'ep01', title: '雨巷', planned_total_seconds: 5, shots: [baseShot] },
+    ],
+    runs: [],
+    options: { variants: [], accelerators: [], frames: [] },
+    readiness: {} as M4Overview['readiness'],
+  };
+
+  const delivState = {
+    confirmed_revision: { id: 'sb-1', revision: 1 },
+    episodes: [
+      {
+        id: 'ep-1',
+        episode_no: 1,
+        episode_code: 'ep01',
+        title: '雨巷',
+        ready_to_assemble: true,
+        shots: [
+          {
+            shot_id: 'shot-1',
+            shot_code: 'ep01-s01',
+            target_seconds: 5,
+            passed_jobs: [
+              { id: 'job-1', output_sha256: 'd'.repeat(64), measured_duration_s: 5, provider: 'comfyui', created_at: '2026-11-22T06:00:00Z' },
+            ],
+          },
+        ],
+        deliveries: [],
+      },
+    ],
+    deliveries: [],
+    readiness: {} as M4Overview['readiness'],
+  };
+
+  stub = new StudioStub([
+    { method: 'GET', pattern: /manual4\/projects\/p1\/production\/state$/, respond: () => jsonResponse(prodState) },
+    {
+      method: 'POST',
+      pattern: /manual4\/projects\/p1\/shots\/shot-1\/prompt\/freeze$/,
+      respond: () => {
+        freezeCalls += 1;
+        return jsonResponse({ prompt: baseShot.frozen_prompt, state: prodState });
+      },
+    },
+    {
+      method: 'POST',
+      pattern: /manual4\/projects\/p1\/shots\/shot-1\/retake$/,
+      respond: () => {
+        retakeCalls += 1;
+        return jsonResponse({ run: { id: 'retake-run-1', status: 'PENDING', jobs: [] }, state: prodState }, 201);
+      },
+    },
+    { method: 'GET', pattern: /manual4\/projects\/p1\/delivery\/state$/, respond: () => jsonResponse(delivState) },
+    {
+      method: 'POST',
+      pattern: /manual4\/projects\/p1\/episodes\/ep-1\/deliveries\/assemble$/,
+      respond: (_url, init) => {
+        assemblePayload = JSON.parse(String(init?.body ?? '{}'));
+        return jsonResponse({
+          delivery: {
+            id: 'deliv-1',
+            project_id: 'p1',
+            run_id: 'run-1',
+            episode_id: 'ep-1',
+            version: 1,
+            status: 'DELIVERED',
+            sha256: 'e'.repeat(64),
+            byte_size: 2048,
+            duration_s: 5,
+            width: 672,
+            height: 384,
+            fps: 24,
+            is_mock: false,
+            has_subtitles: true,
+            media_url: null,
+            subtitle_url: null,
+            acceptance: null,
+            created_at: '2026-11-22T06:00:00Z',
+          },
+          state: delivState,
+        }, 201);
+      },
+    },
+  ]);
+
+  const user = userEvent.setup();
+  const prodView = render(
+    <ScheduleProduceStagePage
+      overview={{ project: { id: 'p1' }, worker_online: true, gpu: { busy: false } } as unknown as M4Overview}
+      onRefresh={async () => {}}
+      onNextStage={() => {}}
+    />,
+  );
+
+  // Clicking retake on a previously shot item MUST prompt before calling /retake
+  await user.click(await screen.findByRole('button', { name: '单镜开拍 / 重拍' }));
+  expect(retakeCalls).toBe(0);
+  const dialog = await screen.findByRole('alertdialog', { name: '重拍 ep01-s01 提示词确认' });
+  expect(dialog).toHaveTextContent('是否需要调整提示词');
+
+  // Choosing "去调整提示词" closes dialog and focuses prompt textarea without submitting
+  await user.click(screen.getByRole('button', { name: '去调整提示词' }));
+  expect(retakeCalls).toBe(0);
+  const textarea = screen.getByPlaceholderText(/填写这一镜提交给 MiniMax-H3/);
+  expect(document.activeElement).toBe(textarea);
+
+  // Edit prompt and click retake -> offers "冻结修改并重拍"
+  await user.type(textarea, '\nClose-up shot.');
+  await user.click(screen.getByRole('button', { name: '单镜开拍 / 重拍' }));
+  await user.click(await screen.findByRole('button', { name: '冻结修改并重拍' }));
+  expect(freezeCalls).toBe(1);
+  expect(retakeCalls).toBe(1);
+  prodView.unmount();
+
+  const { DeliveryStagePage } = await import('../manual4/pages/DeliveryStagePage');
+  render(
+    <DeliveryStagePage
+      overview={{ project: { id: 'p1' }, worker_online: true, gpu: { busy: false } } as unknown as M4Overview}
+      onRefresh={async () => {}}
+    />,
+  );
+  const fontInput = await screen.findByLabelText(/字幕字号/);
+  expect(fontInput).toHaveValue(40);
+  await user.click(screen.getByLabelText('烧录字幕进画面'));
+  await user.clear(fontInput);
+  await user.type(fontInput, '56');
+  await user.click(screen.getByRole('button', { name: '合成当前集成片' }));
+  expect(assemblePayload).toMatchObject({
+    include_subtitles: true,
+    burn_subtitles: true,
+    subtitle_font_size: 56,
+  });
+});

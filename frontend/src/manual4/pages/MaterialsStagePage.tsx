@@ -805,6 +805,7 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                           ) : (
                             sh.bindings.map((b) => (
                               <span key={b.id} className="m4-badge ok">
+                                {b.h3_label ? `${b.h3_label} ` : ''}
                                 {b.role_label || b.asset?.entity_name} ({b.use_as})
                                 <button
                                   type="button"

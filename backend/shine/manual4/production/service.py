@@ -21,6 +21,7 @@ from shine.manual4.h3.output_frame import frame_options, frame_size
 from shine.manual4.prompts.service import (
     _serialize_prompt,
     build_shot_reference_manifest,
+    manifest_digest,
     validate_frozen_prompt_for_shot,
 )
 from shine.manual4.status.readiness import evaluate_m4_readiness
@@ -804,7 +805,7 @@ def create_retake_job_run(
                     .limit(1)
                 )
                 ok_prev_prompt, _ = validate_frozen_prompt_for_shot(m4_db, prev_shot, prev_prompt)
-                prev_manifest_sha = _canonical_sha(build_shot_reference_manifest(m4_db, prev_shot))
+                prev_manifest_sha = manifest_digest(build_shot_reference_manifest(m4_db, prev_shot))
                 candidates = m4_db.scalars(
                     select(M4Job)
                     .where(

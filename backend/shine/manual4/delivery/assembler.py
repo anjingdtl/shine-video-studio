@@ -6,6 +6,7 @@ importing any seven-stage modules.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,6 +18,72 @@ from fastapi import HTTPException
 
 from shine.manual4.materials.probe import probe_file
 from shine.manual4.storage.files import safe_m4_path, sha256_file, store_m4_bytes
+
+SUBTITLE_FONT_SIZE_DEFAULT = 40
+SUBTITLE_FONT_SIZE_MIN = 12
+SUBTITLE_FONT_SIZE_MAX = 96
+
+_SRT_TIMING_RE = re.compile(
+    r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[,.](\d{3})"
+)
+
+
+def clamp_m4_subtitle_font_size(raw: int | None) -> int:
+    try:
+        val = int(raw) if raw is not None else SUBTITLE_FONT_SIZE_DEFAULT
+    except (TypeError, ValueError):
+        val = SUBTITLE_FONT_SIZE_DEFAULT
+    return max(SUBTITLE_FONT_SIZE_MIN, min(SUBTITLE_FONT_SIZE_MAX, val))
+
+
+def _ass_stamp(seconds: float) -> str:
+    units = max(0, round(seconds * 100))
+    hours, units = divmod(units, 360000)
+    minutes, units = divmod(units, 6000)
+    secs, centis = divmod(units, 100)
+    return f"{hours}:{minutes:02}:{secs:02}.{centis:02}"
+
+
+def srt_to_ass(subtitle_srt: str, *, font_size: int = SUBTITLE_FONT_SIZE_DEFAULT) -> str:
+    """Convert SRT text into 720p-referenced ASS so burn-in honours font_size."""
+    size = clamp_m4_subtitle_font_size(font_size)
+    head = [
+        "[Script Info]",
+        "ScriptType: v4.00+",
+        "PlayResX: 1280",
+        "PlayResY: 720",
+        "ScaledBorderAndShadow: yes",
+        "[V4+ Styles]",
+        "Format: Name, Fontname, Fontsize, PrimaryColour, OutlineColour, BackColour, Bold, "
+        "Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
+        "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+        f"Style: Default,Arial,{size},&H00FFFFFF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,"
+        "2,1,2,60,60,60,1",
+        "[Events]",
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+    ]
+    events: list[str] = []
+    normalized = (subtitle_srt or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if normalized:
+        for block in re.split(r"\n\s*\n", normalized):
+            lines = [ln for ln in block.split("\n") if ln.strip() != ""]
+            if len(lines) < 2:
+                continue
+            timing_idx = 1 if lines[0].strip().isdigit() else 0
+            if timing_idx >= len(lines):
+                continue
+            match = _SRT_TIMING_RE.match(lines[timing_idx].strip())
+            if not match:
+                continue
+            vals = [int(v) for v in match.groups()]
+            start_s = vals[0] * 3600 + vals[1] * 60 + vals[2] + vals[3] / 1000.0
+            end_s = vals[4] * 3600 + vals[5] * 60 + vals[6] + vals[7] / 1000.0
+            body = "\n".join(lines[timing_idx + 1 :]).strip()
+            if not body:
+                continue
+            escaped = body.replace("\\", "＼").replace("{", "｛").replace("}", "｝").replace("\n", "\\N")
+            events.append(f"Dialogue: 0,{_ass_stamp(start_s)},{_ass_stamp(end_s)},Default,,0,0,0,,{escaped}")
+    return "\n".join(head + events)
 
 
 @dataclass(frozen=True)
@@ -85,6 +152,7 @@ def assemble_m4_episode_reel(
     crf: int = 18,
     subtitle_srt: str = "",
     burn_subtitles: bool = False,
+    subtitle_font_size: int = SUBTITLE_FONT_SIZE_DEFAULT,
     ffmpeg_path: str = "ffmpeg",
     ffprobe_path: str = "ffprobe",
 ) -> dict[str, Any]:
@@ -190,8 +258,8 @@ def assemble_m4_episode_reel(
 
         final_local = raw_concat
         if burn_subtitles and subtitle_srt.strip():
-            subs_file = work / "subs.srt"
-            subs_file.write_text(subtitle_srt, encoding="utf-8")
+            subs_file = work / "subs.ass"
+            subs_file.write_text(srt_to_ass(subtitle_srt, font_size=subtitle_font_size), encoding="utf-8")
             burned = work / "burned.mp4"
             _run_ffmpeg(
                 [
@@ -201,7 +269,7 @@ def assemble_m4_episode_reel(
                     "-i",
                     raw_concat.name,
                     "-vf",
-                    f"subtitles={subs_file.name}",
+                    f"ass={subs_file.name}",
                     "-c:v",
                     "libx264",
                     "-preset",

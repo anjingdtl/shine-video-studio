@@ -271,6 +271,7 @@ export type M4ShotBinding = {
   use_as: string;
   role_label: string;
   ordinal: number;
+  h3_label?: string | null;
   asset: M4AssetVersion | null;
 };
 
@@ -473,6 +474,9 @@ export type M4PromptRevision = {
     h3_label: string;
     role_label: string;
     use_as: string;
+    family?: string;
+    image_slot?: number | null;
+    media_url?: string;
     sha256: string;
   }>;
   reference_manifest_sha256: string;
@@ -789,7 +793,12 @@ export function fetchM4DeliveryState(projectId: string): Promise<M4DeliveryState
 export function assembleM4EpisodeDelivery(
   projectId: string,
   episodeId: string,
-  opts?: { job_overrides?: Record<string, string>; include_subtitles?: boolean; burn_subtitles?: boolean },
+  opts?: {
+    job_overrides?: Record<string, string>;
+    include_subtitles?: boolean;
+    burn_subtitles?: boolean;
+    subtitle_font_size?: number;
+  },
 ): Promise<{ delivery: M4Delivery; state: M4DeliveryState }> {
   return m4Request(`/manual4/projects/${projectId}/episodes/${episodeId}/deliveries/assemble`, {
     method: 'POST',

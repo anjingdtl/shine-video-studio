@@ -21,11 +21,111 @@ from shine.manual4.storage.models import (
     M4StoryboardRevision,
     m4_utcnow,
 )
+from shine.manual4.storyboard.parser import canonical_entity_key
 
 
 def _canonical_sha(payload: Any) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _binding_family_rank(link: M4ShotAssetBinding, asset: M4AssetVersion) -> int:
+    """H3 Ref2VA reference slot order: characters (<Subject>) -> other images (<Picture>) -> video -> audio."""
+    if link.use_as == "audio":
+        return 3
+    if link.use_as == "video":
+        return 2
+    if asset.family == "character":
+        return 0
+    return 1
+
+
+def _asset_requested_rank(shot: M4Shot | None, asset: M4AssetVersion, role_label: str) -> int:
+    req_assets = list(getattr(shot, "requested_assets", None) or [])
+    if not req_assets:
+        return 0
+    exact_rank: dict[tuple[str, str], int] = {}
+    name_rank: dict[tuple[str, str], int] = {}
+    bare_rank: dict[str, int] = {}
+    for idx, item in enumerate(req_assets):
+        if not isinstance(item, dict):
+            continue
+        fam = str(item.get("family") or "").strip().lower()
+        name = str(item.get("name") or "").strip()
+        var = str(item.get("variant") or "").strip()
+        if not name:
+            continue
+        exact_rank.setdefault((fam, canonical_entity_key(name, var)), idx)
+        name_rank.setdefault((fam, canonical_entity_key(name, "")), idx)
+        bare_rank.setdefault(canonical_entity_key(name, ""), idx)
+
+    fam = str(asset.family or "").strip().lower()
+    exact_key = (fam, canonical_entity_key(asset.entity_name, asset.variant_name))
+    if exact_key in exact_rank:
+        return exact_rank[exact_key]
+    base_key = (fam, canonical_entity_key(asset.entity_name, ""))
+    if base_key in name_rank:
+        return name_rank[base_key]
+    role_base = canonical_entity_key(role_label or asset.entity_name, "")
+    if role_base in bare_rank:
+        return bare_rank[role_base]
+    return len(req_assets)
+
+
+def order_m4_shot_bindings(
+    links: list[M4ShotAssetBinding],
+    assets_by_id: dict[str, M4AssetVersion],
+    shot: M4Shot | None = None,
+) -> list[M4ShotAssetBinding]:
+    """Single authoritative binding order matching H3 Ref2VA slot presentation.
+
+    Characters (<Subject 1..N>) always precede non-character images (<Picture>),
+    and characters follow the shot's storyboard cast order rather than arbitrary
+    promotion/upload order so Shot 1 and later shots bind the exact right face.
+    """
+    def _sort_key(link: M4ShotAssetBinding) -> tuple[int, int, int, str]:
+        asset = assets_by_id.get(link.asset_version_id)
+        if asset is None:
+            return (9, 0, link.ordinal, link.asset_version_id)
+        return (
+            _binding_family_rank(link, asset),
+            _asset_requested_rank(shot, asset, link.role_label),
+            link.ordinal,
+            asset.id,
+        )
+
+    return sorted(links, key=_sort_key)
+
+
+def label_ordered_m4_bindings(
+    ordered_links: list[M4ShotAssetBinding],
+    assets_by_id: dict[str, M4AssetVersion],
+) -> list[tuple[M4ShotAssetBinding, M4AssetVersion, str, int | None]]:
+    """Assign deterministic H3 labels (<Subject 1..>, <Picture k>, <Video k>, <Audio k>)."""
+    labeled: list[tuple[M4ShotAssetBinding, M4AssetVersion, str, int | None]] = []
+    subject_idx = 0
+    img_idx = 0
+    aud_idx = 0
+    vid_idx = 0
+    for link in ordered_links:
+        asset = assets_by_id.get(link.asset_version_id)
+        if asset is None or asset.status != "promoted":
+            continue
+        if link.use_as == "audio":
+            aud_idx += 1
+            labeled.append((link, asset, f"<Audio {aud_idx}>", None))
+        elif link.use_as == "video":
+            vid_idx += 1
+            labeled.append((link, asset, f"<Video {vid_idx}>", None))
+        else:
+            img_idx += 1
+            if asset.family == "character":
+                subject_idx += 1
+                h3_label = f"<Subject {subject_idx}>"
+            else:
+                h3_label = f"<Picture {img_idx}>"
+            labeled.append((link, asset, h3_label, img_idx))
+    return labeled
 
 
 def build_shot_reference_manifest(m4_db: Session, shot: M4Shot) -> list[dict[str, Any]]:
@@ -41,24 +141,9 @@ def build_shot_reference_manifest(m4_db: Session, shot: M4Shot) -> list[dict[str
         a.id: a
         for a in m4_db.scalars(select(M4AssetVersion).where(M4AssetVersion.id.in_(asset_ids))).all()
     }
+    ordered_links = order_m4_shot_bindings(links, assets, shot)
     manifest: list[dict[str, Any]] = []
-    img_idx = 0
-    aud_idx = 0
-    vid_idx = 0
-    for link in links:
-        asset = assets.get(link.asset_version_id)
-        if asset is None or asset.status != "promoted":
-            continue
-        if link.use_as == "audio":
-            aud_idx += 1
-            h3_label = f"<Audio {aud_idx}>"
-        elif link.use_as == "video":
-            vid_idx += 1
-            h3_label = f"<Video {vid_idx}>"
-        else:
-            img_idx += 1
-            prefix = "Subject" if asset.family == "character" else "Picture"
-            h3_label = f"<{prefix} {img_idx}>"
+    for link, asset, h3_label, image_slot in label_ordered_m4_bindings(ordered_links, assets):
         manifest.append(
             {
                 "asset_version_id": asset.id,
@@ -70,7 +155,9 @@ def build_shot_reference_manifest(m4_db: Session, shot: M4Shot) -> list[dict[str
                 "role_label": link.role_label or asset.entity_name,
                 "ordinal": link.ordinal,
                 "h3_label": h3_label,
+                "image_slot": image_slot,
                 "storage_path": asset.storage_path,
+                "media_url": f"/api/v1/manual4/projects/{shot.project_id}/assets/{asset.id}/media",
                 "is_mock": bool(asset.is_mock),
             }
         )
@@ -84,6 +171,7 @@ def manifest_digest(manifest: list[dict[str, Any]]) -> str:
             "sha256": m["sha256"],
             "use_as": m["use_as"],
             "role_label": m["role_label"],
+            "h3_label": m.get("h3_label", ""),
             "ordinal": m["ordinal"],
         }
         for m in manifest
@@ -161,7 +249,9 @@ def save_prompt_draft(
     _confirmed, shot = _get_confirmed_shot(m4_db, project, shot_id)
     text = (prompt_text or "").strip()
     manifest = build_shot_reference_manifest(m4_db, shot)
-    labels = {m["h3_label"] for m in manifest}
+    labels = {m["h3_label"] for m in manifest} | {
+        f"<Picture {m['image_slot']}>" for m in manifest if m.get("image_slot")
+    }
     warnings = review_h3_prompt(
         text,
         mode="Ref2VA",
@@ -259,7 +349,9 @@ def freeze_prompt(
     if not text:
         raise HTTPException(422, {"code": "M4_PROMPT_EMPTY", "message": "人工 H3 提示词不能为空，请填写后冻结。"})
 
-    labels = {m["h3_label"] for m in manifest}
+    labels = {m["h3_label"] for m in manifest} | {
+        f"<Picture {m['image_slot']}>" for m in manifest if m.get("image_slot")
+    }
     warnings = review_h3_prompt(
         text,
         mode="Ref2VA",

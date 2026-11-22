@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,13 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from shine.manual4.delivery.assembler import M4ClipSpec, assemble_m4_episode_reel, build_episode_srt
+from shine.manual4.delivery.assembler import (
+    SUBTITLE_FONT_SIZE_DEFAULT,
+    M4ClipSpec,
+    assemble_m4_episode_reel,
+    build_episode_srt,
+    clamp_m4_subtitle_font_size,
+)
 from shine.manual4.delivery.technical_qc import M4TechnicalExpectations, run_m4_technical_qc
 from shine.manual4.status.readiness import evaluate_m4_readiness
 from shine.manual4.storage.files import safe_m4_path, sha256_file, store_m4_bytes
@@ -228,6 +235,7 @@ def assemble_episode_delivery(
     job_overrides: dict[str, str] | None = None,
     include_subtitles: bool = True,
     burn_subtitles: bool = False,
+    subtitle_font_size: int = SUBTITLE_FONT_SIZE_DEFAULT,
     assembler_stub: Any = None,
 ) -> dict[str, Any]:
     confirmed = m4_db.scalar(
@@ -299,6 +307,7 @@ def assemble_episode_delivery(
         )
         clips_with_dialogue.append((clip, list(sh.dialogue or []), chosen))
 
+    font_size = clamp_m4_subtitle_font_size(subtitle_font_size)
     srt_text = build_episode_srt([(c, d) for c, d, _j in clips_with_dialogue]) if include_subtitles else ""
     edl = [
         {
@@ -312,7 +321,14 @@ def assemble_episode_delivery(
         }
         for idx, (c, _d, _j) in enumerate(clips_with_dialogue)
     ]
-    shots_digest = _canonical_sha({"edl": edl, "burn_subtitles": burn_subtitles, "srt": srt_text})
+    shots_digest = _canonical_sha(
+        {
+            "edl": edl,
+            "burn_subtitles": burn_subtitles,
+            "subtitle_font_size": font_size if (burn_subtitles and srt_text.strip()) else None,
+            "srt": srt_text,
+        }
+    )
     is_mock = any(j.provider == "mock" for _c, _d, j in clips_with_dialogue)
 
     existing_same = m4_db.scalar(
@@ -347,11 +363,21 @@ def assemble_episode_delivery(
     out_filename = f"{ep.episode_code}_v{next_ver}.mp4"
 
     if assembler_stub is not None:
-        stub_res = assembler_stub(
-            episode_code=ep.episode_code,
-            clips=[c for c, _d, _j in clips_with_dialogue],
-            subtitle_srt=srt_text,
-        )
+        stub_kwargs: dict[str, Any] = {
+            "episode_code": ep.episode_code,
+            "clips": [c for c, _d, _j in clips_with_dialogue],
+            "subtitle_srt": srt_text,
+        }
+        sig = inspect.signature(assembler_stub)
+        if "burn_subtitles" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            stub_kwargs["burn_subtitles"] = burn_subtitles
+        if "subtitle_font_size" in sig.parameters or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+        ):
+            stub_kwargs["subtitle_font_size"] = font_size
+        stub_res = assembler_stub(**stub_kwargs)
         raw_bytes = stub_res["bytes"] if isinstance(stub_res, dict) else bytes(stub_res)
         rel_path, digest, _abs = store_m4_bytes(m4_root, project.id, "deliveries", out_filename, raw_bytes)
         out_meta = {
@@ -372,6 +398,7 @@ def assemble_episode_delivery(
             out_filename=out_filename,
             subtitle_srt=srt_text,
             burn_subtitles=burn_subtitles,
+            subtitle_font_size=font_size,
         )
         deliv_qc = run_m4_technical_qc(
             safe_m4_path(m4_root, out_meta["storage_path"]),
@@ -429,6 +456,8 @@ def assemble_episode_delivery(
                 "version": next_ver,
                 "sha256": out_meta["sha256"],
                 "is_mock": is_mock,
+                "burn_subtitles": burn_subtitles,
+                "subtitle_font_size": font_size if (burn_subtitles and srt_text.strip()) else None,
             },
         )
     )

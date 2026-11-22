@@ -26,6 +26,7 @@ from shine.manual4.comfy.image_workflow import (
     MODEL_FAMILY,
 )
 from shine.manual4.materials.probe import probe_file
+from shine.manual4.prompts.service import label_ordered_m4_bindings, order_m4_shot_bindings
 from shine.manual4.status.readiness import evaluate_m4_readiness, evaluate_shot_ref2va_bindings
 from shine.manual4.storage.files import (
     ALLOWED_M4_EXTENSIONS,
@@ -198,16 +199,24 @@ def _bind_asset_to_shots(
         counts[use_as] = counts.get(use_as, 0) + 1
         _enforce_slot_caps(counts)
         next_ord = (max((link.ordinal for link in existing), default=-1) + 1)
-        m4_db.add(
-            M4ShotAssetBinding(
-                project_id=project.id,
-                shot_id=shot_id,
-                asset_version_id=asset.id,
-                use_as=use_as,
-                role_label=role_label,
-                ordinal=next_ord,
-            )
+        new_link = M4ShotAssetBinding(
+            project_id=project.id,
+            shot_id=shot_id,
+            asset_version_id=asset.id,
+            use_as=use_as,
+            role_label=role_label,
+            ordinal=next_ord,
         )
+        m4_db.add(new_link)
+        m4_db.flush()
+        all_links = [*existing, new_link]
+        all_asset_ids = [lnk.asset_version_id for lnk in all_links]
+        assets_map = {
+            a.id: a
+            for a in m4_db.scalars(select(M4AssetVersion).where(M4AssetVersion.id.in_(all_asset_ids))).all()
+        }
+        for idx, lnk in enumerate(order_m4_shot_bindings(all_links, assets_map, valid_shots[shot_id])):
+            lnk.ordinal = idx
         changed_shots.append(shot_id)
     if changed_shots:
         _invalidate_frozen_prompts_for_shots(m4_db, changed_shots, "M4_REFERENCE_MANIFEST_CHANGED")
@@ -412,8 +421,12 @@ def get_materials_state(
                 links_by_shot.setdefault(link.shot_id, []).append(link)
         raw_asset_by_id = {a.id: a for a in assets}
         for sh in shots:
-            sh_links = links_by_shot.get(sh.id, [])
+            sh_links = order_m4_shot_bindings(links_by_shot.get(sh.id, []), raw_asset_by_id, sh)
             ok_ref, ref_code, ref_msg = evaluate_shot_ref2va_bindings(sh_links, raw_asset_by_id)
+            label_by_link_id = {
+                lnk.id: h3_label
+                for lnk, _ast, h3_label, _slot in label_ordered_m4_bindings(sh_links, raw_asset_by_id)
+            }
             serialized_links = [
                 {
                     "id": link.id,
@@ -421,6 +434,7 @@ def get_materials_state(
                     "use_as": link.use_as,
                     "role_label": link.role_label,
                     "ordinal": link.ordinal,
+                    "h3_label": label_by_link_id.get(link.id),
                     "asset": asset_map.get(link.asset_version_id),
                 }
                 for link in sh_links
@@ -1171,26 +1185,19 @@ def put_shot_bindings(
         if use_as not in counts:
             raise HTTPException(422, {"code": "M4_BINDING_USE_AS_INVALID", "message": f"不支持的参考角色：{use_as}"})
         counts[use_as] += 1
-        role_label = str(item.get("role_label") or asset.entity_name).strip()
+        default_label = (
+            f"{asset.entity_name}（{asset.variant_name}）"
+            if getattr(asset, "variant_name", "")
+            else asset.entity_name
+        )
+        role_label = str(item.get("role_label") or default_label).strip()
         normalized.append((asset, use_as, role_label))
 
     _enforce_slot_caps(counts)
 
-    prior_links = m4_db.scalars(
-        select(M4ShotAssetBinding)
-        .where(M4ShotAssetBinding.shot_id == shot.id)
-        .order_by(M4ShotAssetBinding.ordinal)
-    ).all()
-    prior_sig = [(link.asset_version_id, link.use_as, link.role_label) for link in prior_links]
-    next_sig = [(a.id, u, r) for a, u, r in normalized]
-
-    for link in prior_links:
-        m4_db.delete(link)
-    m4_db.flush()
-
-    created: list[dict[str, Any]] = []
-    for idx, (asset, use_as, role_label) in enumerate(normalized):
-        row = M4ShotAssetBinding(
+    assets_by_id = {a.id: a for a, _u, _r in normalized}
+    draft_links = [
+        M4ShotAssetBinding(
             project_id=project.id,
             shot_id=shot.id,
             asset_version_id=asset.id,
@@ -1198,12 +1205,38 @@ def put_shot_bindings(
             role_label=role_label,
             ordinal=idx,
         )
+        for idx, (asset, use_as, role_label) in enumerate(normalized)
+    ]
+    ordered_draft_links = order_m4_shot_bindings(draft_links, assets_by_id, shot)
+
+    prior_links = m4_db.scalars(
+        select(M4ShotAssetBinding)
+        .where(M4ShotAssetBinding.shot_id == shot.id)
+        .order_by(M4ShotAssetBinding.ordinal)
+    ).all()
+    prior_sig = [(link.asset_version_id, link.use_as, link.role_label) for link in prior_links]
+    next_sig = [(lnk.asset_version_id, lnk.use_as, lnk.role_label) for lnk in ordered_draft_links]
+
+    for link in prior_links:
+        m4_db.delete(link)
+    m4_db.flush()
+
+    created: list[dict[str, Any]] = []
+    for idx, lnk in enumerate(ordered_draft_links):
+        row = M4ShotAssetBinding(
+            project_id=project.id,
+            shot_id=shot.id,
+            asset_version_id=lnk.asset_version_id,
+            use_as=lnk.use_as,
+            role_label=lnk.role_label,
+            ordinal=idx,
+        )
         m4_db.add(row)
         created.append(
             {
-                "asset_version_id": asset.id,
-                "use_as": use_as,
-                "role_label": role_label,
+                "asset_version_id": lnk.asset_version_id,
+                "use_as": lnk.use_as,
+                "role_label": lnk.role_label,
                 "ordinal": idx,
             }
         )
