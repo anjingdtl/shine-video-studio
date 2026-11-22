@@ -324,6 +324,86 @@ def freeze_prompt(
     return _serialize_prompt(frozen)
 
 
+def batch_freeze_prompts(
+    m4_db: Session,
+    project: M4Project,
+    *,
+    actor: str,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Batch freeze shots that have entered prompt text, delegating each item to freeze_prompt."""
+    if not items:
+        raise HTTPException(
+            422,
+            {"code": "M4_PROMPT_BATCH_EMPTY", "message": "当前没有可批量冻结的已填提示词镜头。"},
+        )
+
+    deduped: list[tuple[str, str | None]] = []
+    seen_ids: set[str] = set()
+    for item in items:
+        sid = str(item.get("shot_id") or "").strip()
+        if not sid or sid in seen_ids:
+            continue
+        seen_ids.add(sid)
+        raw_text = item.get("prompt_text")
+        deduped.append((sid, str(raw_text) if raw_text is not None else None))
+
+    if not deduped:
+        raise HTTPException(
+            422,
+            {"code": "M4_PROMPT_BATCH_EMPTY", "message": "当前没有可批量冻结的已填提示词镜头。"},
+        )
+
+    shots_by_id = {
+        s.id: s
+        for s in m4_db.scalars(
+            select(M4Shot).where(M4Shot.project_id == project.id, M4Shot.id.in_(list(seen_ids)))
+        ).all()
+    }
+
+    frozen_shot_ids: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for shot_id, prompt_text in deduped:
+        shot_row = shots_by_id.get(shot_id)
+        shot_code = shot_row.shot_code if shot_row is not None else shot_id[:8]
+        try:
+            with m4_db.begin_nested():
+                freeze_prompt(m4_db, project, shot_id, actor=actor, prompt_text=prompt_text)
+            frozen_shot_ids.append(shot_id)
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+            code = str(detail.get("code") or "M4_PROMPT_BATCH_ERROR")
+            msg = str(detail.get("message") or str(exc.detail))
+            if code == "M4_PROMPT_EMPTY":
+                skipped.append({"shot_id": shot_id, "shot_code": shot_code, "code": code, "reason": msg})
+            else:
+                errors.append({"shot_id": shot_id, "shot_code": shot_code, "code": code, "message": msg})
+
+    m4_db.add(
+        M4AuditEvent(
+            project_id=project.id,
+            actor=actor,
+            stage="production",
+            event_type="M4_PROMPT_BATCH_FROZEN",
+            entity_type="m4_project",
+            entity_id=project.id,
+            payload={
+                "requested": len(deduped),
+                "frozen": len(frozen_shot_ids),
+                "skipped": len(skipped),
+                "errors": len(errors),
+            },
+        )
+    )
+    return {
+        "frozen_shot_ids": frozen_shot_ids,
+        "skipped": skipped,
+        "errors": errors,
+    }
+
+
 def update_shot_render_options(
     m4_db: Session,
     project: M4Project,

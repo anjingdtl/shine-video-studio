@@ -205,3 +205,60 @@ def test_p2_long_text_chunking_preserves_every_shot_and_rejects_scanned_pdf(tmp_
         )
         assert pdf_resp.status_code == 422
         assert pdf_resp.json()["detail"]["code"] == "M4_SCANNED_PDF_OCR_UNSUPPORTED"
+
+
+def test_p2_parenthetical_entity_splitting_and_role_tag_dedup(tmp_path):
+    app, _ = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post(
+            "/api/v1/platform/manual4-projects",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"title": "括号变体与角色标签去重测试", "max_shot_seconds": 15.0},
+        ).json()["id"]
+
+        raw_text = (
+            "第1集：雪山探险\n"
+            "第1镜（6s）：苏瑶站在雪坡上。\n"
+            "人物：苏瑶（女主，冲锋衣），陈默（男主）\n"
+            "场景：雪山营地（暴风雪，夜）\n"
+            "第2镜（6s）：苏瑶更换装备继续前行。\n"
+            "人物：苏瑶（女主，探险装）\n"
+            "第3镜（6s）：苏瑶特写。\n"
+            "人物：苏瑶（女主）、苏瑶\n"
+        )
+        imp = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/import",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"text": raw_text, "filename": "plan.txt"},
+        )
+        assert imp.status_code == 201
+        draft = imp.json()["draft"]
+        shots = draft["payload"]["episodes"][0]["shots"]
+        assert shots[0]["requested_assets"] == [
+            {"family": "character", "name": "苏瑶", "variant": "冲锋衣"},
+            {"family": "character", "name": "陈默", "variant": ""},
+            {"family": "scene", "name": "雪山营地", "variant": "暴风雪，夜"},
+        ]
+        assert shots[1]["requested_assets"] == [
+            {"family": "character", "name": "苏瑶", "variant": "探险装"},
+        ]
+        assert shots[2]["requested_assets"] == [
+            {"family": "character", "name": "苏瑶", "variant": ""},
+        ]
+
+        conf = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/confirm",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"expected_revision": draft["revision"]},
+        )
+        assert conf.status_code == 200
+        mat_state = client.get(f"/api/v1/manual4/projects/{pid}/materials/requirements").json()
+        names = {(r["family"], r["entity_name"], r["variant_name"]) for r in mat_state["requirements"]}
+        assert names == {
+            ("character", "苏瑶", "冲锋衣"),
+            ("character", "苏瑶", "探险装"),
+            ("character", "苏瑶", ""),
+            ("character", "陈默", ""),
+            ("scene", "雪山营地", "暴风雪，夜"),
+        }
+        assert all("）" not in r["entity_name"] and "（" not in r["entity_name"] for r in mat_state["requirements"])

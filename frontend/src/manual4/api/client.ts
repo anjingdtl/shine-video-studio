@@ -10,6 +10,8 @@ export type M4Blocker = {
   stage: M4StageKey;
   message: string;
   action?: string;
+  episode_id?: string;
+  episode_code?: string;
   shot_id?: string;
   shot_code?: string;
   requirement_id?: string;
@@ -38,6 +40,30 @@ export type M4ReadinessVerdict = {
   summary: Record<string, unknown>;
 };
 
+export type M4RunProgress = {
+  run_id: string;
+  status: string;
+  scope_kind: string;
+  provider: string;
+  phase: string;
+  phase_label: string;
+  is_working: boolean;
+  progress_pct: number;
+  total_jobs: number;
+  passed_jobs: number;
+  failed_jobs: number;
+  needs_review_jobs: number;
+  queued_jobs: number;
+  current_shot_no: number;
+  active_job: {
+    id: string;
+    shot_id: string;
+    shot_code: string;
+    status: string;
+    ordinal: number;
+  } | null;
+};
+
 export type M4Overview = {
   project: {
     id: string;
@@ -55,6 +81,7 @@ export type M4Overview = {
     active_leases: Array<Record<string, unknown>>;
     reconcile_required: Array<Record<string, unknown>>;
   };
+  production_progress?: M4RunProgress | null;
   recent_events: Array<{
     id: string;
     stage: string;
@@ -370,6 +397,30 @@ export function declineM4Material(
   });
 }
 
+export type M4MaterialBatchAction = 'generate' | 'promote_latest' | 'decline';
+
+export function batchM4Requirements(
+  projectId: string,
+  body: {
+    action: M4MaterialBatchAction;
+    requirement_ids: string[];
+    prompts_by_req?: Record<string, string>;
+    reason?: string;
+  },
+): Promise<{
+  action: M4MaterialBatchAction;
+  applied_ids: string[];
+  skipped: Array<{ requirement_id: string; entity_name?: string; reason: string }>;
+  errors: Array<{ requirement_id: string; entity_name?: string; code?: string; message: string }>;
+  state: M4MaterialsState;
+}> {
+  return m4Request(`/manual4/projects/${projectId}/materials/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
 export function uploadM4Asset(
   projectId: string,
   input: { family: string; entity_name: string; variant_name?: string; requirement_id?: string; file: File },
@@ -453,7 +504,18 @@ export type M4Job = {
   qc_result: Record<string, unknown>;
   failure_code: string | null;
   failure_detail: string;
+  elapsed_seconds?: number | null;
   media_url: string | null;
+  attempts?: Array<{
+    id: string;
+    attempt_no: number;
+    status: string;
+    prompt_id?: string | null;
+    prompt_graph_sha256?: string | null;
+    error_code?: string | null;
+    error_detail?: string | null;
+    created_at: string;
+  }>;
 };
 
 export type M4ProductionRun = {
@@ -461,7 +523,16 @@ export type M4ProductionRun = {
   project_id: string;
   execution_snapshot_id: string;
   scope_kind: string;
+  scope_target_ids?: string[];
   provider: string;
+  config?: {
+    variant_id?: string;
+    accelerator_id?: string;
+    resolution_scale?: number;
+    second_pass?: { enabled?: boolean; denoise?: number; latent_scale?: number; nfe?: string } | null;
+    seed?: number;
+    provider?: string;
+  } | null;
   status: string;
   worker_id: string | null;
   error_code: string | null;
@@ -574,6 +645,22 @@ export function freezeM4Prompt(
   });
 }
 
+export function batchFreezeM4Prompts(
+  projectId: string,
+  items: Array<{ shot_id: string; prompt_text?: string | null }>,
+): Promise<{
+  frozen_shot_ids: string[];
+  skipped: Array<{ shot_id: string; shot_code: string; code?: string; reason: string }>;
+  errors: Array<{ shot_id: string; shot_code: string; code?: string; message: string }>;
+  state: M4ProductionState;
+}> {
+  return m4Request(`/manual4/projects/${projectId}/prompts/batch-freeze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  });
+}
+
 export function previewM4Snapshot(
   projectId: string,
   config: M4RunConfigInput,
@@ -627,6 +714,15 @@ export function reconcileM4Job(
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ decision }),
+  });
+}
+
+export function openM4JobFolder(
+  projectId: string,
+  jobId: string,
+): Promise<{ folder: string; file: string }> {
+  return m4Request(`/manual4/projects/${projectId}/jobs/${jobId}/open-folder`, {
+    method: 'POST',
   });
 }
 

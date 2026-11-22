@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -46,6 +45,7 @@ from shine.manual4.storage.models import (
     M4StoryboardRevision,
     m4_utcnow,
 )
+from shine.manual4.storyboard.parser import canonical_entity_key
 
 VALID_FAMILIES = {"character", "scene", "prop", "voice", "reference_video"}
 MAX_IMAGE_SLOTS = 6
@@ -55,9 +55,7 @@ DEFAULT_IMAGE_EXT = ".png"
 
 
 def _canonical_key(entity_name: str, variant_name: str = "") -> str:
-    base = re.sub(r"\s+", " ", (entity_name or "").strip().lower())
-    var = re.sub(r"\s+", " ", (variant_name or "").strip().lower())
-    return f"{base}::{var}" if var else base
+    return canonical_entity_key(entity_name, variant_name)
 
 
 def _media_kind_for(family: str, filename: str, requested_kind: str | None = None) -> str:
@@ -924,6 +922,204 @@ def decline_m4_requirement(
         )
     )
     return {"requirement_id": req.id, "status": req.status, "user_declined": True}
+
+
+def batch_operate_m4_requirements(
+    m4_db: Session,
+    platform_factory: Any,
+    m4_factory: Any,
+    settings: Any,
+    m4_root: Path,
+    project: M4Project,
+    *,
+    actor: str,
+    action: str,
+    requirement_ids: list[str],
+    prompts_by_req: dict[str, str] | None = None,
+    reason: str = "",
+    image_provider: Any = None,
+    platform_db: Session | None = None,
+) -> dict[str, Any]:
+    """Batch executor over selected M4MaterialRequirements; delegates to single-item executors."""
+    act = (action or "").strip().lower()
+    if act not in {"generate", "promote_latest", "decline"}:
+        raise HTTPException(
+            422,
+            {"code": "M4_MATERIAL_BATCH_ACTION_INVALID", "message": f"不支持的批量操作：{action}"},
+        )
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+    for rid in requirement_ids:
+        clean_id = str(rid or "").strip()
+        if clean_id and clean_id not in seen:
+            seen.add(clean_id)
+            ordered_ids.append(clean_id)
+    if not ordered_ids:
+        raise HTTPException(
+            422,
+            {"code": "M4_MATERIAL_BATCH_EMPTY", "message": "请至少勾选 1 项素材需求。"},
+        )
+
+    reqs = {
+        r.id: r
+        for r in m4_db.scalars(
+            select(M4MaterialRequirement).where(
+                M4MaterialRequirement.project_id == project.id,
+                M4MaterialRequirement.id.in_(ordered_ids),
+            )
+        ).all()
+    }
+    all_candidates: list[M4AssetVersion] = []
+    if act == "promote_latest":
+        all_candidates = m4_db.scalars(
+            select(M4AssetVersion)
+            .where(
+                M4AssetVersion.project_id == project.id,
+                M4AssetVersion.status != "promoted",
+            )
+            .order_by(M4AssetVersion.created_at.desc())
+        ).all()
+
+    applied_ids: list[str] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+
+    for rid in ordered_ids:
+        req = reqs.get(rid)
+        if req is None:
+            skipped.append({"requirement_id": rid, "reason": "素材需求不存在"})
+            continue
+
+        if act == "generate":
+            if req.family in {"voice", "reference_video"}:
+                skipped.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "reason": "音频/视频参考不支持 Qwen 生图",
+                    }
+                )
+                continue
+            if req.pending_task_id:
+                skipped.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "reason": "已有排队中的生图任务",
+                    }
+                )
+                continue
+            try:
+                with m4_db.begin_nested():
+                    select_or_generate_material(
+                        m4_db,
+                        platform_factory,
+                        m4_factory,
+                        settings,
+                        m4_root,
+                        project,
+                        req.id,
+                        actor=actor,
+                        mode="generate",
+                        prompt=(prompts_by_req or {}).get(req.id, ""),
+                        image_provider=image_provider,
+                        platform_db=platform_db,
+                    )
+                applied_ids.append(req.id)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+                errors.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "code": detail.get("code", "M4_BATCH_ERROR"),
+                        "message": detail.get("message", str(exc.detail)),
+                    }
+                )
+        elif act == "promote_latest":
+            cand = next(
+                (
+                    a
+                    for a in all_candidates
+                    if a.requirement_id == req.id
+                    or (a.family == req.family and _canonical_key(a.entity_name, a.variant_name) == req.canonical_key)
+                ),
+                None,
+            )
+            if cand is None:
+                skipped.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "reason": "暂无可晋升的候选素材",
+                    }
+                )
+                continue
+            try:
+                with m4_db.begin_nested():
+                    promote_m4_asset(
+                        m4_db,
+                        project,
+                        cand.id,
+                        actor=actor,
+                        requirement_id=req.id,
+                        platform_db=platform_db,
+                        settings=settings,
+                    )
+                applied_ids.append(req.id)
+            except HTTPException as exc:
+                detail = exc.detail if isinstance(exc.detail, dict) else {"message": str(exc.detail)}
+                errors.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "code": detail.get("code", "M4_BATCH_ERROR"),
+                        "message": detail.get("message", str(exc.detail)),
+                    }
+                )
+        elif act == "decline":
+            if req.user_declined and req.status == "declined":
+                skipped.append(
+                    {
+                        "requirement_id": req.id,
+                        "entity_name": req.entity_name,
+                        "reason": "已标记放弃",
+                    }
+                )
+                continue
+            with m4_db.begin_nested():
+                decline_m4_requirement(
+                    m4_db,
+                    project,
+                    req.id,
+                    actor=actor,
+                    reason=reason or "批量明确放弃该素材需求",
+                )
+            applied_ids.append(req.id)
+
+    m4_db.add(
+        M4AuditEvent(
+            project_id=project.id,
+            actor=actor,
+            stage="materials",
+            event_type="M4_MATERIAL_BATCH_OPERATED",
+            entity_type="m4_project",
+            entity_id=project.id,
+            payload={
+                "action": act,
+                "requested": len(ordered_ids),
+                "applied": len(applied_ids),
+                "skipped": len(skipped),
+                "errors": len(errors),
+            },
+        )
+    )
+    return {
+        "action": act,
+        "applied_ids": applied_ids,
+        "skipped": skipped,
+        "errors": errors,
+    }
 
 
 def put_shot_bindings(

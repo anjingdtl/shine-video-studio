@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -25,6 +26,7 @@ from shine.manual4.production.service import (
     reconcile_m4_job,
 )
 from shine.manual4.prompts.service import (
+    batch_freeze_prompts,
     freeze_prompt,
     save_prompt_draft,
     update_shot_render_options,
@@ -52,6 +54,19 @@ class M4PromptFreezeBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     prompt_text: str | None = None
+
+
+class M4BatchPromptFreezeItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    shot_id: str
+    prompt_text: str | None = None
+
+
+class M4BatchPromptFreezeBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[M4BatchPromptFreezeItem] = Field(default_factory=list)
 
 
 class M4SecondPassBody(BaseModel):
@@ -157,6 +172,27 @@ def m4_freeze_prompt(
     m4_db.commit()
     settings = getattr(request.app.state, "settings", None)
     return {"prompt": prompt, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
+
+
+@production_router.post("/projects/{project_id}/prompts/batch-freeze")
+def m4_batch_freeze_prompts(
+    project_id: str,
+    body: M4BatchPromptFreezeBody,
+    request: Request,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    result = batch_freeze_prompts(
+        m4_db,
+        project,
+        actor=actor,
+        items=[item.model_dump() for item in body.items],
+    )
+    m4_db.commit()
+    settings = getattr(request.app.state, "settings", None)
+    return {**result, "state": get_production_state(m4_db, project, platform_db=platform_db, settings=settings)}
 
 
 @production_router.post("/projects/{project_id}/production/snapshot/preview")
@@ -296,3 +332,36 @@ def m4_job_media(
     if not path.is_file():
         raise HTTPException(404, {"code": "M4_JOB_FILE_MISSING", "message": "视频文件缺失。"})
     return FileResponse(path, media_type="video/mp4")
+
+
+@production_router.post("/projects/{project_id}/jobs/{job_id}/open-folder")
+def m4_open_job_folder(
+    project_id: str,
+    job_id: str,
+    request: Request,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, str]:
+    """Open the stored shot video's directory on the local Windows desktop."""
+    _ = actor
+    project = _project(project_id, platform_db, m4_db)
+    job = m4_db.get(M4Job, job_id)
+    if job is None or job.project_id != project.id or not job.output_storage_path:
+        raise HTTPException(404, {"code": "M4_JOB_MEDIA_MISSING", "message": "该镜头尚无视频输出。"})
+    path = safe_m4_path(request.app.state.m4_root, job.output_storage_path)
+    if not path.is_file():
+        raise HTTPException(404, {"code": "M4_JOB_FILE_MISSING", "message": "视频文件已移动或缺失。"})
+    if not hasattr(os, "startfile"):
+        raise HTTPException(
+            501,
+            {"code": "M4_OPEN_FOLDER_UNSUPPORTED", "message": "打开文件夹需要在 Windows 本机运行工作台。"},
+        )
+    try:
+        os.startfile(str(path.parent), "explore")
+    except OSError as exc:
+        raise HTTPException(
+            409,
+            {"code": "M4_OPEN_FOLDER_FAILED", "message": "Windows 无法打开视频所在文件夹。"},
+        ) from exc
+    return {"folder": str(path.parent), "file": str(path)}

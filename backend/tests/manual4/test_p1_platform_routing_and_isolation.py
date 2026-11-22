@@ -397,6 +397,28 @@ def test_p1_shared_environment_recipe_reuse_and_epoch_advance(tmp_path, monkeypa
         assert launch["env_base"]["SHINE_COMFY_RUNTIME_PACKAGES"] == str(upgraded_source / ".shine-python")
         assert launch["whitelist_nodes"] == spec["whitelist_nodes"]
 
+        # Opt-in NVMe / cache-none flags inject cleanly before --disable-all-custom-nodes
+        import os
+        old_fd = os.environ.get("SHINE_COMFY_FAST_DISK")
+        old_cn = os.environ.get("SHINE_COMFY_CACHE_NONE")
+        os.environ["SHINE_COMFY_FAST_DISK"] = "1"
+        os.environ["SHINE_COMFY_CACHE_NONE"] = "1"
+        try:
+            opt_launch = resolve_shared_comfy_launch(db, settings, tmp_path / "manual4")
+            argv = opt_launch["argv"]
+            assert "--fast-disk" in argv and "--cache-none" in argv
+            assert argv.index("--fast-disk") < argv.index("--disable-all-custom-nodes")
+            assert argv.index("--cache-none") < argv.index("--disable-all-custom-nodes")
+        finally:
+            if old_fd is None:
+                os.environ.pop("SHINE_COMFY_FAST_DISK", None)
+            else:
+                os.environ["SHINE_COMFY_FAST_DISK"] = old_fd
+            if old_cn is None:
+                os.environ.pop("SHINE_COMFY_CACHE_NONE", None)
+            else:
+                os.environ["SHINE_COMFY_CACHE_NONE"] = old_cn
+
     # Acquire m4 lease -> epoch advances; expire it -> reconcile_dead_renderer_leases cleans it safely
     m4_lease = acquire_m4_gpu_lease(factory, tmp_path, owner="m4:run-epoch")
     with factory() as db:

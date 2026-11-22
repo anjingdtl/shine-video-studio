@@ -27,7 +27,7 @@ def manual4_database_url(data_dir: Path) -> str:
 
 
 def make_m4_engine(database_url: str) -> Engine:
-    connect_args = {"check_same_thread": False, "timeout": 10} if database_url.startswith("sqlite") else {}
+    connect_args = {"check_same_thread": False, "timeout": 30} if database_url.startswith("sqlite") else {}
     pool_kwargs: dict = {}
     is_sqlite_file = (
         database_url.startswith("sqlite")
@@ -44,7 +44,7 @@ def make_m4_engine(database_url: str) -> Engine:
             cursor = connection.cursor()
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.execute("PRAGMA busy_timeout=10000")
+            cursor.execute("PRAGMA busy_timeout=30000")
             if os.getenv("SHINE_TEST_FAST_SQLITE") == "1":
                 cursor.execute("PRAGMA synchronous=OFF")
                 cursor.execute("PRAGMA temp_store=MEMORY")

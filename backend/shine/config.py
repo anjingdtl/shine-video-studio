@@ -39,10 +39,10 @@ class Settings:
     worker_heartbeat_seconds: int = 10
     worker_offline_after_seconds: int = 30
     #: How long one render may stay in flight before the worker stops
-    #: watching.  H3 native 20-step sampling on a 16 GB card legitimately
-    #: runs past ten minutes; a ceiling that short turns a healthy render
-    #: into a timeout and lets the sequence walk past it.
-    comfy_render_timeout_seconds: int = 2700
+    #: watching.  H3 native sampling / 12 GB RAM-offloaded 15s shots + decode
+    #: can exceed 30 minutes; 3600s avoids premature timeouts while remaining
+    #: overridable via SHINE_COMFY_RENDER_TIMEOUT_S.
+    comfy_render_timeout_seconds: int = 3600
     comfyui_base_url: str = "http://127.0.0.1:8188"
     render_provider: str = "mock"
     allow_remote_comfyui: bool = False
@@ -96,7 +96,7 @@ class Settings:
             worker_lease_seconds=_env_int("SHINE_WORKER_LEASE_SECONDS", 30),
             worker_heartbeat_seconds=_env_int("SHINE_WORKER_HEARTBEAT_SECONDS", 10),
             worker_offline_after_seconds=_env_int("SHINE_WORKER_OFFLINE_SECONDS", 30),
-            comfy_render_timeout_seconds=_env_int("SHINE_COMFY_RENDER_TIMEOUT_S", 2700),
+            comfy_render_timeout_seconds=_env_int("SHINE_COMFY_RENDER_TIMEOUT_S", 3600),
             comfyui_base_url=comfyui_base_url,
             render_provider=render_provider,
             allow_remote_comfyui=allow_remote,

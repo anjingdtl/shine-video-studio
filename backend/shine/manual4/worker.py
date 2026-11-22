@@ -13,15 +13,18 @@ Isolation & Single-Executor invariants:
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import signal
 import time
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 
 from shine.config import Settings
@@ -58,25 +61,55 @@ from shine.manual4.storage.models import (
     m4_utcnow,
 )
 
+logger = logging.getLogger("shine.manual4.worker")
+
+
+def _is_sqlite_lock_error(exc: BaseException) -> bool:
+    if not isinstance(exc, OperationalError):
+        return False
+    msg = str(exc).lower()
+    return "database is locked" in msg or "database is busy" in msg
+
+
+def _with_sqlite_retry[T](
+    fn: Callable[[], T],
+    *,
+    label: str,
+    max_attempts: int = 5,
+    backoff_s: float = 0.25,
+) -> T:
+    for attempt in range(max_attempts):
+        try:
+            return fn()
+        except OperationalError as exc:
+            if not _is_sqlite_lock_error(exc) or attempt + 1 >= max_attempts:
+                raise
+            logger.warning("%s sqlite_locked attempt=%s/%s", label, attempt + 1, max_attempts)
+            time.sleep(backoff_s * (attempt + 1))
+    raise RuntimeError("unreachable")
+
 
 def register_m4_worker(m4_factory: sessionmaker, worker_id: str, *, status: str = "IDLE") -> None:
-    now = m4_utcnow()
-    with m4_factory.begin() as db:
-        row = db.get(M4WorkerInstance, worker_id)
-        if row is None:
-            row = M4WorkerInstance(
-                worker_id=worker_id,
-                pid=os.getpid(),
-                version=MANUAL4_RUNTIME_VERSION,
-                status=status,
-                last_heartbeat_at=now,
-            )
-            db.add(row)
-        else:
-            row.pid = os.getpid()
-            row.version = MANUAL4_RUNTIME_VERSION
-            row.status = status
-            row.last_heartbeat_at = now
+    def _write() -> None:
+        now = m4_utcnow()
+        with m4_factory.begin() as db:
+            row = db.get(M4WorkerInstance, worker_id)
+            if row is None:
+                row = M4WorkerInstance(
+                    worker_id=worker_id,
+                    pid=os.getpid(),
+                    version=MANUAL4_RUNTIME_VERSION,
+                    status=status,
+                    last_heartbeat_at=now,
+                )
+                db.add(row)
+            else:
+                row.pid = os.getpid()
+                row.version = MANUAL4_RUNTIME_VERSION
+                row.status = status
+                row.last_heartbeat_at = now
+
+    _with_sqlite_retry(_write, label=f"register_m4_worker:{worker_id}")
 
 
 def heartbeat_m4_worker(
@@ -86,14 +119,23 @@ def heartbeat_m4_worker(
     status: str | None = None,
     current_run_id: str | None = None,
 ) -> None:
-    now = m4_utcnow()
-    with m4_factory.begin() as db:
-        row = db.get(M4WorkerInstance, worker_id)
-        if row is not None:
-            row.last_heartbeat_at = now
-            if status is not None:
-                row.status = status
-            row.current_run_id = current_run_id
+    def _write() -> None:
+        now = m4_utcnow()
+        with m4_factory.begin() as db:
+            row = db.get(M4WorkerInstance, worker_id)
+            if row is not None:
+                row.last_heartbeat_at = now
+                if status is not None:
+                    row.status = status
+                row.current_run_id = current_run_id
+
+    try:
+        _with_sqlite_retry(_write, label=f"heartbeat_m4_worker:{worker_id}", max_attempts=4, backoff_s=0.2)
+    except OperationalError as exc:
+        if _is_sqlite_lock_error(exc):
+            logger.warning("m4_worker_heartbeat_deferred worker_id=%s status=%s", worker_id, status)
+            return
+        raise
 
 
 def _resolve_manifest_ref_path(
@@ -771,18 +813,23 @@ def _execute_single_job(
                 recipe_sha256=snap_item.get("recipe_sha256"),
                 extra_data={"shine_line": "manual4", "job_id": job_id, "run_id": run_info["id"]},
             )
+            render_timeout_s = float(
+                max(60, int(getattr(settings, "comfy_render_timeout_seconds", 3600) or 3600))
+            )
             receipt = ComfyH3Executor().execute(
                 comfy_client,
                 h3_req,
                 on_before_submit=_persist_submit_intent,
                 on_submitted=_persist_submitted,
                 object_info=object_info,
-                poll_timeout_s=1800.0,
+                poll_timeout_s=render_timeout_s,
                 poll_interval_s=0.5,
             )
             heartbeat_m4_worker(m4_factory, worker_id, status="RUNNING", current_run_id=run_info["id"])
             if receipt.status == "timeout":
-                raise ComfySubmissionUncertain(receipt.error or "ComfyUI 轮询超时，需要核对队列与历史。")
+                pid_note = f"（prompt_id={receipt.prompt_id or prompt_id}）" if (receipt.prompt_id or prompt_id) else ""
+                base_msg = receipt.error or "ComfyUI 轮询超时，需要核对队列与历史。"
+                raise ComfySubmissionUncertain(f"{base_msg}{pid_note}")
             if receipt.status != "completed" or receipt.output_bytes is None:
                 raise H3ExecutionError(
                     receipt.error_code or "M4_RENDER_FAILED",
@@ -1079,21 +1126,35 @@ def serve_worker(*, once: bool = False, poll_interval: float = 2.0, worker_id: s
 
     try:
         while not stopping:
-            handled = execute_next_m4_run(platform_factory, m4_factory, settings, m4_root, worker_id=wid)
-            if once:
-                break
-            if handled is None:
-                try:
-                    reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
-                except Exception:
-                    pass
-                if time.monotonic() >= next_reconciliation:
-                    reconcile_stalled_m4_runs(m4_factory, m4_root=m4_root, settings=settings)
-                    next_reconciliation = time.monotonic() + 30.0
-                heartbeat_m4_worker(m4_factory, wid, status="IDLE", current_run_id=None)
+            try:
+                handled = execute_next_m4_run(platform_factory, m4_factory, settings, m4_root, worker_id=wid)
+                if once:
+                    break
+                if handled is None:
+                    try:
+                        reconcile_m4_renderer(platform_factory, m4_factory, settings.data_dir)
+                    except Exception:
+                        pass
+                    if time.monotonic() >= next_reconciliation:
+                        reconcile_stalled_m4_runs(m4_factory, m4_root=m4_root, settings=settings)
+                        next_reconciliation = time.monotonic() + 30.0
+                    heartbeat_m4_worker(m4_factory, wid, status="IDLE", current_run_id=None)
+                    time.sleep(max(0.5, poll_interval))
+            except OperationalError as exc:
+                if once or not _is_sqlite_lock_error(exc):
+                    raise
+                logger.warning("m4_worker_tick_sqlite_locked worker_id=%s err=%s", wid, exc)
                 time.sleep(max(0.5, poll_interval))
+            except Exception:
+                if once:
+                    raise
+                logger.exception("m4_worker_tick_error worker_id=%s", wid)
+                time.sleep(max(1.0, poll_interval))
     finally:
-        heartbeat_m4_worker(m4_factory, wid, status="OFFLINE", current_run_id=None)
+        try:
+            heartbeat_m4_worker(m4_factory, wid, status="OFFLINE", current_run_id=None)
+        except Exception:
+            logger.warning("m4_worker_offline_heartbeat_failed worker_id=%s", wid)
         m4_engine.dispose()
         platform_engine.dispose()
     return 0

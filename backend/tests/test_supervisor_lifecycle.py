@@ -405,3 +405,113 @@ def test_accepted_validation_delegation_survives_normal_worker_wait(tmp_path, mo
     assert current["task_id"] == "setup-del-1"
     assert current["status"] == "DONE"
     assert next(s["status"] for s in current["steps"] if s["id"] == "VALIDATE") == "DONE"
+
+
+def test_lifecycle_and_heal_cover_worker_m4(server, monkeypatch):
+    """Supervisor reports worker_m4, marks m4_workers offline on stop, and heals dead worker-m4."""
+    import os
+
+    from shine.comfyops.installer import process_identity
+    from shine.manual4.storage.db import make_m4_engine, make_m4_session_factory
+    from shine.manual4.storage.migrations import ensure_m4_schema
+    from shine.manual4.storage.models import (
+        M4ExecutionSnapshot,
+        M4ProductionRun,
+        M4Project,
+        M4StoryboardRevision,
+        M4WorkerInstance,
+    )
+
+    base, data_dir = server
+    run = data_dir / "run"
+    run.mkdir(parents=True, exist_ok=True)
+    my_pid = os.getpid()
+    my_birth = process_identity(my_pid)
+
+    # Create manual4.sqlite with an online M4WorkerInstance and a PENDING run
+    m4_db_url = f"sqlite:///{(data_dir / 'manual4.sqlite').as_posix()}"
+    m4_engine = make_m4_engine(m4_db_url)
+    ensure_m4_schema(m4_engine)
+    m4_factory = make_m4_session_factory(m4_engine)
+    with m4_factory.begin() as db:
+        db.add(M4Project(id="proj-1", title="M4 测试作品"))
+        db.flush()
+        db.add(
+            M4StoryboardRevision(
+                id="rev-1",
+                project_id="proj-1",
+                revision=1,
+                status="CONFIRMED",
+                payload={},
+            )
+        )
+        db.flush()
+        db.add(
+            M4ExecutionSnapshot(
+                id="snap-1",
+                project_id="proj-1",
+                storyboard_revision_id="rev-1",
+                snapshot_sha256="a" * 64,
+                config_json={},
+                items_json=[],
+            )
+        )
+        db.flush()
+        db.add(M4WorkerInstance(worker_id="w-m4-1", pid=999999, version="m4", status="IDLE"))
+        db.add(
+            M4ProductionRun(
+                project_id="proj-1",
+                storyboard_revision_id="rev-1",
+                execution_snapshot_id="snap-1",
+                idempotency_key="k1",
+                scope_kind="project",
+                provider="comfyui",
+                status="PENDING",
+            )
+        )
+    m4_engine.dispose()
+
+    # _stack_blockers must recognize pending M4 runs so watchdog does not auto-stop idle stack
+    shine_db_url = f"sqlite:///{(data_dir / 'shine.db').as_posix()}"
+    monkeypatch.setenv("SHINE_DATABASE_URL", shine_db_url)
+    from shine.db import Base, make_engine
+    s_engine = make_engine(shine_db_url)
+    Base.metadata.create_all(s_engine)
+    s_engine.dispose()
+    blockers = supervisor._stack_blockers(data_dir)
+    assert any("四阶排片批次" in b for b in blockers)
+
+    # Manifest with live API + live worker + dead worker-m4
+    manifest = {
+        "api_port": 8000,
+        "web_port": 5173,
+        "processes": [
+            {"name": "api", "listener_pid": my_pid, "owners": [{"pid": my_pid, "birth": my_birth}]},
+            {"name": "worker", "pid": my_pid, "birth": my_birth, "owners": [{"pid": my_pid, "birth": my_birth}]},
+            {"name": "worker-m4", "pid": 4_000_000, "birth": "dead", "owners": [{"pid": 4_000_000, "birth": "dead"}]},
+        ],
+    }
+    (run / "processes.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    lc = _get(base, "/lifecycle")
+    assert lc["worker"] == "running"
+    assert lc["worker_m4"] == "stopped"
+
+    # Heal triggers _start_worker when stack is live and worker-m4 stopped
+    healed_calls: list[Path] = []
+    monkeypatch.setattr(supervisor, "_WORKER_HELD_STOP", False)
+    monkeypatch.setattr(supervisor, "_start_worker", lambda d: (healed_calls.append(d) or (200, {})))
+    assert supervisor.heal_stopped_workers(data_dir) is True
+    assert healed_calls == [data_dir]
+
+    # When operator stopped workers intentionally, heal must stay hands-off
+    monkeypatch.setattr(supervisor, "_WORKER_HELD_STOP", True)
+    assert supervisor.heal_stopped_workers(data_dir) is False
+    monkeypatch.setattr(supervisor, "_WORKER_HELD_STOP", False)
+
+    # _mark_worker_stopped updates M4WorkerInstance too
+    supervisor._mark_worker_stopped(data_dir)
+    m4_engine = make_m4_engine(m4_db_url)
+    with make_m4_session_factory(m4_engine)() as db:
+        assert db.get(M4WorkerInstance, "w-m4-1").status == "OFFLINE"
+    m4_engine.dispose()

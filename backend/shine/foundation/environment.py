@@ -410,6 +410,24 @@ def prepare_missing(
     return task
 
 
+def _append_optional_comfy_launch_flags(argv: list[str]) -> None:
+    """Append opt-in ComfyUI memory/NVMe flags cleanly before whitelist args."""
+    extra: list[str] = []
+    if os.getenv("SHINE_COMFY_FAST_DISK", "").strip().lower() in {"1", "true", "yes"}:
+        if "--fast-disk" not in argv:
+            extra.append("--fast-disk")
+    if os.getenv("SHINE_COMFY_CACHE_NONE", "").strip().lower() in {"1", "true", "yes"}:
+        if "--cache-none" not in argv:
+            extra.append("--cache-none")
+    if not extra:
+        return
+    if "--disable-all-custom-nodes" in argv:
+        idx = argv.index("--disable-all-custom-nodes")
+        argv[idx:idx] = extra
+    else:
+        argv.extend(extra)
+
+
 def _adapter_sha(adapter_dir: Path) -> str:
     if (adapter_dir / "__init__.py").is_file() and (adapter_dir / "barrier.py").is_file():
         return adapter_identity(adapter_dir)
@@ -536,6 +554,7 @@ def resolve_shared_comfy_launch(
         if shared_paths_yaml.is_file():
             pinned_files.append(str(shared_paths_yaml))
 
+        _append_optional_comfy_launch_flags(argv)
         env.update(prepare_process_environment(m4_runtime_root))
         return {
             "source": "managed_recipe",
@@ -610,6 +629,7 @@ def resolve_shared_comfy_launch(
             "--whitelist-custom-nodes",
             *whitelist,
         ]
+        _append_optional_comfy_launch_flags(argv)
         pinned_files = [
             str(python_exe),
             str(comfy_root / "main.py"),

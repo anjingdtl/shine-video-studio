@@ -28,10 +28,36 @@ function formatAssetsText(items: M4RequestedAsset[]): string {
     .join(', ');
 }
 
+function splitAssetsTopLevel(raw: string): string[] {
+  const openToClose: Record<string, string> = { '(': ')', '（': '）', '[': ']', '【': '】' };
+  const closeSet = new Set(Object.values(openToClose));
+  const sepSet = new Set([',', '，', '、', ';', '；']);
+  const stack: string[] = [];
+  const parts: string[] = [];
+  let buf = '';
+  for (const ch of raw) {
+    if (openToClose[ch]) {
+      stack.push(openToClose[ch]);
+      buf += ch;
+    } else if (closeSet.has(ch)) {
+      if (stack.length > 0 && stack[stack.length - 1] === ch) stack.pop();
+      buf += ch;
+    } else if (stack.length === 0 && sepSet.has(ch)) {
+      const t = buf.trim();
+      if (t) parts.push(t);
+      buf = '';
+    } else {
+      buf += ch;
+    }
+  }
+  const tail = buf.trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
 function parseAssetsText(raw: string): M4RequestedAsset[] {
   const out: M4RequestedAsset[] = [];
-  for (const token of raw.split(/[,，、;；]+/)) {
-    const t = token.trim();
+  for (const t of splitAssetsTopLevel(raw)) {
     if (!t) continue;
     let family: 'character' | 'scene' | 'prop' = 'character';
     let rest = t;
@@ -41,7 +67,7 @@ function parseAssetsText(raw: string): M4RequestedAsset[] {
       family = f === '场景' || f === 'scene' ? 'scene' : f === '道具' || f === 'prop' ? 'prop' : 'character';
       rest = colon[2].trim();
     }
-    const vm = rest.match(/^(.+?)[（(]([^）)]+)[）)]$/);
+    const vm = rest.match(/^(.+?)[（(\[【]([^）)\]】]+)[）)\]】]$/);
     if (vm) out.push({ family, name: vm[1].trim(), variant: vm[2].trim() });
     else out.push({ family, name: rest, variant: '' });
   }
@@ -71,6 +97,7 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
           (!selectedLlm.base_url ||
             !/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(?::\d+)?(\/|$)/i.test(selectedLlm.base_url)))),
   );
+  const missingRemoteConsent = needsRemoteConsent && !remoteConsent;
 
   const loadDraft = useCallback(async () => {
     try {
@@ -97,6 +124,12 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
 
   const handleImportText = async () => {
     if (!pasteText.trim()) return;
+    if (missingRemoteConsent) {
+      const msg = '已选择远程辅助模型，请先勾选「确认允许将分镜文本发送至远程 LLM 接口」后再解析。';
+      setErrorText(msg);
+      onMessage?.(msg, 'error');
+      return;
+    }
     setBusy(true);
     setErrorText('');
     try {
@@ -123,6 +156,12 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
 
   const handleFileUpload = async (file: File | undefined) => {
     if (!file) return;
+    if (missingRemoteConsent) {
+      const msg = '已选择远程辅助模型，请先勾选「确认允许将分镜文本发送至远程 LLM 接口」后再导入解析。';
+      setErrorText(msg);
+      onMessage?.(msg, 'error');
+      return;
+    }
     setBusy(true);
     setErrorText('');
     try {
@@ -318,26 +357,48 @@ export function StoryboardStagePage({ overview, stage, onRefresh, onNextStage, o
                 )}
               </select>
               {needsRemoteConsent && (
-                <label className="m4-footer-note" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <input
-                    type="checkbox"
-                    checked={remoteConsent}
-                    disabled={busy}
-                    onChange={(e) => setRemoteConsent(e.target.checked)}
-                  />
-                  确认允许将分镜文本发送至远程 LLM 接口
-                </label>
+                <>
+                  <label className="m4-footer-note" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                    <input
+                      type="checkbox"
+                      checked={remoteConsent}
+                      disabled={busy}
+                      onChange={(e) => setRemoteConsent(e.target.checked)}
+                    />
+                    确认允许将分镜文本发送至远程 LLM 接口
+                  </label>
+                  {missingRemoteConsent && (
+                    <div className="m4-blocker-box" role="status">
+                      需先勾选上方远程授权确认，才能使用「{selectedLlm?.name ?? '远程模型'}」进行解析或导入。
+                    </div>
+                  )}
+                </>
               )}
             </>
           )}
-          <button type="button" className="btn-secondary" disabled={busy || !pasteText.trim()} onClick={() => void handleImportText()}>
+          <button
+            type="button"
+            className="btn-secondary"
+            disabled={busy || !pasteText.trim() || missingRemoteConsent}
+            title={missingRemoteConsent ? '请先勾选远程 LLM 授权确认' : undefined}
+            onClick={() => void handleImportText()}
+          >
             解析粘贴文本
           </button>
-          <label className="btn-secondary" style={{ textAlign: 'center', cursor: 'pointer' }}>
+          <label
+            className="btn-secondary"
+            style={{
+              textAlign: 'center',
+              cursor: busy || missingRemoteConsent ? 'not-allowed' : 'pointer',
+              opacity: busy || missingRemoteConsent ? 0.6 : 1,
+            }}
+            title={missingRemoteConsent ? '请先勾选远程 LLM 授权确认' : undefined}
+          >
             导入文件 (.txt/.md/.docx/.pdf)
             <input
               type="file"
               accept=".txt,.md,.markdown,.json,.docx,.pdf"
+              disabled={busy || missingRemoteConsent}
               style={{ display: 'none' }}
               onChange={(e) => void handleFileUpload(e.target.files?.[0])}
             />

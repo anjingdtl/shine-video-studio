@@ -215,12 +215,118 @@ _SHOT_RE = re.compile(
 
 _DURATION_FIELD_RE = re.compile(r"(?:时长|秒数|duration)\s*[:：]\s*(\d+(?:\.\d+)?)\s*(?:s|sec|秒)?", re.IGNORECASE)
 _INLINE_DURATION_RE = re.compile(r"[（(\[]\s*(\d+(?:\.\d+)?)\s*(?:s|sec|秒)\s*[)）\]]", re.IGNORECASE)
-_CAST_RE = re.compile(r"^(?:人物|角色|出场人物)\s*[:：]\s*(.+)$")
-_SCENE_RE = re.compile(r"^(?:场景|地点)\s*[:：]\s*(.+)$")
-_PROP_RE = re.compile(r"^(?:道具|物品)\s*[:：]\s*(.+)$")
-_DIALOGUE_RE = re.compile(r"^(?:对白|台词)\s*[:：]\s*(.+)$")
+_CAST_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:人物|角色|出场人物)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
+_SCENE_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:场景|地点)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
+_PROP_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:道具|物品)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
+_DIALOGUE_RE = re.compile(r"^(?:[-*•]\s*)?(?:\*\*)?(?:对白|台词)(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(.+)$")
 _QUOTE_LINE_RE = re.compile(r'^([^\s:：]{1,24})\s*[:：]\s*[「『"](.+?)[」』"]\s*$')
 _VARIANT_RE = re.compile(r"^(.+?)\s*[（(\[【]([^）)\]】]+)[）)\]】]$")
+_FAMILY_PREFIX_RE = re.compile(
+    r"^(?:\[(?:人物|场景|道具)\]\s*|(?:人物|场景|道具|character|scene|prop)\s*[:：]\s*)",
+    re.IGNORECASE,
+)
+_EMPTY_ENTITY_NAMES = {"无", "暂无", "none", "None", "-"}
+_CHARACTER_ROLE_TAGS = {
+    "女主",
+    "男主",
+    "主角",
+    "女主角",
+    "男主角",
+    "配角",
+    "男配",
+    "女配",
+    "反派",
+    "群演",
+    "龙套",
+    "路人",
+    "lead",
+    "protagonist",
+}
+_BRACKET_PAIRS = {"(": ")", "（": "）", "[": "]", "【": "】"}
+_CLOSE_BRACKETS = set(_BRACKET_PAIRS.values())
+
+
+def canonical_entity_key(entity_name: str, variant_name: str = "") -> str:
+    base = " ".join(str(entity_name or "").split()).casefold()
+    var = " ".join(str(variant_name or "").split()).casefold()
+    return f"{base}::{var}" if var else base
+
+
+def _split_top_level(raw: str, seps: set[str] | None = None) -> list[str]:
+    """Split on separator characters only at bracket depth 0 so e.g. '苏瑶（女主，冲锋衣）' stays intact."""
+    separators = seps if seps is not None else {",", "，", "、", ";", "；"}
+    parts: list[str] = []
+    stack: list[str] = []
+    buf: list[str] = []
+    for ch in raw or "":
+        if ch in _BRACKET_PAIRS:
+            stack.append(_BRACKET_PAIRS[ch])
+            buf.append(ch)
+        elif ch in _CLOSE_BRACKETS:
+            if stack and ch == stack[-1]:
+                stack.pop()
+            buf.append(ch)
+        elif not stack and ch in separators:
+            token = "".join(buf).strip()
+            if token:
+                parts.append(token)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _split_name_and_inline_variant(raw_name: str) -> tuple[str, str]:
+    text = (raw_name or "").strip()
+    if not text:
+        return "", ""
+    m = _VARIANT_RE.match(text)
+    if m:
+        return m.group(1).strip(), m.group(2).strip()
+    # Handle unmatched opening bracket tail (e.g. '苏瑶（女主') or orphan trailing closing bracket ('冲锋衣）')
+    for idx, ch in enumerate(text):
+        if ch in _BRACKET_PAIRS and idx > 0:
+            close_ch = _BRACKET_PAIRS[ch]
+            if close_ch not in text[idx + 1 :]:
+                return text[:idx].strip(), text[idx + 1 :].strip(" ()（）[]【】")
+    if not any(ch in _BRACKET_PAIRS for ch in text):
+        text = text.rstrip(")）]】").strip()
+    return text, ""
+
+
+def normalize_requested_asset(family: str, name: str, variant: str = "") -> dict[str, str] | None:
+    """Normalize a requested asset entry and strip pure dramatic role tags from character variants."""
+    fam = str(family or "").strip().lower()
+    if fam not in {"character", "scene", "prop"}:
+        return None
+    raw_name = _FAMILY_PREFIX_RE.sub("", str(name or "").strip()).strip()
+    if not raw_name or raw_name in _EMPTY_ENTITY_NAMES:
+        return None
+
+    clean_name, inline_var = _split_name_and_inline_variant(raw_name)
+    if not clean_name or clean_name in _EMPTY_ENTITY_NAMES:
+        return None
+
+    explicit_var = str(variant or "").strip()
+    if inline_var and explicit_var and inline_var != explicit_var:
+        eff_variant = f"{inline_var}、{explicit_var}"
+    else:
+        eff_variant = explicit_var or inline_var
+
+    if fam == "character" and eff_variant:
+        sub_tokens = _split_top_level(eff_variant, {",", "，", "、", ";", "；", "/", "／", "|"})
+        if any(tok.strip().casefold() in _CHARACTER_ROLE_TAGS for tok in sub_tokens):
+            kept = [
+                tok.strip()
+                for tok in sub_tokens
+                if tok.strip() and tok.strip().casefold() not in _CHARACTER_ROLE_TAGS
+            ]
+            eff_variant = "、".join(kept)
+
+    return {"family": fam, "name": clean_name, "variant": eff_variant}
 
 
 def chunk_storyboard_text(text: str, *, max_chunk_chars: int = MAX_CHUNK_CHARS) -> list[M4TextChunk]:
@@ -267,17 +373,18 @@ def chunk_storyboard_text(text: str, *, max_chunk_chars: int = MAX_CHUNK_CHARS) 
     return chunks
 
 
-def _split_entity_tokens(raw: str) -> list[dict[str, str]]:
+def _split_entity_tokens(raw: str, *, family: str = "character") -> list[dict[str, str]]:
     items: list[dict[str, str]] = []
-    for token in re.split(r"[,，、;；]+", raw.strip()):
-        name = token.strip()
-        if not name or name in {"无", "暂无", "none", "None", "-"}:
+    seen: set[tuple[str, str]] = set()
+    for token in _split_top_level((raw or "").strip()):
+        normalized = normalize_requested_asset(family, token, "")
+        if normalized is None:
             continue
-        m = _VARIANT_RE.match(name)
-        if m:
-            items.append({"name": m.group(1).strip(), "variant": m.group(2).strip()})
-        else:
-            items.append({"name": name, "variant": ""})
+        dedup_key = (normalized["family"], canonical_entity_key(normalized["name"], normalized["variant"]))
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+        items.append({"name": normalized["name"], "variant": normalized["variant"]})
     return items
 
 
@@ -337,6 +444,16 @@ def extract_storyboard_from_text(
         if shot is None:
             return
         shot["summary"] = "\n".join(shot.pop("_summary_lines", [])).strip()
+        if shot["requested_assets"]:
+            deduped: list[dict[str, str]] = []
+            seen_assets: set[tuple[str, str]] = set()
+            for asset in shot["requested_assets"]:
+                key = (asset["family"], canonical_entity_key(asset["name"], asset.get("variant", "")))
+                if key in seen_assets:
+                    continue
+                seen_assets.add(key)
+                deduped.append(asset)
+            shot["requested_assets"] = deduped
         if shot["target_seconds"] is None:
             ambiguities.append(
                 {
@@ -435,7 +552,7 @@ def extract_storyboard_from_text(
 
             cast_m = _CAST_RE.match(line)
             if cast_m:
-                for ent in _split_entity_tokens(cast_m.group(1)):
+                for ent in _split_entity_tokens(cast_m.group(1), family="character"):
                     current_shot["requested_assets"].append(
                         {"family": "character", "name": ent["name"], "variant": ent["variant"]}
                     )
@@ -443,7 +560,7 @@ def extract_storyboard_from_text(
 
             scene_m = _SCENE_RE.match(line)
             if scene_m:
-                for ent in _split_entity_tokens(scene_m.group(1)):
+                for ent in _split_entity_tokens(scene_m.group(1), family="scene"):
                     current_shot["requested_assets"].append(
                         {"family": "scene", "name": ent["name"], "variant": ent["variant"]}
                     )
@@ -451,7 +568,7 @@ def extract_storyboard_from_text(
 
             prop_m = _PROP_RE.match(line)
             if prop_m:
-                for ent in _split_entity_tokens(prop_m.group(1)):
+                for ent in _split_entity_tokens(prop_m.group(1), family="prop"):
                     current_shot["requested_assets"].append(
                         {"family": "prop", "name": ent["name"], "variant": ent["variant"]}
                     )

@@ -29,8 +29,10 @@ from shine.manual4.storage.models import (
 )
 from shine.manual4.storyboard.parser import (
     M4ParseError,
+    canonical_entity_key,
     chunk_storyboard_text,
     extract_storyboard_from_text,
+    normalize_requested_asset,
     parse_m4_document,
 )
 from shine.platform_projects import chat_completions_url
@@ -58,9 +60,7 @@ def _shot_content_sha(
 
 
 def _canonical_entity_key(name: str, variant: str) -> str:
-    n = " ".join(str(name or "").split()).casefold()
-    v = " ".join(str(variant or "").split()).casefold()
-    return f"{n}::{v}" if v else n
+    return canonical_entity_key(name, variant)
 
 
 def _normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -80,12 +80,20 @@ def _normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:
             dur_raw = sh.get("target_seconds")
             dur = float(dur_raw) if dur_raw not in (None, "") else None
             assets = []
+            seen_assets: set[tuple[str, str]] = set()
             for item in sh.get("requested_assets") or []:
-                family = str(item.get("family") or "").strip().lower()
-                name = str(item.get("name") or "").strip()
-                variant = str(item.get("variant") or "").strip()
-                if family in {"character", "scene", "prop"} and name:
-                    assets.append({"family": family, "name": name, "variant": variant})
+                norm = normalize_requested_asset(
+                    str(item.get("family") or ""),
+                    str(item.get("name") or ""),
+                    str(item.get("variant") or ""),
+                )
+                if norm is None:
+                    continue
+                dedup_key = (norm["family"], canonical_entity_key(norm["name"], norm["variant"]))
+                if dedup_key in seen_assets:
+                    continue
+                seen_assets.add(dedup_key)
+                assets.append(norm)
             shots.append(
                 {
                     "episode_code": ep_code,
@@ -329,7 +337,9 @@ def _llm_extract_chunk(
         '{"episodes":[{"episode_no":1,"title":"...","shots":[{"shot_no":1,"target_seconds":null,'
         '"summary":"verbatim","requested_assets":[{"family":"character|scene|prop","name":"...","variant":""}],'
         '"dialogue":[{"speaker":"...","text":"..."}]}]}]}. '
-        "Never invent durations, shots, or plot."
+        "Put only the pure entity name in 'name' (without dramatic role tags like 女主/男主 or brackets), "
+        "put optional costume/state variants in 'variant' (never split clothing into separate character entries), "
+        "and never invent durations, shots, or plot."
     )
     headers = {"Content-Type": "application/json"}
     if api_key:

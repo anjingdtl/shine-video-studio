@@ -44,6 +44,21 @@ def _canonical_sha(payload: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _job_elapsed_seconds(job: M4Job, attempts: list[M4JobAttempt] | None = None) -> int | None:
+    if job.status not in {"PASSED", "FAILED", "NEEDS_REVIEW", "BLOCKED"}:
+        return None
+    if attempts:
+        latest_att = attempts[-1]
+        start = latest_att.submit_intent_at or latest_att.created_at or job.created_at
+        end = latest_att.updated_at or job.updated_at
+    else:
+        start = job.created_at
+        end = job.updated_at
+    if start is None or end is None:
+        return None
+    return max(0, round((end - start).total_seconds()))
+
+
 def _serialize_job(job: M4Job, attempts: list[M4JobAttempt] | None = None) -> dict[str, Any]:
     return {
         "id": job.id,
@@ -74,6 +89,7 @@ def _serialize_job(job: M4Job, attempts: list[M4JobAttempt] | None = None) -> di
         "qc_result": job.qc_result,
         "failure_code": job.failure_code,
         "failure_detail": job.failure_detail,
+        "elapsed_seconds": _job_elapsed_seconds(job, attempts),
         "media_url": (
             f"/api/v1/manual4/projects/{job.project_id}/jobs/{job.id}/media"
             if job.output_storage_path
@@ -97,7 +113,12 @@ def _serialize_job(job: M4Job, attempts: list[M4JobAttempt] | None = None) -> di
     }
 
 
-def _serialize_run(run: M4ProductionRun, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+def _serialize_run(
+    run: M4ProductionRun,
+    jobs: list[dict[str, Any]],
+    *,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "id": run.id,
         "project_id": run.project_id,
@@ -108,6 +129,7 @@ def _serialize_run(run: M4ProductionRun, jobs: list[dict[str, Any]]) -> dict[str
         "scope_kind": run.scope_kind,
         "scope_target_ids": run.scope_target_ids,
         "provider": run.provider,
+        "config": config,
         "status": run.status,
         "worker_id": run.worker_id,
         "lease_id": run.lease_id,
@@ -162,6 +184,16 @@ def get_production_state(
             ).all():
                 latest_job_by_shot.setdefault(job.shot_id, job)
 
+        latest_job_attempts: dict[str, list[M4JobAttempt]] = {}
+        if latest_job_by_shot:
+            lj_ids = [j.id for j in latest_job_by_shot.values()]
+            for att in m4_db.scalars(
+                select(M4JobAttempt)
+                .where(M4JobAttempt.job_id.in_(lj_ids))
+                .order_by(M4JobAttempt.attempt_no.asc())
+            ).all():
+                latest_job_attempts.setdefault(att.job_id, []).append(att)
+
         shots_by_ep: dict[str, list[dict[str, Any]]] = {}
         for sh in shots:
             manifest = build_shot_reference_manifest(m4_db, sh)
@@ -190,7 +222,7 @@ def get_production_state(
                     "active_prompt": _serialize_prompt(active_prompt) if active_prompt else None,
                     "prompt_valid_for_run": valid_frozen,
                     "prompt_invalid_reason": invalid_reason,
-                    "latest_job": _serialize_job(lj) if lj else None,
+                    "latest_job": _serialize_job(lj, latest_job_attempts.get(lj.id, [])) if lj else None,
                 }
             )
         for ep in episodes:
@@ -212,6 +244,13 @@ def get_production_state(
         .limit(10)
     ).all()
     run_ids = [r.id for r in runs]
+    snap_config_by_id: dict[str, dict[str, Any]] = {}
+    snap_ids = [r.execution_snapshot_id for r in runs if r.execution_snapshot_id]
+    if snap_ids:
+        for snap in m4_db.scalars(
+            select(M4ExecutionSnapshot).where(M4ExecutionSnapshot.id.in_(snap_ids))
+        ).all():
+            snap_config_by_id[snap.id] = dict(snap.config_json or {})
     jobs_by_run: dict[str, list[dict[str, Any]]] = {}
     if run_ids:
         jobs = m4_db.scalars(
@@ -247,7 +286,14 @@ def get_production_state(
     return {
         "confirmed_revision": {"id": confirmed.id, "revision": confirmed.revision} if confirmed else None,
         "episodes": episodes_data,
-        "runs": [_serialize_run(r, jobs_by_run.get(r.id, [])) for r in runs],
+        "runs": [
+            _serialize_run(
+                r,
+                jobs_by_run.get(r.id, []),
+                config=snap_config_by_id.get(r.execution_snapshot_id),
+            )
+            for r in runs
+        ],
         "options": {
             "variants": verified_variants_catalog(),
             "accelerators": accelerators_out,
@@ -835,7 +881,9 @@ def control_production_run(
         if run.status in {"COMPLETED", "CANCELLED"}:
             raise HTTPException(409, {"code": "M4_RUN_ALREADY_TERMINAL", "message": "批次已结束。"})
         run.status = "CANCELLED"
-        for job in m4_db.scalars(select(M4Job).where(M4Job.run_id == run.id, M4Job.status == "QUEUED")).all():
+        for job in m4_db.scalars(
+            select(M4Job).where(M4Job.run_id == run.id, M4Job.status.in_(["QUEUED", "NEEDS_REVIEW"]))
+        ).all():
             job.status = "CANCELLED"
             job.state_version += 1
             job.updated_at = now
@@ -854,7 +902,16 @@ def control_production_run(
         )
     )
     jobs = m4_db.scalars(select(M4Job).where(M4Job.run_id == run.id).order_by(M4Job.ordinal)).all()
-    return _serialize_run(run, [_serialize_job(j) for j in jobs])
+    job_ids = [j.id for j in jobs]
+    attempts_by_job: dict[str, list[M4JobAttempt]] = {}
+    if job_ids:
+        for att in m4_db.scalars(
+            select(M4JobAttempt)
+            .where(M4JobAttempt.job_id.in_(job_ids))
+            .order_by(M4JobAttempt.attempt_no.asc())
+        ).all():
+            attempts_by_job.setdefault(att.job_id, []).append(att)
+    return _serialize_run(run, [_serialize_job(j, attempts_by_job.get(j.id, [])) for j in jobs])
 
 
 def reconcile_m4_job(
@@ -877,13 +934,13 @@ def reconcile_m4_job(
 
     dec = (decision or "").strip().lower()
     now = m4_utcnow()
+    run = m4_db.get(M4ProductionRun, job.run_id)
     if dec == "requeue":
         job.status = "QUEUED"
         job.failure_code = None
         job.failure_detail = ""
         job.state_version += 1
         job.updated_at = now
-        run = m4_db.get(M4ProductionRun, job.run_id)
         if run is not None and run.status in {"FAILED", "NEEDS_REVIEW"}:
             run.status = "PENDING"
             run.updated_at = now
@@ -891,6 +948,16 @@ def reconcile_m4_job(
         job.status = "FAILED"
         job.state_version += 1
         job.updated_at = now
+        if run is not None and run.status == "NEEDS_REVIEW":
+            siblings = m4_db.scalars(select(M4Job).where(M4Job.run_id == run.id)).all()
+            if not any(s.status == "NEEDS_REVIEW" for s in siblings):
+                for s in siblings:
+                    if s.status == "QUEUED":
+                        s.status = "CANCELLED"
+                        s.state_version += 1
+                        s.updated_at = now
+                run.status = "FAILED"
+                run.updated_at = now
     else:
         raise HTTPException(
             422,
@@ -908,4 +975,9 @@ def reconcile_m4_job(
             payload={"decision": dec, "new_status": job.status},
         )
     )
-    return _serialize_job(job)
+    attempts = m4_db.scalars(
+        select(M4JobAttempt)
+        .where(M4JobAttempt.job_id == job.id)
+        .order_by(M4JobAttempt.attempt_no.asc())
+    ).all()
+    return _serialize_job(job, attempts)

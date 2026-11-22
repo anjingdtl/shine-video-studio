@@ -75,7 +75,13 @@ _STATE = {
 _LOCK = threading.Lock()
 _PRESENCE = {"last_seen": None, "ever_seen": False}
 _VALIDATE_BUSY = threading.Lock()
+_WORKER_HELD_STOP = False
 _LAST_STOP: dict | None = None
+
+MANAGED_WORKERS = (
+    ("worker", "shine.worker"),
+    ("worker-m4", "shine.manual4.worker"),
+)
 
 
 def _loopback_origin(origin: str | None) -> bool:
@@ -83,6 +89,17 @@ def _loopback_origin(origin: str | None) -> bool:
         return True  # non-browser caller (curl / tests)
     parsed = urlparse(origin)
     return parsed.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _m4_session_factory(data_dir: Path):
+    """Single Manual4 DB opener for supervisor blockers and offline sync."""
+    from shine.manual4.storage.db import make_m4_engine, make_m4_session_factory, manual4_database_url
+
+    m4_url = manual4_database_url(data_dir)
+    if not os.getenv("SHINE_MANUAL4_DATABASE_URL", "").strip() and not (data_dir / "manual4.sqlite").is_file():
+        return None
+    engine = make_m4_engine(m4_url)
+    return engine, make_m4_session_factory(engine)
 
 
 def _settings(data_dir: Path):
@@ -152,6 +169,32 @@ def _stack_blockers(data_dir: Path) -> list[str]:
                 blockers.append(f"{deliveries} 个成片交付待装配")
     finally:
         engine.dispose()
+
+    m4_pair = _m4_session_factory(data_dir)
+    if m4_pair is not None:
+        from shine.manual4.storage.models import M4Job, M4ProductionRun
+
+        m4_engine, m4_factory = m4_pair
+        try:
+            with m4_factory() as m4_db:
+                m4_runs = m4_db.scalar(
+                    select(func.count(M4ProductionRun.id)).where(
+                        M4ProductionRun.status.in_(["PENDING", "CLAIMED", "RUNNING", "PAUSE_REQUESTED"])
+                    )
+                ) or 0
+                if m4_runs:
+                    blockers.append(f"{m4_runs} 个四阶排片批次待执行或正在生成")
+                m4_jobs = m4_db.scalar(
+                    select(func.count(M4Job.id)).where(
+                        M4Job.status.in_(["SUBMITTING", "RUNNING", "QC_PENDING"])
+                    )
+                ) or 0
+                if m4_jobs and not m4_runs:
+                    blockers.append(f"{m4_jobs} 个四阶镜头任务正在执行")
+        except Exception:  # noqa: BLE001 - optional M4 database may not have tables yet
+            pass
+        finally:
+            m4_engine.dispose()
     return blockers
 
 
@@ -206,6 +249,27 @@ def _run_stop(data_dir: Path, kind: str) -> None:
                           "detail": f"停止异常：{exc}"}
 
 
+def heal_stopped_workers(data_dir: Path) -> bool:
+    """Restart any recorded worker ('worker' or 'worker-m4') that exited unexpectedly.
+
+    Returns True when a heal attempt ran. Respects explicit stack/worker stops
+    and ongoing service validation so it never fights operator control.
+    """
+    with _LOCK:
+        if _STATE["phase"] in ("stopping", "starting") or _WORKER_HELD_STOP:
+            return False
+    if _VALIDATE_BUSY.locked():
+        return False
+    manifest = _read_manifest(data_dir)
+    if not _stack_live(manifest):
+        return False
+    recorded = _recorded_worker_names(manifest)
+    if any(_worker_state(manifest, name) == "stopped" for name in recorded):
+        _start_worker(data_dir)
+        return True
+    return False
+
+
 def _watchdog(data_dir: Path, minutes: float) -> None:
     while True:
         time.sleep(WATCHDOG_TICK_SECONDS)
@@ -215,6 +279,7 @@ def _watchdog(data_dir: Path, minutes: float) -> None:
                 presence = dict(_PRESENCE)
             if busy_restart:
                 continue
+            heal_stopped_workers(data_dir)
             stack_running = _stack_live(_read_manifest(data_dir))
             blockers = _stack_blockers(data_dir) if stack_running else []
             stop, reason = auto_stop_decision(
@@ -324,12 +389,19 @@ def _stack_live(manifest: dict | None) -> bool:
         return False
 
 
-def _worker_state(manifest: dict | None) -> str:
+def _recorded_worker_names(manifest: dict | None) -> list[str]:
+    if not manifest:
+        return []
+    present = {row.get("name") for row in manifest.get("processes", []) if row.get("name")}
+    return [name for name, _mod in MANAGED_WORKERS if name in present]
+
+
+def _worker_state(manifest: dict | None, worker_name: str = "worker") -> str:
     from shine.comfyops.installer import process_identity
     if not manifest:
         return "absent"
     entry = next((row for row in manifest.get("processes", [])
-                  if row.get("name") == "worker"), None)
+                  if row.get("name") == worker_name), None)
     if not entry:
         return "absent"
     state = "stopped"
@@ -346,20 +418,24 @@ def _worker_state(manifest: dict | None) -> str:
 
 
 def _stop_worker(data_dir: Path) -> tuple[int, dict]:
+    global _WORKER_HELD_STOP
     import stop_shine
+    with _LOCK:
+        _WORKER_HELD_STOP = True
     guard = stop_shine._acquire_startup_guard(data_dir)
     try:
         manifest = _read_manifest(data_dir)
         if not manifest:
             return 409, {"code": "STACK_NOT_RUNNING"}
-        entry = next((row for row in manifest.get("processes", [])
-                      if row.get("name") == "worker"), None)
-        if not entry:
+        managed_names = {name for name, _mod in MANAGED_WORKERS}
+        entries = [row for row in manifest.get("processes", [])
+                   if row.get("name") in managed_names]
+        if not entries:
             return 409, {"code": "WORKER_NOT_RECORDED"}
-        # Use the same identity-verified stop path for the Worker entry.
+        # Use the same identity-verified stop path for all recorded worker entries.
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
                                          encoding="utf-8") as handle:
-            json.dump({"processes": [entry]}, handle)
+            json.dump({"processes": entries}, handle)
             temp_path = Path(handle.name)
         try:
             result = stop_shine.stop_manifest(temp_path)
@@ -376,7 +452,7 @@ def _stop_worker(data_dir: Path) -> tuple[int, dict]:
 
 
 def _mark_worker_stopped(data_dir: Path) -> None:
-    """Record the stopped Worker as offline right away.
+    """Record the stopped Workers as offline right away.
 
     The worker process is gone, but its last heartbeat stays inside the
     offline window, so the backend keeps counting it as online for another
@@ -401,11 +477,30 @@ def _mark_worker_stopped(data_dir: Path) -> None:
     finally:
         engine.dispose()
 
+    m4_pair = _m4_session_factory(data_dir)
+    if m4_pair is not None:
+        from shine.manual4.storage.models import M4WorkerInstance
+
+        m4_engine, m4_factory = m4_pair
+        try:
+            with m4_factory.begin() as m4_db:
+                for row in m4_db.scalars(select(M4WorkerInstance)).all():
+                    if row.status != "OFFLINE":
+                        row.status = "OFFLINE"
+                        row.current_run_id = None
+        except Exception:  # noqa: BLE001 - best-effort sync on stop
+            pass
+        finally:
+            m4_engine.dispose()
+
 
 def _start_worker(data_dir: Path) -> tuple[int, dict]:
+    global _WORKER_HELD_STOP
     import stop_shine
     import shine_processes
     from shine.comfyops.installer import process_identity
+    with _LOCK:
+        _WORKER_HELD_STOP = False
     # Read the record, start and record the Worker under the same guard as a
     # whole-stack stop. A concurrent stop must see the new Worker or finish
     # before this request reads the manifest.
@@ -414,11 +509,14 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
         manifest = _read_manifest(data_dir)
         if not manifest:
             return 409, {"code": "STACK_NOT_RUNNING"}
-        state = _worker_state(manifest)
-        if state == "running":
-            return 409, {"code": "WORKER_ALREADY_RUNNING"}
-        if state == "unknown":
+        recorded = set(_recorded_worker_names(manifest))
+        targets = [(n, m) for n, m in MANAGED_WORKERS if n in recorded] or [("worker", "shine.worker")]
+        states = {n: _worker_state(manifest, n) for n, _m in targets}
+        if any(s == "unknown" for s in states.values()):
             return 409, {"code": "WORKER_STATE_UNVERIFIED"}
+        to_start = [(n, m) for n, m in targets if states[n] != "running"]
+        if not to_start:
+            return 409, {"code": "WORKER_ALREADY_RUNNING"}
         log_dir = data_dir / "run" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         env = {**os.environ, "SHINE_DATA_DIR": str(data_dir), "PYTHONUNBUFFERED": "1"}
@@ -426,34 +524,43 @@ def _start_worker(data_dir: Path) -> tuple[int, dict]:
             env["SHINE_DATABASE_URL"] = manifest["database_url"]
         if manifest.get("render_provider"):
             env["SHINE_RENDER_PROVIDER"] = manifest["render_provider"]
-        with (log_dir / "worker.out.log").open("ab") as out, (log_dir / "worker.err.log").open("ab") as err:
-            process = subprocess.Popen(
-                [sys.executable, "-m", "shine.worker"], cwd=str(REPO_ROOT), env=env,
-                stdout=out, stderr=err,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
+        launched: list[tuple[str, str, subprocess.Popen]] = []
+        for worker_name, module_name in to_start:
+            with (log_dir / f"{worker_name}.out.log").open("ab") as out, \
+                    (log_dir / f"{worker_name}.err.log").open("ab") as err:
+                proc = subprocess.Popen(
+                    [sys.executable, "-m", module_name], cwd=str(REPO_ROOT), env=env,
+                    stdout=out, stderr=err,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+            launched.append((worker_name, module_name, proc))
         deadline = time.monotonic() + 5
-        while time.monotonic() < deadline and process.poll() is None:
+        while time.monotonic() < deadline and all(p.poll() is None for _, _, p in launched):
             time.sleep(0.1)
-        if process.poll() is not None:
-            return 409, {"code": "WORKER_START_FAILED",
-                         "detail": "Worker 启动后立即退出，见 run/logs/worker.err.log。"}
-        birth = process_identity(process.pid)
-        owners = shine_processes.snapshot(process.pid, birth)
-        entry = next((row for row in manifest.get("processes", [])
-                      if row.get("name") == "worker"), None)
-        if entry is None:
-            entry = {"name": "worker"}
-            manifest.setdefault("processes", []).append(entry)
-        entry.update(pid=process.pid, birth=birth, owners=owners,
-                     command=f"{sys.executable} -m shine.worker")
+        for worker_name, _module_name, proc in launched:
+            if proc.poll() is not None:
+                return 409, {"code": "WORKER_START_FAILED",
+                             "detail": f"{worker_name} 启动后立即退出，见 run/logs/{worker_name}.err.log。"}
+        pids: dict[str, int] = {}
+        for worker_name, module_name, proc in launched:
+            birth = process_identity(proc.pid)
+            owners = shine_processes.snapshot(proc.pid, birth)
+            entry = next((row for row in manifest.get("processes", [])
+                          if row.get("name") == worker_name), None)
+            if entry is None:
+                entry = {"name": worker_name}
+                manifest.setdefault("processes", []).append(entry)
+            entry.update(pid=proc.pid, birth=birth, owners=owners,
+                         command=f"{sys.executable} -m {module_name}")
+            pids[worker_name] = proc.pid
         path = data_dir / "run" / "processes.json"
         tmp = path.with_suffix(f".new-{os.getpid()}")
         tmp.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
         os.replace(tmp, path)
     finally:
         stop_shine._release_startup_guard(guard)
-    return 200, {"status": "RUNNING", "pid": process.pid}
+    first_pid = next(iter(pids.values()))
+    return 200, {"status": "RUNNING", "pid": first_pid, "workers": pids}
 
 
 def _validate_services_background(data_dir: Path, delegation: dict | None = None) -> dict:
@@ -720,6 +827,7 @@ class Handler(BaseHTTPRequestHandler):
                 if presence["last_seen"] else None,
                 "stack_running": _stack_live(manifest),
                 "worker": _worker_state(manifest),
+                "worker_m4": _worker_state(manifest, "worker-m4"),
                 "last_stop": last_stop,
             }, origin)
         else:

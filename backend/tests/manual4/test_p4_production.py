@@ -510,3 +510,298 @@ def test_live_m4_renderer_reports_busy_not_reconciling_and_failed_run_closes_que
         assert r.error_code == "M4_COMFY_STARTUP_TIMEOUT"
         assert j.status == "FAILED"
         assert j.failure_code == "M4_COMFY_STARTUP_TIMEOUT"
+
+
+def test_p4_batch_freeze_prompts_freezes_entered_shots_and_skips_empty(tmp_path):
+    app, _ = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid, shots = _prepare_two_shots_materials_ready(client)
+        s1_id, s2_id = shots[0]["id"], shots[1]["id"]
+
+        # Save draft on shot 1, pass direct text on shot 2, plus an empty-text entry for shot 2 is handled cleanly
+        draft_resp = client.put(
+            f"/api/v1/manual4/projects/{pid}/shots/{s1_id}/prompt/draft",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"prompt_text": "detailed_description:\nShot 1 draft prompt"},
+        )
+        assert draft_resp.status_code == 200
+
+        batch = client.post(
+            f"/api/v1/manual4/projects/{pid}/prompts/batch-freeze",
+            headers=LOCAL_ACTION_HEADERS,
+            json={
+                "items": [
+                    {"shot_id": s1_id, "prompt_text": None},
+                    {"shot_id": s2_id, "prompt_text": "detailed_description:\nShot 2 entered prompt"},
+                ]
+            },
+        )
+        assert batch.status_code == 200
+        body = batch.json()
+        assert body["frozen_shot_ids"] == [s1_id, s2_id]
+        assert body["errors"] == []
+        ep_shots = body["state"]["episodes"][0]["shots"]
+        assert all(sh["prompt_valid_for_run"] is True for sh in ep_shots)
+
+        # Empty text shot -> skipped without failing whole batch
+        skip_resp = client.post(
+            f"/api/v1/manual4/projects/{pid}/prompts/batch-freeze",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"items": [{"shot_id": s1_id, "prompt_text": "   "}]},
+        )
+        assert skip_resp.status_code == 200
+        assert skip_resp.json()["frozen_shot_ids"] == []
+        assert len(skip_resp.json()["skipped"]) == 1
+        assert skip_resp.json()["skipped"][0]["code"] == "M4_PROMPT_EMPTY"
+
+
+def test_p4_episode_scope_does_not_block_on_other_episode_readiness(tmp_path):
+    app, _ = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid = client.post(
+            "/api/v1/platform/manual4-projects",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"title": "分集排片不互阻测试", "max_shot_seconds": 15.0},
+        ).json()["id"]
+        raw_text = (
+            "第1集：大漠迷窟\n"
+            "第1镜（5s）：沙丘全景。\n"
+            "人物：林风\n"
+            "第2集：幽冥玄棺\n"
+            "第1镜（5s）：地下神殿。\n"
+            "人物：林风\n"
+        )
+        imp = client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/import",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"text": raw_text},
+        ).json()["draft"]
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/storyboard/confirm",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"expected_revision": imp["revision"]},
+        )
+        mat = client.get(f"/api/v1/manual4/projects/{pid}/materials/requirements").json()
+        req_id = mat["requirements"][0]["id"]
+        up = client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/upload",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"family": "character", "entity_name": "林风", "requirement_id": req_id},
+            files={"file": ("linfeng.png", _minimal_png(), "image/png")},
+        ).json()["asset"]
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/{up['id']}/promote",
+            headers=LOCAL_ACTION_HEADERS,
+            json={},
+        )
+
+        pstate0 = client.get(f"/api/v1/manual4/projects/{pid}/production/state").json()
+        ep1 = pstate0["episodes"][0]
+        ep2 = pstate0["episodes"][1]
+        # Freeze only ep1 shot; leave ep2 unfrozen
+        fr = client.post(
+            f"/api/v1/manual4/projects/{pid}/shots/{ep1['shots'][0]['id']}/prompt/freeze",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"prompt_text": "detailed_description:\nEp1 shot1 prompt"},
+        )
+        assert fr.status_code == 200
+        readiness = fr.json()["state"]["readiness"]
+        assert readiness["can_start_production"] is True
+        prod_stage = next(s for s in readiness["stages"] if s["key"] == "production")
+        assert prod_stage["facts"]["ready_episode_ids"] == [ep1["id"]]
+        ep2_blockers = [b for b in prod_stage["blockers"] if b["code"] == "M4_SHOT_PROMPT_NOT_FROZEN"]
+        assert len(ep2_blockers) == 1
+        assert ep2_blockers[0]["episode_id"] == ep2["id"]
+        assert ep2_blockers[0]["episode_code"] == "ep02"
+        no_run = [b for b in prod_stage["blockers"] if b["code"] == "M4_NO_PRODUCTION_RUN"]
+        assert len(no_run) == 1 and "按集排片" in no_run[0]["message"]
+
+        # Schedule ep1 only -> succeeds & passes ep1
+        run_ep1 = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={
+                "scope_kind": "episode",
+                "scope_target_ids": [ep1["id"]],
+                "provider": "mock",
+                "resolution_scale": 0.5,
+            },
+        )
+        assert run_ep1.status_code == 201
+        pstate_after_run = client.get(f"/api/v1/manual4/projects/{pid}/production/state").json()
+        assert pstate_after_run["runs"][0]["scope_kind"] == "episode"
+        assert pstate_after_run["runs"][0]["scope_target_ids"] == [ep1["id"]]
+        assert pstate_after_run["runs"][0]["config"]["resolution_scale"] == 0.5
+        execute_next_m4_run(
+            app.state.session_factory,
+            app.state.m4_session_factory,
+            app.state.settings,
+            app.state.m4_root,
+            worker_id="ep1-w",
+            video_stub=lambda *, shot_code, duration_s, width, height, **_kw: {
+                "bytes": make_mp4_fixture(duration_s=duration_s, width=width, height=height, fps=24),
+                "filename": f"{shot_code}.mp4",
+                "is_mock": True,
+            },
+        )
+
+        # Delivery for ep1 is unblocked even though ep2 is not produced yet
+        ov_after = client.get(f"/api/v1/manual4/projects/{pid}/overview").json()
+        assert ov_after["readiness"]["can_assemble_delivery"] is True
+        deliv_stage = next(s for s in ov_after["readiness"]["stages"] if s["key"] == "delivery")
+        assert not any(b["code"] == "M4_DELIVERY_WAIT_PRODUCTION" for b in deliv_stage["blockers"])
+        prog = ov_after["production_progress"]
+        assert prog is not None
+        assert prog["status"] == "COMPLETED"
+        assert prog["phase"] == "COMPLETED"
+        assert prog["progress_pct"] == 100
+        assert prog["passed_jobs"] == 1 and prog["total_jobs"] == 1
+
+
+def test_p4_job_elapsed_seconds_and_open_folder(tmp_path, monkeypatch):
+    import os
+
+    app, _ = _setup_m4_client(tmp_path)
+    with TestClient(app) as client:
+        pid, shots = _prepare_two_shots_materials_ready(client)
+        s1_id = shots[0]["id"]
+        client.post(
+            f"/api/v1/manual4/projects/{pid}/shots/{s1_id}/prompt/freeze",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"prompt_text": "detailed_description:\nElapsed & folder test prompt"},
+        )
+        run = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "shot", "scope_target_ids": [s1_id], "provider": "mock", "resolution_scale": 0.5},
+        ).json()["run"]
+        job_id = run["jobs"][0]["id"]
+        execute_next_m4_run(
+            app.state.session_factory,
+            app.state.m4_session_factory,
+            app.state.settings,
+            app.state.m4_root,
+            worker_id="elapsed-w",
+            video_stub=lambda *, shot_code, duration_s, width, height, **_kw: {
+                "bytes": make_mp4_fixture(duration_s=duration_s, width=width, height=height, fps=24),
+                "filename": f"{shot_code}.mp4",
+                "is_mock": True,
+            },
+        )
+
+        # Pin attempt timestamps so elapsed_seconds is exact (75s)
+        with app.state.m4_session_factory.begin() as mdb:
+            att = mdb.query(M4JobAttempt).filter(M4JobAttempt.job_id == job_id).one()
+            att.submit_intent_at = att.updated_at - timedelta(seconds=75)
+
+        pstate = client.get(f"/api/v1/manual4/projects/{pid}/production/state").json()
+        lj = pstate["episodes"][0]["shots"][0]["latest_job"]
+        assert lj["elapsed_seconds"] == 75
+        assert pstate["runs"][0]["jobs"][0]["elapsed_seconds"] == 75
+
+        opened: list[tuple[str, str]] = []
+        monkeypatch.setattr(os, "startfile", lambda path, op="open": opened.append((path, op)), raising=False)
+        resp = client.post(
+            f"/api/v1/manual4/projects/{pid}/jobs/{job_id}/open-folder",
+            headers=LOCAL_ACTION_HEADERS,
+        )
+        assert resp.status_code == 200
+        assert len(opened) == 1
+        assert opened[0][1] == "explore"
+        assert opened[0][0] == resp.json()["folder"]
+        assert resp.json()["file"].endswith(".mp4")
+        assert lj["output_sha256"] in resp.json()["file"]
+
+
+def test_p4_sqlite_lock_retry_config_timeout_and_needs_review_closure(tmp_path, monkeypatch):
+    import os
+
+    from sqlalchemy.exc import OperationalError
+
+    import shine.manual4.worker as m4_worker
+    from shine.config import Settings
+    from shine.manual4.worker import heartbeat_m4_worker, register_m4_worker
+
+    timeout_val = Settings.from_env().comfy_render_timeout_seconds
+    assert timeout_val >= 3600 or "SHINE_COMFY_RENDER_TIMEOUT_S" in os.environ
+
+    app, _ = _setup_m4_client(tmp_path)
+    mf = app.state.m4_session_factory
+
+    # 1) Transient sqlite lock during register & heartbeat must retry instead of crashing
+    register_m4_worker(mf, "m4-lock-test", status="IDLE")
+    orig_begin = mf.begin
+    calls = {"n": 0}
+
+    def flaky_begin():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OperationalError("UPDATE m4_workers ...", {}, Exception("database is locked"))
+        return orig_begin()
+
+    monkeypatch.setattr(m4_worker.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(mf, "begin", flaky_begin)
+    heartbeat_m4_worker(mf, "m4-lock-test", status="OFFLINE", current_run_id=None)
+    assert calls["n"] == 2
+    monkeypatch.setattr(mf, "begin", orig_begin)
+
+    # If locked every attempt, heartbeat_m4_worker defers gracefully instead of crashing finally
+    monkeypatch.setattr(
+        mf,
+        "begin",
+        lambda: (_ for _ in ()).throw(OperationalError("UPDATE", {}, Exception("database is locked"))),
+    )
+    heartbeat_m4_worker(mf, "m4-lock-test", status="OFFLINE", current_run_id=None)
+    monkeypatch.setattr(mf, "begin", orig_begin)
+
+    # 2) mark_failed closes parent NEEDS_REVIEW run & cancels remaining QUEUED jobs
+    with TestClient(app) as client:
+        pid, shots = _prepare_two_shots_materials_ready(client)
+        for idx, sh in enumerate(shots):
+            client.post(
+                f"/api/v1/manual4/projects/{pid}/shots/{sh['id']}/prompt/freeze",
+                headers=LOCAL_ACTION_HEADERS,
+                json={"prompt_text": f"detailed_description:\nShot {idx + 1} reconcile closeout"},
+            )
+        run = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "project", "provider": "mock"},
+        ).json()["run"]
+        j0_id = run["jobs"][0]["id"]
+        with mf.begin() as mdb:
+            r_row = mdb.get(M4ProductionRun, run["id"])
+            r_row.status = "NEEDS_REVIEW"
+            j0 = mdb.get(M4Job, j0_id)
+            j0.status = "NEEDS_REVIEW"
+            j0.failure_code = "M4_COMFY_SUBMISSION_OUTCOME_UNKNOWN"
+            mdb.add(M4JobAttempt(job_id=j0.id, attempt_no=1, status="NEEDS_REVIEW", prompt_id="pid-abc-123"))
+
+        rec = client.post(
+            f"/api/v1/manual4/projects/{pid}/jobs/{j0_id}/reconcile",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"decision": "mark_failed"},
+        )
+        assert rec.status_code == 200
+        assert rec.json()["job"]["attempts"][0]["prompt_id"] == "pid-abc-123"
+        closed_run = rec.json()["state"]["runs"][0]
+        assert closed_run["status"] == "FAILED"
+        assert closed_run["jobs"][0]["status"] == "FAILED"
+        assert closed_run["jobs"][1]["status"] == "CANCELLED"
+
+        # And cancelling a NEEDS_REVIEW run closes both QUEUED and NEEDS_REVIEW jobs
+        run2 = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"scope_kind": "project", "provider": "mock", "idempotency_key": "cancel-review-test"},
+        ).json()["run"]
+        with mf.begin() as mdb:
+            mdb.get(M4ProductionRun, run2["id"]).status = "NEEDS_REVIEW"
+            mdb.get(M4Job, run2["jobs"][0]["id"]).status = "NEEDS_REVIEW"
+        cancelled = client.post(
+            f"/api/v1/manual4/projects/{pid}/production/runs/{run2['id']}/cancel",
+            headers=LOCAL_ACTION_HEADERS,
+        )
+        assert cancelled.status_code == 200
+        assert cancelled.json()["run"]["status"] == "CANCELLED"
+        assert all(j["status"] == "CANCELLED" for j in cancelled.json()["run"]["jobs"])

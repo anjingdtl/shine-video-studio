@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AssetCenterPicker } from '../../shared/AssetCenterPicker';
 import {
   adoptM4LibraryVersion,
+  batchM4Requirements,
   declineM4Material,
   fetchM4Materials,
   fetchM4MaterialTask,
@@ -12,6 +13,7 @@ import {
   uploadM4Asset,
   type M4AssetVersion,
   type M4LibraryItem,
+  type M4MaterialBatchAction,
   type M4MaterialRequirement,
   type M4MaterialsState,
   type M4Overview,
@@ -41,6 +43,8 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [promptsByReq, setPromptsByReq] = useState<Record<string, string>>({});
   const [reuseByReq, setReuseByReq] = useState<Record<string, string>>({});
+  const [selectedReqIds, setSelectedReqIds] = useState<string[]>([]);
+  const [batchAction, setBatchAction] = useState<M4MaterialBatchAction>('generate');
 
   // Standalone asset upload state (e.g. extra voice or shot-level Ref2VA upload)
   const [extraFamily, setExtraFamily] = useState('character');
@@ -310,8 +314,53 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
   };
 
   const facts = stage?.facts ?? {};
+  const requirements = state?.requirements ?? [];
+  const validSelectedIds = selectedReqIds.filter((id) => requirements.some((r) => r.id === id));
+  const allSelected = requirements.length > 0 && validSelectedIds.length === requirements.length;
   const promotedAssets: M4AssetVersion[] = (state?.assets ?? []).filter((a) => a.status === 'promoted');
   const shotCodeMap = new Map((state?.shots ?? []).map((s) => [s.id, s.shot_code]));
+  const shotsTotal = Number(facts.shots_total ?? state?.shots.length ?? 0);
+  const shotsReady = Number(facts.shots_ready ?? (state?.shots ?? []).filter((s) => s.ref2va_ready).length);
+
+  const toggleSelectReq = (reqId: string, checked: boolean) => {
+    setSelectedReqIds((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(reqId);
+      else next.delete(reqId);
+      return Array.from(next);
+    });
+  };
+
+  const toggleSelectAll = (checked: boolean) => {
+    setSelectedReqIds(checked ? requirements.map((r) => r.id) : []);
+  };
+
+  const handleApplyBatch = async () => {
+    if (validSelectedIds.length === 0) return;
+    setBusyKey(`batch:${batchAction}`);
+    try {
+      const res = await batchM4Requirements(projectId, {
+        action: batchAction,
+        requirement_ids: validSelectedIds,
+        prompts_by_req: batchAction === 'generate' ? promptsByReq : undefined,
+      });
+      await applyNewState(res.state);
+      const parts: string[] = [];
+      if (res.applied_ids.length > 0) parts.push(`已处理 ${res.applied_ids.length} 项`);
+      if (res.skipped.length > 0) parts.push(`跳过 ${res.skipped.length} 项（${res.skipped[0]?.reason ?? ''}）`);
+      if (res.errors.length > 0) parts.push(`失败 ${res.errors.length} 项（${res.errors[0]?.message ?? ''}）`);
+      if (res.errors.length > 0 && res.applied_ids.length === 0) {
+        onMessage?.(`批量操作未完成：${parts.join('；')}`, 'error');
+      } else {
+        setSelectedReqIds([]);
+        onMessage?.(`批量操作完成：${parts.join('，') || '已完成'}。`, 'success');
+      }
+    } catch (err) {
+      onMessage?.(`批量操作失败：${err instanceof Error ? err.message : String(err)}`, 'error');
+    } finally {
+      setBusyKey(null);
+    }
+  };
 
   return (
     <section className="m4-panel" aria-label="素材生成">
@@ -319,11 +368,13 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         <div>
           <h2>② 素材生成</h2>
           <p className="m4-panel-desc">
-            按①已冻结分镜归并人物 / 场景 / 道具需求；支持本地上传、复用已有主素材或 Qwen-Image-2.1 生成后人工晋升绑定。
+            按①已冻结分镜归并人物 / 场景 / 道具需求；自主制片模式仅要求每一镜具备必需 Ref2VA 参考素材，未选用的需求项不硬阻滞排片。
           </p>
         </div>
         <span className={`m4-badge ${stage?.done ? 'ok' : 'warn'}`}>
-          {String(facts.requirements_ready ?? 0)} / {String(facts.requirements_total ?? 0)} 项已就绪
+          {shotsTotal > 0
+            ? `就绪镜头 ${shotsReady} / ${shotsTotal} · 需求已备 ${String(facts.requirements_ready ?? 0)} / ${String(facts.requirements_total ?? requirements.length)}`
+            : `${String(facts.requirements_ready ?? 0)} / ${String(facts.requirements_total ?? requirements.length)} 项已就绪`}
         </span>
       </div>
 
@@ -341,40 +392,100 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
         <>
           <div className="m4-ep-card">
             <div className="m4-ep-head">
-              <strong>归并素材需求（{state?.requirements.length ?? 0} 项）</strong>
+              <strong>归并素材需求（{requirements.length} 项）</strong>
               <span className="m4-footer-note">
-                已晋升主素材：{promotedAssets.length} · 已绑定镜头：{String(facts.shots_bound ?? 0)} /{' '}
-                {String(facts.shots_total ?? 0)}
+                已晋升主素材：{promotedAssets.length} · 就绪镜头：{shotsReady} / {shotsTotal}
               </span>
             </div>
 
-            {state?.requirements.length === 0 ? (
+            {requirements.length === 0 ? (
               <div className="m4-empty-box">
                 当前分镜未抽出命名人物/场景/道具需求，可在下方手动上传主素材并绑定至各镜头。
               </div>
             ) : (
-              <div className="m4-mat-grid">
-                {state?.requirements.map((req) => (
-                  <div key={req.id} className="m4-mat-card">
-                    <div className="m4-ep-head">
-                      <div>
-                        <strong>
-                          [{FAMILY_LABELS[req.family] ?? req.family}] {req.entity_name}
-                        </strong>
-                        {req.variant_name && <span className="m4-footer-note"> · {req.variant_name}</span>}
+              <>
+                <div className="m4-batch-bar" role="region" aria-label="归并素材批量操作">
+                  <label className="m4-req-check">
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      disabled={busyKey !== null}
+                      aria-label="全选归并素材需求"
+                      onChange={(e) => toggleSelectAll(e.target.checked)}
+                    />
+                    全选
+                  </label>
+                  <span className="m4-footer-note">已选 {validSelectedIds.length} 项</span>
+                  <select
+                    className="m4-input"
+                    style={{ maxWidth: 220 }}
+                    aria-label="批量操作"
+                    value={batchAction}
+                    disabled={busyKey !== null}
+                    onChange={(e) => setBatchAction(e.target.value as M4MaterialBatchAction)}
+                  >
+                    <option value="generate">Qwen 批量生成（图片类）</option>
+                    <option value="promote_latest">批量晋升最新候选为主素材</option>
+                    <option value="decline">批量明确放弃</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busyKey !== null || validSelectedIds.length === 0}
+                    onClick={() => void handleApplyBatch()}
+                  >
+                    {busyKey?.startsWith('batch:') ? '批量执行中...' : '应用到所选'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={busyKey !== null || validSelectedIds.length === 0}
+                    onClick={() => setSelectedReqIds([])}
+                  >
+                    清空选择
+                  </button>
+                </div>
+
+                <div className="m4-mat-grid">
+                  {requirements.map((req) => {
+                    const isChecked = validSelectedIds.includes(req.id);
+                    const statusLabel = req.user_declined
+                      ? '已放弃'
+                      : req.status === 'bound' || req.status === 'promoted'
+                        ? req.status
+                        : req.status === 'candidate'
+                          ? '待晋升'
+                          : '待备料（不阻滞）';
+                    return (
+                    <div key={req.id} className={`m4-mat-card ${isChecked ? 'selected' : ''}`}>
+                      <div className="m4-ep-head">
+                        <div className="m4-req-title-row">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            disabled={busyKey !== null}
+                            aria-label={`选择需求 ${req.entity_name}`}
+                            onChange={(e) => toggleSelectReq(req.id, e.target.checked)}
+                          />
+                          <div>
+                            <strong>
+                              [{FAMILY_LABELS[req.family] ?? req.family}] {req.entity_name}
+                            </strong>
+                            {req.variant_name && <span className="m4-footer-note"> · {req.variant_name}</span>}
+                          </div>
+                        </div>
+                        <span
+                          className={`m4-badge ${
+                            req.status === 'bound' || req.status === 'promoted'
+                              ? 'ok'
+                              : req.user_declined
+                                ? ''
+                                : 'warn'
+                          }`}
+                        >
+                          {statusLabel}
+                        </span>
                       </div>
-                      <span
-                        className={`m4-badge ${
-                          req.status === 'bound' || req.status === 'promoted'
-                            ? 'ok'
-                            : req.user_declined
-                              ? ''
-                              : 'warn'
-                        }`}
-                      >
-                        {req.user_declined ? '已放弃' : req.status}
-                      </span>
-                    </div>
 
                     <div className="m4-footer-note">
                       关联镜头：{req.shot_ids.map((id) => shotCodeMap.get(id) ?? id.slice(0, 6)).join('、') || '无'}
@@ -528,9 +639,11 @@ export function MaterialsStagePage({ overview, stage, onRefresh, onNextStage, on
                         ))}
                       </div>
                     )}
-                  </div>
-                ))}
-              </div>
+                    </div>
+                    );
+                  })}
+                </div>
+              </>
             )}
           </div>
 

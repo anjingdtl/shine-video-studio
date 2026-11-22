@@ -30,6 +30,20 @@ const STAGE_META_LABELS: Record<M4StageKey, string> = {
   delivery: '装配/预览/验收',
 };
 
+const EXEC_PHASES: Array<{ key: string; label: string; phases: string[] }> = [
+  { key: 'claim', label: '1. 认领与启动', phases: ['WAITING_WORKER', 'STARTING_RENDERER', 'PREPARING_NEXT'] },
+  { key: 'submit', label: '2. 提交 H3', phases: ['SUBMITTING'] },
+  { key: 'render', label: '3. H3 渲染', phases: ['RENDERING'] },
+  { key: 'qc', label: '4. 技术质检', phases: ['QC'] },
+  { key: 'done', label: '5. 完成入库', phases: ['COMPLETED'] },
+];
+
+const SCOPE_LABELS: Record<string, string> = {
+  project: '全片排片',
+  episode: '按集排片',
+  shot: '单镜重拍',
+};
+
 /** Independent four-stage H3 autonomous production line shell.
  *  Reads ONLY `/api/v1/manual4/*` projections and never invokes seven-stage APIs. */
 export function Manual4App({ projectId, initialStage, onBackToProjects, onMessage }: Props) {
@@ -39,26 +53,31 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
   const [loadError, setLoadError] = useState('');
   const [activeStage, setActiveStage] = useState<M4StageKey>(initialStage ?? 'storyboard');
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setLoadError('');
+  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = Boolean(opts?.silent);
+    if (!silent) {
+      setLoading(true);
+      setLoadError('');
+    }
     try {
       const [data, status] = await Promise.all([
         fetchM4Overview(projectId),
         fetchM4SystemStatus().catch(() => null),
       ]);
       setOverview(data);
-      setSysStatus(status);
-      if (!initialStage) {
+      if (status) setSysStatus(status);
+      if (!silent && !initialStage) {
         setActiveStage(data.readiness.next_stage);
         window.history.replaceState(null, '', `#m4/${data.readiness.next_stage}`);
       }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : '读取四阶概览失败';
-      setLoadError(msg);
-      onMessage?.(msg, 'error');
+      if (!silent) {
+        const msg = error instanceof Error ? error.message : '读取四阶概览失败';
+        setLoadError(msg);
+        onMessage?.(msg, 'error');
+      }
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, [projectId, initialStage, onMessage]);
 
@@ -69,6 +88,17 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
   useEffect(() => {
     if (initialStage) setActiveStage(initialStage);
   }, [initialStage]);
+
+  const progress = overview?.production_progress ?? null;
+  const shouldPollProgress = Boolean(progress?.is_working || overview?.gpu.busy);
+
+  useEffect(() => {
+    if (!shouldPollProgress) return;
+    const timer = window.setInterval(() => {
+      void refresh({ silent: true });
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [shouldPollProgress, refresh]);
 
   const stages = overview?.readiness.stages ?? [];
   const stageByKey = Object.fromEntries(stages.map((s) => [s.key, s]));
@@ -152,6 +182,78 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
             </button>
           </div>
         </div>
+      )}
+
+      {progress && (
+        <section className="m4-run-progress" aria-label="四阶视频生产进度">
+          <div className="m4-run-progress-head">
+            <div className="m4-toolbar">
+              <strong>
+                {progress.status === 'COMPLETED'
+                  ? `本批次生产完成（${progress.passed_jobs} / ${progress.total_jobs} 镜全部通过）`
+                  : progress.is_working
+                    ? `正在生成第 ${progress.current_shot_no} / ${progress.total_jobs} 镜${progress.active_job ? `（${progress.active_job.shot_code}）` : ''}`
+                    : `排片批次 ${progress.status} · 已通过 ${progress.passed_jobs} / ${progress.total_jobs} 镜`}
+              </strong>
+              <span className={`m4-badge ${progress.status === 'COMPLETED' ? 'ok' : progress.is_working ? 'busy' : 'warn'}`}>
+                {progress.phase_label}
+              </span>
+            </div>
+            <span className="m4-run-progress-pct">{progress.progress_pct}%</span>
+          </div>
+
+          <div
+            className="m4-run-progress-bar"
+            role="progressbar"
+            aria-valuenow={progress.progress_pct}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-label="四阶视频生产进度"
+          >
+            <i
+              style={{ width: `${progress.progress_pct}%` }}
+              className={progress.is_working ? 'is-working' : ''}
+            />
+          </div>
+
+          <div className="m4-phase-steps" aria-label="当前生产阶段">
+            {EXEC_PHASES.map((step, idx) => {
+              const activeIdx = EXEC_PHASES.findIndex((p) => p.phases.includes(progress.phase));
+              const isDone = progress.status === 'COMPLETED' || (activeIdx >= 0 && idx < activeIdx);
+              const isCurrent = progress.status !== 'COMPLETED' && activeIdx === idx;
+              return (
+                <span
+                  key={step.key}
+                  className={`m4-phase-step ${isCurrent ? 'active' : isDone ? 'done' : ''}`}
+                >
+                  {step.label}
+                </span>
+              );
+            })}
+          </div>
+
+          <div className="m4-ep-head">
+            <span className="m4-footer-note">
+              {SCOPE_LABELS[progress.scope_kind] ?? progress.scope_kind} · 已通过 {progress.passed_jobs} / {progress.total_jobs} 镜
+              {progress.queued_jobs > 0 ? ` · 排队 ${progress.queued_jobs}` : ''}
+              {progress.failed_jobs > 0 ? ` · 失败 ${progress.failed_jobs}` : ''}
+              {progress.needs_review_jobs > 0 ? ` · 待核对 ${progress.needs_review_jobs}` : ''}
+              {' · 后台 Worker 持续推进，页面跟读同一份台账。'}
+            </span>
+            <div className="m4-toolbar">
+              {activeStage !== 'production' && (
+                <button type="button" className="btn-secondary" onClick={() => selectStage('production')}>
+                  查看③排片详情
+                </button>
+              )}
+              {progress.passed_jobs === progress.total_jobs && activeStage !== 'delivery' && (
+                <button type="button" className="btn-primary" onClick={() => selectStage('delivery')}>
+                  去④合成成片
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
       )}
 
       {overview && activeStage === 'storyboard' && (

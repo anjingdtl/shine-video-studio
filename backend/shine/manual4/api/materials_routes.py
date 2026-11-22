@@ -20,6 +20,7 @@ from shine.manual4.api.deps import (
 from shine.manual4.materials.service import (
     adopt_library_version_for_m4,
     backfill_m4_project_assets,
+    batch_operate_m4_requirements,
     decline_m4_requirement,
     get_materials_state,
     promote_m4_asset,
@@ -80,6 +81,15 @@ class M4AdoptLibraryBody(BaseModel):
     shot_ids: list[str] = Field(default_factory=list)
     role_label: str = ""
     family: str | None = None
+
+
+class M4BatchRequirementsBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str
+    requirement_ids: list[str] = Field(default_factory=list)
+    prompts_by_req: dict[str, str] = Field(default_factory=dict)
+    reason: str = ""
 
 
 @materials_router.get("/projects/{project_id}/materials/requirements")
@@ -146,6 +156,40 @@ def m4_decline_material(
 ) -> dict[str, Any]:
     project = _project(project_id, platform_db, m4_db)
     result = decline_m4_requirement(m4_db, project, req_id, actor=actor, reason=body.reason)
+    m4_db.commit()
+    return {
+        **result,
+        "state": get_materials_state(m4_db, project, platform_db=platform_db, settings=request.app.state.settings),
+    }
+
+
+@materials_router.post("/projects/{project_id}/materials/batch")
+def m4_batch_requirements(
+    project_id: str,
+    body: M4BatchRequirementsBody,
+    request: Request,
+    actor: M4Operator,
+    platform_db: PlatformDB,
+    m4_db: M4DB,
+) -> dict[str, Any]:
+    project = _project(project_id, platform_db, m4_db)
+    provider = getattr(request.app.state, "m4_image_provider", None)
+    result = batch_operate_m4_requirements(
+        m4_db,
+        request.app.state.session_factory,
+        request.app.state.m4_session_factory,
+        request.app.state.settings,
+        request.app.state.m4_root,
+        project,
+        actor=actor,
+        action=body.action,
+        requirement_ids=body.requirement_ids,
+        prompts_by_req=body.prompts_by_req,
+        reason=body.reason,
+        image_provider=provider,
+        platform_db=platform_db,
+    )
+    platform_db.commit()
     m4_db.commit()
     return {
         **result,

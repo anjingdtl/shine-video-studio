@@ -185,8 +185,9 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                 )
     stage1_done = confirmed_sb is not None and not sb_blockers
 
-    # Stage 2: Materials (Ref2VA readiness + required requirements promoted/bound)
+    # Stage 2: Materials (per-shot Ref2VA readiness; requirements are advisory, never hard-blocking)
     mat_blockers: list[dict[str, Any]] = []
+    shots_ready_count = 0
     promoted_assets_count = db.scalar(
         select(func.count(M4AssetVersion.id)).where(
             M4AssetVersion.project_id == project.id,
@@ -206,21 +207,6 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             }
         )
     else:
-        for req in reqs:
-            if req.user_declined or req.status == "declined":
-                continue
-            if req.status not in {"promoted", "bound"} or not req.bound_asset_version_id:
-                mat_blockers.append(
-                    {
-                        "code": "M4_MATERIAL_REQUIREMENT_UNBOUND",
-                        "stage": "materials",
-                        "requirement_id": req.id,
-                        "family": req.family,
-                        "entity_name": req.entity_name,
-                        "message": f"素材「{req.entity_name}」（{req.family}）尚未晋升并绑定主素材。",
-                        "action": "prepare_material",
-                    }
-                )
         asset_ids = {
             link.asset_version_id
             for links in bindings_by_shot.values()
@@ -241,7 +227,9 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                 bindings_by_shot.get(shot.id, []),
                 assets_by_id,
             )
-            if not ok_ref:
+            if ok_ref:
+                shots_ready_count += 1
+            else:
                 mat_blockers.append(
                     {
                         "code": ref_code or "M4_SHOT_REQUIRES_REF2VA_REFERENCE",
@@ -264,16 +252,19 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
     )
     passed_jobs_count = 0
     active_jobs_count = 0
+    ready_episode_ids: list[str] = []
+    passed_episode_ids: list[str] = []
     if not stage2_done:
         prod_blockers.append(
             {
                 "code": "M4_PRODUCTION_WAIT_MATERIALS",
                 "stage": "production",
-                "message": "请先在②素材生成完成全部必需参考素材晋升与绑定。",
+                "message": "请先在②素材生成确保每一镜均已绑定必需 Ref2VA 参考素材。",
                 "action": "go_materials",
             }
         )
     else:
+        ep_by_id = {ep.id: ep for ep in episodes}
         latest_job_by_shot: dict[str, M4Job] = {}
         all_jobs = db.scalars(
             select(M4Job)
@@ -287,17 +278,24 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
         active_jobs_count = sum(
             1 for job in all_jobs if job.status in {"QUEUED", "SUBMITTING", "RUNNING", "QC_PENDING"}
         )
+        ep_shot_totals: dict[str, int] = {}
+        ep_shot_frozen: dict[str, int] = {}
+        ep_shot_passed: dict[str, int] = {}
         for shot in shots:
+            ep_shot_totals[shot.episode_id] = ep_shot_totals.get(shot.episode_id, 0) + 1
             frozen = frozen_prompts_by_shot.get(shot.id)
             if (
                 frozen is None
                 or frozen.shot_revision != shot.revision
                 or abs(frozen.target_seconds - shot.target_seconds) > 1e-6
             ):
+                ep_row = ep_by_id.get(shot.episode_id)
                 prod_blockers.append(
                     {
                         "code": "M4_SHOT_PROMPT_NOT_FROZEN",
                         "stage": "production",
+                        "episode_id": shot.episode_id,
+                        "episode_code": ep_row.episode_code if ep_row else None,
                         "shot_id": shot.id,
                         "shot_code": shot.shot_code,
                         "message": f"镜头 {shot.shot_code} 尚未冻结有效的当前版本 H3 提示词。",
@@ -305,6 +303,7 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                     }
                 )
                 continue
+            ep_shot_frozen[shot.episode_id] = ep_shot_frozen.get(shot.episode_id, 0) + 1
             lj = latest_job_by_shot.get(shot.id)
             if (
                 lj is not None
@@ -314,16 +313,40 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                 and lj.reference_manifest_sha256 == frozen.reference_manifest_sha256
             ):
                 passed_jobs_count += 1
+                ep_shot_passed[shot.episode_id] = ep_shot_passed.get(shot.episode_id, 0) + 1
+
+        ready_episode_ids = [
+            ep.id
+            for ep in episodes
+            if ep_shot_totals.get(ep.id, 0) > 0
+            and ep_shot_frozen.get(ep.id, 0) == ep_shot_totals.get(ep.id, 0)
+        ]
+        passed_episode_ids = [
+            ep.id
+            for ep in episodes
+            if ep_shot_totals.get(ep.id, 0) > 0
+            and ep_shot_passed.get(ep.id, 0) == ep_shot_totals.get(ep.id, 0)
+        ]
 
         if latest_run is None:
-            prod_blockers.append(
-                {
-                    "code": "M4_NO_PRODUCTION_RUN",
-                    "stage": "production",
-                    "message": "所有镜头提示词已就绪，请点击「确认排片并开拍」。",
-                    "action": "confirm_and_run",
-                }
-            )
+            if not prod_blockers:
+                prod_blockers.append(
+                    {
+                        "code": "M4_NO_PRODUCTION_RUN",
+                        "stage": "production",
+                        "message": "所有镜头提示词已就绪，请点击「确认排片并开拍」。",
+                        "action": "confirm_and_run",
+                    }
+                )
+            elif ready_episode_ids:
+                prod_blockers.append(
+                    {
+                        "code": "M4_NO_PRODUCTION_RUN",
+                        "stage": "production",
+                        "message": "已有分集提示词全部就绪，可选择「按集排片」先行开拍。",
+                        "action": "confirm_and_run",
+                    }
+                )
         elif (
             latest_run.status in {"PENDING", "CLAIMED", "RUNNING", "PAUSED", "PAUSE_REQUESTED"}
             or passed_jobs_count < len(shots)
@@ -377,7 +400,7 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
     delivered_episodes_count = len({d.episode_id for d in deliveries})
 
     deliv_blockers: list[dict[str, Any]] = []
-    if not stage3_done:
+    if not stage3_done and not passed_episode_ids:
         deliv_blockers.append(
             {
                 "code": "M4_DELIVERY_WAIT_PRODUCTION",
@@ -391,7 +414,11 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
             {
                 "code": "M4_NO_DELIVERY_ASSEMBLED",
                 "stage": "delivery",
-                "message": "所有镜头已通过，请点击「合成并导出成片」。",
+                "message": (
+                    "所有镜头已通过，请点击「合成并导出成片」。"
+                    if stage3_done
+                    else "已有分集完成出片，可先合成并验收已就绪分集。"
+                ),
                 "action": "assemble_delivery",
             }
         )
@@ -456,6 +483,7 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                 "promoted_assets": promoted_assets_count,
                 "total_assets": total_assets_count,
                 "shots_bound": sum(1 for s in shots if bindings_by_shot.get(s.id)),
+                "shots_ready": shots_ready_count,
                 "shots_total": len(shots),
             },
         ),
@@ -473,6 +501,8 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
                 "latest_run_status": latest_run.status if latest_run else None,
                 "passed_jobs": passed_jobs_count,
                 "active_jobs": active_jobs_count,
+                "ready_episode_ids": ready_episode_ids,
+                "passed_episode_ids": passed_episode_ids,
             },
         ),
         M4StageSummary(
@@ -496,10 +526,12 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
         all_done=stage4_done,
         stages=stages,
         can_confirm_storyboard=bool(draft_sb is not None),
-        can_start_production=stage2_done and not any(
-            b.get("code") == "M4_SHOT_PROMPT_NOT_FROZEN" for b in prod_blockers
+        can_start_production=stage2_done
+        and (
+            not any(b.get("code") == "M4_SHOT_PROMPT_NOT_FROZEN" for b in prod_blockers)
+            or bool(ready_episode_ids)
         ),
-        can_assemble_delivery=stage3_done,
+        can_assemble_delivery=stage3_done or bool(passed_episode_ids),
         summary={
             "episodes": len(episodes),
             "shots": len(shots),
@@ -513,6 +545,131 @@ def evaluate_m4_readiness(db: Session, project: M4Project) -> M4ReadinessVerdict
     )
 
 
+def build_m4_run_progress(db: Session, project_id: str) -> dict[str, Any] | None:
+    """Single authoritative production run progress & phase projection from manual4.sqlite."""
+    active_run = db.scalar(
+        select(M4ProductionRun)
+        .where(
+            M4ProductionRun.project_id == project_id,
+            M4ProductionRun.status.in_(["PENDING", "CLAIMED", "RUNNING", "PAUSE_REQUESTED"]),
+        )
+        .order_by(M4ProductionRun.created_at.desc())
+        .limit(1)
+    )
+    run = active_run or db.scalar(
+        select(M4ProductionRun)
+        .where(M4ProductionRun.project_id == project_id)
+        .order_by(M4ProductionRun.created_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return None
+
+    jobs = db.scalars(
+        select(M4Job).where(M4Job.run_id == run.id).order_by(M4Job.ordinal.asc())
+    ).all()
+    if not jobs:
+        return None
+
+    shot_ids = [j.shot_id for j in jobs]
+    shot_code_by_id = {
+        s.id: s.shot_code
+        for s in db.scalars(select(M4Shot).where(M4Shot.id.in_(shot_ids))).all()
+    }
+    total_jobs = len(jobs)
+    passed_jobs = sum(1 for j in jobs if j.status == "PASSED")
+    failed_jobs = sum(1 for j in jobs if j.status in {"FAILED", "BLOCKED"})
+    needs_review_jobs = sum(1 for j in jobs if j.status == "NEEDS_REVIEW")
+    queued_jobs = sum(1 for j in jobs if j.status == "QUEUED")
+    in_progress = next((j for j in jobs if j.status in {"SUBMITTING", "RUNNING", "QC_PENDING"}), None)
+    next_queued = next((j for j in jobs if j.status == "QUEUED"), None)
+    active_job = in_progress or (next_queued if run.status in {"PENDING", "CLAIMED", "RUNNING"} else None)
+
+    is_working = run.status in {"PENDING", "CLAIMED", "RUNNING", "PAUSE_REQUESTED"}
+    if run.status == "COMPLETED":
+        phase = "COMPLETED"
+        phase_label = "本批次全部镜头已通过"
+    elif run.status == "PENDING":
+        phase = "WAITING_WORKER"
+        phase_label = "等待 Worker 认领排片批次"
+    elif run.status == "CLAIMED":
+        phase = "STARTING_RENDERER"
+        phase_label = "正在启动/接管 H3 渲染器与显存租约"
+    elif run.status == "PAUSE_REQUESTED":
+        phase = "PAUSE_REQUESTED"
+        phase_label = "正在等待当前镜完成后暂停"
+    elif run.status == "PAUSED":
+        phase = "PAUSED"
+        phase_label = "已暂停，可随时恢复继续"
+    elif run.status == "NEEDS_REVIEW":
+        phase = "NEEDS_REVIEW"
+        phase_label = "存在未知结果镜头，等待人工对账"
+    elif run.status == "CANCELLED":
+        phase = "CANCELLED"
+        phase_label = "本批次已取消"
+    elif run.status == "FAILED":
+        phase = "FAILED"
+        phase_label = "批次存在失败镜头"
+    elif in_progress is not None and in_progress.status == "SUBMITTING":
+        phase = "SUBMITTING"
+        phase_label = "正在提交参考与提示词到 ComfyUI"
+    elif in_progress is not None and in_progress.status == "RUNNING":
+        phase = "RENDERING"
+        phase_label = "H3 正在渲染视频"
+    elif in_progress is not None and in_progress.status == "QC_PENDING":
+        phase = "QC"
+        phase_label = "正在执行技术质检"
+    else:
+        phase = "PREPARING_NEXT"
+        phase_label = "准备下一镜"
+
+    if total_jobs > 0:
+        if run.status == "COMPLETED":
+            progress_pct = 100
+        elif in_progress is not None and passed_jobs < total_jobs:
+            # Show settled shots + half-step credit for the actively executing shot so bar visibly advances
+            stage_fraction = {"SUBMITTING": 0.25, "RUNNING": 0.55, "QC_PENDING": 0.85}.get(in_progress.status, 0.2)
+            progress_pct = min(99, max(1, round(((passed_jobs + stage_fraction) / total_jobs) * 100)))
+        else:
+            progress_pct = min(100, round((passed_jobs / total_jobs) * 100))
+    else:
+        progress_pct = 0
+
+    current_shot_no = (
+        (active_job.ordinal + 1)
+        if active_job is not None
+        else min(total_jobs, passed_jobs + (0 if passed_jobs == total_jobs else 1))
+    )
+
+    return {
+        "run_id": run.id,
+        "status": run.status,
+        "scope_kind": run.scope_kind,
+        "provider": run.provider,
+        "phase": phase,
+        "phase_label": phase_label,
+        "is_working": is_working,
+        "progress_pct": progress_pct,
+        "total_jobs": total_jobs,
+        "passed_jobs": passed_jobs,
+        "failed_jobs": failed_jobs,
+        "needs_review_jobs": needs_review_jobs,
+        "queued_jobs": queued_jobs,
+        "current_shot_no": current_shot_no,
+        "active_job": (
+            {
+                "id": active_job.id,
+                "shot_id": active_job.shot_id,
+                "shot_code": shot_code_by_id.get(active_job.shot_id, active_job.shot_id[:8]),
+                "status": active_job.status,
+                "ordinal": active_job.ordinal,
+            }
+            if active_job is not None
+            else None
+        ),
+    }
+
+
 def build_m4_overview(
     db: Session,
     project: M4Project,
@@ -520,6 +677,7 @@ def build_m4_overview(
     gpu_status: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     verdict = evaluate_m4_readiness(db, project)
+    run_progress = build_m4_run_progress(db, project.id)
     now = m4_utcnow()
     workers = db.scalars(select(M4WorkerInstance).order_by(M4WorkerInstance.started_at.desc())).all()
     online_workers = [
@@ -546,6 +704,7 @@ def build_m4_overview(
         "readiness": verdict.model_dump(mode="json"),
         "worker_online": bool(online_workers),
         "gpu": gpu_status or {"busy": False, "active_leases": [], "reconcile_required": []},
+        "production_progress": run_progress,
         "recent_events": [
             {
                 "id": ev.id,

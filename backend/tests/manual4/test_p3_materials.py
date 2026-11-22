@@ -283,3 +283,100 @@ def test_p3_decline_preserved_across_storyboard_reconfirm_and_slot_limit_enforce
         )
         assert too_many.status_code == 422
         assert too_many.json()["detail"]["code"] == "M4_REF2VA_SLOT_LIMIT_EXCEEDED"
+
+
+def test_p3_autonomous_stage2_allows_unprepared_requirements_when_every_shot_has_ref2va(tmp_path):
+    app, _ = _setup_m4_client(tmp_path)
+    png_bytes = _minimal_png(16, 16)
+
+    with TestClient(app) as client:
+        pid, mat_state = _confirm_sample_storyboard(client, "自主制片按镜放行测试")
+        reqs = {(r["family"], r["entity_name"]): r for r in mat_state["requirements"]}
+
+        # Only prepare & promote character 林晚 (which covers both shot 1 and shot 2).
+        # Leave scene 雨夜窄巷 and prop 油纸伞 completely unprepared and NOT declined.
+        up_char = client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/upload",
+            headers=LOCAL_ACTION_HEADERS,
+            data={"family": "character", "entity_name": "林晚", "requirement_id": reqs[("character", "林晚")]["id"]},
+            files={"file": ("linwan.png", png_bytes, "image/png")},
+        ).json()["asset"]
+        prom = client.post(
+            f"/api/v1/manual4/projects/{pid}/assets/{up_char['id']}/promote",
+            headers=LOCAL_ACTION_HEADERS,
+            json={},
+        )
+        assert prom.status_code == 200
+        state = prom.json()["state"]
+        stage2 = state["readiness"]["stages"][1]
+        assert stage2["done"] is True
+        assert stage2["blockers"] == []
+        assert state["readiness"]["next_stage"] == "production"
+        assert stage2["facts"]["shots_ready"] == 2
+        assert stage2["facts"]["shots_total"] == 2
+
+        # Unbind shot 1 -> Stage 2 MUST block on shot 1 missing Ref2VA (not on missing requirements)
+        shot1_id = state["shots"][0]["id"]
+        unbind = client.put(
+            f"/api/v1/manual4/projects/{pid}/shots/{shot1_id}/bindings",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"bindings": []},
+        ).json()["state"]
+        assert unbind["readiness"]["stages"][1]["done"] is False
+        codes = [b["code"] for b in unbind["readiness"]["stages"][1]["blockers"]]
+        assert codes == ["M4_SHOT_REQUIRES_REF2VA_REFERENCE"]
+
+
+def test_p3_batch_operations_generate_promote_and_decline(tmp_path):
+    app, _ = _setup_m4_client(tmp_path)
+    png_bytes = _minimal_png(16, 16)
+    app.state.m4_image_provider = lambda **_kwargs: {
+        "bytes": png_bytes,
+        "filename": "batch_cand.png",
+        "is_mock": True,
+        "provider": "offline-test-qwen",
+    }
+
+    with TestClient(app) as client:
+        pid, mat_state = _confirm_sample_storyboard(client, "批量操作测试")
+        req_ids = [r["id"] for r in mat_state["requirements"]]
+        char_req = next(r for r in mat_state["requirements"] if r["entity_name"] == "林晚")
+        scene_req = next(r for r in mat_state["requirements"] if r["entity_name"] == "雨夜窄巷")
+        prop_req = next(r for r in mat_state["requirements"] if r["entity_name"] == "油纸伞")
+
+        # 1. Batch generate for character + scene
+        gen_resp = client.post(
+            f"/api/v1/manual4/projects/{pid}/materials/batch",
+            headers=LOCAL_ACTION_HEADERS,
+            json={
+                "action": "generate",
+                "requirement_ids": [char_req["id"], scene_req["id"]],
+                "prompts_by_req": {char_req["id"]: "Lin Wan portrait"},
+            },
+        )
+        assert gen_resp.status_code == 200
+        assert set(gen_resp.json()["applied_ids"]) == {char_req["id"], scene_req["id"]}
+        assert gen_resp.json()["errors"] == []
+
+        # 2. Batch promote latest candidates for all 3 (prop has no candidate -> skipped)
+        prom_resp = client.post(
+            f"/api/v1/manual4/projects/{pid}/materials/batch",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"action": "promote_latest", "requirement_ids": req_ids},
+        )
+        assert prom_resp.status_code == 200
+        assert set(prom_resp.json()["applied_ids"]) == {char_req["id"], scene_req["id"]}
+        assert len(prom_resp.json()["skipped"]) == 1
+        assert prom_resp.json()["skipped"][0]["requirement_id"] == prop_req["id"]
+        assert prom_resp.json()["state"]["readiness"]["stages"][1]["done"] is True
+
+        # 3. Batch decline prop
+        dec_resp = client.post(
+            f"/api/v1/manual4/projects/{pid}/materials/batch",
+            headers=LOCAL_ACTION_HEADERS,
+            json={"action": "decline", "requirement_ids": [prop_req["id"]]},
+        )
+        assert dec_resp.status_code == 200
+        assert dec_resp.json()["applied_ids"] == [prop_req["id"]]
+        prop_after = next(r for r in dec_resp.json()["state"]["requirements"] if r["id"] == prop_req["id"])
+        assert prop_after["user_declined"] is True
