@@ -133,6 +133,39 @@ def _proven_pre_submit_mapping_failure(db, job):
                 and all(lease.status in {"RELEASED", "WAITING"} for lease in leases))
 
 
+def _same_render_binding(source: dict, retake: dict, key: str) -> bool:
+    """A retake keeps every render binding of its source.
+
+    The H3 workflow graph is the one binding with two legal forms: a
+    dynamic-strategy shot compiles with ``MiniMaxLowVRAMAttention`` mounted or
+    not, and the two share one recipe (the high-watermark gate is a lossless
+    VRAM switch, not a workflow change).  Every other binding is compared
+    verbatim.
+    """
+    if key != "workflow_profile_hash" or source.get(key) == retake.get(key):
+        return source.get(key) == retake.get(key)
+    from shine.foundation.h3 import low_vram_attention_form_of_graph, render_reference_counts
+    from shine.schemas import ReferenceManifestItem
+    from shine.strategy import GenerationStrategy
+
+    try:
+        strategy = GenerationStrategy.model_validate(retake.get("strategy"))
+        manifest = [ReferenceManifestItem.model_validate(item) for item in retake.get("reference_manifest") or []]
+        forms = [
+            low_vram_attention_form_of_graph(
+                request.get(key),
+                variant_id=strategy.model_variant_id,
+                accelerator_id=strategy.accelerator_id,
+                second_pass=strategy.second_pass_spec(),
+                **render_reference_counts(manifest),
+            )
+            for request in (source, retake)
+        ]
+    except ValueError:
+        return False
+    return None not in forms
+
+
 def _blocker(db, job, shot):
     if not job:
         return "GENERATION_NOT_STARTED"
@@ -378,7 +411,7 @@ def regenerate(project_id: str, shot_id: str, body: SegmentAction, actor: Operat
     if job is not None:
         # 修订重拍允许同时修正镜头规格与角色绑定（如剔除未出场角色）；同修订重拍仍锁死全套绑定。
         keys = [k for k in binding_keys if not (retired and k in {"shot_spec", "reference_manifest"})]
-        if any(source.request.get(k) != job.request.get(k) for k in keys):
+        if any(not _same_render_binding(source.request, job.request, k) for k in keys):
             raise HTTPException(409, "GENERATION_RENDER_BINDINGS_CHANGED")
         job.request_revision = source.request_revision + 1
     elif not retired:

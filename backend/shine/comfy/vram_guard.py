@@ -41,7 +41,13 @@ class H3TokenEstimate:
 
 @dataclass(frozen=True)
 class LowVramAttentionDecision:
-    """Single authoritative gating decision for ``MiniMaxLowVRAMAttention``."""
+    """Single authoritative gating decision for ``MiniMaxLowVRAMAttention``.
+
+    ``frozen_request`` marks the one case the threshold does not decide: a
+    request already frozen names one of the shot's two legal graphs (every
+    request frozen before the gate names the mounted one), and the Worker
+    submits the graph the request demands.
+    """
 
     enabled: bool
     reason: Literal[
@@ -50,6 +56,7 @@ class LowVramAttentionDecision:
         "oom_fallback",
         "forced_disabled",
         "legacy_default",
+        "frozen_request",
     ]
     threshold: int
     estimate: H3TokenEstimate | None = None

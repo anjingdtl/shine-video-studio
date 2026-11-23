@@ -2755,6 +2755,7 @@ def _run_comfy_job(
             compile_h3_ref2va_graph,
             decide_low_vram_attention,
             is_low_vram_guard_variant,
+            low_vram_attention_form_of_graph,
             render_reference_counts,
         )
         from shine.strategy import GenerationStrategy
@@ -2809,6 +2810,21 @@ def _run_comfy_job(
                 force_low_vram_attention=True if is_oom_fallback_attempt else None,
                 **ref_counts,
             )
+            # The frozen request is the authority for the graph it demands.  One
+            # shot has two legal graphs (MiniMaxLowVRAMAttention mounted or not);
+            # a request frozen before the high-watermark gate names the mounted
+            # one and keeps rendering exactly as it was frozen.
+            frozen_form = low_vram_attention_form_of_graph(
+                request.workflow_profile_hash,
+                variant_id=strategy.model_variant_id,
+                accelerator_id=strategy.accelerator_id,
+                second_pass=strategy.second_pass_spec(),
+                **ref_counts,
+            )
+            if (not is_oom_fallback_attempt and frozen_form is not None
+                    and frozen_form != low_vram_decision.enabled):
+                low_vram_decision = replace(
+                    low_vram_decision, enabled=frozen_form, reason="frozen_request")
             profile = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
@@ -2875,11 +2891,13 @@ def _run_comfy_job(
                 }, project_id=job.project_id)
             return job_id
         with session_factory.begin() as db:
+            # "seq_len", not "tokens": the audit sanitizer treats any key containing
+            # "token" as a credential and stores it as "[redacted]".
             add_audit(db, "comfy-worker", "STRATEGY_GRAPH_COMPILED", "job", job_id, {
                 "execution_identity": profile.execution_identity(),
                 "low_vram_attention": low_vram_decision.enabled,
                 "low_vram_attention_reason": low_vram_decision.reason,
-                "estimated_attention_tokens": (
+                "estimated_attention_seq_len": (
                     low_vram_decision.estimate.total_tokens if low_vram_decision.estimate is not None else None
                 ),
                 "low_vram_attention_threshold": low_vram_decision.threshold,
@@ -3308,12 +3326,12 @@ def _run_comfy_job(
                     job.id,
                     {
                         "attempt_id": attempt_id,
-                        "estimated_tokens": (
+                        "estimated_attention_seq_len": (
                             low_vram_decision.estimate.total_tokens
                             if low_vram_decision.estimate is not None
                             else None
                         ),
-                        "threshold": low_vram_decision.threshold,
+                        "low_vram_attention_threshold": low_vram_decision.threshold,
                         "oom_error": (result.error or "")[:300],
                         "error_details": result.error_details,
                     },

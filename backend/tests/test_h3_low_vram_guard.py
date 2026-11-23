@@ -17,6 +17,7 @@ from shine.comfy.graph_compiler import (
     SecondPassSpec,
     compile_ref2va_workflow,
     is_low_vram_guard_variant,
+    low_vram_attention_form_of_graph,
 )
 from shine.comfy.provider import ComfyUIRenderService
 from shine.comfy.vram_guard import (
@@ -224,6 +225,11 @@ def test_graph_topology_and_recipe_hash_isolation(kwargs: dict[str, Any]):
         expected_graph_sha256=without_low.graph_sha256,
         **kwargs,
     )
+    # One authority names the two legal forms of a shot; anything else is a drifted graph.
+    assert low_vram_attention_form_of_graph(with_low.graph_sha256, **kwargs) is True
+    assert low_vram_attention_form_of_graph(without_low.graph_sha256, **kwargs) is False
+    assert low_vram_attention_form_of_graph("f" * 64, **kwargs) is None
+    assert low_vram_attention_form_of_graph(None, **kwargs) is None
     m4_without = compile_m4_ref2va_workflow(**kwargs, low_vram_attention=False)
     assert m4_without.graph_sha256 == without_low.graph_sha256
     est = estimate_h3_attention_tokens(width=672, height=384, duration_s=5.0, image_count=2)
@@ -720,11 +726,18 @@ def test_mainline_request_threshold_and_oom_fallback_loop(tmp_path: Path, monkey
                 assert len(compiled_events) == 2
                 assert compiled_events[0].payload["low_vram_attention"] is False
                 assert compiled_events[0].payload["low_vram_attention_reason"] == "below_threshold"
-                assert compiled_events[0].payload["estimated_attention_tokens"] is not None
+                # The persisted audit must carry the real number: a key named "...tokens" is a
+                # credential to the audit sanitizer and would be stored as "[redacted]".
+                # 672x384 5s with one image: 37 x 252 + 252 + 1024 + 414.
+                assert compiled_events[0].payload["estimated_attention_seq_len"] == 11_014
                 assert compiled_events[0].payload["low_vram_attention_threshold"] == 45000
                 assert compiled_events[1].payload["low_vram_attention"] is True
                 assert compiled_events[1].payload["low_vram_attention_reason"] == "oom_fallback"
-                assert any(e.event_type == "H3_OOM_LOW_VRAM_FALLBACK_SCHEDULED" for e in events)
+                fallback = [e for e in events if e.event_type == "H3_OOM_LOW_VRAM_FALLBACK_SCHEDULED"]
+                assert len(fallback) == 1
+                assert fallback[0].payload["estimated_attention_seq_len"] == 11_014
+                assert fallback[0].payload["low_vram_attention_threshold"] == 45000
+                assert "OutOfMemoryError" in fallback[0].payload["oom_error"]
     finally:
         server.stop()
         app.state.engine.dispose()
@@ -779,4 +792,126 @@ def test_mainline_double_oom_and_non_oom_do_not_loop(tmp_path: Path, monkeypatch
             assert server.prompt_count == 3
     finally:
         server.stop()
+        app.state.engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 6. Requests frozen before the high-watermark gate
+# ---------------------------------------------------------------------------
+
+
+def _freeze_legacy_graph_hash(factory, job_id: str, graph_sha256: str) -> None:
+    """Rewrite a request the way the pre-gate code froze it."""
+    with factory.begin() as db:
+        job = db.get(Job, job_id)
+        job.request = {**dict(job.request), "workflow_profile_hash": graph_sha256}
+
+
+def test_worker_honors_a_request_frozen_before_the_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Every pre-gate request names the graph with node ``"15"`` mounted and still renders."""
+    app, factory, settings = make_studio(tmp_path)
+    server = _MainlineFakeComfyServer(["ok", "ok"]).start()
+    try:
+        server.output_bytes = make_test_video_bytes(duration_s=5.0)
+        accelerator = DEFAULT_STRATEGY.accelerator_id
+        full_graph = compile_ref2va_workflow(image_count=1, accelerator_id=accelerator, low_vram_attention=True).graph
+        monkeypatch.setattr(ComfyUIClient, "object_info", lambda self: _compiled_object_info(full_graph))
+        always_on = compile_ref2va_workflow(image_count=1, accelerator_id=accelerator, low_vram_attention=True)
+        with TestClient(app) as client:
+            project_id = create_project(client, title="门控之前冻结的请求")
+            style = freeze_style(client, project_id)
+            legacy_job = _seed_mainline_job(client, project_id, style["id"], width=672, height=384, duration_s=5.0)
+            forged_job = _seed_mainline_job(client, project_id, style["id"], width=672, height=384, duration_s=5.0)
+            _freeze_legacy_graph_hash(factory, legacy_job, always_on.graph_sha256)
+            _freeze_legacy_graph_hash(factory, forged_job, "f" * 64)
+            with factory.begin() as db:
+                db.get(Job, forged_job).paused = True
+
+            offline = Settings(
+                data_dir=settings.data_dir,
+                database_url=settings.database_url,
+                secret_store_dir=settings.secret_store_dir,
+                ffprobe_path="missing-ffprobe",
+                ffmpeg_path="missing-ffmpeg",
+                render_provider="comfyui",
+                offline_simulation=True,
+            )
+            comfy_client = ComfyUIClient(server.base_url, timeout_s=2)
+
+            # The frozen request is the authority: the mounted graph is submitted, not the gated one.
+            assert run_one(factory, worker_id="w-legacy", settings=offline, comfy_client=comfy_client) == legacy_job
+            assert server.prompt_count == 1
+            prompt = server.submitted_prompts[0]["prompt"]
+            assert "MiniMaxLowVRAMAttention" in {n["class_type"] for n in prompt.values()}
+            legacy = client.get(f"/api/v1/jobs/{legacy_job}").json()
+            assert legacy["status"] in {"PASSED", "NEEDS_REVIEW"}
+            assert len(legacy["attempts"]) == 1
+            with factory() as db:
+                compiled = [
+                    e for e in db.scalars(select(AuditEvent).where(AuditEvent.entity_id == legacy_job)).all()
+                    if e.event_type == "STRATEGY_GRAPH_COMPILED"
+                ]
+                assert len(compiled) == 1
+                assert compiled[0].payload["low_vram_attention"] is True
+                assert compiled[0].payload["low_vram_attention_reason"] == "frozen_request"
+
+            # A hash that is neither legal form is still a drifted graph and is never submitted.
+            with factory.begin() as db:
+                db.get(Job, forged_job).paused = False
+            assert run_one(factory, worker_id="w-forged", settings=offline, comfy_client=comfy_client) == forged_job
+            assert server.prompt_count == 1
+            forged = client.get(f"/api/v1/jobs/{forged_job}").json()
+            assert forged["failure_code"] == "STRATEGY_COMPILE_WORKFLOW_IDENTITY_CHANGED"
+    finally:
+        server.stop()
+        app.state.engine.dispose()
+
+
+def test_retake_keeps_the_bindings_of_a_shot_frozen_before_the_gate(tmp_path: Path):
+    """The gate is a lossless VRAM switch, so a pre-gate take can still be retaken."""
+    from tests.test_generation_segments import _passed
+
+    app, factory, settings = make_studio(tmp_path)
+    always_on = compile_ref2va_workflow(
+        image_count=1, accelerator_id=DEFAULT_STRATEGY.accelerator_id, low_vram_attention=True
+    )
+    gated = compile_ref2va_workflow(
+        image_count=1, accelerator_id=DEFAULT_STRATEGY.accelerator_id, low_vram_attention=False
+    )
+    try:
+        with TestClient(app) as client:
+            project_id = create_project(client, title="门控之前通过的镜头")
+            style = freeze_style(client, project_id)
+            legacy_job = _seed_mainline_job(client, project_id, style["id"], width=672, height=384, duration_s=5.0)
+            forged_job = _seed_mainline_job(client, project_id, style["id"], width=672, height=384, duration_s=5.0)
+            _freeze_legacy_graph_hash(factory, legacy_job, always_on.graph_sha256)
+            _freeze_legacy_graph_hash(factory, forged_job, "f" * 64)
+            with factory.begin() as db:
+                for job_id in (legacy_job, forged_job):
+                    _passed(db, db.get(Job, job_id))
+                legacy_shot = db.get(Job, legacy_job)
+                forged_shot = db.get(Job, forged_job)
+                legacy_path = (legacy_shot.shot_id, legacy_shot.shot_revision)
+                forged_path = (forged_shot.shot_id, forged_shot.shot_revision)
+
+            shot_id, revision = legacy_path
+            retake = client.post(
+                f"/api/v1/projects/{project_id}/generation-segments/{shot_id}/regenerate",
+                json={"source_job_id": legacy_job, "expected_shot_revision": revision},
+                headers=LOCAL_ACTION_HEADERS,
+            )
+            assert retake.status_code == 202, retake.text
+            with factory() as db:
+                # The retake is a new request, so the gate applies to it; the binding is unchanged.
+                assert db.get(Job, retake.json()["job_id"]).request["workflow_profile_hash"] == gated.graph_sha256
+
+            shot_id, revision = forged_path
+            refused = client.post(
+                f"/api/v1/projects/{project_id}/generation-segments/{shot_id}/regenerate",
+                json={"source_job_id": forged_job, "expected_shot_revision": revision},
+                headers=LOCAL_ACTION_HEADERS,
+            )
+            assert refused.status_code == 409
+            assert refused.json()["detail"] == "GENERATION_RENDER_BINDINGS_CHANGED"
+    finally:
         app.state.engine.dispose()

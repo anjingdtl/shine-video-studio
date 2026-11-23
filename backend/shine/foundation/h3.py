@@ -38,6 +38,7 @@ from shine.comfy.graph_compiler import (
     SecondPassSpec,
     compile_ref2va_workflow,
     is_low_vram_guard_variant,
+    low_vram_attention_form_of_graph,
 )
 from shine.comfy.provider import (
     find_output,
@@ -619,6 +620,7 @@ __all__ = [
     "has_authorized_h3_speech",
     "is_cuda_oom_error",
     "is_low_vram_guard_variant",
+    "low_vram_attention_form_of_graph",
     "low_vram_threshold_from_env",
     "reconcile_submission",
     "sanitize_h3_dialogue_text",

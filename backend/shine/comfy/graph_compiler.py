@@ -661,7 +661,7 @@ def compile_ref2va_workflow(
     if low_vram_decision is not None:
         model_identity["low_vram_attention_reason"] = low_vram_decision.reason
         if low_vram_decision.estimate is not None:
-            model_identity["estimated_attention_tokens"] = low_vram_decision.estimate.total_tokens
+            model_identity["estimated_attention_seq_len"] = low_vram_decision.estimate.total_tokens
     return CompiledWorkflow(
         graph=graph,
         parameter_map=parameter_map,
@@ -678,6 +678,41 @@ def compile_ref2va_workflow(
         reference_counts={"image": image_count, "audio": audio_count, "video": video_count},
         validated_against=validated_against,
     )
+
+
+def low_vram_attention_form_of_graph(
+    frozen_graph_sha256: str | None,
+    *,
+    variant_id: str = INT8_VARIANT_ID,
+    accelerator_id: str = "pdd8",
+    second_pass: SecondPassSpec | None = None,
+    image_count: int,
+    audio_count: int = 0,
+    video_count: int = 0,
+) -> bool | None:
+    """Name which ``MiniMaxLowVRAMAttention`` form a frozen graph hash is.
+
+    Since the high-watermark gate one shot has exactly two legal execution
+    graphs, both compiled from the same recipe: the guarded one (node ``"15"``
+    mounted - every request frozen above the threshold, and every request
+    frozen before the gate existed) and the unguarded one.  ``True``/``False``
+    name the two; ``None`` means the hash is neither, i.e. a forged or drifted
+    graph.
+    """
+    if not frozen_graph_sha256:
+        return None
+    identity = {
+        "variant_id": variant_id,
+        "accelerator_id": accelerator_id,
+        "second_pass": second_pass,
+        "image_count": image_count,
+        "audio_count": audio_count,
+        "video_count": video_count,
+    }
+    for form in (True, False):
+        if compile_ref2va_workflow(low_vram_attention=form, **identity).graph_sha256 == frozen_graph_sha256:
+            return form
+    return None
 
 
 def is_low_vram_guard_variant(
@@ -706,6 +741,16 @@ def is_low_vram_guard_variant(
     if actual_graph_sha256 != guarded.graph_sha256:
         return False
     if expected_graph_sha256 is not None:
+        if low_vram_attention_form_of_graph(
+            expected_graph_sha256,
+            variant_id=variant_id,
+            accelerator_id=accelerator_id,
+            second_pass=second_pass,
+            image_count=image_count,
+            audio_count=audio_count,
+            video_count=video_count,
+        ) is None:
+            return False
         unguarded = compile_ref2va_workflow(
             variant_id=variant_id,
             accelerator_id=accelerator_id,
@@ -715,8 +760,6 @@ def is_low_vram_guard_variant(
             video_count=video_count,
             low_vram_attention=False,
         )
-        if expected_graph_sha256 not in {unguarded.graph_sha256, guarded.graph_sha256}:
-            return False
         if unguarded.recipe_sha256 != guarded.recipe_sha256:
             return False
     return True
