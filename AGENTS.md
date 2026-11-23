@@ -2550,3 +2550,43 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
 - **scriptwriter 补充台词说话方约束**：对话率分支钉住「补充台词的说话方必须是该节拍 `characters` 里列出的既有 source 人物，不得添加画外说话人」——服务器按名字解析说话方，画外新说话人是不可绑定镜头。契约断言补进 `test_crew_prompt_contract.py`。
 - 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。进度与行为矩阵见
   `docs/PROGRESS_20261122_LLM_STREAM_UNKNOWN_SEMANTICS.md`；回归：定向三文件 26 用例、相邻/扩展模块 182 用例、Ruff、后端 8 分片 304 文件全量（`shards-20261122-231522-576`，wall `1108.6s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）均通过。
+
+## 2026-11-23 H3 LowVRAMAttention 高水位门控（真机核验收尾轮）
+
+- **一张镜头图有两种合法形态，冻结请求是权威。** 自 45,000 token 门控起，同一
+  `variant / accelerator / second_pass / 参考数` 的镜头可编译出不挂节点 `"15"` 与挂载节点 `"15"`
+  两张图：`recipe_sha256` 相同，`graph_sha256` 不同。`make_render_request` 建任务时裁决一次并冻结
+  哈希；Worker 不重新裁决，只认冻结哈希点名的那一种（审计原因 `frozen_request`），升级前冻结的存量
+  请求因此照常渲染。既不是任一合法形态的哈希仍按 `WORKFLOW_IDENTITY_CHANGED` 拒绝。
+- **`low_vram_attention_form_of_graph()` 是唯一知道这对形态的函数**（`shine/comfy/graph_compiler.py`，
+  经 `shine.foundation.h3` 导出），`is_low_vram_guard_variant()` 复用它。重拍
+  （`api_segments._same_render_binding`）用同一个函数把同一镜头的两张图判为同一 H3 工作流绑定，
+  其余绑定逐字比对。**不要再写第二个「两张图哈希是否等价」的判断。** 首轮实现缺这一步，结果是
+  存量冻结请求一条都不提交、存量低水位镜头重拍全部 `409 GENERATION_RENDER_BINDINGS_CHANGED`。
+- **审计键名不得含 `token`。** `security.sanitize_payload` 把键名含 `token` / `secret` / `api_key` /
+  `password` / `credential` / `authorization` 的值一律存成 `[redacted]`。本功能的可观测字段是
+  `estimated_attention_seq_len` 与 `low_vram_attention_threshold`；断言审计字段时写真实数字，
+  `is not None` 挡不住 `"[redacted]"`。
+- **Token 口径**：`vram_guard.estimate_h3_attention_tokens` 在三个前提下等于本机真实
+  `PackedLayout.seq_len`（用 ComfyUI 内嵌解释器实测 16 组零误差，含 1344×768·5s 的 5 图 43,774 /
+  6 图 44,782 阈值边界）：文本条件按 1024 计（真实值是 `cond.shape[1]`，即提示词加每图视觉 token，
+  不是常数）、参考图不小于目标面积、音频参考按 6.4 s 计。45,000 阈值在 9 图上限内保留 ≥ 10% 余量。
+- **真机事实（RTX 5080 16GB，隔离目录，8 次真实出片全部 `PASSED`）**：默认阈值下 23,902 tokens
+  省略节点 `"15"`、56,040 tokens 挂载，执行图取自 ComfyUI 交接历史归档。**节点 `"15"` 数学等价得到
+  最硬证据**：同项目、同提示词、同种子下，挂载与不挂载的成片 MP4 **逐字节相同**
+  （1024×576·5s 124/124 帧、1344×768·7s 175/175 帧 PSNR 均为 inf），而提示词只差一个风格版本
+  UUID 的对照是 26.2 dB。低水位镜头省略节点 `"15"` 渲染快约 16%（108.4s 对 129.1s）。
+- **本机未复现 OOM**：不挂节点 `"15"` 的 1344×768·2 图在 7s（56,040）/ 10s（76,426）/
+  15s（112,102）全部首次通过。方案所述「56k~78k 撞墙区」在本机本次条件下不成立；兜底从未被排程
+  （不误触发得到真机确认），**真机 OOM 兜底、受管渲染器路径与 production series 中的兜底均无真机或
+  离线用例**，只有代码走读。
+- **`worker.py` 已被修改**（首轮与本轮）：`client_review_identity` 按设计失效，真实生产验收前必须
+  重做真实 VLM 正负校准并重新冻结制片计划。本轮未做，8 次出片均为
+  `acceptance_status=pending_review`，是技术交付不是艺术验收。
+- **隔离验收必须设置 `SHINE_RUNTIME_ENV_PATH=<隔离目录>\.env`。** `POST /setup/configuration` 会把
+  `SHINE_DATA_DIR` / `SHINE_SETUP_RECIPE` / `SHINE_ENABLE_LOCAL_EXECUTION` 写回仓库根 `.env`；
+  不设钩子时日常启动器的数据目录被换成隔离目录，隔离栈随之占用日常端口 8000/5173。
+- 回归：`backend/tests/test_h3_low_vram_guard.py`（21 例，含存量冻结请求与存量重拍两条新反例）、
+  `test_generation_segments.py`；后端 8 分片 305 文件（`shards-20261123-231702-338`，8 分片全部
+  exit 0、`shards_with_failure_markers=0`）、前端 488/488 与 `tsc`/Vite build、Ruff 均通过。
+  证据与未完成项见 `docs/ACCEPTANCE_20261123_H3_LOW_VRAM_ATTENTION_GUARD.md`。
