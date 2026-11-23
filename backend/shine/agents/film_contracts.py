@@ -74,6 +74,11 @@ class ShotIntent(APIModel):
     asset_ids: list[str] = Field(default_factory=list, max_length=12)
     continuity: ShotIntentContinuity | None = None
     cuts: list[EditorialCut] = Field(default_factory=list, max_length=19)
+    location: str | None = Field(
+        default=None, max_length=80,
+        description="The registered name of the place this shot is staged in, exactly as the context lists it. "
+                    "Landing binds its confirmed scene master, or asks the material stage for it.",
+    )
 
 
 class DirectorialPlan(APIModel):

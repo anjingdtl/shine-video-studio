@@ -42,6 +42,7 @@ from shine.schemas import (
     ReferenceUse,
     RenderProvider,
     RenderRequest,
+    RequestedAsset,
     ShotBindingInput,
     ShotSpec,
     StyleBible,
@@ -716,6 +717,53 @@ def complete_character_bindings(
         result.append(binding)
         by_asset[asset.id] = binding
     return result
+
+
+def complete_location_binding(
+    db: Session, project_id: str, location: str | None, bindings: list[ShotBindingInput],
+) -> tuple[list[ShotBindingInput], RequestedAsset | None]:
+    """Bind the approved, locked scene master of the location a shot declares.
+
+    The same rule as the character path, for the place: only a confirmed master
+    is ever bound, and a shot the material stage has not answered yet still
+    lands.  A shot carries at most one scene picture (the material stage's own
+    rule), so a scene picture that is already bound is kept and nothing is
+    added.  When no confirmed master answers the location, the location is
+    returned as a scene request for the material stage instead of a binding.
+
+    Returns the bindings and the request, if any.
+    """
+    from shine.asset_identity import character_reference_key
+    from shine.comfyops.assets import rights_status
+
+    result = [binding.model_copy() for binding in bindings]
+    location = (location or "").strip()
+    if not location:
+        return result, None
+    images = 0
+    for binding in result:
+        if binding.use_as.value == "picture":
+            asset = db.get(Asset, binding.asset_id)
+            if asset is not None and asset.role == "scene":
+                return result, None
+        if binding.use_as.value in {"subject", "picture"}:
+            images += 1
+    key = character_reference_key(location)
+    masters = [asset for asset in db.scalars(select(Asset).where(
+        Asset.project_id == project_id, Asset.kind == "image", Asset.role == "scene",
+        Asset.approved.is_(True), Asset.locked.is_(True),
+    )) if character_reference_key(asset.entity_id or "") == key
+        and not (asset.provenance or {}).get("offline_only") and not (asset.provenance or {}).get("is_mock")]
+    # The last confirmed master of a place wins, as it does for a character.
+    master = max(masters, key=lambda asset: asset.created_at) if masters else None
+    # Adding the place must never push the shot past a renderer limit: a shot
+    # that is already full keeps its cast and asks the material stage instead.
+    fits = images < MAX_REFERENCE_COUNTS["image"] and len(result) < MAX_TOTAL_REFERENCES
+    if (master is not None and fits
+            and rights_status(db, project_id, (master.provenance or {}).get("rights_id"))["approved"]):
+        result.append(ShotBindingInput(asset_id=master.id, use_as="picture", ordinal=len(result)))
+        return result, None
+    return result, RequestedAsset(family="scene", name=location[:80])
 
 
 def protected_shot_ids(db: Session, project_id: str, shot_ids: list[str]) -> set[str]:

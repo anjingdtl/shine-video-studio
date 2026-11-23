@@ -13,7 +13,11 @@ from types import SimpleNamespace
 
 from sqlalchemy import select
 
-from shine.h3.compiler import H3PromptCompiler, PromptCompilationError
+from shine.h3.compiler import (
+    LEGACY_TIMELINE_COMPILER_VERSION,
+    H3PromptCompiler,
+    PromptCompilationError,
+)
 from shine.models import Job
 from shine.schemas import (
     ReferenceManifestItem,
@@ -87,10 +91,21 @@ def test_compiler_binds_the_cast_order_to_the_reference_images():
         characters=["阿德", "小米"],
     )
     compiled = H3PromptCompiler().compile(spec=spec, style=STYLE, manifest=manifest)
-    assert "Reference cast order (mandatory)" in compiled.sections["detailed_description"]
-    assert "<Subject 1> (first)" in compiled.sections["detailed_description"]
-    assert "for the first listed performer" in compiled.sections["subject_definitions"]
-    assert "never swap, merge or borrow a face" in compiled.sections["detailed_description"]
+    # 2.0.0 states the order once, without re-describing either face.
+    assert "Cast order: <Subject 1> (first), <Subject 2> (second); each person keeps exactly " \
+        "their own reference identity." in compiled.sections["detailed_description"]
+    assert ("<Subject 1> is the first listed performer, shown in <Picture 1>;"
+            in compiled.sections["subject_definitions"])
+    assert "Reference cast order (mandatory)" not in compiled.sections["detailed_description"]
+    # The released 1.4.0 paragraph replays unchanged.
+    legacy = H3PromptCompiler().compile(
+        spec=spec, style=STYLE, manifest=manifest,
+        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION,
+    )
+    assert "Reference cast order (mandatory)" in legacy.sections["detailed_description"]
+    assert "for the first listed performer" in legacy.sections["subject_definitions"]
+    assert "<Subject 1> (first)" in legacy.sections["detailed_description"]
+    assert "never swap, merge or borrow a face" in legacy.sections["detailed_description"]
 
 
 def test_compiler_refuses_a_character_without_a_reference():

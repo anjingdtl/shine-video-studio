@@ -102,7 +102,10 @@ export const failureLabels: Record<string, string> = {
   STORY_MERGE_NEEDS_REVIEW: '这一卷的大纲归并没有完成，需要核对后继续',
   STORY_DURABLE_OUTLINE_REQUIRED: '长剧本要先确认总体大纲，才能逐场分析',
   CONTRACT_OR_POLICY_REJECTED: '不符合剧组的硬性约束',
-  EDITORIAL_TIMING_CONFLICT: '生成段时长与剧本切点表对不上',
+  EDITORIAL_TIMING_CONFLICT: '台词放不进生成段，或生成段时长与剧本切点表对不上',
+  SHOT_DIALOGUE_LONGER_THAN_SHOT: '这一镜的台词比镜头还长，按原速说不完',
+  SHOT_LOCATION_UNKNOWN: '镜头的地点不在已登记的场景里',
+  SHOT_CONTINUITY_PREDECESSOR_UNKNOWN: '接拍依赖的上一镜不存在或不属于本作品',
   EDITORIAL_TIMING_UNGROUPABLE: '剧本切点表无法分组成 4–15 秒的 H3 生成段，请调整切点时长',
   EDITORIAL_BEAT_COUNT_MISMATCH: '编剧分段数与剧本切点表不一致，请重跑编剧或调整切点表',
   AGENT_REQUEST_RECONCILIATION_REQUIRED: '远端模型结果待核实，请勿重试',
@@ -154,6 +157,15 @@ export const repairActionLabels: Record<string, string> = {
   rebuild_manifest: '重建素材清单', adjust_parameters: '调整生成参数', rebind_asset: '更换绑定素材',
   none: '无需动作',
 };
+
+/** H3 单镜时长的硬边界，也是「单镜秒数上限」这一项设置的可调范围。 */
+export const MIN_SHOT_SECONDS = 4;
+export const MAX_SHOT_SECONDS = 15;
+/**
+ * 新分镜书的「单镜秒数上限」初始值：与后端 schemas.DEFAULT_MAX_SHOT_SECONDS 同源同值
+ * （两处各有一条测试钉住）。它只是这项设置的起始值，不是另一道上限；已冻结的风格不受影响。
+ */
+export const DEFAULT_MAX_SHOT_SECONDS = 10;
 
 export const reviewOptionLabels: Record<string, string> = {
   NOT_REVIEWED: '未审', PASS: '通过', FAIL: '不通过', NOT_APPLICABLE: '不适用',

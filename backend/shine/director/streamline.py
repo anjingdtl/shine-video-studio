@@ -481,6 +481,13 @@ def confirm_storyboard_book(
         raise HTTPException(409, "EPISODE_PLAN_CHANGED")
     style_result = None
     if style:
+        style = dict(style)
+        book_ceiling = (row.payload.get("source") or {}).get("max_shot_seconds")
+        if style.get("max_shot_seconds") is None and book_ceiling is not None:
+            # The book the person is confirming states its per-shot ceiling.  The
+            # frozen style's setting is that same number, not a second one the
+            # confirm body has to repeat; a body that names its own value wins.
+            style["max_shot_seconds"] = float(book_ceiling)
         style_result = _apply_and_freeze_style(db, project, style, actor=actor)
     # Reuse the expert confirmation logic (coverage + supersede + audit).
     from shine.api_director import _section_plan_problems
@@ -1064,6 +1071,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 raise HTTPException(409, "REMOTE_AGENT_CONSENT_REQUIRED")
         prior_section = _prior_section_id(state, cursor)
         facts = _carryover_facts(db, project_id, prior_section)
+        predecessor = _episode_predecessor(state, unit)
         # A retry resumes the failed unit from its failed role: the resume
         # steps and the one-call replay authorisation are scoped to exactly
         # that unit (``failed_unit_index``), never to the whole run — a later
@@ -1171,6 +1179,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                     "timeline": outline.payload_json.get("timeline", []),
                     "characters": outline.payload_json.get("characters", []),
                     "continuity_facts": facts,
+                    "continuity_predecessor": bool(predecessor),
                     "continuity": {"basis": "user_supplied_unverified"},
                     "previous_render_status": "PENDING_SERVER_VERIFICATION"},
                 consent_document_id=document.id, consent_document_sha256=document.sha256,
@@ -1233,6 +1242,9 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 continuity_artifact_id=continuity_id,
                 arbitration_artifact_id=arbitration_id,
                 name_prefix=f"导演分镜-{unit['episode_id']}",
+                # Same episode only: the first unit of an episode passes None
+                # and opens on a cut.
+                previous_shot_id=_episode_predecessor(state, unit),
             ), db)
     except Exception as exc:  # noqa: BLE001 - a landing gate must keep the finished chain
         code = _fault_code(exc)
@@ -1325,14 +1337,41 @@ def _asset_context(db, project_id):
 
 
 def _prior_section_id(state, cursor) -> str | None:
-    """The production section immediately before this unit, in script order."""
+    """The production section immediately before this unit, inside the same episode.
+
+    Continuity never crosses an episode: the first unit of an episode carries
+    nothing over from the previous episode's last scene, so its shots open on
+    their own facts instead of another episode's cast and closing line.
+    """
     unit = state["units"][cursor]
     prior = None
     for earlier in state["units"][:cursor]:
-        if (earlier.get("section_order") or 0) < (unit.get("section_order") or 0):
-            if prior is None or (earlier.get("section_order") or 0) > (prior.get("section_order") or 0):
-                prior = earlier
+        if earlier.get("episode_id") != unit.get("episode_id"):
+            continue
+        if prior is None or (earlier.get("section_order") or 0) > (prior.get("section_order") or 0):
+            prior = earlier
     return prior["production_section_id"] if prior else None
+
+
+def _episode_predecessor(state: dict, unit: dict) -> str | None:
+    """The last shot the previous unit of this episode landed, if any.
+
+    This is the only source of a plan's ``previous_shot_id``.  It reads the
+    run's own ledger of landed units, never another episode: the first unit of
+    an episode has no predecessor, so its first shot is a cut and no final
+    frame is ever carried from one episode into the next.
+    """
+    for result in reversed(state.get("results") or []):
+        landed = result.get("unit") or {}
+        if landed.get("episode_id") != unit.get("episode_id"):
+            continue
+        if (landed.get("production_section_id") == unit.get("production_section_id")
+                and landed.get("start_offset") == unit.get("start_offset")):
+            # The unit asking is never its own predecessor.
+            continue
+        shot_ids = (result.get("apply") or {}).get("shot_ids") or []
+        return shot_ids[-1] if shot_ids else None
+    return None
 
 
 CREW_ROLE_LABELS = {
@@ -1354,6 +1393,9 @@ _REFUSAL_LABELS = {
     "ARBITRATION_UNKNOWN_RULE": "导演裁定引用了规则包里不存在的规则",
     "NARRATOR_NOT_LISTED_IN_BEAT": "旁白说话方没有列入该情节拍的人物",
     "SHOT_DURATION_OVER_LIMIT": "镜头时长超出 H3 单镜上限",
+    "SHOT_LOCATION_UNKNOWN": "镜头的地点不在已登记的场景里",
+    "SHOT_DIALOGUE_LONGER_THAN_SHOT": "这一镜的台词比镜头还长，按原速说不完",
+    "SHOT_CONTINUITY_PREDECESSOR_UNKNOWN": "接拍依赖的上一镜不存在或不属于本作品",
     "UNAPPROVED_VOICE": "镜头引用了未批准的音色",
     "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE": "剪辑引用的源镜头未通过或入出点无效",
 }

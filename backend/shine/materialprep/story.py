@@ -1238,8 +1238,12 @@ def verified_production_context(db, project_id, source_text, supplied):
             "story_line": outline.payload_json.get("story_line", []),
             "timeline": outline.payload_json.get("timeline", []),
             "characters": outline.payload_json.get("characters", []),
+            "locations": outline.payload_json.get("locations", []),
             "continuity_facts": supplied.get("continuity_facts", []),
             "continuity": continuity_evidence,
+            # The run's own fact: an earlier unit of this episode already landed
+            # shots, so this unit's first shot may continue the last of them.
+            "continuity_predecessor": bool(supplied.get("continuity_predecessor")),
             **({"creative_source": creative_source, "script_artifact_id": script_artifact_id,
                 "script_sha256": script_sha256} if script_artifact_id else {}),
             "previous_render_status": previous_render_status}

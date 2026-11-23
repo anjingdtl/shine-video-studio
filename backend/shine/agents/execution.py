@@ -37,6 +37,8 @@ SAFE_REJECTIONS = {
     "ARBITRATION_ISSUE_COVERAGE", "ARBITRATION_UNKNOWN_RULE",
     "NARRATOR_NOT_LISTED_IN_BEAT", "SHOT_DURATION_OVER_LIMIT",
     "UNAPPROVED_VOICE", "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE",
+    # A place the context never registered cannot be bound to a scene master.
+    "SHOT_LOCATION_UNKNOWN",
     # A request the literary budget refused before it was sent (streamline
     # §6.3): the named reason tells the person to split the unit, not that the
     # model misbehaved.

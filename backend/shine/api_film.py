@@ -38,6 +38,7 @@ from shine.models import (
     ProjectDocument,
     ProviderProfile,
     RulePack,
+    Shot,
     StyleVersion,
     WorkflowProfile,
     utcnow,
@@ -46,6 +47,7 @@ from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, 
 from shine.security import is_loopback_url
 from shine.services import (
     add_audit,
+    complete_location_binding,
     create_shot_record,
     make_render_request,
     order_bindings_for_cast,
@@ -330,6 +332,12 @@ class ApplyCamera(APIModel):
     continuity_artifact_id: str
     arbitration_artifact_id: str | None = None
     name_prefix: str = Field(default="专业分镜", max_length=80)
+    previous_shot_id: str | None = Field(
+        default=None, max_length=36,
+        description="The last shot the previous unit of the SAME episode landed. It is the predecessor "
+                    "of this plan's first shot when that shot continues the take. The first unit of an "
+                    "episode passes nothing: its first shot is a cut, never another episode's last frame.",
+    )
 
 
 def _scene_style_tags(beat: dict, intent: dict) -> list[str]:
@@ -585,6 +593,19 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         beats = {b["id"]: b for b in script.payload_json["beats"]}
         intents = {s["id"]: s for s in direction.payload_json["shots"]}
         created = []
+        # The shot before this plan, when an earlier unit of the same episode
+        # landed one.  Without it every unit opened on a cut, however clearly the
+        # director said the first shot continues the previous take.
+        predecessor = None
+        if body.previous_shot_id:
+            earlier = db.get(Shot, body.previous_shot_id)
+            if earlier is None or earlier.project_id != project_id:
+                raise HTTPException(422, {
+                    "code": "SHOT_CONTINUITY_PREDECESSOR_UNKNOWN",
+                    "message": "接拍依赖的上一镜不存在或不属于本作品",
+                    "shot_id": body.previous_shot_id,
+                })
+            predecessor = earlier.id
         material_notices: list[dict] = []
         style_warnings: list[dict] = []
         for camera in camera_plan.shots:
@@ -610,26 +631,19 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     lines.extend({**line, "start_s": round(line["start_s"] + offset, 3),
                                   "end_s": round(line["end_s"] + offset, 3)} for line in cut_beat["dialogue"])
                 beat = {**beat, "characters": list(dict.fromkeys(characters)), "dialogue": lines}
-            # The scriptwriter and the director choose timings independently;
-            # at this materialisation boundary the spoken beats are fitted
-            # proportionally into the shot the director actually planned, so
-            # the spec stays renderable without changing a single word.
+            # Spoken timing is the plan's own fact.  validate_output refuses a
+            # shot that does not contain its lines, so nothing is squeezed here:
+            # compressing a line into a shorter window used to hide that conflict
+            # and left H3 rushing or cutting off the end of the line.
             duration = float(intent["duration_s"])
-            dialogue = []
-            for line in beat["dialogue"]:
-                line = dict(line)
-                start, end = float(line["start_s"]), float(line["end_s"])
-                if not cuts and end > start:
-                    latest = max(0.5, duration - 0.2)
-                    if end > latest:
-                        scale = (latest - 0.2) / (end - start) if end - start > 0 else 1.0
-                        start = 0.2 + (start - min(start, 0.2)) * scale
-                        start, end = min(start, latest - 0.1), latest
-                        if end - start < 0.3:
-                            start = max(0.2, end - 0.3)
-                    line["start_s"], line["end_s"] = round(start, 3), round(end, 3)
-                dialogue.append(line)
-            beat = {**beat, "dialogue": dialogue}
+            long_lines = [line["text"] for line in beat["dialogue"] if float(line["end_s"]) > duration]
+            if long_lines:
+                raise HTTPException(409, {
+                    "code": "SHOT_DIALOGUE_LONGER_THAN_SHOT",
+                    "message": "这一镜的台词比镜头本身还长，无法按原速说完；请重新生成分镜或调长这一镜",
+                    "intent_id": camera.intent_id, "duration_s": duration, "lines": long_lines[:5],
+                })
+            dialogue = [dict(line) for line in beat["dialogue"]]
             cast = list(dict.fromkeys(name for entry in beat["characters"] for name in split_character_names(entry)))
             # A speaker the beat forgot to list is still a speaking character
             # of this shot (voice-only entities included); the ShotSpec
@@ -664,6 +678,10 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 binding = ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings))
                 bindings.append(binding)
             bindings = complete_character_bindings(db, project_id, cast, bindings)
+            # The place a shot declares gets its confirmed scene master the same
+            # way a character gets theirs; with none confirmed yet the shot still
+            # lands and asks the material stage for it.
+            bindings, scene_request = complete_location_binding(db, project_id, intent.get("location"), bindings)
             camera_fields = {
                 "composition": camera.composition,
                 "movement": camera.movement,
@@ -700,6 +718,18 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                         sound_rules = non_vocal_ambience_text(sound_rules)
                     if sound_rules:
                         sound_fields["ambience"] = sound_rules
+            # The boundary the director asked for, materialised.  The first shot
+            # of a plan continues the shot the previous unit of the same episode
+            # landed; with no earlier shot in the episode there is nothing to
+            # continue and the shot is a cut.
+            declared = intent.get("continuity") or None
+            source = created[-1] if created else predecessor
+            continuity = None
+            if declared and declared.get("mode") not in (None, "cut") and source:
+                continuity = {"mode": declared["mode"], "previous_shot_id": source}
+                note = str(declared.get("note") or "").strip()
+                if note:
+                    continuity["notes"] = note[:500]
             spec = ShotSpec(
                 story_beat=visual,
                 duration_target_s=intent["duration_s"],
@@ -710,24 +740,16 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 # 生成，它不再是落镜的前置条件。
                 required_asset_ids=[binding.asset_id for binding in bindings],
                 characters=cast,
-                dialogue=beat["dialogue"],
+                dialogue=dialogue,
                 locked_story_facts=script.payload_json["locked_story_facts"],
                 prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
                 prompt_style=script.payload_json.get("prompt_style"),
                 camera=camera_fields,
                 sound=sound_fields,
                 internal_cuts=internal_cuts,
-                **(
-                    {
-                        "continuity": {
-                            "mode": intent["continuity"]["mode"],
-                            "previous_shot_id": created[-1],
-                        }
-                    }
-                    if intent.get("continuity") and intent["continuity"].get("mode") not in (None, "cut")
-                    and created
-                    else {}
-                ),
+                requested_assets=[scene_request] if scene_request else [],
+                location_id=intent.get("location") or None,
+                **({"continuity": continuity} if continuity else {}),
             )
             # The H3 presentation numbers images in one sequence, so a static
             # workflow profile can only map the slots if the references arrive
@@ -1529,6 +1551,23 @@ def generate_storyboard(
                 "duration_s must be at most the max_shot_seconds stated in the context (the H3 hard "
                 "ceiling is 15 seconds). Split a longer beat into several shots or internal cuts, each "
                 "within the ceiling, with cut start times strictly increasing inside the shot."
+            )
+        if reason == "EDITORIAL_TIMING_CONFLICT":
+            # Without a cut table the director owns the durations and can
+            # lengthen a shot; with one they are fixed facts it must copy.
+            return (
+                " The previous answer placed a spoken line outside its shot. Every shot's duration_s must "
+                "contain the latest dialogue end_s of each beat it carries (its opening beat and every "
+                "cut's beat), with a short tail after the last word. When the context carries an "
+                "editorial_timing_plan its durations and cut offsets are fixed: copy every duration_s and "
+                "start_s exactly and address each beat exactly once. Without one, lengthen that shot "
+                "within the per-shot ceiling or move the beat into a shot that contains it, and never "
+                "shorten a line or move it onto another beat."
+            )
+        if reason == "SHOT_LOCATION_UNKNOWN":
+            return (
+                " The previous answer named a place the context does not list. Set each shot's location "
+                "to a name copied exactly from production_context.locations."
             )
         if reason == "CONTINUITY_CONFLICT":
             issues_list = failure.get("continuity_issues") or []

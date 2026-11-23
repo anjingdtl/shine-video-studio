@@ -17,6 +17,8 @@ from shine.h3.compiler import (
     COMPILER_VERSION,
     LEGACY_ANCHORED_COMPILER_VERSION,
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+    LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    LEGACY_TIMELINE_COMPILER_VERSION,
     REF_RULE_SHA256,
     REF_SECTION_ORDER,
     RULE_VERSION,
@@ -67,14 +69,21 @@ def _compiled_matches_request(compiled, request: RenderRequest) -> bool:
 def recompile_for_provenance(request: RenderRequest):
     """The single compiler replays a stored request at its pinned version.
 
-    ``1.3.0`` is historically ambiguous: the ledger holds both the pre-anchoring
-    and the anchored bytes under that one label (the silent-shot sanitizer, the
-    language-world anchor and the subject appearance wording changed without a
-    version bump).  The canonical replay is the anchored variant; when it does
-    not reproduce the frozen bytes exactly, the pre-anchoring replay is tried.
-    Acceptance requires an exact byte match to one of the two pinned historical
-    variants, so a tampered prompt matches neither and is still refused.  No
-    stored hash or snapshot is ever rewritten.
+    Two released versions are historically ambiguous, each because behaviour
+    changed under it without a version bump:
+
+    * ``1.3.0`` holds both the pre-anchoring and the anchored bytes (the
+      silent-shot sanitizer, the language-world anchor and the subject
+      appearance wording changed under it).
+    * ``1.4.0`` holds both the pre-sanitizing and the sanitizing bytes (the
+      dialogue sanitizer, the silent-shot style sanitizer and the silent-shot
+      environment sanitizer were added under it).
+
+    The canonical replay is the current behaviour of that version; when it does
+    not reproduce the frozen bytes exactly, the replay-only identity of the
+    earlier bytes is tried.  Acceptance requires an exact byte match to one of
+    the pinned historical variants, so a tampered prompt matches neither and is
+    still refused.  No stored hash or snapshot is ever rewritten.
 
     Returns ``(compiled, replayed_variant)``; ``replayed_variant`` is ``None``
     when the canonical pinned version matched, else the replay identity that did.
@@ -91,10 +100,14 @@ def recompile_for_provenance(request: RenderRequest):
     compiled = compiler.compile(compiler_version=pinned, **kwargs)
     if _compiled_matches_request(compiled, request):
         return compiled, None
-    if pinned == LEGACY_ANCHORED_COMPILER_VERSION:
-        replay = compiler.compile(compiler_version=LEGACY_PRE_ANCHOR_COMPILER_VERSION, **kwargs)
+    replay_variant = {
+        LEGACY_ANCHORED_COMPILER_VERSION: LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+        LEGACY_TIMELINE_COMPILER_VERSION: LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    }.get(pinned)
+    if replay_variant:
+        replay = compiler.compile(compiler_version=replay_variant, **kwargs)
         if _compiled_matches_request(replay, request):
-            return replay, LEGACY_PRE_ANCHOR_COMPILER_VERSION
+            return replay, replay_variant
     return compiled, None
 
 
@@ -463,8 +476,8 @@ class H3RulebookRegistry:
                     "rule_id": "SHINE_PROVENANCE",
                     "field": "compiler_version",
                     "message": (
-                        f"Stored 1.3.0 request replayed byte-exactly as {replayed_variant} "
-                        "(pre-anchoring historical variant); no stored hash was rewritten."
+                        f"Stored {request.compiler_version} request replayed byte-exactly as {replayed_variant} "
+                        "(the earlier historical variant of the same version); no stored hash was rewritten."
                     ),
                 }))
         except PromptCompilationError as exc:

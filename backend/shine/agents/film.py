@@ -578,11 +578,19 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                 raise ValueError("UNAPPROVED_ASSET_OR_UNKNOWN_BEAT")
             if starts != sorted(set(starts)) or starts[-1] >= shot.duration_s:
                 raise ValueError("EDITORIAL_TIMING_CONFLICT")
-            if timing or shot.cuts:
-                ends = starts[1:] + [shot.duration_s]
-                for beat_id, start, end in zip(beat_ids, starts, ends, strict=True):
-                    if any(line["end_s"] > end - start + 1e-6 for line in beats[beat_id].get("dialogue", [])):
-                        raise ValueError("EDITORIAL_TIMING_CONFLICT")
+            # Every spoken line must end inside the shot interval that performs
+            # it, whether or not the script carries a cut table.  Without this a
+            # shot shorter than its own line was accepted here and silently
+            # squeezed at landing; the conflict is named where the model can
+            # repair it.
+            ends = starts[1:] + [shot.duration_s]
+            for beat_id, start, end in zip(beat_ids, starts, ends, strict=True):
+                if any(line["end_s"] > end - start + 1e-6 for line in beats[beat_id].get("dialogue", [])):
+                    raise ValueError("EDITORIAL_TIMING_CONFLICT")
+            locations = context.get("locations")
+            if locations and shot.location not in {entry.get("name") for entry in locations if isinstance(entry, dict)}:
+                # A place nobody registered cannot be bound to a master later.
+                raise ValueError("SHOT_LOCATION_UNKNOWN")
             timeline.extend((beat_id, round(elapsed + start, 3))
                             for beat_id, start in zip(beat_ids, starts, strict=True))
             elapsed += shot.duration_s

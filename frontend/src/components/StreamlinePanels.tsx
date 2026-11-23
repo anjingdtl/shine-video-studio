@@ -49,7 +49,7 @@ import {
   type StyleDimension,
   type StyleVersion,
 } from '../api';
-import { styleFields } from '../constants';
+import { DEFAULT_MAX_SHOT_SECONDS, MAX_SHOT_SECONDS, MIN_SHOT_SECONDS, styleFields } from '../constants';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { assignLibraryVersion, searchLibraryForProject, type LibraryAsset, type LibraryVersion } from '../asset-center/api';
 import {
@@ -114,7 +114,9 @@ export function StoryboardBookPanel({
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
-  const [maxShotSeconds, setMaxShotSeconds] = useState(15);
+  // 新分镜书的单镜上限初始值：与后端 StoryboardBookBody 的默认值
+  // （schemas.DEFAULT_MAX_SHOT_SECONDS）同源同值，范围仍是 H3 的 4–15。
+  const [maxShotSeconds, setMaxShotSeconds] = useState(DEFAULT_MAX_SHOT_SECONDS);
   const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [dimensions, setDimensions] = useState<Style>(() => ({ ...STYLE_PRESETS[0].values }));
@@ -465,9 +467,10 @@ export function StoryboardBookPanel({
           onChange={(event) => setTargetSeconds(Math.max(8, Number(event.target.value) || 60))} />
       </label>
       <label>单镜秒数上限
-        <input type="number" min={4} max={15} step={0.5} value={maxShotSeconds}
+        <input type="number" min={MIN_SHOT_SECONDS} max={MAX_SHOT_SECONDS} step={0.5} value={maxShotSeconds}
           title="第③步镜头拆解里每个渲染镜头的时长上限；H3 单镜最短 4 秒，故可调范围 4–15 秒"
-          onChange={(event) => setMaxShotSeconds(Math.min(15, Math.max(4, Number(event.target.value) || 15)))} />
+          onChange={(event) => setMaxShotSeconds(Math.min(MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS,
+            Number(event.target.value) || DEFAULT_MAX_SHOT_SECONDS)))} />
       </label>
       <button type="button" className="btn-secondary" disabled={busy} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书
@@ -695,6 +698,9 @@ const REFUSAL_LABELS: Record<string, string> = {
   CHARACTER_MASTER_BINDING_REQUIRED: '人物还没有绑定已确认的主素材',
   VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE: '画面描述里混入了中文，需要按提示词语言重写',
   DIALOGUE_NOT_IN_USER_SCRIPT: '对白不是剧本原文，需要按原文重写',
+  SHOT_LOCATION_UNKNOWN: '镜头的地点不在已登记的场景里',
+  SHOT_DIALOGUE_LONGER_THAN_SHOT: '这一镜的台词比镜头还长，按原速说不完',
+  SHOT_CONTINUITY_PREDECESSOR_UNKNOWN: '接拍依赖的上一镜不存在或不属于本作品',
 };
 
 function refusalReason(rejection: { code?: string; rejection_reason_code?: string;

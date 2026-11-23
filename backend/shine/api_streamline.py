@@ -18,7 +18,7 @@ from shine.api_common import DBSession
 from shine.api_operator import Operator
 from shine.director import streamline
 from shine.models import AgentArtifact, utcnow
-from shine.schemas import APIModel
+from shine.schemas import DEFAULT_MAX_SHOT_SECONDS, APIModel
 from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["director streamline"])
@@ -132,7 +132,11 @@ class StoryboardBookBody(APIModel):
     episode_count: int = Field(ge=1, le=200)
     target_seconds: int = Field(default=60, ge=8, le=3600)
     tolerance_seconds: int = Field(default=15, ge=0, le=900)
-    max_shot_seconds: float | None = Field(default=None, ge=4.0, le=15.0)
+    # The person's own per-shot ceiling.  A book that does not name one starts
+    # from the same default the workbench shows; an explicit null keeps the
+    # style's current value.  The range stays H3's own 4-15, so a style frozen
+    # with any value in it still loads.
+    max_shot_seconds: float | None = Field(default=DEFAULT_MAX_SHOT_SECONDS, ge=4.0, le=15.0)
 
 
 @router.get("/projects/{project_id}/director/storyboard-book")

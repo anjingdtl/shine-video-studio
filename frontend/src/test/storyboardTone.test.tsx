@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, expect, it, vi } from 'vitest';
 import { StageRailProvider } from '../components/StageRail';
 import { StoryboardBookPanel } from '../components/StreamlinePanels';
+import { DEFAULT_MAX_SHOT_SECONDS } from '../constants';
 import { StudioStub, jsonResponse } from './studioStub';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -188,7 +189,17 @@ it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注�
   const rail = screen.getByLabelText('本阶段操作');
   await user.click(within(rail).getByRole('button', { name: '生成分镜书' }));
   await waitFor(() => expect(bodies).toHaveLength(1));
-  expect(bodies[0]).toMatchObject({ episode_count: 3, target_seconds: 45, tolerance_seconds: 11, max_shot_seconds: 15 });
+  // A new book starts from the default of the person's own per-shot ceiling.
+  // The number is the backend's schemas.DEFAULT_MAX_SHOT_SECONDS: one setting,
+  // the same first value on both sides.
+  expect(DEFAULT_MAX_SHOT_SECONDS).toBe(10);
+  expect(bodies[0]).toMatchObject({
+    episode_count: 3, target_seconds: 45, tolerance_seconds: 11, max_shot_seconds: DEFAULT_MAX_SHOT_SECONDS,
+  });
+  expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
+  // The range of the setting itself is H3's own: a person may still choose 15.
+  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('max', '15');
+  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('min', '4');
   stub.restore();
 });
 

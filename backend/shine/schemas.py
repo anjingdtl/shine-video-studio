@@ -70,6 +70,13 @@ STYLE_BIBLE_FIELDS = (
     "sound_performance",
 )
 
+#: The per-shot ceiling a NEW storyboard book starts from.  It is only the first
+#: value of the person's own ``StyleBible.max_shot_seconds`` setting, which stays
+#: the one fact the crew prompt, the editorial grouping and the landed-plan
+#: verdict all read; nothing else caps a shot.  A style frozen without the
+#: setting keeps H3's own 15-second ceiling exactly as before.
+DEFAULT_MAX_SHOT_SECONDS = 10.0
+
 
 class StyleBible(APIModel):
     # Omit unset settings to keep the canonical hash of older snapshots.
@@ -214,6 +221,87 @@ class InternalCut(APIModel):
     visual_description: str = Field(min_length=1, max_length=1000)
 
 
+class FrameZone(StrEnum):
+    """Where a performer stands in the frame: horizontal side by depth plane."""
+
+    LEFT_FG = "left_fg"
+    CENTER_FG = "center_fg"
+    RIGHT_FG = "right_fg"
+    LEFT_MG = "left_mg"
+    CENTER_MG = "center_mg"
+    RIGHT_MG = "right_mg"
+    LEFT_BG = "left_bg"
+    CENTER_BG = "center_bg"
+    RIGHT_BG = "right_bg"
+
+
+class Facing(StrEnum):
+    """Which way a performer faces, in screen terms (the 180-degree axis)."""
+
+    FACING_CAMERA = "facing_camera"
+    FACING_LEFT = "facing_left"
+    FACING_RIGHT = "facing_right"
+    THREE_QUARTER_LEFT = "three_quarter_left"
+    THREE_QUARTER_RIGHT = "three_quarter_right"
+    BACK_TO_CAMERA = "back_to_camera"
+
+
+class TransitionMotivation(StrEnum):
+    """Why a shot joins the one before it the way it does (V4 plan, Layer 3).
+
+    The continuity engine decides the boundary from this dramatic reason; the
+    reason is frozen with the shot so a retake or a review reads the same fact.
+    """
+
+    CONTINUOUS_ACTION = "continuous_action"
+    EMOTIONAL_HOLD = "emotional_hold"
+    MATCH_ON_ACTION = "match_on_action"
+    SHOT_REVERSE_SHOT = "shot_reverse_shot"
+    EYELINE_MATCH = "eyeline_match"
+    ESTABLISHING_RESET = "establishing_reset"
+    TIME_OR_SPACE_JUMP = "time_or_space_jump"
+
+
+class CharacterPlacement(APIModel):
+    """One performer's place in the frame at the start of the shot."""
+
+    character: str = Field(min_length=1, max_length=80)
+    zone: FrameZone
+    facing: Facing
+    posture: str = Field(default="", max_length=200)
+    props: list[str] = Field(default_factory=list, max_length=6)
+
+
+class ShotBlocking(APIModel):
+    """The spatial blocking of one shot: the axis and every placement on it."""
+
+    axis: str = Field(default="", max_length=200)
+    placements: list[CharacterPlacement] = Field(default_factory=list, max_length=12)
+
+
+class ShotEnvironment(APIModel):
+    """The physical set of one shot: depth, practical light, moving air."""
+
+    depth: str = Field(default="", max_length=600)
+    light: str = Field(default="", max_length=600)
+    micro_motion: str = Field(default="", max_length=600)
+
+
+class TemporalBeat(APIModel):
+    """One window of the shot's performance: what the body does and the face shows.
+
+    ``start_s``/``end_s`` are measured from the render segment's start.  The
+    compiler weaves the windows into second-by-second prose; a window never
+    carries a spoken line, because speech is frozen in ``ShotSpec.dialogue``.
+    """
+
+    start_s: float = Field(ge=0, allow_inf_nan=False)
+    end_s: float = Field(gt=0, allow_inf_nan=False)
+    action: str = Field(min_length=1, max_length=600)
+    expression: str = Field(default="", max_length=400)
+    camera: str = Field(default="", max_length=400)
+
+
 class ShotSpec(APIModel):
     schema_version: Literal["1.0"] = "1.0"
     story_beat: str = Field(min_length=1, max_length=2000)
@@ -233,6 +321,17 @@ class ShotSpec(APIModel):
     prompt_style: StyleBible | None = None
     requested_assets: list[RequestedAsset] = Field(default_factory=list, max_length=12)
     internal_cuts: list[InternalCut] = Field(default_factory=list, max_length=19)
+    # V4 rich-timeline fields.  Every one is optional and omitted while empty,
+    # so a shot that predates them keeps its byte-identical spec and hash.
+    #: The registered location this shot is staged in (binding key, never prose).
+    location_id: str | None = Field(default=None, max_length=80)
+    transition_motivation: TransitionMotivation | None = None
+    blocking: ShotBlocking | None = None
+    environment: ShotEnvironment | None = None
+    timeline: list[TemporalBeat] = Field(default_factory=list, max_length=8)
+    #: The picture the shot opens on and settles on, as English prose.
+    entry_state: str = Field(default="", max_length=600)
+    exit_state: str = Field(default="", max_length=600)
 
     @model_serializer(mode="wrap")
     def _omit_empty_optional_lists(self, handler):
@@ -245,6 +344,14 @@ class ShotSpec(APIModel):
                 data.pop("requested_assets", None)
             if not data.get("internal_cuts"):
                 data.pop("internal_cuts", None)
+            for optional in ("location_id", "transition_motivation", "blocking", "environment"):
+                if not data.get(optional):
+                    data.pop(optional, None)
+            if not data.get("timeline"):
+                data.pop("timeline", None)
+            for prose in ("entry_state", "exit_state"):
+                if not (data.get(prose) or "").strip():
+                    data.pop(prose, None)
         return data
 
     @model_validator(mode="after")
@@ -257,6 +364,18 @@ class ShotSpec(APIModel):
             if cut.start_s <= previous or cut.start_s >= self.duration_target_s:
                 raise ValueError("internal cut times must increase inside the target shot duration")
             previous = cut.start_s
+        # Performance windows lie inside the segment and never overlap: two
+        # windows at the same moment would tell H3 two different actions.
+        previous = 0.0
+        for beat in self.timeline:
+            outside = beat.end_s > self.duration_target_s + 1e-9 or beat.start_s >= beat.end_s
+            if beat.start_s < previous - 1e-9 or outside:
+                raise ValueError("timeline windows must increase inside the target shot duration")
+            previous = beat.end_s
+        if self.blocking is not None and any(
+            placement.character not in self.characters for placement in self.blocking.placements
+        ):
+            raise ValueError("every placed character must be listed in characters")
         # A chorus line names several speakers in one field ("S1, S2"); every
         # person it names has to be listed in the shot's characters.
         from shine.asset_identity import split_character_names

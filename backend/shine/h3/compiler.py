@@ -17,7 +17,9 @@ from shine.schemas import (
     CompiledPrompt,
     ContinuityMode,
     DialogueLine,
+    Facing,
     FrameRole,
+    FrameZone,
     GenerationMode,
     ReferenceManifestItem,
     ReferenceUse,
@@ -46,16 +48,35 @@ LEGACY_SOUND_COMPILER_VERSION = "shine-h3-compiler/1.2.3"
 # bytes; ``1.3.0-original`` is a replay-only identity that reproduces the exact
 # pre-anchoring bytes.  The single provenance verifier falls back to it for stored
 # ``1.3.0`` requests whose bytes predate the anchor.  Neither historical variant is
-# ever rewritten.  All new prompt behaviour lands in 1.4.0.
+# ever rewritten.  New prompt behaviour never lands in a released version
+# again: it goes into the next one, so a stored request always replays.
 LEGACY_ANCHORED_COMPILER_VERSION = "shine-h3-compiler/1.3.0"
 LEGACY_PRE_ANCHOR_COMPILER_VERSION = "shine-h3-compiler/1.3.0-original"
-COMPILER_VERSION = "shine-h3-compiler/1.4.0"
+# 1.4.0 is the native in-shot timeline: each internal cut becomes its own
+# "[Shot N] At MM:SS.mmm" block, the summary names the real use of every
+# reference, and the camera is written as prose.
+LEGACY_TIMELINE_COMPILER_VERSION = "shine-h3-compiler/1.4.0"
+# The same drift happened again under 1.4.0: commit 40042d2 (2026-11-22) added
+# the dialogue sanitizer, the silent-shot style sanitizer and the silent-shot
+# environment sanitizer to 1.4.0 *without* a version bump.  Requests frozen
+# before it (16 real 1.4.0 requests in the ledger, 6 of them touched by the
+# sanitizers) no longer replayed.  As with 1.3.0, ``1.4.0`` keeps the current
+# (sanitizing) bytes and ``1.4.0-original`` is a replay-only identity that
+# reproduces the pre-sanitizing bytes; neither is ever rewritten.
+LEGACY_PRE_SANITIZE_COMPILER_VERSION = "shine-h3-compiler/1.4.0-original"
+# 2.0.0 is the thin shell over a rich timeline: the reference sections bind
+# each label in one sentence, the frozen-style header and the other meta
+# instructions are gone, the second-by-second performance is prose, and every
+# spoken line sits inside the [Shot N] block that performs it.
+COMPILER_VERSION = "shine-h3-compiler/2.0.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
     LEGACY_SOUND_COMPILER_VERSION,
     LEGACY_ANCHORED_COMPILER_VERSION,
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+    LEGACY_TIMELINE_COMPILER_VERSION,
+    LEGACY_PRE_SANITIZE_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -65,6 +86,13 @@ LEGACY_SEMANTIC_VERSIONS = (
     LEGACY_SOUND_COMPILER_VERSION,
     LEGACY_ANCHORED_COMPILER_VERSION,
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
+)
+#: Versions that keep the pre-2.0.0 shell (style-bible header, legal-form
+#: reference sections, all spoken lines inside the [Shot 1] block).
+LEGACY_SHELL_VERSIONS = (
+    *LEGACY_SEMANTIC_VERSIONS,
+    LEGACY_TIMELINE_COMPILER_VERSION,
+    LEGACY_PRE_SANITIZE_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -121,6 +149,12 @@ class _Context:
     pre_anchor: bool = False
     #: Keeps the pre-1.4.0 summary/retention/camera/shot-text behaviour.
     legacy_semantics: bool = False
+    #: Replay-only: the pre-sanitizing 1.4.0 bytes (dialogue text, the silent
+    #: shot's style dimensions and its environment are emitted unsanitized).
+    pre_sanitize: bool = False
+    #: 2.0.0: thin reference shell, performance timeline, dialogue inside the
+    #: [Shot N] block that speaks it.
+    thin_shell: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -132,6 +166,12 @@ def _language_tag(text: str, project_language: str) -> str:
     return "English"
 
 
+def _clause(text: str) -> str:
+    """One prose clause as a sentence: no doubled full stop when the value has one."""
+    stripped = str(text or "").strip().rstrip(".")
+    return stripped + "." if stripped else ""
+
+
 def _style_sentences(
     style: StyleBible,
     style_version_id: str,
@@ -139,6 +179,8 @@ def _style_sentences(
     *,
     legacy_sound: bool = False,
     legacy_semantics: bool = False,
+    pre_sanitize: bool = False,
+    thin_shell: bool = False,
 ) -> str:
     if include_sound:
         sound_clause = f"Performance and sound: {style.sound_performance}."
@@ -149,18 +191,32 @@ def _style_sentences(
             "Performance and sound: this shot is performed without dialogue; "
             "its soundtrack is entirely non-vocal."
         )
+    unsanitized_style = include_sound or legacy_semantics or pre_sanitize
     blocking = (
         style.shot_blocking
-        if (include_sound or legacy_semantics)
+        if unsanitized_style
         else (sanitize_non_vocal_style_text(style.shot_blocking) or style.shot_blocking)
     )
     rhythm = (
         style.editing_rhythm
-        if (include_sound or legacy_semantics)
+        if unsanitized_style
         else (sanitize_non_vocal_style_text(style.editing_rhythm) or style.editing_rhythm)
     )
     film_clause = film_type_sentence(style.film_type)
     film_prefix = f"{film_clause} " if film_clause else ""
+    if thin_shell:
+        # The seven dimensions are the creative content and stay.  The header
+        # that named the Style Bible version is a meta instruction: the request
+        # already pins ``style_version_id`` and the shot already carries it, so
+        # the UUID only spent the text encoder's attention.
+        if include_sound:
+            sound_clause = f"Performance and sound: {_clause(style.sound_performance)}"
+        return (
+            f"{film_prefix}Photography language: {_clause(style.photography_language)} "
+            f"Blocking: {_clause(blocking)} Color palette: {_clause(style.color_palette)} "
+            f"Lighting and tone: {_clause(style.lighting_tone)} Lens and texture: {_clause(style.lens_texture)} "
+            f"Editing rhythm: {_clause(rhythm)} {sound_clause}"
+        )
     return (
         "Visual style constraints from the frozen Style Bible "
         f"(version {style_version_id}). {film_prefix}Photography language: {style.photography_language}. "
@@ -417,7 +473,10 @@ def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     else:
         subject = "The speaker"
     speaker = ", ".join(ctx.speaker_labels[name] for name in speakers)
-    spoken_line = line.text if ctx.legacy_semantics else (sanitize_h3_dialogue_text(line.text) or line.text)
+    spoken_line = (
+        line.text if (ctx.legacy_semantics or ctx.pre_sanitize)
+        else (sanitize_h3_dialogue_text(line.text) or line.text)
+    )
     return (
         f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}) says: "
         f"<d>[{language}] {spoken_line}</d>"
@@ -471,7 +530,7 @@ def _shot_text(ctx: _Context) -> str:
     parts: list[str] = ["[Shot 1] " + _style_sentences(
         _prompt_style(ctx.spec, ctx.style, legacy_style=ctx.legacy_style), ctx.spec.style_version_id,
         include_sound=bool(ctx.spec.dialogue), legacy_sound=ctx.legacy_sound,
-        legacy_semantics=ctx.legacy_semantics,
+        legacy_semantics=ctx.legacy_semantics, pre_sanitize=ctx.pre_sanitize,
     )]
     cast = _cast_order(ctx)
     if cast:
@@ -498,7 +557,7 @@ def _shot_text(ctx: _Context) -> str:
     if camera:
         parts.append(camera)
     environment = ctx.spec.sound.get("environment")
-    if environment and not ctx.spec.dialogue and not ctx.legacy_semantics:
+    if environment and not ctx.spec.dialogue and not ctx.legacy_semantics and not ctx.pre_sanitize:
         environment = non_vocal_ambience_text(environment)
     if environment:
         parts.append(f"The scene is set in {environment}.")
@@ -524,38 +583,7 @@ def _shot_text(ctx: _Context) -> str:
         parts.append(narrator_sentence())
     for line in sorted(ctx.spec.dialogue, key=lambda item: item.start_s):
         parts.append(_dialogue_sentence(ctx, line))
-    continuity = ctx.spec.continuity
-    continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
-    if continuation:
-        if continuity.mode == ContinuityMode.LAST_FRAME:
-            parts.append(f"Use {continuation.label}, the preceding shot's final frame, as a soft visual reference "
-                         "for the opening composition.")
-        elif continuity.mode == ContinuityMode.HARD_FRAME_ANCHOR:
-            parts.append(f"Use {continuation.label}, the preceding shot's final frame, as the opening frame.")
-        elif continuity.mode == ContinuityMode.VIDEO_REFERENCE:
-            parts.append(f"Continue the motion and framing in {continuation.label}, the source shot's video.")
-        elif continuity.mode == ContinuityMode.AUDIO_REFERENCE:
-            parts.append(
-                f"Continue the sound bed in {continuation.label}, the source shot's audio."
-                if ctx.legacy_audio else
-                f"Use {continuation.label} for non-vocal ambience only."
-            )
-    elif continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
-        parts.append(
-            f"The opening composition continues seamlessly from the approved final frame of shot "
-            f"{continuity.previous_shot_id}."
-        )
-    elif continuity.mode == ContinuityMode.VIDEO_REFERENCE and continuity.previous_shot_id:
-        parts.append(
-            f"The shot continues the motion and framing of the approved video from shot "
-            f"{continuity.previous_shot_id}."
-        )
-    elif continuity.mode == ContinuityMode.AUDIO_REFERENCE and continuity.previous_shot_id:
-        parts.append(
-            "The audio bed continues uninterrupted from the previous approved shot."
-            if ctx.legacy_audio else
-            "Only non-vocal ambience continues from the previous approved shot."
-        )
+    parts.extend(_continuity_sentences(ctx))
     base = " ".join(part.strip() for part in parts if part.strip())
     # Plan P0-C: the official native in-shot timeline.  Each internal cut becomes
     # its own [Shot N] At MM:SS.mmm block instead of a flattened "hard cut"
@@ -569,6 +597,202 @@ def _shot_text(ctx: _Context) -> str:
             )
         return "\n".join(blocks)
     return base
+
+
+def _continuity_sentences(ctx: _Context) -> list[str]:
+    """How the shot joins the one before it, from the derivative it was given.
+
+    Both the historical and the 2.0.0 shot text read this one list: the
+    sentences were validated on the real renderer and are not restyled.
+    """
+    continuity = ctx.spec.continuity
+    continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
+    if continuation:
+        if continuity.mode == ContinuityMode.LAST_FRAME:
+            return [f"Use {continuation.label}, the preceding shot's final frame, as a soft visual reference "
+                    "for the opening composition."]
+        if continuity.mode == ContinuityMode.HARD_FRAME_ANCHOR:
+            return [f"Use {continuation.label}, the preceding shot's final frame, as the opening frame."]
+        if continuity.mode == ContinuityMode.VIDEO_REFERENCE:
+            return [f"Continue the motion and framing in {continuation.label}, the source shot's video."]
+        if continuity.mode == ContinuityMode.AUDIO_REFERENCE:
+            return [
+                f"Continue the sound bed in {continuation.label}, the source shot's audio."
+                if ctx.legacy_audio else
+                f"Use {continuation.label} for non-vocal ambience only."
+            ]
+        return []
+    if continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
+        return [
+            f"The opening composition continues seamlessly from the approved final frame of shot "
+            f"{continuity.previous_shot_id}."
+        ]
+    if continuity.mode == ContinuityMode.VIDEO_REFERENCE and continuity.previous_shot_id:
+        return [
+            f"The shot continues the motion and framing of the approved video from shot "
+            f"{continuity.previous_shot_id}."
+        ]
+    if continuity.mode == ContinuityMode.AUDIO_REFERENCE and continuity.previous_shot_id:
+        return [
+            "The audio bed continues uninterrupted from the previous approved shot."
+            if ctx.legacy_audio else
+            "Only non-vocal ambience continues from the previous approved shot."
+        ]
+    return []
+
+
+def _performance_sentence(ctx: _Context) -> str:
+    """The positive performance contract of the shot (never a list of forbidden acts)."""
+    if ctx.legacy_audio:
+        return ""
+    if ctx.spec.dialogue:
+        return (
+            "Perform speech only for the timed dialogue blocks below. Between those lines, "
+            "use silent reactions and non-vocal scene sounds."
+            if ctx.legacy_sound else
+            "Deliver only the timed dialogue blocks below, exactly as written; between those "
+            "lines the performers react silently and the scene sound stays non-vocal."
+        )
+    return (
+        "Show reactions through gaze, gestures and movement with no speaking or mouthing words. "
+        "Use only non-vocal scene sounds."
+        if ctx.legacy_sound else
+        "Performers act with closed mouths, expressing reactions through gaze, gestures and "
+        "movement; the soundtrack stays non-vocal."
+    )
+
+
+_FACING_PHRASE = {
+    Facing.FACING_CAMERA: "facing the camera",
+    Facing.FACING_LEFT: "facing screen-left",
+    Facing.FACING_RIGHT: "facing screen-right",
+    Facing.THREE_QUARTER_LEFT: "turned three-quarter toward screen-left",
+    Facing.THREE_QUARTER_RIGHT: "turned three-quarter toward screen-right",
+    Facing.BACK_TO_CAMERA: "back to the camera",
+}
+_DEPTH_PLANE = {"fg": "foreground", "mg": "midground", "bg": "background"}
+
+
+def _zone_phrase(zone: FrameZone) -> str:
+    side, _, plane = zone.value.partition("_")
+    return f"{side} {_DEPTH_PLANE.get(plane, plane)}"
+
+
+def _placement_sentence(ctx: _Context) -> str:
+    """Where every placed performer stands, anchored in the shot's first action sentence."""
+    blocking = ctx.spec.blocking
+    if blocking is None:
+        return ""
+    placements: list[str] = []
+    for placement in blocking.placements:
+        label = _label_for_character(placement.character, ctx)
+        if not label:
+            continue
+        phrase = f"{label} is in the {_zone_phrase(placement.zone)}, {_FACING_PHRASE[placement.facing]}"
+        if placement.posture.strip():
+            phrase += f", {placement.posture.strip().rstrip('.')}"
+        if placement.props:
+            phrase += ", holding " + ", ".join(prop.strip().rstrip(".") for prop in placement.props)
+        placements.append(phrase)
+    if not placements:
+        return ""
+    return "In frame: " + "; ".join(placements) + "."
+
+
+def _timeline_sentence(beats) -> str:
+    """The performance as second-by-second prose: action, then the face, then the camera."""
+    windows: list[str] = []
+    for beat in beats:
+        window = f"From {beat.start_s:.1f}s to {beat.end_s:.1f}s, {beat.action.strip().rstrip('.')}"
+        if beat.expression.strip():
+            window += f"; {beat.expression.strip().rstrip('.')}."
+        else:
+            window += "."
+        if beat.camera.strip():
+            window += f" {beat.camera.strip().rstrip('.')}."
+        windows.append(window)
+    return " ".join(windows)
+
+
+def _environment_sentences(ctx: _Context) -> list[str]:
+    environment = ctx.spec.environment
+    if environment is None:
+        return []
+    sentences = []
+    for label, text in (
+        ("Space", environment.depth), ("Light", environment.light), ("Air", environment.micro_motion),
+    ):
+        if text.strip():
+            sentences.append(f"{label}: {_clause(text)}")
+    return sentences
+
+
+def _shot_text_thin(ctx: _Context) -> str:
+    """The 2.0.0 shot text: one shell, a rich timeline, every line in its own block.
+
+    A shot with internal cuts is one ``[Shot N]`` block per sub-shot.  A spoken
+    line belongs to the sub-shot that performs it, so each block carries the
+    lines and performance windows that start inside it; up to 1.4.0 every line
+    sat in the ``[Shot 1]`` block whatever its timestamp said.
+    """
+    spec = ctx.spec
+    cuts = list(spec.internal_cuts)
+    blocks: list[list[str]] = [[] for _ in range(len(cuts) + 1)]
+    for index, cut in enumerate(cuts, start=1):
+        blocks[index].append(
+            f"[Shot {index + 1}] At {_format_timestamp(cut.start_s)}, {cut.visual_description.strip()}"
+        )
+
+    def block_of(seconds: float) -> int:
+        # The sub-shot that performs a moment: the last cut at or before it.
+        return sum(1 for cut in cuts if cut.start_s <= seconds)
+
+    blocks[0].append("[Shot 1] " + _style_sentences(
+        _prompt_style(spec, ctx.style, legacy_style=ctx.legacy_style), spec.style_version_id,
+        include_sound=bool(spec.dialogue), legacy_sound=ctx.legacy_sound,
+        legacy_semantics=ctx.legacy_semantics, pre_sanitize=ctx.pre_sanitize, thin_shell=True,
+    ))
+    cast = _cast_order(ctx)
+    if cast:
+        blocks[0].append(cast)
+    blocks[0].append(_performance_sentence(ctx))
+    for sentence in (
+        _placement_sentence(ctx),
+        f"It opens on {_clause(spec.entry_state)}" if spec.entry_state.strip() else "",
+        spec.story_beat.strip(),
+        _camera_narrative(spec),
+    ):
+        if sentence:
+            blocks[0].append(sentence)
+    for beat in sorted(spec.timeline, key=lambda item: item.start_s):
+        blocks[block_of(beat.start_s)].append(_timeline_sentence([beat]))
+    environment = spec.sound.get("environment")
+    if environment and not spec.dialogue:
+        environment = non_vocal_ambience_text(environment)
+    if environment:
+        blocks[0].append(f"The scene is set in {environment}.")
+    blocks[0].extend(_environment_sentences(ctx))
+    facts = spec.locked_story_facts
+    if any(re.search(r"[\u3400-\u9fff]", fact) for fact in facts):
+        translated = spec.prompt_story_facts
+        if (len(translated) != len(facts) or any(not value.strip() or re.search(r"[\u3400-\u9fff]", value)
+                                                  for value in translated)):
+            raise PromptCompilationError("H3_LOCKED_FACT_TRANSLATION_REQUIRED",
+                                         "Chinese locked facts require corresponding English prompt translations")
+        facts = translated
+    if facts:
+        blocks[0].append(
+            "Background story facts, for the picture only and never heard: "
+            + " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
+        )
+    if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
+        blocks[0].append(narrator_sentence())
+    for line in sorted(spec.dialogue, key=lambda item: item.start_s):
+        blocks[block_of(line.start_s)].append(_dialogue_sentence(ctx, line))
+    blocks[0].extend(_continuity_sentences(ctx))
+    if spec.exit_state.strip():
+        blocks[-1].append(f"The shot settles on {_clause(spec.exit_state)}")
+    return "\n".join(" ".join(part.strip() for part in block if part.strip()) for block in blocks)
 
 
 _DIALOGUE_AMBIENCE_PREP_RE = re.compile(
@@ -772,6 +996,16 @@ def _subject_definitions(ctx: _Context) -> str:
             identity = f"the {_ordinal(subject_index)} listed performer"
             if role:
                 identity += f" ({role})"
+            if ctx.thin_shell:
+                # One binding sentence.  The reference image already fixes the
+                # face and the costume, so the prompt spends no words
+                # re-describing appearance that could compete with it.
+                lines.append(
+                    f"{item.label} is {identity}, shown in <Picture {positions[id(item)]}>; "
+                    "keep that exact reference appearance throughout."
+                )
+                subject_index += 1
+                continue
             appearance_note = (
                 ", build, and reference appearance"
                 if not ctx.legacy_sound and not ctx.pre_anchor
@@ -787,7 +1021,10 @@ def _subject_definitions(ctx: _Context) -> str:
             frame = item.frame_role.value if item.frame_role else "composition"
             lines.append(f"{item.label} is the {frame} reference for [Shot 1].")
         elif item.use_as == ReferenceUse.VIDEO:
-            lines.append(f"{item.label} is an approved video reference for motion, framing, or continuation.")
+            if ctx.thin_shell:
+                lines.append(f"{item.label} is a reference for motion, framing or continuation.")
+            else:
+                lines.append(f"{item.label} is an approved video reference for motion, framing, or continuation.")
         else:
             if ctx.legacy_audio:
                 lines.append(f"{item.label} is an approved audio reference.")
@@ -816,6 +1053,9 @@ def _cast_order(ctx: _Context) -> str:
     subjects = [item for item in ctx.manifest if item.use_as == ReferenceUse.SUBJECT]
     if len(subjects) < 2:
         return ""
+    if ctx.thin_shell:
+        cast = ", ".join(f"{item.label} ({_ordinal(index)})" for index, item in enumerate(subjects))
+        return f"Cast order: {cast}; each person keeps exactly their own reference identity."
     cast = ", ".join(
         f"{item.label} ({_ordinal(index)})" for index, item in enumerate(subjects)
     )
@@ -860,13 +1100,24 @@ def _summary(ctx: _Context) -> str:
     labels = ", ".join(item.label for item in ctx.manifest)
     medium = ""
     if not ctx.legacy_style and ctx.style.film_type is not None:
-        medium = (
-            f"{film_type_sentence(ctx.style.film_type)} "
-            "Keep this medium through every frame and internal cut. "
-            "Use visual references for the identities, composition or motion assigned below. "
-        )
-        if not any(item.frame_role for item in ctx.manifest):
-            medium += "Render those features in the frozen medium even when the source uses another medium. "
+        if ctx.thin_shell:
+            medium = f"{film_type_sentence(ctx.style.film_type)} Keep this medium through every frame and internal cut."
+            if not any(item.frame_role for item in ctx.manifest):
+                medium += (" Render the references' identities, composition or motion in that frozen medium "
+                           "even when the source uses another medium.")
+            medium += " "
+        else:
+            medium = (
+                f"{film_type_sentence(ctx.style.film_type)} "
+                "Keep this medium through every frame and internal cut. "
+                "Use visual references for the identities, composition or motion assigned below. "
+            )
+            if not any(item.frame_role for item in ctx.manifest):
+                medium += "Render those features in the frozen medium even when the source uses another medium. "
+    if ctx.thin_shell:
+        # The task types and the labels are the contract; the sentence that
+        # said the video "adapts the frozen story beat" told the model nothing.
+        return f"[{' + '.join(task_types)}] {medium}Reference labels used: {labels}."
     return (
         f"[{' + '.join(task_types)}] The target video adapts the frozen story beat within the locked Style Bible. "
         f"{medium}Reference labels used: {labels}."
@@ -879,6 +1130,10 @@ def _retention(ctx: _Context) -> str:
     for item in ctx.manifest:
         marker = "reference" if item.use_as == ReferenceUse.AUDIO else "fully_preserved"
         if item.use_as == ReferenceUse.SUBJECT:
+            if ctx.thin_shell:
+                lines.append(f"{item.label}: {marker} - the same person in every frame.")
+                subject_index += 1
+                continue
             lines.append(
                 f"{item.label} (the {_ordinal(subject_index)} listed performer in [Shot 1]): "
                 f"{marker} - this exact face, hairstyle and build are retained and are never "
@@ -894,10 +1149,16 @@ def _retention(ctx: _Context) -> str:
                     "the approved frame composition is retained."
                 )
             else:
-                lines.append(
-                    f"{item.label} ([Shot 1] composition reference): partially_preserved - "
-                    "the approved composition and scene layout guide the frame while the action proceeds."
-                )
+                if ctx.thin_shell:
+                    lines.append(
+                        f"{item.label} ([Shot 1] composition reference): partially_preserved - "
+                        "guides the frame while the action proceeds."
+                    )
+                else:
+                    lines.append(
+                        f"{item.label} ([Shot 1] composition reference): partially_preserved - "
+                        "the approved composition and scene layout guide the frame while the action proceeds."
+                    )
         elif item.use_as == ReferenceUse.VIDEO:
             visual_track = "" if ctx.legacy_audio else " Use the visual track only."
             if ctx.legacy_semantics:
@@ -909,6 +1170,11 @@ def _retention(ctx: _Context) -> str:
                 lines.append(
                     f"{item.label} (continuation structure): fully_preserved - "
                     "the approved motion and framing are retained." + visual_track
+                )
+            elif ctx.thin_shell:
+                lines.append(
+                    f"{item.label} (motion and pacing reference): attribute_transfer - "
+                    "the referenced camera motion and rhythm transfer to the new subjects." + visual_track
                 )
             else:
                 lines.append(
@@ -958,6 +1224,8 @@ class H3PromptCompiler:
         )
         pre_anchor = compiler_version == LEGACY_PRE_ANCHOR_COMPILER_VERSION
         legacy_semantics = compiler_version in LEGACY_SEMANTIC_VERSIONS
+        pre_sanitize = compiler_version == LEGACY_PRE_SANITIZE_COMPILER_VERSION
+        thin_shell = compiler_version not in LEGACY_SHELL_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -983,6 +1251,8 @@ class H3PromptCompiler:
             legacy_sound=legacy_sound,
             pre_anchor=pre_anchor,
             legacy_semantics=legacy_semantics,
+            pre_sanitize=pre_sanitize,
+            thin_shell=thin_shell,
         )
         if language_fallback:
             ctx.warnings.append(
@@ -1000,7 +1270,7 @@ class H3PromptCompiler:
             raise PromptCompilationError("H3_MODE_REFERENCE_MISMATCH", "Ref2VA requires reference files")
 
         sections: dict[str, str] = {}
-        shots = _shot_text(ctx)
+        shots = _shot_text_thin(ctx) if thin_shell else _shot_text(ctx)
         if mode in {GenerationMode.T2VA, GenerationMode.I2VA, GenerationMode.FL2VA, GenerationMode.L2VA}:
             sections["integrated_multimodal_description"] = shots
             sections["overall_soundscape"] = _soundscape(

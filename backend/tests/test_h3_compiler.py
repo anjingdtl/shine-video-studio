@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from shine.h3.compiler import H3PromptCompiler, PromptCompilationError
+from shine.h3.compiler import (
+    LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    LEGACY_TIMELINE_COMPILER_VERSION,
+    H3PromptCompiler,
+    PromptCompilationError,
+)
 from shine.schemas import (
     FilmType,
     FrameRole,
@@ -72,10 +77,10 @@ def spec(**overrides) -> ShotSpec:
     return ShotSpec(**payload)
 
 
-def compile_prompt(manifest, *, shot=None, mode=None, project_language="Chinese"):
+def compile_prompt(manifest, *, shot=None, mode=None, project_language="Chinese", style=STYLE):
     return H3PromptCompiler().compile(
         spec=shot or spec(),
-        style=STYLE,
+        style=style,
         manifest=manifest,
         project_language=project_language,
         mode_hint=mode,
@@ -91,7 +96,15 @@ def test_t2va_uses_the_three_official_fields_in_order():
         "non_diegetic_music",
     ]
     assert compiled.prompt.startswith("integrated_multimodal_description: [Shot 1]")
-    assert "Visual style constraints from the frozen Style Bible (version style-v1)" in compiled.prompt
+    # 2.0.0 keeps the seven frozen dimensions and drops the header that only
+    # named the Style Bible version: the request already pins that version.
+    assert "Photography language: 平视中近景，稳定缓推." in compiled.prompt
+    assert "Visual style constraints from the frozen Style Bible" not in compiled.prompt
+    assert "style-v1" not in compiled.prompt
+    # The released 1.4.0 bytes still carry the header they were frozen with.
+    legacy = H3PromptCompiler().compile(spec=spec(), style=STYLE, manifest=[],
+                                        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+    assert "Visual style constraints from the frozen Style Bible (version style-v1)" in legacy.prompt
     assert "夜雨中的旧码头" in compiled.sections["overall_soundscape"]
     assert compiled.sections["non_diegetic_music"].startswith("Sparse low strings")
     assert len(compiled.prompt_sha256) == 64
@@ -166,8 +179,16 @@ def test_a_dialogue_free_shot_never_quotes_the_speech_style_dimension():
         "Performance and sound: this shot is performed without dialogue; "
         "its soundtrack is entirely non-vocal." in silent.prompt
     )
-    assert "Story continuity facts below are silent background context for the picture only" in silent.prompt
-    assert "they inform the visuals and are never heard as audio" in silent.prompt
+    # 2.0.0 states the same rule in one short lead instead of a meta paragraph.
+    assert "Background story facts, for the picture only and never heard:" in silent.prompt
+    assert "Story continuity facts below" not in silent.prompt
+    # 1.4.0 keeps the paragraph its frozen requests were compiled with.
+    legacy = H3PromptCompiler().compile(
+        spec=spec(locked_story_facts=[continuity], prompt_story_facts=[continuity]),
+        style=STYLE, manifest=[], compiler_version=LEGACY_TIMELINE_COMPILER_VERSION,
+    )
+    assert "Story continuity facts below are silent background context for the picture only" in legacy.prompt
+    assert "they inform the visuals and are never heard as audio" in legacy.prompt
     assert (
         "Words quoted in the story facts or visual description stay silent context and are never heard"
         in silent.prompt
@@ -237,7 +258,7 @@ def test_chinese_locked_facts_require_and_use_explicit_english_prompt_translatio
     original = ["怀表停在十二点"]
     shot = spec(locked_story_facts=original, prompt_story_facts=["The watch is stopped at twelve."])
     compiled = compile_prompt([], shot=shot)
-    assert "Story continuity facts below are silent background context" in compiled.prompt
+    assert "Background story facts, for the picture only and never heard:" in compiled.prompt
     assert "The watch is stopped at twelve." in compiled.prompt
     assert original == shot.locked_story_facts
     with pytest.raises(PromptCompilationError) as error:
@@ -313,19 +334,26 @@ def test_ref2va_emits_all_six_official_sections_and_stable_labels():
         "non_diegetic_music",
     ]
     assert compiled.prompt.index("subject_definitions:") < compiled.prompt.index("summary:")
+    # 2.0.0 binds the label to its presentation slot in one sentence and spends
+    # no words re-describing the appearance the reference image already fixes.
     assert (
-        "<Subject 1> is the approved, locked reference" in compiled.sections["subject_definitions"]
-    )
+        "<Subject 1> is the first listed performer (character), shown in <Picture 1>; "
+        "keep that exact reference appearance throughout."
+    ) in compiled.sections["subject_definitions"]
+    assert "approved, locked" not in compiled.sections["subject_definitions"]
+    assert "this exact face, hairstyle" not in compiled.sections["subject_definitions"]
     # 1.4.0: a first-frame picture is a concrete frame anchor, so the official
     # task type is keyframe completion alongside reference generation.
     assert compiled.sections["summary"].startswith(
         "[reference generation + keyframe completion + audio reference]"
     )
-    assert (
-        "<Subject 1> (the first listed performer in [Shot 1]): fully_preserved"
-        in compiled.sections["retention_analysis"]
-    )
+    assert "<Subject 1>: fully_preserved - the same person in every frame." in compiled.sections["retention_analysis"]
     assert "<Picture 1> ([Shot 1] first_frame frame): fully_preserved" in compiled.sections["retention_analysis"]
+    # The released 1.4.0 retention line replays unchanged.
+    legacy = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
+                                        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+    assert ("<Subject 1> (the first listed performer in [Shot 1]): fully_preserved"
+            in legacy.sections["retention_analysis"])
     assert "<Subject 1> (S1) says: <d>[Chinese] 账册在哪儿？</d>" in compiled.sections["detailed_description"]
     assert compiled.labels["<Subject 1>"] == "asset-1"
 
@@ -389,15 +417,20 @@ def test_ref2va_subject_definitions_cite_presentation_picture_slots():
     compiled = compile_prompt(manifest, shot=shot)
     definitions = compiled.sections["subject_definitions"]
     assert (
-        "<Subject 1> is the approved, locked reference for the first listed performer (character), "
-        "shown in <Picture 1>;"
+        "<Subject 1> is the first listed performer (character), shown in <Picture 1>;"
     ) in definitions
     assert (
-        "<Subject 2> is the approved, locked reference for the second listed performer (character), "
-        "shown in <Picture 2>;"
+        "<Subject 2> is the second listed performer (character), shown in <Picture 2>;"
     ) in definitions
     assert "<Picture 3> is the keyframe reference for [Shot 1]." in definitions
     assert "<Audio 1> is a reference for non-vocal ambience only." in definitions
+    # The released 1.4.0 binding sentence replays unchanged.
+    legacy = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
+                                        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+    assert (
+        "<Subject 1> is the approved, locked reference for the first listed performer (character), "
+        "shown in <Picture 1>;"
+    ) in legacy.sections["subject_definitions"]
 
 
 def test_ref2va_presentation_indices_follow_manifest_order_not_family_order():
@@ -886,3 +919,506 @@ def test_compiler_140_sanitizes_dialogue_quotes_and_silent_style_priming():
     )
     assert "<d>[Chinese] 这就是，古地图上的遗迹</d>" in spoken.sections["detailed_description"]
 
+
+# --- 1.4.0 golden masters ---------------------------------------------------------
+#
+# 1.4.0 is a historical version since 2.0.0, so its bytes are pinned here the
+# same way 1.2.x and 1.3.0 are.  The ``1.4.0`` column was sampled on the
+# unmodified tree before 2.0.0 existed.  The ``1.4.0-original`` column was
+# sampled on the code as it was before commit 40042d2, which added three
+# sanitizers under 1.4.0 without a version bump.
+
+_V14_PROMPT_HASHES = {
+    "silent_t2va_with_facts": {
+        "shine-h3-compiler/1.4.0": "44cdd444e359f0227b491c229dca83ee0b81e1b844adeea0671b7ea563ed1b79",
+    },
+    "dialogue_ref2va_voice_master": {
+        "shine-h3-compiler/1.4.0": "f6099fb0a14109569fcfe4354bbb0f39c09c9201c7f35f58d82ca86dbb1cca6e",
+    },
+    "silent_ref2va_continuity_audio": {
+        "shine-h3-compiler/1.4.0": "13c81a0cd852c7ce0a4058ed002345b5702ea207378619b638198e0b156e4bfe",
+    },
+    "narrated_ref2va": {
+        "shine-h3-compiler/1.4.0": "8df5763d0384d77c049a309f41f2e2b06d82753110d948499424422609884298",
+    },
+    "silent_ref2va_no_sound_fields": {
+        "shine-h3-compiler/1.4.0": "879a4213154c4f32d53f555dd02a52e1814d05513ce944f21c4e20026f9f926c",
+    },
+    "internal_cuts_with_dialogue": {
+        "shine-h3-compiler/1.4.0": "5be07dd1383c038fd23934e228425e59fd27e1494131e052cfd795ae04cb999d",
+    },
+    "camera_narrative_t2va": {
+        "shine-h3-compiler/1.4.0": "4721c8dd2434b0d1fe20a5fde3fc581ddfc93b66ad064e1b0f6882fb57622290",
+    },
+    "video_motion_reference": {
+        "shine-h3-compiler/1.4.0": "c9c4597c4e731085d7e0b000038d1debb3655fdcafec14d1ffc486c15b4149f4",
+    },
+    "true_video_continuation": {
+        "shine-h3-compiler/1.4.0": "b75205ee60f13e75efd2af86b0d6bcd687d800ab7462bee9833422052a0c5e4a",
+    },
+    "composition_picture": {
+        "shine-h3-compiler/1.4.0": "758c27bdf32be401d869b8e78f89dc837557e69789de1ef811bf9814370fa741",
+    },
+    "animation_frozen_with_live_action_projection": {
+        "shine-h3-compiler/1.4.0": "29a2436c24300bef51a18654886f00a913b240e562d95266d186c1a884721d7b",
+    },
+    "silent_english_style_dialogue_priming": {
+        "shine-h3-compiler/1.4.0": "85935b83a43cf76625fea4c94f2e45c9475af0f6c13070a3869e5c987c1d7328",
+        "shine-h3-compiler/1.4.0-original": "f8f70f388c2a54578c52d783f58f262e73345145b19ec82bfa64d53c6fda6f65",
+    },
+    "silent_ambience_priming": {
+        "shine-h3-compiler/1.4.0": "ee37b37a28edc248c71bb55ec0b9d0524b09bb392e91094503a30d9fef7365ca",
+    },
+    "spoken_ellipsis_and_trailing_comma": {
+        "shine-h3-compiler/1.4.0": "7d2709efdedc1fea950554e37dfef07f70986208f26377ede06ab3cd5797df8e",
+        "shine-h3-compiler/1.4.0-original": "809e032b728d21d69607cc686048ca43d48d08a2d708068ecb0f77ae3522e74b",
+    },
+    "last_frame_continuation": {
+        "shine-h3-compiler/1.4.0": "3c04b8931f8531fb3a87e4439d5a85e29e990b5d6370f8e5504d5a942dc94f70",
+    },
+}
+
+_V14 = "shine-h3-compiler/1.4.0"
+_V14_ORIGINAL = "shine-h3-compiler/1.4.0-original"
+
+_ENGLISH_STYLE = StyleBible(
+    photography_language="Eye-level medium shot.",
+    shot_blocking="Medium two-shot follows the 180-degree dialogue axis.",
+    color_palette="Neutral desert amber.",
+    lighting_tone="Hard noon sunlight.",
+    lens_texture="Clean spherical image.",
+    editing_rhythm="Natural dialogue breaths between cuts.",
+    sound_performance="Natural Mandarin Chinese speech.",
+)
+
+
+def _v14_hash_fixtures() -> dict[str, tuple[ShotSpec, list, StyleBible]]:
+    """The 1.2.x/1.3.0 masters plus the shots that exercise 1.4.0 itself."""
+    return {
+        **{name: (shot, manifest, STYLE) for name, (shot, manifest) in _legacy_hash_fixtures().items()},
+        # 1.4.0 features: the native in-shot timeline, natural camera prose, the
+        # real use of every reference, and a frozen medium.
+        "internal_cuts_with_dialogue": (
+            spec(
+                characters=["CHAR_A"], duration_target_s=10,
+                dialogue=[{"speaker_id": "CHAR_A", "text": "你先走。", "start_s": 0.4, "end_s": 1.8},
+                          {"speaker_id": "CHAR_A", "text": "我随后就到。", "start_s": 4.2, "end_s": 6.2}],
+                internal_cuts=[
+                    {"start_s": 3.5, "beat_id": "B02",
+                     "visual_description": "The woman places both feet firmly on the floor and rises from the chair."},
+                    {"start_s": 7.0, "beat_id": "B03",
+                     "visual_description": "She crosses to the window and pulls the curtain aside."},
+                ],
+            ),
+            [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character")],
+            STYLE,
+        ),
+        "camera_narrative_t2va": (
+            spec(camera={
+                "composition": "A medium two-shot of the leads at the desk",
+                "movement": "The camera slowly pushes in on the lead's face",
+                "lighting": "Low-key side light keeps the shadows readable",
+            }),
+            [],
+            STYLE,
+        ),
+        "video_motion_reference": (
+            spec(continuity={"mode": "cut"}),
+            [item("<Video 1>", ReferenceUse.VIDEO, duration_s=4)],
+            STYLE,
+        ),
+        "true_video_continuation": (
+            spec(continuity={"mode": "video_reference", "previous_shot_id": "src"}),
+            [item("<Video 1>", ReferenceUse.VIDEO, duration_s=4, role="continuity_derivative")],
+            STYLE,
+        ),
+        "composition_picture": (spec(), [item("<Picture 1>", ReferenceUse.PICTURE)], STYLE),
+        "animation_frozen_with_live_action_projection": (
+            spec(prompt_style=STYLE.model_copy(update={"film_type": FilmType.LIVE_ACTION})),
+            [item("<Subject 1>", ReferenceUse.SUBJECT)],
+            STYLE.model_copy(update={"film_type": FilmType.ANIMATION}),
+        ),
+        # The content the 40042d2 sanitizers reach: a silent shot's style
+        # dimensions and environment, and a line with an ellipsis and a trailing comma.
+        "silent_english_style_dialogue_priming": (
+            spec(sound={"environment": "desert wind beneath the original dialogue"}),
+            [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="林风", role="character")],
+            _ENGLISH_STYLE,
+        ),
+        "silent_ambience_priming": (
+            spec(sound={"ambience": "Keep diegetic city ambience restrained beneath the original dialogue "
+                                    "and preserve intentional silence."}),
+            [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="安娜", role="character")],
+            STYLE,
+        ),
+        "spoken_ellipsis_and_trailing_comma": (
+            spec(
+                characters=["林风"],
+                dialogue=[{"speaker_id": "林风", "text": "“这就是……古地图上的遗迹，”", "start_s": 0.5, "end_s": 3.0}],
+            ),
+            [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="林风", role="character")],
+            _ENGLISH_STYLE,
+        ),
+        "last_frame_continuation": (
+            spec(continuity={"mode": "last_frame", "previous_shot_id": "shot-prev"}),
+            [
+                item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character"),
+                item("<Picture 2>", ReferenceUse.PICTURE, asset_id="last", role="continuity_derivative",
+                     frame_role=FrameRole.LAST),
+            ],
+            STYLE,
+        ),
+    }
+
+
+def _respec(shot: ShotSpec, **changes) -> ShotSpec:
+    """A copy of a shot with fields replaced, validated like a stored spec."""
+    return ShotSpec.model_validate({**shot.model_dump(mode="json"), **changes})
+
+
+def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
+    from shine.h3.compiler import COMPILER_VERSION
+
+    compiler = H3PromptCompiler()
+    assert COMPILER_VERSION == "shine-h3-compiler/2.0.0"
+    for name, (shot, manifest, style) in _v14_hash_fixtures().items():
+        compiled = compiler.compile(
+            spec=shot, style=style, manifest=manifest,
+            project_language="Chinese", compiler_version=LEGACY_TIMELINE_COMPILER_VERSION,
+        )
+        assert compiled.prompt_sha256 == _V14_PROMPT_HASHES[name][_V14], name
+        assert compiled.compiler_version == LEGACY_TIMELINE_COMPILER_VERSION
+        current = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese")
+        assert current.compiler_version == COMPILER_VERSION
+        # 2.0.0 restyles every prompt: the style header alone is gone.
+        assert current.prompt_sha256 != _V14_PROMPT_HASHES[name][_V14], name
+
+
+def test_the_pre_sanitizing_140_variant_replays_its_exact_bytes():
+    """Commit 40042d2 added three sanitizers under 1.4.0 without a version bump.
+
+    Requests frozen before it (6 of the 16 real 1.4.0 requests in the ledger)
+    stopped replaying.  ``1.4.0-original`` is their replay-only identity; the
+    hashes below were sampled on the code as it was before that commit.
+    """
+    compiler = H3PromptCompiler()
+    for name, (shot, manifest, style) in _v14_hash_fixtures().items():
+        expected = _V14_PROMPT_HASHES[name].get(_V14_ORIGINAL, _V14_PROMPT_HASHES[name][_V14])
+        replay = compiler.compile(
+            spec=shot, style=style, manifest=manifest,
+            project_language="Chinese", compiler_version=LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+        )
+        assert replay.prompt_sha256 == expected, name
+        assert replay.compiler_version == LEGACY_PRE_SANITIZE_COMPILER_VERSION
+        canonical = compiler.compile(
+            spec=shot, style=style, manifest=manifest,
+            project_language="Chinese", compiler_version=LEGACY_TIMELINE_COMPILER_VERSION,
+        )
+        drifted = name in {"silent_english_style_dialogue_priming", "spoken_ellipsis_and_trailing_comma"}
+        # The two variants differ exactly where the sanitizers reach.
+        assert (replay.prompt_sha256 != canonical.prompt_sha256) is drifted, name
+
+
+def test_pre_sanitize_replay_restores_the_unsanitized_wording():
+    compiler = H3PromptCompiler()
+    shot, manifest, style = _v14_hash_fixtures()["spoken_ellipsis_and_trailing_comma"]
+    original = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese",
+                                compiler_version=LEGACY_PRE_SANITIZE_COMPILER_VERSION)
+    assert "<d>[Chinese] “这就是……古地图上的遗迹，”</d>" in original.prompt
+    assert "<d>[Chinese] 这就是，古地图上的遗迹</d>" in compile_prompt(manifest, shot=shot).prompt
+
+    shot, manifest, style = _v14_hash_fixtures()["silent_english_style_dialogue_priming"]
+    original_silent = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese",
+                                       compiler_version=LEGACY_PRE_SANITIZE_COMPILER_VERSION)
+    desc = original_silent.sections["detailed_description"]
+    assert "Natural dialogue breaths between cuts." in desc
+    assert "desert wind beneath the original dialogue" in desc
+    # The current compiler still sanitizes both, as 1.4.0 has since 40042d2.
+    current = compile_prompt(manifest, shot=shot, style=_ENGLISH_STYLE).sections["detailed_description"]
+    assert "Natural silent reaction beats between cuts." in current
+    assert "beneath the original dialogue" not in current
+
+
+def test_provenance_replay_falls_back_to_the_earlier_140_variant_only_on_exact_bytes():
+    from types import SimpleNamespace
+
+    from shine.h3.rulebook import recompile_for_provenance
+
+    compiler = H3PromptCompiler()
+    shot, manifest, style = _v14_hash_fixtures()["spoken_ellipsis_and_trailing_comma"]
+    original = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese",
+                                compiler_version=LEGACY_PRE_SANITIZE_COMPILER_VERSION)
+    canonical = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese",
+                                 compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+
+    def frozen(compiled, version) -> SimpleNamespace:
+        return SimpleNamespace(
+            compiler_version=version, shot_spec=shot, style_snapshot=style, reference_manifest=manifest,
+            generation_mode=compiled.mode, project_language="Chinese", compiled_prompt=compiled.prompt,
+            prompt_sha256=compiled.prompt_sha256, compiled_prompt_sections=compiled.sections,
+        )
+
+    # A request frozen before 40042d2 is replayed byte-exactly by the earlier variant.
+    replayed, variant = recompile_for_provenance(frozen(original, LEGACY_TIMELINE_COMPILER_VERSION))
+    assert variant == LEGACY_PRE_SANITIZE_COMPILER_VERSION
+    assert replayed.prompt == original.prompt
+    # The canonical bytes of the same version need no fallback.
+    replayed, variant = recompile_for_provenance(frozen(canonical, LEGACY_TIMELINE_COMPILER_VERSION))
+    assert variant is None and replayed.prompt == canonical.prompt
+    # A tampered prompt matches neither variant: nothing is accepted for it.
+    tampered = frozen(original, LEGACY_TIMELINE_COMPILER_VERSION)
+    tampered.compiled_prompt = original.prompt.replace("古地图上的遗迹", "被改写的台词")
+    replayed, variant = recompile_for_provenance(tampered)
+    assert variant is None and replayed.prompt != tampered.compiled_prompt
+    # A version that was never changed under itself has no variant to fall back to.
+    anchored = compiler.compile(spec=shot, style=style, manifest=manifest, project_language="Chinese",
+                                compiler_version="shine-h3-compiler/1.2.3")
+    tampered = frozen(anchored, "shine-h3-compiler/1.2.3")
+    tampered.compiled_prompt = anchored.prompt + " "
+    replayed, variant = recompile_for_provenance(tampered)
+    assert variant is None and replayed.prompt != tampered.compiled_prompt
+
+
+# --- 2.0.0: thin shell, rich timeline, every line in its own block ---------------
+
+
+def _shell_words(compiled) -> int:
+    """The words of the three reference sections and of the two meta paragraphs."""
+    count = sum(len(compiled.sections[name].split())
+                for name in ("subject_definitions", "summary", "retention_analysis"))
+    first = compiled.sections["detailed_description"].splitlines()[0]
+    for marker, end in (
+        ("Visual style constraints from the frozen Style Bible", "Photography language:"),
+        ("Reference cast order (mandatory)", ". The first described person"),
+    ):
+        if marker in first:
+            start = first.index(marker)
+            stop = first.index(end, start) if end in first[start:] else start + len(marker)
+            count += len(first[start:stop].split())
+    return count
+
+
+def test_the_thin_shell_keeps_the_contract_and_drops_the_meta_instructions():
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character"),
+        item("<Subject 2>", ReferenceUse.SUBJECT, entity_id="CHAR_B", asset_id="asset-2", role="character"),
+        item("<Subject 3>", ReferenceUse.SUBJECT, entity_id="CHAR_C", asset_id="asset-3", role="character"),
+        item("<Picture 4>", ReferenceUse.PICTURE, asset_id="asset-4"),
+        item("<Audio 1>", ReferenceUse.AUDIO, asset_id="voice-1", duration_s=4),
+    ]
+    shot = spec(
+        characters=["CHAR_A", "CHAR_B", "CHAR_C"],
+        dialogue=[{"speaker_id": "CHAR_A", "text": "你来了。", "start_s": 1.0, "end_s": 2.4}],
+    )
+    compiled = compile_prompt(manifest, shot=shot)
+    legacy = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
+                                        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+    # The official six-section contract and its order are untouched.
+    assert list(compiled.sections) == [
+        "subject_definitions", "summary", "retention_analysis",
+        "detailed_description", "overall_soundscape", "non_diegetic_music",
+    ]
+    # So are the task types, the retention levels, the slots and the labels.
+    assert compiled.sections["summary"].startswith("[reference generation + audio reference]")
+    assert ("Reference labels used: <Subject 1>, <Subject 2>, <Subject 3>, <Picture 4>, <Audio 1>."
+            in compiled.sections["summary"])
+    assert "<Subject 1>: fully_preserved - the same person in every frame." in compiled.sections["retention_analysis"]
+    assert "([Shot 1] composition reference): partially_preserved" in compiled.sections["retention_analysis"]
+    assert "the approved timbre voices only the scripted dialogue lines" in compiled.sections["retention_analysis"]
+    assert "shown in <Picture 1>" in compiled.sections["subject_definitions"].splitlines()[0]
+    assert "shown in <Picture 3>" in compiled.sections["subject_definitions"].splitlines()[2]
+    # And the validated positive sound contract is inherited as it was.
+    assert "Every voice in this shot speaks Chinese" in compiled.sections["overall_soundscape"]
+    assert "the scripted lines' voice timbre" in compiled.sections["subject_definitions"]
+    assert ("Deliver only the timed dialogue blocks below, exactly as written"
+            in compiled.sections["detailed_description"])
+    assert "<d>[Chinese] 你来了。</d>" in compiled.sections["detailed_description"]
+    # The meta instructions are gone.
+    prompt = compiled.prompt
+    for boilerplate in (
+        "Visual style constraints from the frozen Style Bible", "style-v1",
+        "Reference cast order (mandatory)",
+        "The target video adapts the frozen story beat within the locked Style Bible",
+        "approved, locked reference", "this exact face, hairstyle",
+    ):
+        assert boilerplate not in prompt, boilerplate
+    for boilerplate in ("Visual style constraints from the frozen Style Bible", "Reference cast order (mandatory)",
+                        "approved, locked reference"):
+        assert boilerplate in legacy.prompt, boilerplate
+    assert ("Cast order: <Subject 1> (first), <Subject 2> (second), <Subject 3> (third); "
+            "each person keeps exactly their own reference identity."
+            in compiled.sections["detailed_description"])
+    # No doubled full stop where a frozen dimension already ends with one.
+    assert ".. " not in prompt and not prompt.endswith("..")
+    # The same shot's shell is a fraction of what 1.4.0 spent on it.
+    assert _shell_words(compiled) < 0.6 * _shell_words(legacy), (_shell_words(compiled), _shell_words(legacy))
+
+
+_RICH_SHOT = dict(
+    characters=["CHAR_A", "CHAR_B"],
+    duration_target_s=6,
+    dialogue=[{"speaker_id": "CHAR_A", "text": "你听见了吗？", "start_s": 1.0, "end_s": 2.4}],
+    timeline=[
+        {"start_s": 0.0, "end_s": 2.4, "action": "She sets the brass cup down without a sound",
+         "expression": "her eyes stay on the door", "camera": "The camera holds still"},
+        {"start_s": 2.4, "end_s": 5.0, "action": "He turns his head a fraction toward the window",
+         "expression": "his jaw tightens, then releases"},
+    ],
+    blocking={
+        "axis": "the two sit on one eyeline, camera on the same side",
+        "placements": [
+            {"character": "CHAR_A", "zone": "left_fg", "facing": "facing_right",
+             "posture": "seated, back straight", "props": ["the brass cup"]},
+            {"character": "CHAR_B", "zone": "right_mg", "facing": "facing_left", "posture": "standing"},
+        ],
+    },
+    environment={
+        "depth": "Desk in the foreground, rain-streaked window behind",
+        "light": "A single desk lamp rims their profiles; the window stays cold",
+        "micro_motion": "Rain crawls down the glass; the lamp filament flickers",
+    },
+    entry_state="the cup halfway to the table",
+    exit_state="her hand flat on the desk, his reflection in the window",
+)
+_RICH_MANIFEST = [
+    item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="CHAR_A", role="character"),
+    item("<Subject 2>", ReferenceUse.SUBJECT, entity_id="CHAR_B", asset_id="asset-2", role="character"),
+    item("<Picture 3>", ReferenceUse.PICTURE, asset_id="asset-3"),
+]
+
+
+def test_the_rich_timeline_becomes_second_by_second_prose():
+    compiled = compile_prompt(_RICH_MANIFEST, shot=spec(**_RICH_SHOT))
+    desc = compiled.sections["detailed_description"]
+    # Placement is anchored before the first performance window...
+    assert (
+        "In frame: <Subject 1> is in the left foreground, facing screen-right, seated, back straight, "
+        "holding the brass cup; <Subject 2> is in the right midground, facing screen-left, standing."
+    ) in desc
+    assert "It opens on the cup halfway to the table." in desc
+    assert desc.index("In frame:") < desc.index("From 0.0s")
+    # ...the performance is a timeline of action, face and camera...
+    assert (
+        "From 0.0s to 2.4s, She sets the brass cup down without a sound; her eyes stay on the door. "
+        "The camera holds still. From 2.4s to 5.0s, He turns his head a fraction toward the window; "
+        "his jaw tightens, then releases."
+    ) in desc
+    # ...the physical set is stated once, in its own three facts...
+    assert (
+        "Space: Desk in the foreground, rain-streaked window behind. "
+        "Light: A single desk lamp rims their profiles; the window stays cold. "
+        "Air: Rain crawls down the glass; the lamp filament flickers."
+    ) in desc
+    # ...and the exit state is the last sentence: the frame the next shot continues from.
+    assert desc.endswith("The shot settles on her hand flat on the desk, his reflection in the window.")
+    assert "<d>[Chinese] 你听见了吗？</d>" in desc
+    # The timeline prose is not a cut marker: the rule pack reads only
+    # "At MM:SS.mmm" as a timestamp, and the only one is the spoken line.
+    assert desc.count("At 00:") == 1
+    from shine.h3.spec_review import review_h3_prompt
+
+    findings = review_h3_prompt(
+        compiled.prompt, compiled.sections, mode=compiled.mode.value,
+        dialogue=_RICH_SHOT["dialogue"], duration_s=6,
+        defined_labels={reference.label for reference in _RICH_MANIFEST},
+    )
+    assert not any(finding.get("rule_id") == "H3_TIMING" for finding in findings)
+
+
+def test_a_silent_rich_timeline_never_primes_speech():
+    compiled = compile_prompt(_RICH_MANIFEST, shot=spec(**{**_RICH_SHOT, "dialogue": []}))
+    desc = compiled.sections["detailed_description"]
+    assert "From 0.0s to 2.4s" in desc and "The shot settles on" in desc
+    assert "Performers act with closed mouths" in desc
+    for token in (*_PRIMING_VOCABULARY, "narration"):
+        assert token not in compiled.prompt.lower(), token
+    assert "dialogue" not in desc.replace("performed without dialogue", "")
+
+
+def test_every_spoken_line_sits_in_the_shot_block_that_performs_it():
+    shot, manifest, _ = _v14_hash_fixtures()["internal_cuts_with_dialogue"]
+    shot = _respec(shot, dialogue=[
+        *shot.dialogue, {"speaker_id": "CHAR_A", "text": "带上灯。", "start_s": 7.0, "end_s": 8.6},
+    ])
+    lines = compile_prompt(manifest, shot=shot).sections["detailed_description"].splitlines()
+    assert len(lines) == 3
+    assert lines[0].startswith("[Shot 1] ")
+    assert "<d>[Chinese] 你先走。</d>" in lines[0]
+    assert "我随后就到" not in lines[0] and "带上灯" not in lines[0]
+    # A line that starts after the first cut belongs to the second sub-shot.
+    assert lines[1].startswith("[Shot 2] At 00:03.500, The woman places both feet firmly on the floor")
+    assert "<d>[Chinese] 我随后就到。</d>" in lines[1]
+    # A line that starts exactly at a cut belongs to the sub-shot that opens there.
+    assert lines[2].startswith("[Shot 3] At 00:07.000, She crosses to the window and pulls the curtain aside.")
+    assert "<d>[Chinese] 带上灯。</d>" in lines[2]
+    # Up to 1.4.0 every line sat in the [Shot 1] block whatever its timestamp said.
+    legacy = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
+                                        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION)
+    legacy_lines = legacy.sections["detailed_description"].splitlines()
+    for line in ("<d>[Chinese] 你先走。</d>", "<d>[Chinese] 我随后就到。</d>", "<d>[Chinese] 带上灯。</d>"):
+        assert line in legacy_lines[0]
+    assert not any("<d>" in line for line in legacy_lines[1:])
+    # No line was lost, and the cut timestamps still increase inside the duration.
+    prompt = "\n".join(lines)
+    assert prompt.count("<d>") == len(shot.dialogue) == 3
+
+
+def test_a_timeline_window_lands_in_the_sub_shot_where_it_starts():
+    shot, manifest, _ = _v14_hash_fixtures()["internal_cuts_with_dialogue"]
+    shot = _respec(
+        shot,
+        timeline=[
+            {"start_s": 0.2, "end_s": 2.0, "action": "She grips the chair arm"},
+            {"start_s": 3.8, "end_s": 5.4, "action": "She rises to her full height"},
+            {"start_s": 7.2, "end_s": 9.0, "action": "She leans into the window glass"},
+        ],
+        exit_state="her breath fogging the glass",
+    )
+    lines = compile_prompt(manifest, shot=shot).sections["detailed_description"].splitlines()
+    assert "From 0.2s to 2.0s, She grips the chair arm." in lines[0]
+    assert "From 3.8s to 5.4s, She rises to her full height." in lines[1]
+    assert ("From 7.2s to 9.0s, She leans into the window glass. "
+            "The shot settles on her breath fogging the glass." in lines[2])
+    assert "The shot settles on" not in lines[0] + lines[1]
+
+
+def test_rich_timeline_fields_are_omitted_while_empty_and_keep_old_spec_bytes():
+    from pydantic import ValidationError
+
+    plain = spec().model_dump(mode="json")
+    for key in ("location_id", "transition_motivation", "blocking", "environment",
+                "timeline", "entry_state", "exit_state"):
+        assert key not in plain
+    empty = spec(location_id=None, transition_motivation=None, blocking=None, environment=None,
+                 timeline=[], entry_state="", exit_state="   ")
+    assert empty.model_dump(mode="json") == plain
+    # A shot that carries them keeps every field it was given.
+    kept = spec(**_RICH_SHOT).model_dump(mode="json")
+    assert set(kept) - set(plain) == {"blocking", "environment", "timeline", "entry_state", "exit_state"}
+    tagged = spec(location_id="LOC_STUDY", transition_motivation="shot_reverse_shot").model_dump(mode="json")
+    assert tagged["location_id"] == "LOC_STUDY" and tagged["transition_motivation"] == "shot_reverse_shot"
+
+    with pytest.raises(ValidationError):
+        # Two windows at the same moment would tell H3 two different actions.
+        spec(timeline=[{"start_s": 2.0, "end_s": 4.0, "action": "She waits"},
+                       {"start_s": 3.0, "end_s": 5.0, "action": "She turns"}])
+    with pytest.raises(ValidationError):
+        spec(timeline=[{"start_s": 0.0, "end_s": 6.5, "action": "She waits"}])
+    with pytest.raises(ValidationError):
+        spec(timeline=[{"start_s": 0.0, "end_s": 0.0, "action": "She waits"}])
+    with pytest.raises(ValidationError):
+        spec(characters=["CHAR_A"], blocking={"placements": [
+            {"character": "CHAR_B", "zone": "left_fg", "facing": "facing_right"},
+        ]})
+    with pytest.raises(ValidationError):
+        spec(blocking={"placements": [{"character": "CHAR_A", "zone": "middle", "facing": "sideways"}]})
+
+
+def test_a_released_version_ignores_the_rich_timeline_fields():
+    compiled = H3PromptCompiler().compile(
+        spec=spec(**_RICH_SHOT), style=STYLE, manifest=_RICH_MANIFEST,
+        compiler_version=LEGACY_TIMELINE_COMPILER_VERSION,
+    )
+    desc = compiled.sections["detailed_description"]
+    for prose in ("From 0.0s", "In frame:", "The shot settles on", "Space:", "It opens on"):
+        assert prose not in desc, prose
