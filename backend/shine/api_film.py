@@ -1530,6 +1530,15 @@ def generate_storyboard(
                 "ceiling is 15 seconds). Split a longer beat into several shots or internal cuts, each "
                 "within the ceiling, with cut start times strictly increasing inside the shot."
             )
+        if reason == "CONTINUITY_CONFLICT":
+            issues_list = failure.get("continuity_issues") or []
+            detail = "; ".join(str(item).strip() for item in issues_list[:3] if str(item).strip())
+            where = f": {detail}" if detail else ""
+            return (
+                " The previous directorial/camera plan had unresolved continuity conflict(s)" + where
+                + ". Revise the shot blocking, character sightlines, and prop/object positions so "
+                "physical state transitions stay strictly consistent across and within shots."
+            )
         note = CONTRACT_REPAIR_NOTES.get(reason or "")
         if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):
             note += (

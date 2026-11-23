@@ -239,6 +239,14 @@ def create_run(
         db.rollback()
         raise HTTPException(409, "PRODUCTION_RUN_ALREADY_ACTIVE") from exc
 
+    # A superseded NEEDS_REVIEW run may still retain unsubmitted pre-submit
+    # series/jobs from episodes it never reached. Settle those non-inflight
+    # series through the single series-cancel path so later episodes of the
+    # new run cannot collide with dead QUEUED reservations.
+    _settle_superseded_pre_submit_series(
+        db, package.project_id, current_run_id=run.id, actor=actor,
+    )
+
     for episode in chosen:
         db.add(
             ProductionRunEpisode(
@@ -1308,6 +1316,52 @@ def pause_run(session_factory, run_id: str, *, worker_id: str = "user", expected
         return run.status
 
 
+def _settle_superseded_pre_submit_series(
+    db: Session,
+    project_id: str,
+    *,
+    current_run_id: str | None = None,
+    actor: str = "user",
+) -> int:
+    """Cancel unsubmitted pre-submit series belonging to superseded NEEDS_REVIEW runs.
+
+    Any series with live or unreconciled external work is left untouched so a
+    later run still honors its shot lock until reconciled.
+    """
+    from shine.comfyops.production_series import cancel_series_in_session
+
+    prior_runs = list(db.scalars(
+        select(ProductionRun).where(
+            ProductionRun.project_id == project_id,
+            ProductionRun.status == "NEEDS_REVIEW",
+        )
+    ).all())
+    settled = 0
+    for prior in prior_runs:
+        if current_run_id and prior.id == current_run_id:
+            continue
+        prior_settled = 0
+        for batch in _batch_rows(db, prior.id):
+            if not batch.series_id:
+                continue
+            series = db.get(ProductionSeries, batch.series_id)
+            if series is None or series.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                continue
+            if _series_has_inflight_work(db, series):
+                continue
+            cancel_series_in_session(db, series.id, reason="RUN_SUPERSEDED", actor=actor)
+            _sync_batch_from_series(db, batch)
+            prior_settled += 1
+        if prior_settled:
+            _event(db, prior, "RUN_SUPERSEDED",
+                   f"新的一轮制作已接管：清理 {prior_settled} 个未开拍序列的排队占用",
+                   {"settled_series": prior_settled, "superseded_by_run_id": current_run_id})
+            settled += prior_settled
+    if settled:
+        db.flush()
+    return settled
+
+
 def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: str) -> int:
     """Reopen only run series whose failed item is proven not to have reached H3.
 
@@ -1321,10 +1375,14 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
     from shine.comfy.client import ComfyError
     from shine.comfy.provider import collect_unbound_transfer_families, validate_reference_slots
     from shine.comfyops.models import ResourceLease
+    from shine.comfyops.ownership import shot_ownership
     from shine.models import Asset
-    from shine.services import manifest_from_shot_bindings
+    from shine.services import add_audit, manifest_from_shot_bindings
 
     recovered = 0
+    _settle_superseded_pre_submit_series(
+        db, run.project_id, current_run_id=run.id, actor=actor,
+    )
     package = db.get(DirectorPackageVersion, run.package_id)
     # This path repairs a submission that was *proven never sent*.  It must not
     # be gated by the package's new-run readiness: a corrected binding is
@@ -1364,8 +1422,6 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
             continue
         lease.status = "RELEASED"
         lease.expires_at = utcnow()
-        from shine.services import add_audit
-
         add_audit(
             db, actor, "RESOURCE_LEASE_RELEASED_PRE_SUBMIT", "resource_lease", lease.id,
             {"owner_job_id": job.id, "external_submission": "NOT_SENT_PROVEN",
@@ -1417,6 +1473,31 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
         return True
 
     for batch in _batch_rows(db, run.id):
+        if batch.status == "BLOCKED" and not batch.series_id and batch.failure_code == "BATCH_DISPATCH_REFUSED":
+            if shot_ownership(db, run.project_id, list(batch.shot_ids or [])):
+                continue
+            episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+            batch_key = batch.batch_key
+            episode_id = batch.episode_id
+            db.delete(batch)
+            db.flush()
+            remaining_batches = [
+                row for row in _batch_rows(db, run.id) if row.episode_id == episode_id
+            ]
+            if episode is not None and episode.status == "BLOCKED" and not any(
+                row.status == "BLOCKED" for row in remaining_batches
+            ):
+                episode.status = "PLANNED" if not remaining_batches else "PRODUCING"
+                episode.blocker_code = None
+            add_audit(
+                db, actor, "PRODUCTION_BATCH_REOPENED_PRE_DISPATCH",
+                "production_run", run.id,
+                {"batch_key": batch_key, "reason": "BATCH_DISPATCH_REFUSED",
+                 "external_submission": "NOT_SENT_PROVEN"},
+                project_id=run.project_id,
+            )
+            recovered += 1
+            continue
         if batch.status != "BLOCKED" or not batch.series_id:
             continue
         series = db.get(ProductionSeries, batch.series_id)
@@ -1637,10 +1718,17 @@ def _resume_safe_pre_submit_series(db: Session, run: ProductionRun, *, actor: st
 
 def explain_run_resume_blocker(db: Session, run: ProductionRun) -> str:
     """Honest explanation when a NEEDS_REVIEW run has no safely resumable batch."""
+    from shine.comfyops.ownership import shot_ownership
     from shine.comfyops.production_series import peek_series_resume_plan
 
     for batch in _batch_rows(db, run.id):
-        if batch.status != "BLOCKED" or not batch.series_id:
+        if batch.status != "BLOCKED":
+            continue
+        if not batch.series_id:
+            if batch.failure_code == "BATCH_DISPATCH_REFUSED" and shot_ownership(
+                db, run.project_id, list(batch.shot_ids or [])
+            ):
+                return "该批次存在仍在拍摄或未核对的镜头占用，请先到⑥页核对或处理占用任务后重试。"
             continue
         series = db.get(ProductionSeries, batch.series_id)
         if series is None:
@@ -1682,6 +1770,7 @@ def resume_run(session_factory, run_id: str, *, actor: str = "user",
         if run.status == "NEEDS_REVIEW":
             episodes = _episode_rows(db, run.id)
             batches = _batch_rows(db, run.id)
+            run.blocker_count = sum(1 for batch in batches if batch.status == "BLOCKED")
             still_blocked = (any(episode.status == "BLOCKED" for episode in episodes)
                              or any(batch.status == "BLOCKED" for batch in batches))
             if still_blocked and not recovered:
@@ -1932,10 +2021,20 @@ def episode_public(
 ) -> list[dict[str, Any]]:
     """Public shape of a bounded set of episodes, with their batches."""
     from shine.media.delivery_acceptance import acceptances_for
+    from shine.media.delivery_engine import delivery_order_public
+    from shine.media.delivery_models import DeliveryOrder
 
     batches = _batch_rows(db, run.id) if episodes else []
     passed = run_owned_passed_jobs(db, run.id, episodes)
     acceptances = acceptances_for(db, [episode.delivered_artifact_id for episode in episodes])
+    orders = {
+        order.id: order
+        for order in db.scalars(
+            select(DeliveryOrder).where(
+                DeliveryOrder.id.in_([e.delivery_order_id for e in episodes if e.delivery_order_id] or ["-"])
+            )
+        ).all()
+    }
     return [
         {
             "id": episode.id,
@@ -1956,6 +2055,7 @@ def episode_public(
             "delivered_artifact_id": episode.delivered_artifact_id,
             "delivered_sha256": episode.delivered_sha256,
             "acceptance": acceptances.get(episode.delivered_artifact_id),
+            "assembly": delivery_order_public(orders.get(episode.delivery_order_id or "")),
             "blocker_code": episode.blocker_code,
             "delivered_at": episode.delivered_at.isoformat() + "Z" if episode.delivered_at else None,
             "batches": [

@@ -13,6 +13,7 @@ import hashlib
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -158,6 +159,52 @@ class DeliveryAssembler:
             tail = completed.stderr.decode("utf-8", errors="replace")[-800:]
             raise DeliveryError(500, f"DELIVERY_FFMPEG_FAILED: {tail}")
 
+    def _run_with_progress(
+        self,
+        command: list[str],
+        *,
+        cwd: Path | None = None,
+        total_s: float | None = None,
+        on_tick: Callable[[float, float], None] | None = None,
+    ) -> None:
+        """Stream FFmpeg `-progress pipe:1` ticks without risking stderr deadlock."""
+        if on_tick is None or not total_s or total_s <= 0:
+            self._run(command, cwd=cwd)
+            return
+        prog_cmd = [command[0], "-progress", "pipe:1", "-stats_period", "0.5", *command[1:]]
+        with tempfile.TemporaryFile() as stderr_file:
+            proc = subprocess.Popen(
+                prog_cmd,
+                stdout=subprocess.PIPE,
+                stderr=stderr_file,
+                cwd=cwd,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            try:
+                assert proc.stdout is not None
+                for raw in proc.stdout:
+                    line = raw.strip()
+                    if line.startswith("out_time_us="):
+                        val = line.split("=", 1)[1].strip()
+                        try:
+                            elapsed_s = max(0.0, int(val) / 1_000_000.0)
+                        except ValueError:
+                            continue
+                        on_tick(min(1.0, elapsed_s / total_s), min(total_s, elapsed_s))
+                    elif line == "progress=end":
+                        on_tick(1.0, total_s)
+                returncode = proc.wait(timeout=1800)
+            except Exception:
+                proc.kill()
+                proc.wait(timeout=5)
+                raise
+            if returncode != 0:
+                stderr_file.seek(0)
+                tail = stderr_file.read().decode("utf-8", errors="replace")[-800:]
+                raise DeliveryError(500, f"DELIVERY_FFMPEG_FAILED: {tail}")
+
     def _normalise_clip(
         self,
         source: Path,
@@ -220,6 +267,7 @@ class DeliveryAssembler:
         reuse_existing: bool = False,
         page_size: int = 100,
         output_subdir: str = "delivery/history",
+        on_progress: Callable[[str, int, str], None] | None = None,
     ) -> AssembledDelivery:
         """Render one reel from an ordered clip list.
 
@@ -250,10 +298,18 @@ class DeliveryAssembler:
         width = max(16, int(width) // 2 * 2)
         height = max(16, int(height) // 2 * 2)
 
+        norm_ceiling = 45 if subtitle_ass else 85
+        total_duration_s = sum(max(0.0, clip.out_s - clip.in_s) for clip, *_ in resolved)
+        if on_progress is not None:
+            on_progress("normalizing", 2, f"正在准备规范化 {len(resolved)} 个镜头片段")
+
         with tempfile.TemporaryDirectory(prefix="shine-delivery-") as workdir:
             work = Path(workdir)
             segments: list[Path] = []
             for index, (clip, artifact, _status, _duration) in enumerate(resolved):
+                if on_progress is not None:
+                    pct = 2 + int((norm_ceiling - 2) * index / max(1, len(resolved)))
+                    on_progress("normalizing", pct, f"正在规范化第 {index + 1}/{len(resolved)} 镜")
                 source = safe_asset_path(self.asset_root, artifact.storage_path)
                 info = probe_file(source, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)
                 target = work / f"segment{index:03d}.mp4"
@@ -311,6 +367,8 @@ class DeliveryAssembler:
                 sources = pages
             else:
                 sources = segments
+            if on_progress is not None:
+                on_progress("concat", norm_ceiling + 2, "正在拼接分集片段")
             reel = concat(sources, work / "delivery.mp4", "concat")
             final = reel
             if subtitle_ass:
@@ -324,7 +382,20 @@ class DeliveryAssembler:
                 # ass filter and breaks the burn-in.
                 final = work / "delivery-subtitled.mp4"
                 (work / "subtitles.ass").write_text(subtitle_ass, encoding="utf-8")
-                self._run(
+                if on_progress is not None:
+                    on_progress("burning_subtitles", 50, "正在准备烧录字幕")
+
+                def _subtitle_tick(ratio: float, elapsed_s: float) -> None:
+                    if on_progress is None:
+                        return
+                    pct = 50 + int(46 * ratio)
+                    on_progress(
+                        "burning_subtitles",
+                        min(96, pct),
+                        f"正在烧录字幕（{int(elapsed_s)}/{max(1, round(total_duration_s))} 秒）",
+                    )
+
+                self._run_with_progress(
                     [
                         self.ffmpeg_path,
                         "-nostdin",
@@ -348,7 +419,11 @@ class DeliveryAssembler:
                         str(final),
                     ],
                     cwd=work,
+                    total_s=total_duration_s,
+                    on_tick=_subtitle_tick if on_progress is not None else None,
                 )
+            if on_progress is not None:
+                on_progress("finalizing", 98, "正在写入并校验成片文件")
             content = final.read_bytes()
             # Probe while the temporary directory still exists.
             probe = probe_file(final, ffprobe_path=self.ffprobe_path, ffmpeg_path=self.ffmpeg_path)

@@ -8,7 +8,6 @@ and every segment stays traceable to the artifact it came from.
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -341,15 +340,16 @@ def open_video_folder(artifact_id: str, request: Request, db: DBSession, _actor:
     artifact = db.get(MediaArtifact, artifact_id)
     if not artifact or artifact.artifact_kind not in {"video", "delivery"}:
         raise HTTPException(404, "找不到这段视频的存储记录。")
+    from shine.foundation.folder_reveal import DesktopRevealUnsupported, reveal_file_in_explorer
     from shine.media.output_layout import output_root_for_request
 
     path = safe_asset_path(output_root_for_request(request, db), artifact.storage_path)
     if not path.is_file():
         raise HTTPException(404, "视频文件已移动或缺失。")
-    if not hasattr(os, "startfile"):
-        raise HTTPException(501, "打开文件夹需要在 Windows 本机运行工作台。")
     try:
-        os.startfile(str(path.parent), "explore")
+        reveal_file_in_explorer(path)
+    except DesktopRevealUnsupported as exc:
+        raise HTTPException(501, str(exc)) from exc
     except OSError as exc:
         raise HTTPException(409, "Windows 无法打开视频所在文件夹。") from exc
     return Response(status_code=204)

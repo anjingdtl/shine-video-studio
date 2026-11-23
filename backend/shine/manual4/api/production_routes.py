@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
@@ -355,16 +354,18 @@ def m4_open_job_folder(
     path = safe_m4_path(request.app.state.m4_root, job.output_storage_path)
     if not path.is_file():
         raise HTTPException(404, {"code": "M4_JOB_FILE_MISSING", "message": "视频文件已移动或缺失。"})
-    if not hasattr(os, "startfile"):
+    from shine.foundation.folder_reveal import DesktopRevealUnsupported, reveal_file_in_explorer
+
+    try:
+        resolved = reveal_file_in_explorer(path)
+    except DesktopRevealUnsupported as exc:
         raise HTTPException(
             501,
-            {"code": "M4_OPEN_FOLDER_UNSUPPORTED", "message": "打开文件夹需要在 Windows 本机运行工作台。"},
-        )
-    try:
-        os.startfile(str(path.parent), "explore")
+            {"code": "M4_OPEN_FOLDER_UNSUPPORTED", "message": str(exc)},
+        ) from exc
     except OSError as exc:
         raise HTTPException(
             409,
             {"code": "M4_OPEN_FOLDER_FAILED", "message": "Windows 无法打开视频所在文件夹。"},
         ) from exc
-    return {"folder": str(path.parent), "file": str(path)}
+    return {"folder": str(resolved.parent), "file": str(resolved)}

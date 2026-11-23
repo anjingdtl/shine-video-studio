@@ -281,3 +281,39 @@ def test_a_broken_stream_records_the_underlying_error_type(monkeypatch):
     assert excinfo.value.details.get("external_outcome") == "UNKNOWN"
     assert excinfo.value.details.get("error_type") == "ReadError"
     assert excinfo.value.details.get("streamed") is True
+
+
+def test_stream_finishes_when_finish_reason_already_arrived(monkeypatch):
+    class HangingTailStream(httpx.SyncByteStream):
+        def __iter__(self):
+            payload = json.dumps({
+                "choices": [{"delta": {"content": '{"ok": true}'}, "finish_reason": "stop"}],
+                "usage": {"completion_tokens": 12},
+            })
+            yield f"data: {payload}\n\n".encode()
+            raise AssertionError("must not keep reading once finish_reason and usage both arrived")
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, stream=HangingTailStream(),
+                                                           headers={"content-type": "text/event-stream"}))))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    response = provider.complete([ChatMessage(role="user", content="hi")])
+    assert response.parsed == {"ok": True}
+    assert response.usage.get("completion_tokens") == 12
+
+
+def test_stream_read_error_after_finish_reason_keeps_completed_answer(monkeypatch):
+    class TailCutStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'data: {"choices": [{"delta": {"content": "{\\"ok\\": true}"}, "finish_reason": "stop"}]}\n\n'
+            raise httpx.ReadTimeout("trailing [DONE] timed out")
+
+    monkeypatch.setattr(openai_compatible, "build_text_client",
+                        lambda *a, **k: httpx.Client(transport=httpx.MockTransport(
+                            lambda request: httpx.Response(200, stream=TailCutStream(),
+                                                           headers={"content-type": "text/event-stream"}))))
+    provider = openai_compatible.OpenAICompatibleProvider(_config(streaming=True))
+    response = provider.complete([ChatMessage(role="user", content="hi")])
+    assert response.parsed == {"ok": True}
+

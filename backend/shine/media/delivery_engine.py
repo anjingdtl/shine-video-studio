@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import time
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -414,7 +415,13 @@ def _write_back(db: Session, order_id: str, claim: DeliveryClaim, values: dict[s
 ASSEMBLY_HEARTBEAT_SECONDS = 60
 
 
-def renew_assembly_claim(session_factory, order_id: str, claim: DeliveryClaim) -> bool | None:
+def renew_assembly_claim(
+    session_factory,
+    order_id: str,
+    claim: DeliveryClaim,
+    *,
+    progress: dict[str, Any] | None = None,
+) -> bool | None:
     """Refresh a running assembly's lease without changing its claim token.
 
     Only the owning claim may renew it, and only while the order is still
@@ -424,6 +431,9 @@ def renew_assembly_claim(session_factory, order_id: str, claim: DeliveryClaim) -
     """
     from sqlalchemy.exc import OperationalError
 
+    values: dict[str, Any] = {"updated_at": utcnow()}
+    if progress is not None:
+        values["edit_rules"] = {"progress": progress}
     try:
         with session_factory.begin() as db:
             result = db.execute(
@@ -434,7 +444,7 @@ def renew_assembly_claim(session_factory, order_id: str, claim: DeliveryClaim) -
                     DeliveryOrder.state_version == claim.version,
                     DeliveryOrder.status == "ASSEMBLING",
                 )
-                .values(updated_at=utcnow())
+                .values(**values)
                 .execution_options(synchronize_session=False)
             )
             return result.rowcount == 1
@@ -442,6 +452,73 @@ def renew_assembly_claim(session_factory, order_id: str, claim: DeliveryClaim) -
         if "locked" in str(exc).lower() or "busy" in str(exc).lower():
             return None
         raise
+
+
+def report_assembly_progress(
+    session_factory,
+    order_id: str,
+    claim: DeliveryClaim,
+    *,
+    stage: str,
+    percent: int,
+    detail: str,
+    state: dict[str, Any] | None = None,
+) -> None:
+    """Write throttled assembly progress to the single authoritative DeliveryOrder row."""
+    now = time.monotonic()
+    clamped = max(0, min(99, int(percent)))
+    if state is not None:
+        prev_stage = state.get("stage")
+        prev_pct = state.get("percent")
+        prev_at = float(state.get("at") or 0.0)
+        if prev_stage == stage and (prev_pct == clamped or (now - prev_at < 0.7 and clamped < 98)):
+            return
+        state["stage"] = stage
+        state["percent"] = clamped
+        state["at"] = now
+    renew_assembly_claim(
+        session_factory,
+        order_id,
+        claim,
+        progress={
+            "stage": stage,
+            "percent": clamped,
+            "detail": str(detail)[:200],
+            "updated_at": utcnow().isoformat() + "Z",
+        },
+    )
+
+
+def delivery_order_public(order: DeliveryOrder | None) -> dict[str, Any] | None:
+    """Single public projection of a delivery/subtitle-burn order's live progress."""
+    if order is None:
+        return None
+    rules = order.edit_rules if isinstance(order.edit_rules, dict) else {}
+    progress = rules.get("progress") if isinstance(rules.get("progress"), dict) else {}
+    if order.status == "PENDING":
+        stage, percent, detail = "queued", 0, "已排队，等待开始装配与字幕烧录"
+    elif order.status == "ASSEMBLING":
+        stage = str(progress.get("stage") or "assembling")
+        percent = max(2, min(99, int(progress.get("percent") or 5)))
+        detail = str(progress.get("detail") or "正在准备装配成片")
+    elif order.status == "DELIVERED":
+        stage, percent, detail = "completed", 100, "成片已装配交付"
+    elif order.status == "CANCELLED":
+        stage, percent, detail = "cancelled", 0, str(order.failure_note or order.failure_code or "已取消")
+    else:
+        stage = "failed"
+        percent = int(progress.get("percent") or 0)
+        detail = str(order.failure_note or order.failure_code or "装配受阻")
+    return {
+        "order_id": order.id,
+        "status": order.status,
+        "subtitle_revision": order.subtitle_revision,
+        "stage": stage,
+        "percent": percent,
+        "detail": detail,
+        "failure_code": order.failure_code,
+        "updated_at": (order.updated_at.isoformat() + "Z") if order.updated_at else None,
+    }
 
 
 class AssemblyHeartbeat:
@@ -569,6 +646,7 @@ def run_delivery_order(
                 for clip in edl["clips"]
             ]
         with session_factory() as work_db, AssemblyHeartbeat(session_factory, order_id, claim):
+            progress_state: dict[str, Any] = {}
             result = assembler.assemble(
                 work_db,
                 project_id,
@@ -581,6 +659,15 @@ def run_delivery_order(
                 subtitle_sha256=subtitle_sha256,
                 reuse_existing=True,
                 output_subdir="delivery/current",
+                on_progress=lambda stage, pct, detail: report_assembly_progress(
+                    session_factory,
+                    order_id,
+                    claim,
+                    stage=stage,
+                    percent=pct,
+                    detail=detail,
+                    state=progress_state,
+                ),
             )
             work_db.commit()
         with session_factory.begin() as db:

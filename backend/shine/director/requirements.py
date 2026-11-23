@@ -72,11 +72,18 @@ def _preparation_catalog(
         AgentArtifact.project_id == project_id,
         AgentArtifact.kind == "ScriptPreparation",
         AgentArtifact.stale.is_(False),
-    ).order_by(AgentArtifact.created_at)).all()
+    ).order_by(AgentArtifact.created_at.desc())).all()
     merged: dict[tuple[str, str], dict[str, Any]] = {}
+    seen_scene_keys: set[str] = set()
     for row in rows:
         payload = dict(row.payload_json or {})
         row_key = str(payload.get("scene_key") or "")
+        # Re-extracting an outline produces a newer ScriptPreparation for the same scene_key;
+        # keep only the newest extraction per scene_key so old drafts never duplicate entities.
+        if row_key:
+            if row_key in seen_scene_keys:
+                continue
+            seen_scene_keys.add(row_key)
         matched = [sid for sid in section_ids if row_key and row_key in section_keys.get(sid, [])]
         for req in payload.get("requirements") or []:
             family = str(req.get("family") or "")

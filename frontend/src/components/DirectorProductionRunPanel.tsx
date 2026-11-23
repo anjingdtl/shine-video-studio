@@ -258,12 +258,22 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
   }, [load]);
 
   // One aggregate poll for the whole panel, and only while something is moving.
-  const moving = !!activeRun && RUN_ACTIVE.includes(activeRun.status);
+  const activeRunIdForPoll = journey?.scope?.run_id ?? journey?.run?.id ?? run?.id ?? '';
+  const assembling = (overviewEpisodes ?? []).some((row) =>
+    ['PENDING', 'ASSEMBLING'].includes(row.delivery?.assembly?.status ?? ''),
+  ) || (run?.id === activeRunIdForPoll && (run?.episodes ?? []).some((row) =>
+    ['PENDING', 'ASSEMBLING'].includes(row.assembly?.status ?? ''),
+  ));
+  const moving = (!!run && RUN_ACTIVE.includes(run.status)) || assembling;
   useEffect(() => {
     if (!moving) return;
-    const timer = window.setInterval(() => { load().catch(() => undefined); }, 5000);
+    const intervalMs = assembling ? 1200 : 5000;
+    const timer = window.setInterval(() => {
+      load().catch(() => undefined);
+      if (assembling) onRefresh?.();
+    }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [moving, load]);
+  }, [moving, assembling, load, onRefresh]);
 
   async function act(name: string, action: () => Promise<unknown>, success?: string) {
     setBusy(name);
@@ -462,43 +472,52 @@ export function DirectorProductionRunPanel({ projectId, mode, packageId, demo, w
             {row.title || row.episode_id} · {row.state_label}
           </button>)}
         </div>}
-        {selected && <div className="post-ep-preview">
-          <div className="run-ep-head">
-            <span className="run-ep-no">{selected.order ?? '—'}</span>
-            <div>
-              <b>{selected.title || selected.episode_id}</b>
-              <span>{selected.shots.confirmed_count || selected.shots.landed_count} 镜
-                {' '}· 成片 {selected.delivery?.actual_seconds ? `${Math.round(selected.delivery.actual_seconds)} 秒` : '—'}</span>
-              <em className="run-ep-sub">
-                {selected.delivery?.sha256 ? `文件 ${selected.delivery.sha256.slice(0, 10)}…（SHA-256）` : '尚无成片文件'}
-                {' · '}
-                {selected.delivery?.post_contract?.subtitle_revision
-                  ? `字幕第 ${Number(selected.delivery.post_contract.subtitle_revision)} 版` : '无字幕轨'}
-              </em>
-            </div>
-            <span className={`run-badge ${acceptanceLabel(selected.delivery?.acceptance).tone}`}>
-              {acceptanceLabel(selected.delivery?.acceptance).text}
-            </span>
-          </div>
-          {selected.delivery?.artifact_id
-            ? <div className="run-ep-media">
-              <video key={selected.delivery.artifact_id} controls preload="metadata"
-                src={`${API}/deliveries/${selected.delivery.artifact_id}/media`} />
-              <div className="row run-ep-acceptance">
-                <OpenVideoFolderButton artifactId={selected.delivery.artifact_id} />
-                <button type="button" className="btn-secondary" onClick={() => setAcceptTarget({
-                  artifactId: selected.delivery!.artifact_id,
-                  sha256: selected.delivery!.sha256 ?? '',
-                  title: selected.title || selected.episode_id,
-                  acceptance: selected.delivery?.acceptance ?? null,
-                })}>观看并确认</button>
+        {selected && (() => {
+          const liveAssembly = selected.delivery?.assembly
+            ?? (activeRun?.episodes ?? []).find((row) => row.episode_id === selected.episode_id)?.assembly
+            ?? null;
+          return <div className="post-ep-preview">
+            <div className="run-ep-head">
+              <span className="run-ep-no">{selected.order ?? '—'}</span>
+              <div>
+                <b>{selected.title || selected.episode_id}</b>
+                <span>{selected.shots.confirmed_count || selected.shots.landed_count} 镜
+                  {' '}· 成片 {selected.delivery?.actual_seconds ? `${Math.round(selected.delivery.actual_seconds)} 秒` : '—'}</span>
+                <em className="run-ep-sub">
+                  {liveAssembly && ['PENDING', 'ASSEMBLING'].includes(liveAssembly.status)
+                    ? `正在重新装配 ${liveAssembly.percent}% · ${liveAssembly.detail}`
+                    : <>
+                      {selected.delivery?.sha256 ? `文件 ${selected.delivery.sha256.slice(0, 10)}…（SHA-256）` : '尚无成片文件'}
+                      {' · '}
+                      {selected.delivery?.post_contract?.subtitle_revision
+                        ? `字幕第 ${Number(selected.delivery.post_contract.subtitle_revision)} 版` : '无字幕轨'}
+                    </>}
+                </em>
               </div>
+              <span className={`run-badge ${acceptanceLabel(selected.delivery?.acceptance).tone}`}>
+                {acceptanceLabel(selected.delivery?.acceptance).text}
+              </span>
             </div>
-            : <p className="run-hint">这一集还没有装配成片；全部镜头通过后会自动装配。</p>}
-          {selRunId && <EpisodeSubtitleFold projectId={projectId} episode={selected} runId={selRunId}
-            runEpisode={postEditorEpisode(selected)} onMessage={onMessage}
-            onApplied={() => { void load(); onRefresh?.(); }} />}
-        </div>}
+            {selected.delivery?.artifact_id
+              ? <div className="run-ep-media">
+                <video key={selected.delivery.artifact_id} controls preload="metadata"
+                  src={`${API}/deliveries/${selected.delivery.artifact_id}/media`} />
+                <div className="row run-ep-acceptance">
+                  <OpenVideoFolderButton artifactId={selected.delivery.artifact_id} />
+                  <button type="button" className="btn-secondary" onClick={() => setAcceptTarget({
+                    artifactId: selected.delivery!.artifact_id!,
+                    sha256: selected.delivery!.sha256 ?? '',
+                    title: selected.title || selected.episode_id,
+                    acceptance: selected.delivery?.acceptance ?? null,
+                  })}>观看并确认</button>
+                </div>
+              </div>
+              : <p className="run-hint">这一集还没有装配成片；全部镜头通过后会自动装配。</p>}
+            {selRunId && <EpisodeSubtitleFold projectId={projectId} episode={selected} runId={selRunId}
+              runEpisode={postEditorEpisode(selected)} assembly={liveAssembly} onMessage={onMessage}
+              onApplied={() => { void load(); onRefresh?.(); }} />}
+          </div>;
+        })()}
       </section>
       {selected && <section className="card section-card run-card">
         <div className="section-heading">

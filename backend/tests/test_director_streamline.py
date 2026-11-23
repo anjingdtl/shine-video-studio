@@ -1358,3 +1358,113 @@ def test_unknown_continuity_resend_preserves_failed_role_and_reuses_succeeded_la
     assert resumed_calls == ["ContinuityReport", "EditIntentPlan"]
 
 
+def test_headingless_multiprose_splits_into_paragraph_sections_for_episodes(api):
+    from shine.materialprep.story import source_sections
+    from tests.test_film_crew import prepare
+
+    client, factory, _settings = api
+    project_id, _style, _profile = prepare(
+        client, freeze=False, character_entity_id="老周", character_filename="老周.png")
+    story_text = (
+        "《雨夜钟表》\n"
+        "（根据民间故事旧抄本原篇整理改写）\n\n"
+        "第一天夜里，老周在灯下擦拭着那块停摆已久的怀表，窗外大雨倾盆而下，街角几乎没有行人。\n\n"
+        "第二天清晨，一位穿深蓝风衣的年轻女子走进钟表铺，轻声询问昨天留下的那枚铜钥匙是否还在。\n\n"
+        "第三天黄昏，老周沿着女子留下的地址找到城南旧巷，在斑驳木门后发现了一整墙走时精准的挂钟。\n\n"
+        "（完）\n"
+    )
+    doc = _document(client, project_id, "雨夜钟表.txt", story_text)
+    sections = source_sections(project_id, type("Doc", (), {"text": story_text})())
+    assert len(sections) == 3
+    assert sections[0]["start_offset"] == 0
+    assert sections[-1]["end_offset"] == len(story_text)
+    assert "".join(story_text[s["start_offset"]:s["end_offset"]] for s in sections) == story_text
+    assert "《雨夜钟表》" in sections[0]["title"]
+    assert "（根据民间故事旧抄本原篇整理改写）" in story_text[sections[0]["start_offset"]:sections[0]["end_offset"]]
+    assert "（完）" in story_text[sections[-1]["start_offset"]:sections[-1]["end_offset"]]
+
+    _approved_outline(factory, project_id, doc, sections)
+    book = _storyboard_book(client, project_id, episode_count=3, target_seconds=12, tolerance_seconds=6)
+    assert book["preview"]["episode_count"] == 3
+
+
+def test_fault_code_and_curly_quoted_visible_text_under_h3_english():
+    from fastapi import HTTPException
+
+    from shine.director.streamline import _fault_code
+    from shine.h3.spec_review import BASE_SECTION_ORDER, QUOTED_OR_DIALOGUE, review_h3_prompt
+
+    report_exc = HTTPException(
+        status_code=422,
+        detail={"violations": [{"rule_id": "H3_ENGLISH", "evidence": "CJK found"}]},
+    )
+    assert _fault_code(report_exc) == "H3_ENGLISH"
+
+    text = "The wooden plaque reads \u201c\u5170\u82e5\u5bfa\u201d in weathered gilt calligraphy."
+    assert not any("\u4e00" <= ch <= "\u9fff" for ch in QUOTED_OR_DIALOGUE.sub("", text))
+    findings = review_h3_prompt(
+        text,
+        {key: "Clean ambient acoustics." for key in BASE_SECTION_ORDER},
+        mode="I2VA",
+    )
+    assert not any(item["code"] == "H3_ENGLISH" for item in findings)
+
+
+def test_continuity_conflict_reports_reason_and_retries_director_with_lesson(api):
+    client, _factory, settings = api
+    prepared = _prepare_project(client, sections=1)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    assets = client.get(f"/api/v1/projects/{project}/assets").json()
+    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
+    base = _chain_responder({"asset": master})
+
+    conflict_issue = "[shot-1] 人物把碗放上桌面后下一句又凭空端着碗。"
+    first_round = True
+    retry_director_prompts: list[str] = []
+    retry_titles: list[str] = []
+
+    def responder(messages, schema):
+        title = schema.get("title") or ""
+        if not first_round:
+            retry_titles.append(title)
+            if title == "DirectorialPlan":
+                retry_director_prompts.append(messages[0].content)
+        if first_round and title == "ContinuityReport":
+            return {"issues": [conflict_issue], "recommendation": "needs_review"}
+        if first_round and title == "ContinuityArbitration":
+            return {"rulings": [{"issue_index": 0, "issue": conflict_issue,
+                                 "verdict": "conflict", "rule_id": "H3_KEYFRAMES",
+                                 "rationale": "Prop handoff contradiction."}],
+                    "recommendation": "needs_review"}
+        return base(messages, schema)
+
+    _run_storyboard_to_rest(client, settings, project, responder=responder)
+    blocked = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert blocked["status"] == "NEEDS_REVIEW"
+    blocker = blocked["episodes"][0]["blocker"]
+    assert blocker["rejections"][0]["code"] == "CONTINUITY_CONFLICT"
+    assert "连续性矛盾需要重排" in blocker["summary"]
+    assert conflict_issue in blocker["summary"]
+
+    first_round = False
+    retry = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/retry",
+        json={"expected_state_version": blocked["state_version"]}, headers=LOCAL)
+    assert retry.status_code == 202, retry.text
+    _run_storyboard_to_rest(client, settings, project, responder=responder)
+
+    final_state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert final_state["status"] == "SUCCEEDED"
+    assert final_state["episodes"][0]["status"] == "APPLIED"
+    # ScriptBreakdown is preserved; retry begins directly from director with the conflict lesson.
+    assert "ScriptBreakdown" not in retry_titles
+    assert retry_director_prompts and conflict_issue in retry_director_prompts[0]
+
+
+
+
+

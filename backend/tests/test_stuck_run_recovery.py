@@ -361,7 +361,7 @@ def test_resume_run_continues_remaining_pending_shots_after_abandoned_shot(api):
 
     resumed = client.post(f"/api/v1/production-runs/{run_id}/resume", json={}, headers=LOCAL)
     assert resumed.status_code == 202, resumed.text
-    assert resumed.json()["status"] == "RUNNING"
+    assert resumed.json()["status"] == "RUNNING", resumed.json()
     with factory() as db:
         assert db.get(ProductionSeries, series_id).status == "QUEUED"
         assert db.get(ProductionRunBatch, db.scalar(
@@ -409,3 +409,128 @@ def test_resume_run_explains_when_no_runnable_shot_remains(api):
     assert resumed.status_code == 202
     assert resumed.json()["status"] == "NEEDS_REVIEW"
     assert "重拍" in resumed.json().get("message", "")
+
+
+def _seed_superseded_pre_submit_series(factory, project_id, package_id, shot_id, style_id):
+    """构造上一轮 NEEDS_REVIEW 运行遗留的未开拍排队序列（0 attempt，暂停排队中）。"""
+    from shine.models import ProductionSeriesItem
+    from shine.production.models import ProductionRunBatch, ProductionRunEpisode
+
+    with factory.begin() as db:
+        prior_run = ProductionRun(
+            project_id=project_id, package_id=package_id, package_revision=1,
+            manifest_sha256="a" * 64, scope_digest="b" * 64, policy_hash="c" * 64,
+            scope={"episode_ids": ["ep-01"], "shot_count": 1},
+            budget={}, counters={}, status="NEEDS_REVIEW", control_reason="SERIES_INCOMPLETE",
+            idempotency_key=uuid4().hex, request_hash=uuid4().hex[:64],
+        )
+        db.add(prior_run)
+        db.flush()
+        ep = ProductionRunEpisode(
+            run_id=prior_run.id, project_id=project_id, episode_id="ep-01",
+            position=0, title="第1集", manifest_sha256="d" * 64,
+            shot_ids=[shot_id], status="BLOCKED", blocker_code="SERIES_INCOMPLETE",
+        )
+        db.add(ep)
+        db.flush()
+        job = Job(
+            project_id=project_id, shot_id=shot_id, shot_revision=1,
+            style_version_id=style_id, request={}, idempotency_key=uuid4().hex,
+            status="QUEUED", paused=True, provider="comfyui", generation_mode="Ref2VA",
+        )
+        db.add(job)
+        db.flush()
+        series = ProductionSeries(
+            project_id=project_id, provider="comfyui", status="NEEDS_REVIEW",
+            failure_code="SERIES_INCOMPLETE", finalization_state="NONE",
+        )
+        db.add(series)
+        db.flush()
+        db.add(ProductionSeriesItem(
+            series_id=series.id, position=0, shot_id=shot_id, job_id=job.id, status="QUEUED",
+        ))
+        db.add(ProductionRunBatch(
+            run_id=prior_run.id, episode_row_id=ep.id, episode_id="ep-01",
+            batch_key="ep-01-b01", position=0, input_digest=uuid4().hex[:64],
+            shot_ids=[shot_id], status="BLOCKED", series_id=series.id,
+            failure_code="SERIES_INCOMPLETE",
+        ))
+        return prior_run.id, series.id, job.id
+
+
+def test_new_run_settles_superseded_needs_review_pre_submit_series(api):
+    """新一轮 run 启动时必须清理已作废 NEEDS_REVIEW run 遗留的未提交 QUEUED 序列。"""
+    client, factory, settings = api
+    studio = _studio(client, shots=1)
+    shot_id = studio["shots"][0]["id"]
+    _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
+    _confirm_package(client, package["id"])
+    prior_id, old_series_id, old_job_id = _seed_superseded_pre_submit_series(
+        factory, studio["project"], package["id"], shot_id, studio["style"]["id"],
+    )
+
+    created = client.post(f"/api/v1/projects/{studio['project']}/production-runs",
+                          json={"package_id": package["id"]}, headers=LOCAL)
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+    assert run_id != prior_id
+
+    with factory() as db:
+        assert db.get(ProductionSeries, old_series_id).status == "CANCELLED"
+        assert db.get(Job, old_job_id).stale is True
+
+    _advance(factory, settings, run_id)
+    with factory() as db:
+        from shine.production.models import ProductionRunBatch
+
+        run = db.get(ProductionRun, run_id)
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run_id))
+        assert batch is not None and batch.series_id is not None and batch.status == "QUEUED"
+        assert run.status == "RUNNING"
+
+
+def test_resume_run_reopens_batch_dispatch_refused_after_superseded_cleared(api):
+    """已被遗留排队单挡成 BATCH_DISPATCH_REFUSED 的 run，点恢复可清理旧排队并重新派批。"""
+    from shine.production.models import ProductionRunBatch, ProductionRunEpisode
+
+    client, factory, settings = api
+    studio = _studio(client, shots=1)
+    shot_id = studio["shots"][0]["id"]
+    _plan, package = _plan_and_package(client, studio, target_seconds=60, batch_limit=1)
+    _confirm_package(client, package["id"])
+
+    created = client.post(f"/api/v1/projects/{studio['project']}/production-runs",
+                          json={"package_id": package["id"]}, headers=LOCAL)
+    assert created.status_code == 201, created.text
+    run_id = created.json()["id"]
+
+    # 模拟当前 run 的批次在派发前被一笔旧 NEEDS_REVIEW run 的未开拍 QUEUED 占用挡下。
+    _prior_id, old_series_id, old_job_id = _seed_superseded_pre_submit_series(
+        factory, studio["project"], package["id"], shot_id, studio["style"]["id"],
+    )
+    _advance(factory, settings, run_id)
+    with factory() as db:
+        run = db.get(ProductionRun, run_id)
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run_id))
+        ep = db.scalar(select(ProductionRunEpisode).where(ProductionRunEpisode.run_id == run_id))
+        assert run.status == "NEEDS_REVIEW"
+        assert batch.status == "BLOCKED" and batch.series_id is None
+        assert batch.failure_code == "BATCH_DISPATCH_REFUSED"
+        assert ep.status == "BLOCKED"
+
+    resumed = client.post(f"/api/v1/production-runs/{run_id}/resume", json={}, headers=LOCAL)
+    assert resumed.status_code == 202, resumed.text
+    assert resumed.json()["status"] == "RUNNING", resumed.json()
+
+    with factory() as db:
+        assert db.get(ProductionSeries, old_series_id).status == "CANCELLED"
+        assert db.get(Job, old_job_id).stale is True
+        assert db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run_id)) is None
+        ep = db.scalar(select(ProductionRunEpisode).where(ProductionRunEpisode.run_id == run_id))
+        assert ep.status == "PLANNED" and ep.blocker_code is None
+        assert db.get(ProductionRun, run_id).blocker_count == 0
+
+    _advance(factory, settings, run_id)
+    with factory() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run_id))
+        assert batch is not None and batch.series_id is not None and batch.status == "QUEUED"

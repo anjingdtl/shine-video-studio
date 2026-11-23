@@ -362,6 +362,14 @@ def _episode_node(
     shooting_this_episode = bool(run_active and in_current_run and active_episode is not None
                                  and active_episode.status != "DELIVERED")
     delivery_row = latest_delivery or run_episode
+    from shine.media.delivery_engine import delivery_order_public
+    from shine.media.delivery_models import DeliveryOrder
+
+    delivery_order = (
+        db.get(DeliveryOrder, delivery_row.delivery_order_id)
+        if delivery_row is not None and delivery_row.delivery_order_id
+        else None
+    )
     delivered = bool(delivery_row is not None and delivery_row.delivered_artifact_id)
     episode_delivered = bool(delivery_row is not None and delivery_row.status == "DELIVERED")
 
@@ -445,7 +453,13 @@ def _episode_node(
             "post_contract": delivery_row.post_contract,
             "run_id": delivery_row.run_id,
             "acceptance": _delivery_acceptance(db, delivery_row.delivered_artifact_id),
-        } if delivery_row is not None and delivered else None),
+            "assembly": delivery_order_public(delivery_order),
+        } if delivery_row is not None and (
+            delivered
+            or (delivery_order is not None and delivery_order.status in {
+                "PENDING", "ASSEMBLING", "FAILED", "BLOCKED",
+            })
+        ) else None),
         "next_action": action,
     }
 

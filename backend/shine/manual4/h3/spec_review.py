@@ -23,7 +23,10 @@ LABEL_PATTERN = re.compile(r"<(Subject|Picture|Video|Audio) (\d+)>")
 NARRATOR_SPEAKER_NAMES = {"旁白", "画外音", "narrator", "voiceover", "voice-over", "vo"}
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
-_QUOTED_OR_DIALOGUE = re.compile(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」|『[^』]*』", re.S)
+_QUOTED_OR_DIALOGUE = re.compile(
+    r"<d>.*?</d>|\"[^\"]*\"|\u201c[^\u201d]*\u201d|「[^」]*」|『[^』]*』",
+    re.S,
+)
 _TIMESTAMP = re.compile(r"At (\d{2}):(\d{2}\.\d{3})")
 MAX_PROMPT_CHARS = 12000
 

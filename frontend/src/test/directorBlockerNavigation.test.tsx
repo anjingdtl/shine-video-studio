@@ -82,4 +82,24 @@ describe('分集未确认的恢复入口', () => {
     await user.click(toOutline[0]);
     await waitFor(() => expect(window.location.hash).toBe('#d/creative'));
   });
+
+  it('大纲已确认时，剧本统筹页不再回指「去第 1 阶段确认大纲」或提示先确认大纲', async () => {
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/journey$/, respond: () => jsonResponse({
+      ...EMPTY_JOURNEY,
+      stages: EMPTY_JOURNEY.stages.map((row) => {
+        if (row.id === 'script') return { ...row, done: true, blockers: [], facts: { outline_confirmed: true } };
+        if (row.id === 'plan') return { ...row, blockers: [{ code: 'EPISODE_PLAN_NOT_CONFIRMED', message: '分集方案尚未确认' }] };
+        return row;
+      }),
+    }) });
+
+    const user = userEvent.setup();
+    render(<App />);
+    await switchToDirector(user);
+    await gotoDirectorPage(user, /剧本统筹/);
+
+    await waitFor(() => expect(screen.getByText(/大纲已确认。设定好集数、每集秒数与风格后，点击「生成分镜书」。/)).toBeTruthy());
+    expect(screen.queryByRole('button', { name: '去第 1 阶段确认大纲' })).toBeNull();
+    expect(screen.queryByText(/先确认大纲（第 1 阶段）/)).toBeNull();
+  });
 });

@@ -84,6 +84,38 @@ def test_a_running_renderer_is_never_called_a_crash(monkeypatch):
     assert failure.value.detail == "IMAGE_RENDERER_LISTENER_TIMEOUT"
 
 
+def test_dying_prior_socket_entry_is_tolerated_until_owned_listener_binds(monkeypatch):
+    """If Windows TCP table briefly shows an already-dead prior renderer PID right
+    after retiring the idle image renderer, H3 startup must wait for teardown rather
+    than crashing with COMFY_STARTUP_OWNERSHIP_UNVERIFIED in milliseconds."""
+    from shine.comfyops import handoff_startup
+
+    class _OwnedGroup:
+        def owns(self, pid, birth):
+            return pid == 2002 and birth == "owned-birth"
+
+        def exit_code_if_stopped(self):
+            return None
+
+    polls = iter([
+        [("127.0.0.1", 1001)],  # retired image PID still closing in TCP table
+        [],                      # socket cleared
+        [("127.0.0.1", 2002)],  # new H3 renderer bound
+    ])
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: next(polls))
+    monkeypatch.setattr(handoff_startup, "process_identity",
+                        lambda pid: None if pid == 1001 else "owned-birth")
+    owned = handoff_startup._wait_for_owned_listener(_OwnedGroup(), 8237, timeout=5.0)
+    assert owned == {"pid": 2002, "birth": "owned-birth"}
+
+    # A *live* unowned process must still fail immediately without waiting.
+    monkeypatch.setattr(handoff_startup, "windows_port_listeners", lambda port: [("127.0.0.1", 9999)])
+    monkeypatch.setattr(handoff_startup, "process_identity", lambda pid: "foreign-birth")
+    with pytest.raises(HTTPException) as rejected:
+        handoff_startup._wait_for_owned_listener(_OwnedGroup(), 8237, timeout=5.0)
+    assert rejected.value.detail == "COMFY_STARTUP_OWNERSHIP_UNVERIFIED"
+
+
 def _record_dead_renderer(factory, instance_id="fake-instance"):
     with factory() as db:
         db.add(AppSetting(

@@ -94,11 +94,13 @@ function describeError(error: unknown): string {
 type StyleStrength = 'subtle' | 'balanced' | 'strong';
 
 export function StoryboardBookPanel({
-  projectId, currentStyle, styles = [], onApplyStyleToAllShots, onRefreshFreeze, onMessage, onConfirmed, onGoStage,
+  projectId, currentStyle, styles = [], outlineConfirmed = false,
+  onApplyStyleToAllShots, onRefreshFreeze, onMessage, onConfirmed, onGoStage,
 }: {
   projectId: string;
   currentStyle?: { version: number; id?: string; snapshot?: Record<string, unknown> | null } | null;
   styles?: StyleVersion[];
+  outlineConfirmed?: boolean;
   onApplyStyleToAllShots?: () => void;
   onRefreshFreeze?: () => void;
   onMessage?: (message: string) => void;
@@ -665,7 +667,9 @@ export function StoryboardBookPanel({
       <span>有一版未确认的分镜书（第 {pendingDraft} 版）。点上方「生成分镜书」重新预览，再确认。</span>
     </div>}
     {!book && !confirmedPlan && <p className="empty-inline">
-      先确认大纲（第 1 阶段），再在这里生成分镜书。
+      {outlineConfirmed
+        ? '大纲已确认。设定好集数、每集秒数与风格后，点击「生成分镜书」。'
+        : '先确认大纲（第 1 阶段），再在这里生成分镜书。'}
     </p>}
   </section>;
 }

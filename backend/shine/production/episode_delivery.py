@@ -29,6 +29,7 @@ from shine.media.delivery_engine import (
     DeliveryBlock,
     DeliveryClaim,
     _write_back,
+    report_assembly_progress,
 )
 from shine.media.delivery_models import DeliveryOrder
 from shine.models import Job, MediaArtifact, Shot, SubtitleTrack, utcnow
@@ -529,7 +530,9 @@ def run_episode_delivery(
                     raise DeliveryBlock("EPISODE_SUBTITLE_NOT_APPROVED")
                 from shine.director.subtitles import track_matches_episode
 
-                if not track_matches_episode(track, order.scope_id or ""):
+                episode_row = db.get(ProductionRunEpisode, episode_scope_id or "")
+                episode_key = episode_row.episode_id if episode_row is not None else (order.scope_id or "")
+                if not track_matches_episode(track, episode_key):
                     raise DeliveryBlock("EPISODE_SUBTITLE_EPISODE_MISMATCH")
                 if order.subtitle_sha256 and track.sha256 != order.subtitle_sha256:
                     # The order pinned one subtitle identity; a different text
@@ -555,6 +558,7 @@ def run_episode_delivery(
                 for clip in edl["clips"]
             ]
         with session_factory() as work_db, AssemblyHeartbeat(session_factory, order_id, claim):
+            progress_state: dict[str, Any] = {}
             result = assembler.assemble(
                 work_db,
                 project_id,
@@ -567,6 +571,15 @@ def run_episode_delivery(
                 subtitle_sha256=subtitle_sha256,
                 reuse_existing=True,
                 page_size=EPISODE_PAGE_SIZE,
+                on_progress=lambda stage, pct, detail: report_assembly_progress(
+                    session_factory,
+                    order_id,
+                    claim,
+                    stage=stage,
+                    percent=pct,
+                    detail=detail,
+                    state=progress_state,
+                ),
             )
             work_db.commit()
         with session_factory.begin() as db:

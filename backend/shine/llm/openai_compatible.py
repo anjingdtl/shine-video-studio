@@ -326,29 +326,33 @@ class OpenAICompatibleProvider:
                             if choice.get("finish_reason"):
                                 finish_reason = choice["finish_reason"]
                                 saw_done = True
+                        if saw_done and usage:
+                            break
         except (httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ConnectError) as exc:
             if not headers_received:
                 return None
-            raise LLMConnectionError("Provider stream broke after acknowledgement", details={
-                "external_outcome": "UNKNOWN", "streamed": True,
-                "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
-                "headers_received": True, "error_type": type(exc).__name__,
-            }) from None
-        except httpx.HTTPError as exc:
-            if not chunks:
-                # A read/write failure can happen after the POST was sent even
-                # when no response headers arrived; absence of headers does not
-                # prove the provider never received the request.
-                raise LLMConnectionError("Provider stream failed before content", details={
+            if not saw_done:
+                raise LLMConnectionError("Provider stream broke after acknowledgement", details={
                     "external_outcome": "UNKNOWN", "streamed": True,
                     "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
-                    "headers_received": headers_received, "error_type": type(exc).__name__,
+                    "headers_received": True, "error_type": type(exc).__name__,
                 }) from None
-            raise LLMConnectionError("Provider stream broke", details={
-                "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
-                "streamed": True, "first_event_ms": first_event_ms,
-                "last_event_ms": last_event_ms, "error_type": type(exc).__name__,
-            }) from None
+        except httpx.HTTPError as exc:
+            if not saw_done:
+                if not chunks:
+                    # A read/write failure can happen after the POST was sent even
+                    # when no response headers arrived; absence of headers does not
+                    # prove the provider never received the request.
+                    raise LLMConnectionError("Provider stream failed before content", details={
+                        "external_outcome": "UNKNOWN", "streamed": True,
+                        "first_event_ms": first_event_ms, "last_event_ms": last_event_ms,
+                        "headers_received": headers_received, "error_type": type(exc).__name__,
+                    }) from None
+                raise LLMConnectionError("Provider stream broke", details={
+                    "external_outcome": "UNKNOWN", "provider_text": "".join(chunks),
+                    "streamed": True, "first_event_ms": first_event_ms,
+                    "last_event_ms": last_event_ms, "error_type": type(exc).__name__,
+                }) from None
         text = "".join(chunks)
         if not text:
             if saw_done:

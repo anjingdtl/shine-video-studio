@@ -54,17 +54,66 @@ class OutlinePart(APIModel):
     characters: list[OutlineCharacter] = Field(default_factory=list, max_length=24)
 
 
+def _paragraph_section_boundaries(source: str, lines: list) -> list[int]:
+    """Split headingless prose at paragraph breaks while keeping each section narrative."""
+    import re
+
+    from shine.materialprep.source_spans import is_narrative_fragment, narrative_body
+
+    def is_prose_unit(fragment: str) -> bool:
+        if not is_narrative_fragment(fragment):
+            return False
+        body = narrative_body(fragment)
+        # Title + parenthesized attribution lines can exceed 20 chars with zero story sentences;
+        # keep them merged into the opening scene unless they carry real prose or >= 40 chars.
+        return len(body) >= 40 or bool(re.search(r"[。！？!?]", body))
+
+    def select(candidates: list[int]) -> list[int]:
+        selected = [0]
+        for pos in candidates:
+            if pos <= selected[-1]:
+                continue
+            if is_prose_unit(source[selected[-1]:pos]) and is_prose_unit(source[pos:]):
+                selected.append(pos)
+        return selected
+
+    blank_blocks: list[int] = []
+    in_block = False
+    for match in lines:
+        if match.group().strip():
+            if not in_block:
+                blank_blocks.append(match.start())
+                in_block = True
+        else:
+            in_block = False
+    chosen = select(blank_blocks)
+    if len(chosen) > 1:
+        return chosen
+    line_starts = [match.start() for match in lines if match.group().strip()]
+    return select(line_starts)
+
+
 def source_sections(project_id, document):
     import re
 
     source = document.text or ""
+    lines = list(re.finditer(r"[^\n]*\n|[^\n]+$", source))
     boundaries = [0]
     titles = {}
-    for line in re.finditer(r"[^\n]*\n|[^\n]+$", source):
+    for line in lines:
         if HEADING.match(line.group()) or re.match(r"\s*第[^\n]{1,20}[章节回卷]", line.group()):
             boundaries.append(line.start())
             titles[line.start()] = line.group().strip()[:100]
+    if len(boundaries) == 1 and len(source) <= 45_000:
+        # Untitled manuscripts exceeding a single volume (45k chars) must remain
+        # one monolithic section so volume planning records an explicit hard-split cut.
+        boundaries = _paragraph_section_boundaries(source, lines)
     boundaries = sorted({*boundaries, len(source)})
+    if len(boundaries) > 2 and not titles:
+        for left, right in zip(boundaries, boundaries[1:], strict=False):
+            first_line = next((ln.strip() for ln in source[left:right].splitlines() if ln.strip()), "")
+            if first_line:
+                titles[left] = (first_line[:36] + "…") if len(first_line) > 36 else first_line
     return [{"production_section_id": str(uuid5(NAMESPACE_URL,
                 f"shine:{project_id}:{titles.get(left, 'preamble')}:"
                 f"{sum(titles.get(other, 'preamble') == titles.get(left, 'preamble')

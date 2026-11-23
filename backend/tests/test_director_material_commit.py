@@ -281,6 +281,45 @@ def test_streamline_project_surfaces_core_scenes_and_props_from_script_preparati
     assert next(r for r in rows if r["family"] == "prop")["critical"] is True
 
 
+def test_reextracted_script_preparation_replaces_prior_scene_key_entities(api):
+    """Re-extracting an outline writes a newer ScriptPreparation for the same scene_key;
+    requirements derivation must read only the latest per scene_key so old names never linger."""
+    from datetime import UTC, datetime, timedelta
+
+    from shine.h3.rulebook import digest
+    from shine.models import AgentArtifact, AgentTaskRecord
+
+    client, factory, _settings = api
+    project, _derived = _episode_one_requirements(client, _settings)
+    old_payload = {"schema_version": "1.0", "scene_key": "S1", "summary": "", "locked_facts": [],
+                   "requirements": [{"family": "prop", "name": "旧版锥子", "description": "旧。",
+                                     "carrier": "object", "core_prop_reason": "旧。",
+                                     "source_span_ids": [], "questions": []}], "questions": []}
+    new_payload = {"schema_version": "1.0", "scene_key": "S1", "summary": "", "locked_facts": [],
+                   "requirements": [{"family": "prop", "name": "新版取血锥", "description": "新。",
+                                     "carrier": "object", "core_prop_reason": "新。",
+                                     "source_span_ids": [], "questions": []}], "questions": []}
+    t0 = datetime(2026, 11, 23, 0, 0, tzinfo=UTC)
+    with factory.begin() as db:
+        task = AgentTaskRecord(project_id=project, role_id="producer", input_hash=digest(new_payload),
+                               asset_manifest_hash=digest(new_payload), rulepack_id="t", rulepack_hash=digest("t"),
+                               model_profile_id="t", model_id="t", schema_version="1.0",
+                               status="SUCCEEDED", trace={})
+        db.add(task)
+        db.flush()
+        db.add(AgentArtifact(project_id=project, kind="ScriptPreparation", schema_version="1.0",
+                             payload_json=old_payload, sha256=digest(old_payload), producer_role="producer",
+                             source_task_id=task.id, input_revision_ids=[], created_at=t0))
+        db.add(AgentArtifact(project_id=project, kind="ScriptPreparation", schema_version="1.0",
+                             payload_json=new_payload, sha256=digest(new_payload), producer_role="producer",
+                             source_task_id=task.id, input_revision_ids=[],
+                             created_at=t0 + timedelta(seconds=10)))
+    derived = client.post(f"/api/v1/projects/{project}/director/materials/derive", json={}, headers=LOCAL)
+    assert derived.status_code == 200, derived.text
+    props = {row["entity_id"] for row in derived.json()["requirements"] if row["family"] == "prop"}
+    assert props == {"新版取血锥"}
+
+
 def test_material_preparation_confirm_binds_shots_like_director_commit(api):
     """晋升走的 /material-preparation/confirm 必须与 director commit 一样回绑镜头。
 

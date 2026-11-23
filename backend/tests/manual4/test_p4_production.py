@@ -659,8 +659,6 @@ def test_p4_episode_scope_does_not_block_on_other_episode_readiness(tmp_path):
 
 
 def test_p4_job_elapsed_seconds_and_open_folder(tmp_path, monkeypatch):
-    import os
-
     app, _ = _setup_m4_client(tmp_path)
     with TestClient(app) as client:
         pid, shots = _prepare_two_shots_materials_ready(client)
@@ -699,16 +697,32 @@ def test_p4_job_elapsed_seconds_and_open_folder(tmp_path, monkeypatch):
         assert lj["elapsed_seconds"] == 75
         assert pstate["runs"][0]["jobs"][0]["elapsed_seconds"] == 75
 
-        opened: list[tuple[str, str]] = []
-        monkeypatch.setattr(os, "startfile", lambda path, op="open": opened.append((path, op)), raising=False)
+        from shine.foundation import folder_reveal
+
+        opened: list[tuple[list[str], object]] = []
+        monkeypatch.setattr(folder_reveal.os, "name", "nt")
+        monkeypatch.setattr(
+            folder_reveal.subprocess,
+            "STARTUPINFO",
+            lambda: type("SI", (), {"dwFlags": 0, "wShowWindow": 0})(),
+            raising=False,
+        )
+        monkeypatch.setattr(folder_reveal.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+        monkeypatch.setattr(
+            folder_reveal.subprocess,
+            "Popen",
+            lambda args, **kwargs: opened.append((args, kwargs.get("startupinfo"))),
+        )
         resp = client.post(
             f"/api/v1/manual4/projects/{pid}/jobs/{job_id}/open-folder",
             headers=LOCAL_ACTION_HEADERS,
         )
         assert resp.status_code == 200
         assert len(opened) == 1
-        assert opened[0][1] == "explore"
-        assert opened[0][0] == resp.json()["folder"]
+        args, startupinfo = opened[0]
+        assert args[1:] == ["/select,", resp.json()["file"]]
+        assert startupinfo.wShowWindow == 1
+        assert resp.json()["file"].startswith(resp.json()["folder"])
         assert resp.json()["file"].endswith(".mp4")
         assert lj["output_sha256"] in resp.json()["file"]
 

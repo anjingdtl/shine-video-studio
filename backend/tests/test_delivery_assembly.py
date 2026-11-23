@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 from uuid import uuid4
@@ -33,14 +32,32 @@ def test_open_video_folder_only_opens_registered_local_video_directory(api, monk
         db.add(artifact)
         db.flush()
         artifact_id = artifact.id
-    opened = []
-    monkeypatch.setattr(os, "startfile", lambda path, verb: opened.append((path, verb)), raising=False)
+    from shine.foundation import folder_reveal
+
+    opened: list[tuple[list[str], object]] = []
+    monkeypatch.setattr(folder_reveal.os, "name", "nt")
+    monkeypatch.setattr(
+        folder_reveal.subprocess,
+        "STARTUPINFO",
+        lambda: type("SI", (), {"dwFlags": 0, "wShowWindow": 0})(),
+        raising=False,
+    )
+    monkeypatch.setattr(folder_reveal.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(
+        folder_reveal.subprocess,
+        "Popen",
+        lambda args, **kwargs: opened.append((args, kwargs.get("startupinfo"))),
+    )
     endpoint = f"/api/v1/video-artifacts/{artifact_id}/open-folder"
     headers = {"X-Shine-Local-Action": "1"}
 
     assert client.post(endpoint, headers={**headers, "Origin": "https://other.example"}).status_code == 403
     assert client.post(endpoint, headers=headers).status_code == 204
-    assert opened == [(str(path.parent.resolve()), "explore")]
+    assert len(opened) == 1
+    args, startupinfo = opened[0]
+    assert args[1:] == ["/select,", str(path.resolve())]
+    assert startupinfo.dwFlags & 1
+    assert startupinfo.wShowWindow == 1
 
     path.unlink()
     assert client.post(endpoint, headers=headers).status_code == 404

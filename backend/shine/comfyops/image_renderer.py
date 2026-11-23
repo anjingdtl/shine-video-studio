@@ -149,15 +149,27 @@ def _wait_for_owned_listener(group, port: int, *, timeout: float = 600.0) -> dic
     whole group has exited, the exit code is reported and the start fails
     with a named reason.
     """
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    dead_socket_grace = min(deadline, started + 3.0)
     while True:
         listeners = windows_port_listeners(port)
         if listeners:
             if len(listeners) != 1 or listeners[0][0] != "127.0.0.1":
+                if time.monotonic() < dead_socket_grace:
+                    time.sleep(0.05)
+                    continue
                 raise HTTPException(409, "IMAGE_RENDERER_LISTENER_UNVERIFIED")
             pid = listeners[0][1]
             birth = process_identity(pid)
-            if not birth or not group.owns(pid, birth):
+            if not birth:
+                # A just-terminated process can linger briefly in Windows' TCP table
+                # while its socket tears down; give it a short grace window to clear.
+                if time.monotonic() < dead_socket_grace:
+                    time.sleep(0.05)
+                    continue
+                raise HTTPException(409, "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED")
+            if not group.owns(pid, birth):
                 raise HTTPException(409, "IMAGE_RENDERER_OWNERSHIP_UNVERIFIED")
             return {"pid": pid, "birth": birth}
         exit_code = _owned_group_exit_code(group)
@@ -808,6 +820,16 @@ def _stop_image_renderer_locked(factory, settings, *, instance_id: str, actor: s
             "code": "IMAGE_RENDERER_STOP_UNCONFIRMED",
             "detail": "受管进程组里仍有成员，没有停止。",
         })
+    port = record.get("port")
+    if isinstance(port, int) and port > 0:
+        port_deadline = time.monotonic() + 5.0
+        while windows_port_listeners(port) and time.monotonic() < port_deadline:
+            time.sleep(0.05)
+        if windows_port_listeners(port):
+            raise HTTPException(409, {
+                "code": "IMAGE_RENDERER_STOP_UNCONFIRMED",
+                "detail": "渲染器进程已退出但监听端口尚未释放。",
+            })
     _mark_stopped(factory, instance_id, record)
     return {"status": "STOPPED", "instance_id": instance_id, "outcome": "stopped", "evidence": evidence}
 

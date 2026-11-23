@@ -20,7 +20,11 @@ from shine.h3.compiler import BASE_SECTION_ORDER, LABEL_PATTERN, REF_SECTION_ORD
 from shine.h3.narrator import is_narrator_speaker
 
 _CJK = re.compile(r"[\u3400-\u9fff]")
-_QUOTED_OR_DIALOGUE = re.compile(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」|『[^』]*』", re.S)
+QUOTED_OR_DIALOGUE = re.compile(
+    r"<d>.*?</d>|\"[^\"]*\"|\u201c[^\u201d]*\u201d|「[^」]*」|『[^』]*』",
+    re.S,
+)
+_QUOTED_OR_DIALOGUE = QUOTED_OR_DIALOGUE
 _TIMESTAMP = re.compile(r"At (\d{2}):(\d{2}\.\d{3})")
 MAX_PROMPT_CHARS = 12000
 """A soft ceiling: past this the shot description usually repeats itself."""

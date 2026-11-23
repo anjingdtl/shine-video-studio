@@ -907,6 +907,17 @@ export type DeliveryAcceptance = {
   created_at: string;
 };
 
+export type DeliveryOrderProgress = {
+  order_id: string;
+  status: string;
+  subtitle_revision?: number | null;
+  stage: string;
+  percent: number;
+  detail: string;
+  failure_code?: string | null;
+  updated_at?: string | null;
+};
+
 export type RunEpisode = {
   id: string; episode_id: string; position: number; title: string; status: string;
   shot_count: number; passed_shot_count: number; planned_seconds: number;
@@ -916,6 +927,7 @@ export type RunEpisode = {
   actual_seconds: number | null; delivery_order_id: string | null;
   delivered_artifact_id: string | null; delivered_sha256: string | null;
   acceptance?: DeliveryAcceptance | null;
+  assembly?: DeliveryOrderProgress | null;
   blocker_code: string | null; delivered_at: string | null;
   batches: Array<{
     batch_key: string; status: string; series_id: string | null; shot_count: number;
@@ -2002,11 +2014,12 @@ export type DirectorEpisodeOverview = {
     in_current_run: boolean;
   } | null;
   delivery: {
-    artifact_id: string; sha256: string | null; delivered_at: string | null;
+    artifact_id: string | null; sha256: string | null; delivered_at: string | null;
     actual_seconds: number | null; status: string;
     post_contract: Record<string, unknown> | null;
     run_id: string | null;
     acceptance?: DeliveryAcceptance | null;
+    assembly?: DeliveryOrderProgress | null;
   } | null;
   next_action: DirectorNextAction | null;
 };

@@ -203,11 +203,11 @@ def _reconcile(factory, settings, installation_id: str) -> dict[str, Any]:
         if m4_db_path.is_file():
             from shine.manual4.comfy.managed_instance import reconcile_m4_renderer
             from shine.manual4.storage.db import (
-                ensure_m4_schema,
                 make_m4_engine,
                 make_m4_session_factory,
                 manual4_database_url,
             )
+            from shine.manual4.storage.migrations import ensure_m4_schema
 
             m4_engine = make_m4_engine(manual4_database_url(settings.data_dir))
             try:

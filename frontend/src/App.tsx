@@ -170,10 +170,24 @@ function App() {
     bindStandardParameters, abandonJob,
   } = studio;
 
-  // 等待人工决定的镜头（结果未知 / 已放弃）：运行卡与任务明细读同一份台账。
-  const attentionJobs = useMemo(() => jobs.filter((job) =>
-    (job.status === 'NEEDS_REVIEW' && UNCERTAIN_RENDER_FAILURE_CODES.includes(job.failure_code ?? ''))
-    || (job.status === 'FAILED' && job.failure_code === ABANDONED_RENDER_FAILURE_CODE)), [jobs]);
+  // 等待人工决定的镜头（结果未知 / 已放弃）：运行卡与任务明细读同一份台账；
+  // 同一镜头在新一轮运行已经重拍推进（存在更新的 job）时，旧的已放弃记录不再冒充待决定项。
+  const attentionJobs = useMemo(() => {
+    const latestCreatedByShot = new Map<string, string>();
+    for (const job of jobs) {
+      const prev = latestCreatedByShot.get(job.shot_id);
+      if (!prev || job.created_at > prev) latestCreatedByShot.set(job.shot_id, job.created_at);
+    }
+    return jobs.filter((job) => {
+      if (job.status === 'NEEDS_REVIEW' && UNCERTAIN_RENDER_FAILURE_CODES.includes(job.failure_code ?? '')) {
+        return true;
+      }
+      if (job.status === 'FAILED' && job.failure_code === ABANDONED_RENDER_FAILURE_CODE) {
+        return job.created_at >= (latestCreatedByShot.get(job.shot_id) ?? job.created_at);
+      }
+      return false;
+    });
+  }, [jobs]);
 
   // 旧深链落到导演工作台后,地址栏统一成规范 #d/… 形式:刷新、前进后退
   // 与分享链接都落在同一套入口上,不再保留第二套地址。
@@ -400,6 +414,9 @@ function App() {
       .catch(() => undefined);
     return () => { alive = false; };
   }, [projectId, projectionEpoch, directorPackageId]);
+  const outlineConfirmed = Boolean(
+    journey?.stages.find((stage) => stage.id === 'script')?.facts?.['outline_confirmed'],
+  );
   const stageDone: Record<string, boolean> = useMemo(() => Object.fromEntries(
     (journey?.stages ?? []).map((stage) => [stage.id, stage.done]),
   ), [journey]);
@@ -418,7 +435,11 @@ function App() {
         const direct = described.action;
         const directPage = direct ? blockerTargetPage(direct.target) : null;
         const selfLoop = directPage !== null && directPage === directorPage;
-        const fallback = selfLoop ? described.selfLoopAction : undefined;
+        // 只有大纲真的还没确认时，在本页才回指第 1 阶段；大纲已确认时本页就是生成分镜书的起点。
+        const allowSelfLoopFallback = !(
+          blocker.code === 'EPISODE_PLAN_NOT_CONFIRMED' && outlineConfirmed
+        );
+        const fallback = selfLoop && allowSelfLoopFallback ? described.selfLoopAction : undefined;
         const fallbackPage = fallback ? blockerTargetPage(fallback.target) : null;
         const effective = selfLoop
           ? (fallback && fallbackPage !== directorPage ? fallback : undefined)
@@ -997,6 +1018,7 @@ function App() {
                 projectId={projectId}
                 currentStyle={currentStyle}
                 styles={styles}
+                outlineConfirmed={outlineConfirmed}
                 onApplyStyleToAllShots={() => void applyStyleToAllShots()}
                 onRefreshFreeze={() => void refreshStyleFreeze()}
                 onGoStage={(target) => { resolveBlockerTarget(target)(); }}

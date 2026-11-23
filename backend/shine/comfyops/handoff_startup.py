@@ -619,15 +619,27 @@ def _wait_for_owned_listener(group, port, *, timeout=600):
     renderer loads thousands of node types before it answers, so the wait is
     generous: the startup intent is already durable.
     """
-    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    deadline = started + timeout
+    dead_socket_grace = min(deadline, started + 3.0)
     while True:
         listeners = windows_port_listeners(port)
         if listeners:
             if len(listeners) != 1 or listeners[0][0] != "127.0.0.1":
+                if time.monotonic() < dead_socket_grace:
+                    time.sleep(0.05)
+                    continue
                 raise HTTPException(409, "COMFY_STARTUP_LISTENER_UNVERIFIED")
             pid = listeners[0][1]
             birth = process_identity(pid)
-            if not birth or not group.owns(pid, birth):
+            if not birth:
+                # A just-retired renderer's socket can briefly stay visible in
+                # GetExtendedTcpTable right after TerminateJobObject returns.
+                if time.monotonic() < dead_socket_grace:
+                    time.sleep(0.05)
+                    continue
+                raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
+            if not group.owns(pid, birth):
                 raise HTTPException(409, "COMFY_STARTUP_OWNERSHIP_UNVERIFIED")
             return {"pid": pid, "birth": birth}
         if time.monotonic() >= deadline:

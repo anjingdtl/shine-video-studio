@@ -140,6 +140,98 @@ describe('⑦ 字幕唯一生成入口', () => {
     expect(screen.getByText(/已按新的剪辑\/字幕合同排队重新装配/)).toBeInTheDocument();
   });
 
+  it('先展开「修订剪辑 / 字幕」再点击生成字幕轨时，下拉框立即同步新版本而不停在只有不烧录字幕', async () => {
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    fireEvent.click(screen.getByText(/字幕与台词核对/));
+    fireEvent.click(screen.getByText(/修订剪辑 \/ 字幕（只重装配，不重拍）/));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    const select = screen.getByLabelText('烧录字幕版本') as HTMLSelectElement;
+    expect(select.options).toHaveLength(1);
+    expect(select.value).toBe('');
+
+    fireEvent.click(screen.getByRole('button', { name: '按真实成片时长生成 / 更新字幕轨' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    expect(select.options.length).toBeGreaterThan(1);
+    expect(select.value).toBe('1');
+  });
+
+  it('点击烧录后实时显示动态进度条，完成后自动轮询到新成片而无需手动刷新', async () => {
+    let phase: 'idle' | 'pending' | 'burning' | 'done' = 'idle';
+    stub.add({
+      method: 'GET',
+      pattern: /\/api\/v1\/projects\/proj-1\/director\/overview/,
+      respond: () => {
+        const body = overviewBody() as {
+          episodes: Array<{
+            delivery: {
+              artifact_id: string;
+              post_contract: Record<string, unknown> | null;
+              assembly?: Record<string, unknown> | null;
+            };
+          }>;
+        };
+        if (phase === 'pending') {
+          body.episodes[0].delivery.assembly = {
+            order_id: 'order-2', status: 'PENDING', subtitle_revision: 1,
+            stage: 'queued', percent: 0, detail: '已排队，等待开始装配与字幕烧录',
+          };
+        } else if (phase === 'burning') {
+          body.episodes[0].delivery.assembly = {
+            order_id: 'order-2', status: 'ASSEMBLING', subtitle_revision: 1,
+            stage: 'burning_subtitles', percent: 68, detail: '正在烧录字幕（34/50 秒）',
+          };
+        } else if (phase === 'done') {
+          body.episodes[0].delivery.artifact_id = 'art-2';
+          body.episodes[0].delivery.post_contract = { subtitle_revision: 1 };
+          body.episodes[0].delivery.assembly = {
+            order_id: 'order-2', status: 'DELIVERED', subtitle_revision: 1,
+            stage: 'completed', percent: 100, detail: '成片已装配交付',
+          };
+        }
+        return jsonResponse(body);
+      },
+    });
+    stub.add({
+      method: 'PUT',
+      pattern: /\/production-runs\/run-1\/episodes\/ep-01\/post-contract$/,
+      respond: () => {
+        phase = 'pending';
+        return jsonResponse({ delivery_order_id: 'order-2' }, 202);
+      },
+    });
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    fireEvent.click(screen.getByText(/字幕与台词核对/));
+    fireEvent.click(screen.getByText(/修订剪辑 \/ 字幕（只重装配，不重拍）/));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    fireEvent.click(screen.getByRole('button', { name: '按真实成片时长生成 / 更新字幕轨' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    fireEvent.click(screen.getByRole('button', { name: '批准该版字幕并按新合同重新装配' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(100); });
+
+    const bar = screen.getByRole('progressbar', { name: '字幕烧录与装配进度' });
+    expect(bar).toHaveAttribute('aria-valuenow', '0');
+    expect(screen.getAllByText(/已排队，等待开始装配与字幕烧录/).length).toBeGreaterThan(0);
+
+    phase = 'burning';
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    expect(screen.getByRole('progressbar', { name: '字幕烧录与装配进度' })).toHaveAttribute('aria-valuenow', '68');
+    expect(screen.getAllByText(/68% · 正在烧录字幕（34\/50 秒）/).length).toBeGreaterThan(0);
+
+    phase = 'done';
+    await act(async () => { await vi.advanceTimersByTimeAsync(1300); });
+    expect(screen.queryByRole('progressbar', { name: '字幕烧录与装配进度' })).not.toBeInTheDocument();
+    expect(screen.getAllByText(/文件 8888888888…（SHA-256）/).length).toBe(1);
+    expect(screen.getByText(/文件 8888888888…（SHA-256）/).textContent).toContain('字幕第 1 版');
+  });
+
   it('重拍进行中：⑦ 分段卡显示重拍进度条并跟读', async () => {
     stub.add({ method: 'GET', pattern: /\/generation-segments$/,
       respond: () => jsonResponse({ series_id: 'series-1', run_id: 'run-1', segments: [{

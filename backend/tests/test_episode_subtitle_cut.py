@@ -262,3 +262,145 @@ def test_a_recut_keeps_subtitles_on_the_selected_version(api):
         assert len(db.query(DeliveryOrder).filter(
             DeliveryOrder.project_id == project_id).all()) == order_count, \
             "重新装配字幕不新建交付单，也不重新渲染镜头"
+
+
+def test_episode_scoped_subtitle_passes_assembly_match_against_episode_key(api):
+    """分集字幕按 episode_id（如 e1）生成，装配校验不得拿分集行 UUID 去比对而误报 mismatch。"""
+    import hashlib
+    from uuid import uuid4
+
+    from shine.director.subtitles import track_matches_episode
+    from shine.models import (
+        Job,
+        JobAttempt,
+        MediaArtifact,
+        ProductionSeries,
+        ProductionSeriesItem,
+        QualityGate,
+        SubtitleTrack,
+    )
+    from shine.production.episode_delivery import run_episode_delivery
+    from shine.production.models import ProductionRun, ProductionRunBatch, ProductionRunEpisode
+    from tests.conftest import make_test_video_bytes
+
+    client, factory, settings = api
+    built = _setup(client, factory, durations=[4.0, 4.0])
+    project_id, shots = built["project_id"], built["shots"]
+    created = _episode_with_orders(factory, project_id, [row["id"] for row in shots],
+                                   cuts=[[(0.0, 4.0), (0.0, 4.0)]])
+    _freeze(client, project_id, shots[0]["id"], [{"start_s": 0.0, "end_s": 1.0, "text": "第一句"}])
+    compiled = _compile(client, project_id)
+    rev = compiled["revision"]
+    approved = client.post(f"/api/v1/projects/{project_id}/subtitles/{rev}/approve", headers=LOCAL)
+    assert approved.status_code == 200, approved.text
+
+    with factory() as db:
+        ep = db.get(ProductionRunEpisode, created["episode_id"])
+        track = db.query(SubtitleTrack).filter(
+            SubtitleTrack.project_id == project_id, SubtitleTrack.revision == rev,
+        ).one()
+        assert ep.id != ep.episode_id
+        assert track.episode_id == "e1"
+        assert track_matches_episode(track, ep.episode_id)
+
+    mp4 = make_test_video_bytes(duration_s=4.0, width=320, height=240, with_audio=True)
+    digest = hashlib.sha256(mp4).hexdigest()
+    with factory.begin() as db:
+        run = db.query(ProductionRun).filter(ProductionRun.project_id == project_id).one()
+        run_id = run.id
+        series = ProductionSeries(project_id=project_id, provider="comfyui", status="COMPLETED")
+        db.add(series)
+        db.flush()
+        series_id = series.id
+        db.add(ProductionRunBatch(
+            run_id=run_id, episode_row_id=created["episode_id"], episode_id="e1",
+            batch_key="e1-b01", position=0, input_digest="f" * 64,
+            shot_ids=[s["id"] for s in shots], status="PASSED", series_id=series.id,
+        ))
+        from shine.models import StyleVersion, utcnow
+
+        style_id = db.query(StyleVersion.id).filter(StyleVersion.project_id == project_id).scalar()
+        now = utcnow()
+        for idx, shot in enumerate(shots):
+            job_id, att_id, art_id = uuid4().hex, uuid4().hex, uuid4().hex
+            rel = f"artifacts/ep_sub_{idx}.mp4"
+            p = settings.data_dir / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(mp4)
+            job = Job(id=job_id, project_id=project_id, shot_id=shot["id"], shot_revision=1,
+                      style_version_id=style_id, request={},
+                      idempotency_key=f"sub-burn-{idx}", status="PASSED",
+                      quality_verification="real", provider="comfyui", generation_mode="Ref2VA",
+                      artifact_id=art_id)
+            db.add(job)
+            db.flush()
+            db.add(JobAttempt(id=att_id, job_id=job_id, attempt_no=1,
+                              request_fingerprint="a" * 64, status="COMPLETED",
+                              lease_owner="test-worker", lease_expires_at=now,
+                              output_path=rel, output_sha256=digest, output_bytes=len(mp4)))
+            db.add(MediaArtifact(id=art_id, project_id=project_id, job_id=job_id, attempt_id=att_id,
+                                 artifact_kind="video", storage_path=rel, sha256=digest,
+                                 byte_size=len(mp4), content_type="video/mp4", is_mock=False,
+                                 provenance={"duration_s": 4.0}))
+            db.add(QualityGate(job_id=job_id, attempt_id=att_id, artifact_id=art_id,
+                               gate_name="technical", status="passed", is_mock=False))
+            db.add(ProductionSeriesItem(series_id=series.id, position=idx,
+                                        shot_id=shot["id"], job_id=job_id, status="PASSED"))
+
+    from shine.media.delivery_models import DeliveryOrder
+
+    with factory.begin() as db:
+        track = db.query(SubtitleTrack).filter(
+            SubtitleTrack.project_id == project_id, SubtitleTrack.revision == rev,
+        ).one()
+        order = DeliveryOrder(
+            project_id=project_id, series_id=series_id, scope_kind="episode",
+            scope_id=created["episode_id"], origin="run_episode", version=99,
+            status="PENDING", input_digest="a" * 64, shots_digest="b" * 64,
+            subtitle_revision=rev, subtitle_sha256=track.sha256,
+        )
+        db.add(order)
+        db.flush()
+        order_id = order.id
+
+    res = run_episode_delivery(
+        factory, order_id, settings=settings, asset_root=settings.data_dir, worker_id="test-worker",
+    )
+    assert res == "DELIVERED"
+    with factory() as db:
+        order = db.get(DeliveryOrder, order_id)
+        art = db.get(MediaArtifact, order.artifact_id)
+        assert art is not None and art.provenance.get("subtitles_composited") is True
+        assert art.provenance.get("subtitles_sha256") == track.sha256
+        from shine.media.delivery_engine import delivery_order_public
+
+        pub = delivery_order_public(order)
+        assert pub is not None and pub["status"] == "DELIVERED" and pub["percent"] == 100
+
+    # 验证装配进度投影：ASSEMBLING 期间读写同一张 DeliveryOrder 台账并在 overview 露出。
+    from shine.media.delivery_engine import DeliveryClaim, report_assembly_progress
+
+    with factory.begin() as db:
+        prog_order = DeliveryOrder(
+            project_id=project_id, series_id=series_id, scope_kind="episode",
+            scope_id=created["episode_id"], origin="run_episode", version=100,
+            status="ASSEMBLING", worker_id="w-prog", state_version=3,
+            subtitle_revision=rev, subtitle_sha256=track.sha256,
+        )
+        db.add(prog_order)
+        db.flush()
+        prog_id = prog_order.id
+        ep_row = db.get(ProductionRunEpisode, created["episode_id"])
+        ep_row.delivery_order_id = prog_id
+    report_assembly_progress(
+        factory, prog_id, DeliveryClaim(owner="w-prog", version=3),
+        stage="burning_subtitles", percent=72, detail="正在烧录字幕（36/50 秒）",
+    )
+    ov = client.get(f"/api/v1/projects/{project_id}/director/overview")
+    assert ov.status_code == 200, ov.text
+    asm = ov.json()["episodes"][0]["delivery"]["assembly"]
+    assert asm["order_id"] == prog_id
+    assert asm["status"] == "ASSEMBLING"
+    assert asm["stage"] == "burning_subtitles"
+    assert asm["percent"] == 72
+    assert "36/50" in asm["detail"]

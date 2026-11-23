@@ -1,8 +1,8 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Scissors } from 'lucide-react';
 import {
   ApiError, approveSubtitleRevision, listSubtitleTracks, setEpisodePostContract,
-  type RunEpisode, type SubtitleTrack,
+  type DeliveryOrderProgress, type RunEpisode, type SubtitleTrack,
 } from '../api';
 import { label, subtitleStatusLabels } from '../constants';
 
@@ -11,13 +11,19 @@ import { label, subtitleStatusLabels } from '../constants';
  *
  * 只改变已经拍好的片段怎样装配——服务端据此生成新的交付版本，旧版保留，
  * 不重新渲染 H3。留空的入出点表示整条使用；音量混音尚未实现，这里不提供。
- * 字幕版本在这里选择；草稿版在提交时经你的明确动作先批准再烧录，
- * 批准与装配都走既有唯一执行者。
+ * 字幕版本在这里选择；优先共用父级字幕折叠卡的同一份轨道台账，避免生成
+ * 字幕后下拉仍停在旧快照上；草稿版在提交时经你的明确动作先批准再烧录。
  */
-export function EpisodePostEditor({ projectId, runId, episode, onDone }: {
+export function EpisodePostEditor({
+  projectId, runId, episode, tracks: parentTracks, suggestedRevision, assembly, onTracksRefresh, onDone,
+}: {
   projectId: string;
   runId: string;
   episode: RunEpisode;
+  tracks?: SubtitleTrack[];
+  suggestedRevision?: number | null;
+  assembly?: DeliveryOrderProgress | null;
+  onTracksRefresh?: () => void;
   onDone: (message: string, kind: 'success' | 'error') => void;
 }) {
   const current = episode.post_contract ?? null;
@@ -29,13 +35,27 @@ export function EpisodePostEditor({ projectId, runId, episode, onDone }: {
     }]),
   ));
   const [subtitle, setSubtitle] = useState(current?.subtitle_revision ? String(current.subtitle_revision) : '');
-  const [tracks, setTracks] = useState<SubtitleTrack[]>([]);
+  const [localTracks, setLocalTracks] = useState<SubtitleTrack[]>([]);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
 
+  const tracks = (parentTracks ?? localTracks).filter(
+    (row) => !row.episode_id || row.episode_id === episode.episode_id,
+  );
+
   const loadTracks = () => {
-    listSubtitleTracks(projectId).then(setTracks).catch(() => setTracks([]));
+    if (onTracksRefresh) {
+      onTracksRefresh();
+      return;
+    }
+    listSubtitleTracks(projectId).then(setLocalTracks).catch(() => setLocalTracks([]));
   };
+
+  useEffect(() => {
+    if (suggestedRevision != null) {
+      setSubtitle(String(suggestedRevision));
+    }
+  }, [suggestedRevision]);
 
   const selectedTrack = tracks.find((row) => String(row.revision) === subtitle) ?? null;
   const needsApproval = Boolean(selectedTrack && selectedTrack.status !== 'APPROVED');
@@ -70,6 +90,10 @@ export function EpisodePostEditor({ projectId, runId, episode, onDone }: {
     }
   }
 
+  const assemblyRunning = Boolean(assembly && ['PENDING', 'ASSEMBLING'].includes(assembly.status));
+  const assemblyFailed = Boolean(assembly && ['FAILED', 'BLOCKED'].includes(assembly.status));
+  const assemblyPct = Math.max(0, Math.min(100, Number(assembly?.percent ?? 0)));
+
   return <details className="episode-post-editor" onToggle={(event) => {
     if (event.currentTarget.open) loadTracks();
   }}>
@@ -102,9 +126,18 @@ export function EpisodePostEditor({ projectId, runId, episode, onDone }: {
           ? '所选字幕还是草稿：提交会先经你这一次点击批准，再烧录装配。'
           : '字幕的时间轴必须对应这一集剪辑后的长度；超出时服务端会拒绝装配，而不是把字幕压到错误的画面上。音量混音尚未实现。'}
       </p>
-      <button type="button" className="btn-secondary" disabled={busy} onClick={() => { void submit(); }}>
-        {busy ? '提交中…' : needsApproval ? '批准该版字幕并按新合同重新装配' : '按新合同重新装配'}
+      <button type="button" className="btn-secondary" disabled={busy || assemblyRunning} onClick={() => { void submit(); }}>
+        {busy ? '提交中…' : assemblyRunning ? '正在烧录装配…'
+          : needsApproval ? '批准该版字幕并按新合同重新装配' : '按新合同重新装配'}
       </button>
+      {assemblyRunning && assembly && <div className="episode-assembly-progress">
+        <div className="run-progress-bar" role="progressbar" aria-label="字幕烧录与装配进度"
+          aria-valuemin={0} aria-valuemax={100} aria-valuenow={assemblyPct}>
+          <i style={{ width: `${Math.max(4, assemblyPct)}%` }} className="is-working" />
+        </div>
+        <p className="run-progress-note">{assemblyPct}% · {assembly.detail}</p>
+      </div>}
+      {assemblyFailed && assembly && <p className="form-error">装配受阻：{assembly.detail}</p>}
       {problem && <p className="form-error">{problem}</p>}
     </div>
   </details>;

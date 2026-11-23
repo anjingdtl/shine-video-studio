@@ -25,7 +25,7 @@ from shine.h3.compiler import (
     PromptCompilationError,
     validate_reference_manifest,
 )
-from shine.h3.spec_review import review_h3_prompt
+from shine.h3.spec_review import QUOTED_OR_DIALOGUE, review_h3_prompt
 from shine.models import ProjectRuleLock, RulePack, utcnow
 from shine.schemas import APIModel, GenerationMode, RenderRequest
 
@@ -482,7 +482,7 @@ class H3RulebookRegistry:
         # Test the text outside dialogue and visible quoted text. CJK is deterministic;
         # fluency and creative quality still need probabilistic review and are not auto-passed here.
         text = request.compiled_prompt or ""
-        descriptive = re.sub(r"<d>.*?</d>|\"[^\"]*\"|「[^」]*」", "", text, flags=re.S)
+        descriptive = QUOTED_OR_DIALOGUE.sub("", text)
         if re.search(r"[\u3400-\u9fff]", descriptive):
             reject("H3_ENGLISH", "compiled_prompt", "CJK found outside dialogue or quoted visible text")
         for line in request.shot_spec.dialogue:

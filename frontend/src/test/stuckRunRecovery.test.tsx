@@ -166,4 +166,18 @@ describe('⑥ 运行卡的人工决定面', () => {
     await user.click(await screen.findByRole('button', { name: /继续安全可恢复批次/ }));
     expect(await screen.findByRole('alert')).toHaveTextContent('去⑦重拍此镜');
   });
+
+  it('同一镜头已有更新一轮任务（如已通过）时，旧轮次已放弃记录不再重复弹窗', async () => {
+    stubSystem();
+    stubStuckRun([
+      stuckJob({ id: 'job-old', status: 'FAILED', failure_code: 'USER_ABANDONED_UNRECONCILED', created_at: '2026-11-21T00:00:00Z' }),
+      stuckJob({ id: 'job-new', status: 'PASSED', failure_code: null, created_at: '2026-11-21T00:10:00Z' }),
+    ]);
+    const user = userEvent.setup();
+    render(<App />);
+    await gotoDirectorPage(user, /第 6 阶段：视频生产/);
+
+    expect(await screen.findByText('运行等待人工核对')).toBeInTheDocument();
+    expect(screen.queryByText('拍摄停在等待你决定的镜头')).toBeNull();
+  });
 });

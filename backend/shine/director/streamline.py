@@ -925,8 +925,14 @@ def _fault_code(exc: Exception) -> str:
     if isinstance(exc, HTTPException):
         if isinstance(exc.detail, str):
             return exc.detail
-        if isinstance(exc.detail, dict) and isinstance(exc.detail.get("code"), str):
-            return exc.detail["code"]
+        if isinstance(exc.detail, dict):
+            if isinstance(exc.detail.get("code"), str):
+                return exc.detail["code"]
+            violations = exc.detail.get("violations")
+            if isinstance(violations, list) and violations and isinstance(violations[0], dict):
+                rule_id = violations[0].get("rule_id")
+                if isinstance(rule_id, str) and rule_id:
+                    return rule_id
     return type(exc).__name__
 
 
@@ -1131,13 +1137,27 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                     # reconcile first, then decide. Never a silent new call.
                     raise HTTPException(
                         409, "STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION")
+        continuity_issues = [
+            str(item).strip()
+            for item in ((state.get("last_blocked_result") or {}).get("continuity_issues") or [])
+            if str(item).strip()
+        ]
+        if retrying and lesson is None and continuity_issues:
+            lesson = {"rejection_reason_code": "CONTINUITY_CONFLICT",
+                      "continuity_issues": continuity_issues[:3]}
+        effective_start_role = state.get("failed_role") if retrying else None
+        effective_resume_steps = dict(state.get("resume_steps") or {}) if retrying else {}
+        if (retrying and effective_start_role is None and continuity_issues
+                and effective_resume_steps.get("scriptwriter")):
+            effective_start_role = "director"
+            effective_resume_steps = {"scriptwriter": effective_resume_steps["scriptwriter"]}
         try:
             result = (pending["result"] if landing_retry else
                       generate_storyboard(project_id, StoryboardRequest(
                 text=unit.get("creative_text") or document.text[unit["start_offset"]:unit["end_offset"]],
                 locked_story_facts=state["locked_facts"], allow_remote_text=True,
-                start_role=state.get("failed_role") if retrying else None,
-                resume_steps=state.get("resume_steps", {}) if retrying else {},
+                start_role=effective_start_role,
+                resume_steps=effective_resume_steps,
                 authorize_replay_task_id=authorize,
                 retry_lesson=lesson,
                 production_context={
@@ -1174,18 +1194,31 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         # failed role and resume steps travel with the task so a retry continues
         # from the failed role, never re-buying the successful ones.
         rejections = list(result.get("rejections") or [])
+        failed_role = result.get("failed_role")
+        resume_steps = dict(result.get("resume_steps", {}) or {})
+        issues = [str(item).strip() for item in (result.get("continuity_issues") or []) if str(item).strip()]
+        if not rejections and issues:
+            rejections = [{
+                "role": "director",
+                "code": "CONTINUITY_CONFLICT",
+                "rejection_reason_code": "CONTINUITY_CONFLICT",
+                "message": issues[0][:240],
+            }]
+            failed_role = "director"
+            resume_steps = ({"scriptwriter": resume_steps["scriptwriter"]}
+                            if "scriptwriter" in resume_steps else {})
         failed_task_id = next((str(item.get("task_id")) for item in rejections
                                if isinstance(item, dict) and item.get("task_id")), None)
         blocked = {**state.get("blocked_episodes", {}),
                    unit["episode_id"]: {"unit_index": cursor, "status": result["status"],
-                                        "failed_role": result.get("failed_role"),
+                                        "failed_role": failed_role,
                                         "failed_task_id": failed_task_id,
                                         "rejections": rejections}}
         state = {**state, "blocked_episodes": blocked, "cursor": cursor,
                  "failed_unit_index": cursor,
-                 "failed_role": result.get("failed_role"),
+                 "failed_role": failed_role,
                  "failed_task_id": failed_task_id,
-                 "resume_steps": result.get("resume_steps", {}),
+                 "resume_steps": resume_steps,
                  "last_blocked_result": result}
         _finish_step(factory, task_id, version, worker_id, state, "QUEUED")
         return
@@ -1339,6 +1372,9 @@ def _rejection_reason_label(rejection: dict) -> str:
             return f"模型超过 {round(timeout)} 秒无回应，结果未知（{code}）"
     if code in RECONCILIATION_CODES:
         return "上一次同输入请求中断，结果未知，需要先核对"
+    if code == "CONTINUITY_CONFLICT":
+        detail = str(rejection.get("message") or "").strip()
+        return f"连续性矛盾需要重排：{detail}（{code}）" if detail else f"连续性矛盾需要重排（{code}）"
     label = _REFUSAL_LABELS.get(code)
     return f"{label}（{code}）" if label else (code or "分镜被拒绝")
 
