@@ -37,11 +37,13 @@ from shine.foundation.h3 import (
     H3ReferenceInput,
     SecondPassSpec,
     compile_h3_ref2va_graph,
+    decide_low_vram_attention,
     enforce_h3_render_audio_contract,
     evaluate_h3_technical_qc,
     extract_comfy_prompt_texts,
     extract_last_frame_png,
     extract_video_output,
+    low_vram_threshold_from_env,
     reconcile_submission,
 )
 from shine.foundation.materials import resolve_library_version_file
@@ -748,15 +750,38 @@ def _execute_single_job(
                 (f"reference_video_{idx + 1}", vid_upload_name, raw_vid, item["content_type"])
             )
 
+        low_vram_threshold = (
+            int(settings.h3_low_vram_attention_token_threshold)
+            if settings is not None and hasattr(settings, "h3_low_vram_attention_token_threshold")
+            else low_vram_threshold_from_env()
+        )
+        oom_retry_enabled = (
+            bool(settings.h3_oom_low_vram_retry_enabled)
+            if settings is not None and hasattr(settings, "h3_oom_low_vram_retry_enabled")
+            else os.getenv("SHINE_H3_OOM_LOW_VRAM_RETRY", "1").strip().lower() not in {"0", "false", "no", "off"}
+        )
+
         if video_stub is not None:
+            stub_img_count = len(img_items) + (1 if prev_video_rel is not None else 0)
+            stub_decision = decide_low_vram_attention(
+                width=width,
+                height=height,
+                duration_s=target_seconds,
+                image_count=stub_img_count,
+                audio_count=len(aud_items),
+                video_count=len(vid_items),
+                threshold=low_vram_threshold,
+            )
             compiled = compile_h3_ref2va_graph(
                 variant_id=variant_id,
                 accelerator_id=accelerator_id,
                 second_pass=sp_spec,
-                image_count=len(img_items) + (1 if prev_video_rel is not None else 0),
+                image_count=stub_img_count,
                 audio_count=len(aud_items),
                 video_count=len(vid_items),
                 object_info=object_info,
+                low_vram_attention=stub_decision.enabled,
+                low_vram_decision=stub_decision,
             )
     except (H3ExecutionError, GraphCompileError) as exc:
         return _fail_job_precheck(
@@ -775,6 +800,8 @@ def _execute_single_job(
     is_mock_run = video_stub is not None
     prompt_id = ""
     submitted_graph_sha = ""
+    oom_fallback_triggered = False
+    low_vram_attention_used: bool | None = None
 
     def _persist_submit_intent(graph_sha: str, _graph: dict[str, Any] | None = None) -> None:
         nonlocal attempt_id, expected_state_ver, submitted_graph_sha
@@ -783,7 +810,30 @@ def _execute_single_job(
             j_row = db.get(M4Job, job_id)
             if j_row is None or j_row.state_version != expected_state_ver:
                 raise H3ExecutionError("M4_STATE_CONFLICT", "任务状态已被并发修改，中止提交。")
-            attempt_no = attempt_no_base + 1
+            attempt_no = int(j_row.attempt_count) + 1
+            if attempt_id is not None:
+                prev_att = db.get(M4JobAttempt, attempt_id)
+                if prev_att is not None:
+                    prev_att.status = "FAILED"
+                    prev_att.error_code = "M4_CUDA_OOM_RETRYING"
+                    prev_att.error_detail = "ComfyUI 显存不足 (CUDA OOM)，自动启用 MiniMaxLowVRAMAttention 重试"
+                    prev_att.updated_at = m4_utcnow()
+                db.add(
+                    M4AuditEvent(
+                        project_id=run_info["project_id"],
+                        actor=f"m4-worker-{worker_id}",
+                        stage="production",
+                        event_type="M4_H3_OOM_LOW_VRAM_FALLBACK_SCHEDULED",
+                        entity_type="m4_job",
+                        entity_id=job_id,
+                        payload={
+                            "shot_code": snap_item["shot_code"],
+                            "failed_attempt_id": attempt_id,
+                            "next_attempt_no": attempt_no,
+                            "fallback_graph_sha256": graph_sha,
+                        },
+                    )
+                )
             att = M4JobAttempt(
                 job_id=job_id,
                 attempt_no=attempt_no,
@@ -860,6 +910,8 @@ def _execute_single_job(
                 reference_manifest=[*ref_items, *([continuity_ref_item] if continuity_ref_item else [])],
                 normalize_audio_prompt=True,
                 ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
+                low_vram_attention_token_threshold=low_vram_threshold,
+                retry_on_oom_with_low_vram=oom_retry_enabled,
             )
             render_timeout_s = float(
                 max(60, int(getattr(settings, "comfy_render_timeout_seconds", 3600) or 3600))
@@ -873,6 +925,8 @@ def _execute_single_job(
                 poll_timeout_s=render_timeout_s,
                 poll_interval_s=0.5,
             )
+            oom_fallback_triggered = bool(receipt.oom_fallback_triggered)
+            low_vram_attention_used = receipt.low_vram_attention_used
             heartbeat_m4_worker(m4_factory, worker_id, status="RUNNING", current_run_id=run_info["id"])
             if receipt.status == "timeout":
                 pid_note = f"（prompt_id={receipt.prompt_id or prompt_id}）" if (receipt.prompt_id or prompt_id) else ""
@@ -882,6 +936,12 @@ def _execute_single_job(
                 raise H3ExecutionError(
                     receipt.error_code or "M4_RENDER_FAILED",
                     receipt.error or "ComfyUI 执行失败。",
+                )
+            if oom_fallback_triggered:
+                logger.info(
+                    "m4_h3_oom_low_vram_fallback_succeeded job_id=%s prompt_id=%s",
+                    job_id,
+                    receipt.prompt_id or prompt_id,
                 )
             out_filename = safe_m4_filename(receipt.output_filename or out_filename)
             out_bytes = receipt.output_bytes
@@ -991,7 +1051,13 @@ def _execute_single_job(
                 event_type=f"M4_JOB_{final_status}",
                 entity_type="m4_job",
                 entity_id=job_id,
-                payload={"shot_code": snap_item["shot_code"], "sha256": out_sha, "is_mock": is_mock_run},
+                payload={
+                    "shot_code": snap_item["shot_code"],
+                    "sha256": out_sha,
+                    "is_mock": is_mock_run,
+                    "oom_fallback_triggered": oom_fallback_triggered,
+                    "low_vram_attention_used": low_vram_attention_used,
+                },
             )
         )
     return final_status

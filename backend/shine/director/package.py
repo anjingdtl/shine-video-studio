@@ -640,6 +640,8 @@ def _compiled_shot_blockers(
                     GraphCompileError,
                     H3ExecutionError,
                     compile_h3_ref2va_graph,
+                    decide_low_vram_attention,
+                    low_vram_threshold_from_env,
                     render_reference_counts,
                 )
                 from shine.strategy import shot_reference_capability_blockers
@@ -661,11 +663,21 @@ def _compiled_shot_blockers(
                     ))
                 if ref_blockers:
                     continue
+                binding_output = binding.get("output") if isinstance(binding.get("output"), dict) else {}
+                low_vram_decision = decide_low_vram_attention(
+                    width=binding_output.get("width"),
+                    height=binding_output.get("height"),
+                    duration_s=binding_output.get("clip_seconds") or spec.duration_target_s,
+                    threshold=low_vram_threshold_from_env(),
+                    **counts,
+                )
                 try:
                     compile_h3_ref2va_graph(
                         variant_id=strategy_contract.model_variant_id,
                         accelerator_id=strategy_contract.accelerator_id,
                         second_pass=strategy_contract.second_pass_spec(),
+                        low_vram_attention=low_vram_decision.enabled,
+                        low_vram_decision=low_vram_decision,
                         **counts,
                     )
                 except (GraphCompileError, H3ExecutionError) as exc:

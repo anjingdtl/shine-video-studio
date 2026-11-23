@@ -940,9 +940,9 @@ def run_one(
                 if job and job.lease_owner and job.lease_owner != worker_id:
                     # A newer claim owns the job; this worker must not alter its lease.
                     pass
-                elif lease.status == "RECONCILE_REQUIRED":
-                    # Never turn an uncertain handoff into a release by trying
-                    # the renderer's unload endpoint a second time.
+                elif lease.status in {"RELEASED", "RECONCILE_REQUIRED"}:
+                    # Never turn an already-released or uncertain handoff into a
+                    # release/reconcile override by touching it a second time.
                     pass
                 elif managed_first is not None and _managed_handoff_holds_lease(managed_first):
                     # The completed managed handoff keeps its own exclusive lease
@@ -2710,6 +2710,12 @@ def _run_comfy_job(
             return job_id
         profile, request, manifest, assets, _policy, _language = _load_comfy_context(db, job)
         project_id = job.project_id
+        is_oom_fallback_attempt = attempt.attempt_kind == "oom_low_vram"
+        prior_oom_fallback = is_oom_fallback_attempt or any(
+            a.attempt_kind == "oom_low_vram" or a.failure_code == "COMFY_CUDA_OOM"
+            for a in job.attempts
+            if a.id != attempt.id
+        )
         if profile is None and request.strategy is None:
             job.failure_code = "COMFY_WORKFLOW_PROFILE_MISSING"
             job.lease_owner = None
@@ -2735,6 +2741,7 @@ def _run_comfy_job(
             raise HTTPException(409, "HANDOFF_COORDINATOR_INVALID")
         managed_guard.check()
         managed_continuation.before_prepare(service, attempt_id, worker_id, expected_version)
+    low_vram_decision = None
     if profile is None and request.strategy is not None:
         # Dynamic per-shot compilation: this job carries a frozen strategy, so
         # its graph is compiled here from the strategy plus this shot's own
@@ -2746,6 +2753,8 @@ def _run_comfy_job(
             GraphCompileError,
             H3ExecutionError,
             compile_h3_ref2va_graph,
+            decide_low_vram_attention,
+            is_low_vram_guard_variant,
             render_reference_counts,
         )
         from shine.strategy import GenerationStrategy
@@ -2791,15 +2800,35 @@ def _run_comfy_job(
                 }, project_id=project_id)
             return job_id
         try:
+            ref_counts = render_reference_counts(manifest)
+            low_vram_decision = decide_low_vram_attention(
+                width=request.output_width,
+                height=request.output_height,
+                duration_s=request.expected_duration_s,
+                threshold=settings.h3_low_vram_attention_token_threshold,
+                force_low_vram_attention=True if is_oom_fallback_attempt else None,
+                **ref_counts,
+            )
             profile = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
                 object_info=live_object_info,
-                **render_reference_counts(manifest),
+                low_vram_attention=low_vram_decision.enabled,
+                low_vram_decision=low_vram_decision,
+                **ref_counts,
             )
-            if (profile.graph_sha256 != request.workflow_profile_hash
-                    or profile.checkpoint_id != request.model_checkpoint_id):
+            hash_matches = profile.graph_sha256 == request.workflow_profile_hash
+            if not hash_matches and is_oom_fallback_attempt and low_vram_decision.enabled:
+                hash_matches = is_low_vram_guard_variant(
+                    profile.graph_sha256,
+                    expected_graph_sha256=request.workflow_profile_hash,
+                    variant_id=strategy.model_variant_id,
+                    accelerator_id=strategy.accelerator_id,
+                    second_pass=strategy.second_pass_spec(),
+                    **ref_counts,
+                )
+            if not hash_matches or profile.checkpoint_id != request.model_checkpoint_id:
                 raise GraphCompileError(
                     "WORKFLOW_IDENTITY_CHANGED", "逐镜执行图与冻结请求的图哈希或 checkpoint 不一致。",
                     {"expected": request.workflow_profile_hash, "actual": profile.graph_sha256},
@@ -2848,6 +2877,12 @@ def _run_comfy_job(
         with session_factory.begin() as db:
             add_audit(db, "comfy-worker", "STRATEGY_GRAPH_COMPILED", "job", job_id, {
                 "execution_identity": profile.execution_identity(),
+                "low_vram_attention": low_vram_decision.enabled,
+                "low_vram_attention_reason": low_vram_decision.reason,
+                "estimated_attention_tokens": (
+                    low_vram_decision.estimate.total_tokens if low_vram_decision.estimate is not None else None
+                ),
+                "low_vram_attention_threshold": low_vram_decision.threshold,
             }, project_id=project_id)
     if not heartbeat(session_factory, worker_id, current_job_id=job_id, phase="submitting",
                      expected_state_version=expected_version, attempt_id=attempt_id,
@@ -3217,6 +3252,95 @@ def _run_comfy_job(
                 )
         return job_id
     if result.status != "completed":
+        from shine.foundation.h3 import is_cuda_oom_error
+
+        can_oom_fallback = (
+            result.status == "failed"
+            and request.strategy is not None
+            and settings.h3_oom_low_vram_retry_enabled
+            and low_vram_decision is not None
+            and not low_vram_decision.enabled
+            and not prior_oom_fallback
+            and is_cuda_oom_error(result.error_details, result.error)
+        )
+        if can_oom_fallback:
+            if managed_guard is not None:
+                managed_guard.stop()
+            scheduled = False
+            with session_factory.begin() as db:
+                guarded = _guard_claimed_job(
+                    db,
+                    job_id=job_id,
+                    expected_state_version=ack_state_version,
+                    worker_id=worker_id,
+                    attempt_id=attempt_id,
+                    allowed_status=("RUNNING", "QC_PENDING"),
+                    settings=settings,
+                )
+                if guarded is None:
+                    return job_id
+                job, attempt = guarded
+                if job.status == "RUNNING":
+                    transition(job, "QC_PENDING")
+                transition(job, "REPAIR_PENDING")
+                attempt.status = "FAILED"
+                attempt.failure_code = "COMFY_CUDA_OOM"
+                attempt.reconciliation_state = "oom_low_vram_retry"
+                new_request = dict(job.request or {})
+                new_request["idempotency_key"] = uuid4().hex
+                job.request = new_request
+                job.provider_job_id = None
+                job.failure_code = None
+                job.lease_owner = None
+                job.lease_expires_at = None
+                job.pending_repair_context = {
+                    "attempt_kind": "oom_low_vram",
+                    "parent_attempt_id": attempt_id,
+                    "force_low_vram_attention": True,
+                    "reason": "COMFY_CUDA_OOM",
+                }
+                transition(job, "QUEUED")
+                add_audit(
+                    db,
+                    "comfy-worker",
+                    "H3_OOM_LOW_VRAM_FALLBACK_SCHEDULED",
+                    "job",
+                    job.id,
+                    {
+                        "attempt_id": attempt_id,
+                        "estimated_tokens": (
+                            low_vram_decision.estimate.total_tokens
+                            if low_vram_decision.estimate is not None
+                            else None
+                        ),
+                        "threshold": low_vram_decision.threshold,
+                        "oom_error": (result.error or "")[:300],
+                        "error_details": result.error_details,
+                    },
+                    project_id=job.project_id,
+                )
+                scheduled = True
+            if scheduled and managed_continuation is not None:
+                supervisor = getattr(managed_continuation, "supervisor", None)
+                lease_id = getattr(managed_continuation, "lease_id", None)
+                stopped = False
+                if supervisor is not None:
+                    try:
+                        supervisor.stop_after_drain()
+                        stopped = True
+                    except Exception:
+                        try:
+                            supervisor.stop_closed()
+                            stopped = True
+                        except Exception:
+                            stopped = False
+                if stopped and lease_id:
+                    from shine.comfyops.scheduler import ResourceScheduler
+
+                    with session_factory.begin() as rel_db:
+                        ResourceScheduler().release(rel_db, lease_id, "h3:" + job_id, reconciled=True)
+            return job_id
+
         with session_factory.begin() as db:
             guarded = _guard_claimed_job(
                 db,
@@ -3245,7 +3369,11 @@ def _run_comfy_job(
                     provider_job_id=submission.prompt_id,
                     action="poll_after_ack",
                     result=result.status,
-                    evidence={"output": result.output_filename, "error_code": result.error_code},
+                    evidence={
+                        "output": result.output_filename,
+                        "error_code": result.error_code,
+                        "error": (result.error or "")[:300] if result.error else None,
+                    },
                 )
             )
             add_audit(
@@ -3254,7 +3382,11 @@ def _run_comfy_job(
                 "COMFY_OUTPUT_RECONCILIATION_REQUIRED",
                 "job",
                 job.id,
-                {"result": result.status, "error_code": result.error_code},
+                {
+                    "result": result.status,
+                    "error_code": result.error_code,
+                    "error": (result.error or "")[:300] if result.error else None,
+                },
                 project_id=job.project_id,
             )
         return job_id

@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from shine.comfy.vram_guard import LowVramAttentionDecision
 from shine.comfy.workflow import (
     graph_hash,
     validate_against_object_info,
@@ -195,7 +196,13 @@ def _candidate_weights() -> tuple[str, str]:
     return checkpoint, digest
 
 
-def _model_stack(unet: str, *, sage_attention: bool, lowend: bool) -> dict[str, Any]:
+def _model_stack(
+    unet: str,
+    *,
+    sage_attention: bool,
+    lowend: bool,
+    low_vram_attention: bool = True,
+) -> tuple[dict[str, Any], list[Any]]:
     """Parameterize the shared model chain with the variant's audited patches."""
     nodes = {
         "10": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
@@ -238,29 +245,52 @@ def _model_stack(unet: str, *, sage_attention: bool, lowend: bool) -> dict[str, 
             },
         },
     }
-    if not sage_attention:
+    if sage_attention:
+        prev: list[Any] = ["14", 0]
+    else:
         del nodes["14"]
-        nodes["15"]["inputs"]["model"] = ["13", 0]
+        prev = ["13", 0]
+
+    if low_vram_attention:
+        nodes["15"]["inputs"]["model"] = list(prev)
+        prev = ["15", 0]
+    else:
+        del nodes["15"]
+
     if lowend:
         del nodes["11"]
         nodes["12"]["inputs"].update(model=["10", 0], shift_video=12, shift_audio=3)
-        nodes["16"] = nodes.pop("15")
-    return nodes
+        del nodes["16"]
+        if low_vram_attention:
+            nodes["16"] = nodes.pop("15")
+            model_out_ref: list[Any] = ["16", 0]
+        else:
+            model_out_ref = list(prev)
+    else:
+        nodes["16"]["inputs"]["model"] = list(prev)
+        model_out_ref = ["16", 0]
+
+    return nodes, model_out_ref
 
 
-def _sampling_stack(accelerator_id: str, steps: int) -> tuple[dict[str, Any], list, list]:
+def _sampling_stack(
+    accelerator_id: str,
+    steps: int,
+    model_out_ref: list[Any] | None = None,
+) -> tuple[dict[str, Any], list, list]:
     """Return (nodes, guider_model_input, sampler_sigmas_input) for pass one."""
+    out_ref = list(model_out_ref or ["16", 0])
     if accelerator_id == "pdd8":
         nodes = {
             "17": {
                 "class_type": "BasicScheduler",
-                "inputs": {"model": ["16", 0], "scheduler": "simple", "steps": 20, "denoise": 1.0},
+                "inputs": {"model": list(out_ref), "scheduler": "simple", "steps": 20, "denoise": 1.0},
             },
             "18": {"class_type": "ShineH3SamplingMode", "inputs": {"mode": "PDD 8 steps"}},
             "19": {
                 "class_type": "MiniMaxH3PDDAccApply",
                 "inputs": {
-                    "model": ["16", 0],
+                    "model": list(out_ref),
                     "bypass_sigmas": ["17", 0],
                     "pdd_file": PDD_FILE,
                     "nfe": ["18", 0],
@@ -278,10 +308,10 @@ def _sampling_stack(accelerator_id: str, steps: int) -> tuple[dict[str, Any], li
     nodes = {
         "17": {
             "class_type": "BasicScheduler",
-            "inputs": {"model": ["16", 0], "scheduler": "simple", "steps": steps, "denoise": 1.0},
+            "inputs": {"model": list(out_ref), "scheduler": "simple", "steps": steps, "denoise": 1.0},
         },
     }
-    return nodes, ["16", 0], ["17", 0]
+    return nodes, list(out_ref), ["17", 0]
 
 
 def compile_ref2va_workflow(
@@ -293,6 +323,8 @@ def compile_ref2va_workflow(
     audio_count: int = 0,
     video_count: int = 0,
     object_info: dict[str, Any] | None = None,
+    low_vram_attention: bool | None = None,
+    low_vram_decision: LowVramAttentionDecision | None = None,
 ) -> CompiledWorkflow:
     """Compile one shot's Ref2VA execution graph from audited recipes.
 
@@ -368,8 +400,23 @@ def compile_ref2va_workflow(
         raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该候选模型仅登记 native20 单采配方。")
     checkpoint, candidate_digest = _candidate_weights() if candidate else (UNET_BASELINE, None)
     steps = int(ACCELERATORS[accelerator_id]["steps"])
-    graph = _model_stack(checkpoint, sage_attention=accelerator_id != "pdd8", lowend=candidate)
-    sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(accelerator_id, steps)
+    if low_vram_attention is not None:
+        effective_low_vram = bool(low_vram_attention)
+    elif low_vram_decision is not None:
+        effective_low_vram = bool(low_vram_decision.enabled)
+    else:
+        effective_low_vram = True
+    graph, model_out_ref = _model_stack(
+        checkpoint,
+        sage_attention=accelerator_id != "pdd8",
+        lowend=candidate,
+        low_vram_attention=effective_low_vram,
+    )
+    sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(
+        accelerator_id,
+        steps,
+        model_out_ref=model_out_ref,
+    )
     graph.update(sampling)
 
     # Loaders: text encoder, both VAEs, the frame-grid length expression and
@@ -504,7 +551,7 @@ def compile_ref2va_workflow(
             "62": {
                 "class_type": "MiniMaxH3PDDAccApply",
                 "inputs": {
-                    "model": ["16", 0],
+                    "model": list(model_out_ref),
                     "pdd_file": PDD_FILE,
                     "nfe": second_pass.nfe,
                     "lora_strength": 1.0,
@@ -609,7 +656,12 @@ def compile_ref2va_workflow(
         "media_transfer_families": sorted(media_transfers),
         "dynamic_autogrow": True,
         "recipe_sha256": recipe_sha256,
+        "low_vram_attention": effective_low_vram,
     }
+    if low_vram_decision is not None:
+        model_identity["low_vram_attention_reason"] = low_vram_decision.reason
+        if low_vram_decision.estimate is not None:
+            model_identity["estimated_attention_tokens"] = low_vram_decision.estimate.total_tokens
     return CompiledWorkflow(
         graph=graph,
         parameter_map=parameter_map,
@@ -626,3 +678,45 @@ def compile_ref2va_workflow(
         reference_counts={"image": image_count, "audio": audio_count, "video": video_count},
         validated_against=validated_against,
     )
+
+
+def is_low_vram_guard_variant(
+    actual_graph_sha256: str,
+    *,
+    expected_graph_sha256: str | None = None,
+    variant_id: str = INT8_VARIANT_ID,
+    accelerator_id: str = "pdd8",
+    second_pass: SecondPassSpec | None = None,
+    image_count: int,
+    audio_count: int = 0,
+    video_count: int = 0,
+) -> bool:
+    """Verify ``actual_graph_sha256`` is the exact LowVRAM-enabled variant of this shot."""
+    if not actual_graph_sha256:
+        return False
+    guarded = compile_ref2va_workflow(
+        variant_id=variant_id,
+        accelerator_id=accelerator_id,
+        second_pass=second_pass,
+        image_count=image_count,
+        audio_count=audio_count,
+        video_count=video_count,
+        low_vram_attention=True,
+    )
+    if actual_graph_sha256 != guarded.graph_sha256:
+        return False
+    if expected_graph_sha256 is not None:
+        unguarded = compile_ref2va_workflow(
+            variant_id=variant_id,
+            accelerator_id=accelerator_id,
+            second_pass=second_pass,
+            image_count=image_count,
+            audio_count=audio_count,
+            video_count=video_count,
+            low_vram_attention=False,
+        )
+        if expected_graph_sha256 not in {unguarded.graph_sha256, guarded.graph_sha256}:
+            return False
+        if unguarded.recipe_sha256 != guarded.recipe_sha256:
+            return False
+    return True

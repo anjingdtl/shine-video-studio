@@ -37,12 +37,25 @@ from shine.comfy.graph_compiler import (
     GraphCompileError,
     SecondPassSpec,
     compile_ref2va_workflow,
+    is_low_vram_guard_variant,
 )
 from shine.comfy.provider import (
     find_output,
     prepare_workflow_submission,
     reconcile_submission,
     submit_prepared_prompt,
+)
+from shine.comfy.vram_guard import (
+    DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD,
+    H3TokenEstimate,
+    LowVramAttentionDecision,
+    align_h3_frame_count,
+    decide_low_vram_attention,
+    estimate_h3_attention_tokens,
+    extract_comfy_history_error,
+    format_comfy_history_error,
+    is_cuda_oom_error,
+    low_vram_threshold_from_env,
 )
 from shine.comfy.workflow import apply_parameters, graph_hash
 from shine.foundation.h3_audio import (
@@ -105,6 +118,9 @@ class H3ExecutionRequest:
     normalize_audio_prompt: bool = False
     project_language: str = "Chinese"
     ffmpeg_path: str = "ffmpeg"
+    low_vram_attention_token_threshold: int = DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD
+    force_low_vram_attention: bool | None = None
+    retry_on_oom_with_low_vram: bool = True
 
 
 @dataclass(frozen=True)
@@ -118,6 +134,9 @@ class H3ExecutionReceipt:
     model_identity: dict[str, Any] | None = None
     error_code: str | None = None
     error: str | None = None
+    error_details: dict[str, Any] | None = None
+    low_vram_attention_used: bool | None = None
+    oom_fallback_triggered: bool = False
 
 
 def verified_variants_catalog() -> list[dict[str, Any]]:
@@ -161,6 +180,8 @@ def compile_h3_ref2va_graph(
     accelerator_id: str = "pdd8",
     second_pass: SecondPassSpec | None = None,
     object_info: dict[str, Any] | None = None,
+    low_vram_attention: bool | None = None,
+    low_vram_decision: LowVramAttentionDecision | None = None,
 ) -> CompiledWorkflow:
     """Compile the single Ref2VA definition for the frozen reference layout."""
     try:
@@ -172,6 +193,8 @@ def compile_h3_ref2va_graph(
             audio_count=audio_count,
             video_count=video_count,
             object_info=object_info,
+            low_vram_attention=low_vram_attention,
+            low_vram_decision=low_vram_decision,
         )
     except GraphCompileError as exc:
         if exc.code == "REF2VA_IMAGE_REFERENCE_REQUIRED":
@@ -291,6 +314,21 @@ class ComfyH3Executor:
 
         if object_info is None:
             object_info = client.object_info()
+        video_ref_durations = [v.duration_s for v in videos if v.duration_s is not None and v.duration_s > 0]
+        avg_video_ref_duration = (
+            sum(video_ref_durations) / len(video_ref_durations) if video_ref_durations else 3.0
+        )
+        decision = decide_low_vram_attention(
+            width=request.width,
+            height=request.height,
+            duration_s=request.duration_s,
+            image_count=len(images),
+            audio_count=len(audios),
+            video_count=len(videos),
+            threshold=request.low_vram_attention_token_threshold,
+            force_low_vram_attention=request.force_low_vram_attention,
+            video_ref_duration_s=avg_video_ref_duration,
+        )
         compiled = compile_h3_ref2va_graph(
             image_count=len(images),
             audio_count=len(audios),
@@ -299,6 +337,8 @@ class ComfyH3Executor:
             accelerator_id=request.accelerator_id,
             second_pass=request.second_pass,
             object_info=object_info,
+            low_vram_attention=decision.enabled,
+            low_vram_decision=decision,
         )
         if request.recipe_sha256 and compiled.recipe_sha256 != request.recipe_sha256:
             raise H3ExecutionError(
@@ -370,88 +410,151 @@ class ComfyH3Executor:
                 project_language=request.project_language,
             )
 
-        try:
-            prepared = prepare_workflow_submission(
-                compiled,
-                prompt=effective_prompt,
-                duration_s=float(request.duration_s),
-                seed=int(request.seed),
-                width=int(request.width),
-                height=int(request.height),
-                references=uploaded_names,
-            )
-        except ComfyWorkflowError as exc:
-            raise H3ExecutionError("WORKFLOW_PARAMETER_ERROR", str(exc), details=exc.details) from exc
-
-        if on_before_submit is not None:
-            on_before_submit(prepared.prompt_graph_sha256, prepared.prompt)
-
-        final_graph_sha = prepared.prompt_graph_sha256
-        try:
-            submission = submit_prepared_prompt(
-                client,
-                prepared,
-                idempotency_key=request.idempotency_key,
-                prompt_sha256=request.prompt_sha256,
-                extra_data=request.extra_data,
-            )
-            prompt_id = submission.prompt_id
-        except ComfySubmissionUncertain:
-            # The owned renderer is still alive. Recover its ACK before releasing it.
-            if not request.idempotency_key:
-                raise
-            prompt_id, _, _ = reconcile_submission(
-                client, prompt_id=None, prompt_graph_sha256=final_graph_sha,
-                idempotency_key=request.idempotency_key,
-            )
-            if prompt_id is None:
-                raise
-
-        if on_submitted is not None:
-            try:
-                on_submitted(prompt_id)
-            except Exception as exc:
-                raise ComfySubmissionUncertain("ComfyUI 已回执，但未能持久化 prompt_id；需要对账。") from exc
-
-        deadline = time.monotonic() + max(1.0, poll_timeout_s)
-        interval = max(0.05, poll_interval_s)
+        current_compiled = compiled
+        current_decision = decision
+        current_idempotency_key = request.idempotency_key
+        fallback_triggered = False
         history_rec: dict[str, Any] | None = None
+        final_graph_sha = ""
+        prompt_id = ""
+
         while True:
-            matched_id, state, rec = reconcile_submission(
-                client,
-                prompt_id=prompt_id,
-            )
-            if state == "failed":
-                return H3ExecutionReceipt(
-                    status="failed",
-                    prompt_id=matched_id or prompt_id,
-                    prompt_graph_sha256=final_graph_sha,
-                    model_identity=compiled.model_identity,
-                    error_code="COMFY_EXECUTION_ERROR",
-                    error="ComfyUI 执行失败。",
+            try:
+                prepared = prepare_workflow_submission(
+                    current_compiled,
+                    prompt=effective_prompt,
+                    duration_s=float(request.duration_s),
+                    seed=int(request.seed),
+                    width=int(request.width),
+                    height=int(request.height),
+                    references=uploaded_names,
                 )
-            if state == "completed" and rec is not None:
-                history_rec = rec
-                break
-            if state == "completed_without_output":
-                return H3ExecutionReceipt(
-                    status="failed",
-                    prompt_id=matched_id or prompt_id,
-                    prompt_graph_sha256=final_graph_sha,
-                    model_identity=compiled.model_identity,
-                    error_code="COMFY_VIDEO_OUTPUT_MISSING",
-                    error="ComfyUI 完成执行但未产生任何视频输出。",
+            except ComfyWorkflowError as exc:
+                raise H3ExecutionError("WORKFLOW_PARAMETER_ERROR", str(exc), details=exc.details) from exc
+
+            if on_before_submit is not None:
+                on_before_submit(prepared.prompt_graph_sha256, prepared.prompt)
+
+            final_graph_sha = prepared.prompt_graph_sha256
+            try:
+                submission = submit_prepared_prompt(
+                    client,
+                    prepared,
+                    idempotency_key=current_idempotency_key,
+                    prompt_sha256=request.prompt_sha256,
+                    extra_data=request.extra_data,
                 )
-            if time.monotonic() >= deadline:
-                return H3ExecutionReceipt(
-                    status="timeout",
+                prompt_id = submission.prompt_id
+            except ComfySubmissionUncertain:
+                # The owned renderer is still alive. Recover its ACK before releasing it.
+                if not current_idempotency_key:
+                    raise
+                recovered_id, _, _ = reconcile_submission(
+                    client, prompt_id=None, prompt_graph_sha256=final_graph_sha,
+                    idempotency_key=current_idempotency_key,
+                )
+                if recovered_id is None:
+                    raise
+                prompt_id = recovered_id
+
+            if on_submitted is not None:
+                try:
+                    on_submitted(prompt_id)
+                except Exception as exc:
+                    raise ComfySubmissionUncertain("ComfyUI 已回执，但未能持久化 prompt_id；需要对账。") from exc
+
+            deadline = time.monotonic() + max(1.0, poll_timeout_s)
+            interval = max(0.05, poll_interval_s)
+            retry_with_low_vram = False
+            while True:
+                matched_id, state, rec = reconcile_submission(
+                    client,
                     prompt_id=prompt_id,
-                    prompt_graph_sha256=final_graph_sha,
-                    model_identity=compiled.model_identity,
-                    error_code="COMFY_TIMEOUT",
-                    error="ComfyUI 视频生成超时。",
                 )
-            time.sleep(interval)
+                if state == "failed":
+                    error_info = extract_comfy_history_error(rec)
+                    error_text = format_comfy_history_error(error_info, fallback="ComfyUI 执行失败。")
+                    if (
+                        not fallback_triggered
+                        and request.retry_on_oom_with_low_vram
+                        and not current_decision.enabled
+                        and is_cuda_oom_error(error_info, error_text)
+                    ):
+                        fallback_triggered = True
+                        current_decision = decide_low_vram_attention(
+                            width=request.width,
+                            height=request.height,
+                            duration_s=request.duration_s,
+                            image_count=len(images),
+                            audio_count=len(audios),
+                            video_count=len(videos),
+                            threshold=request.low_vram_attention_token_threshold,
+                            force_low_vram_attention=True,
+                            video_ref_duration_s=avg_video_ref_duration,
+                        )
+                        current_compiled = compile_h3_ref2va_graph(
+                            image_count=len(images),
+                            audio_count=len(audios),
+                            video_count=len(videos),
+                            variant_id=request.variant_id,
+                            accelerator_id=request.accelerator_id,
+                            second_pass=request.second_pass,
+                            object_info=object_info,
+                            low_vram_attention=True,
+                            low_vram_decision=current_decision,
+                        )
+                        fb_validation = current_compiled.validated_against or {}
+                        if fb_validation["missing_nodes"] or fb_validation["missing_inputs"]:
+                            raise H3ExecutionError(
+                                "H3_WORKFLOW_NODES_UNAVAILABLE",
+                                f"本机 ComfyUI 缺少 H3 LowVRAM 兜底节点或输入：{fb_validation}",
+                                {"validation": fb_validation},
+                            )
+                        current_idempotency_key = (
+                            f"{request.idempotency_key}:oom-lowvram" if request.idempotency_key else ""
+                        )
+                        retry_with_low_vram = True
+                        break
+                    return H3ExecutionReceipt(
+                        status="failed",
+                        prompt_id=matched_id or prompt_id,
+                        prompt_graph_sha256=final_graph_sha,
+                        model_identity=current_compiled.model_identity,
+                        error_code="COMFY_EXECUTION_ERROR",
+                        error=error_text,
+                        error_details=error_info,
+                        low_vram_attention_used=current_decision.enabled,
+                        oom_fallback_triggered=fallback_triggered,
+                    )
+                if state == "completed" and rec is not None:
+                    history_rec = rec
+                    break
+                if state == "completed_without_output":
+                    return H3ExecutionReceipt(
+                        status="failed",
+                        prompt_id=matched_id or prompt_id,
+                        prompt_graph_sha256=final_graph_sha,
+                        model_identity=current_compiled.model_identity,
+                        error_code="COMFY_VIDEO_OUTPUT_MISSING",
+                        error="ComfyUI 完成执行但未产生任何视频输出。",
+                        low_vram_attention_used=current_decision.enabled,
+                        oom_fallback_triggered=fallback_triggered,
+                    )
+                if time.monotonic() >= deadline:
+                    return H3ExecutionReceipt(
+                        status="timeout",
+                        prompt_id=prompt_id,
+                        prompt_graph_sha256=final_graph_sha,
+                        model_identity=current_compiled.model_identity,
+                        error_code="COMFY_TIMEOUT",
+                        error="ComfyUI 视频生成超时。",
+                        low_vram_attention_used=current_decision.enabled,
+                        oom_fallback_triggered=fallback_triggered,
+                    )
+                time.sleep(interval)
+
+            if not retry_with_low_vram:
+                break
 
         filename, subfolder, file_type = extract_video_output(history_rec)
         out_bytes = client.view(filename, subfolder=subfolder, file_type=file_type)
@@ -470,7 +573,9 @@ class ComfyH3Executor:
             output_filename=filename,
             output_bytes=out_bytes,
             output_sha256=out_sha,
-            model_identity=compiled.model_identity,
+            model_identity=current_compiled.model_identity,
+            low_vram_attention_used=current_decision.enabled,
+            oom_fallback_triggered=fallback_triggered,
         )
 
 
@@ -483,27 +588,38 @@ __all__ = [
     "ComfyUnavailable",
     "CompiledWorkflow",
     "ComfyH3Executor",
+    "DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD",
     "GraphCompileError",
     "H3ExecutionError",
     "H3ExecutionReceipt",
     "H3ExecutionRequest",
     "H3ReferenceInput",
+    "H3TokenEstimate",
+    "LowVramAttentionDecision",
     "MAX_AUDIO_SLOTS",
     "MAX_IMAGE_SLOTS",
     "MAX_TOTAL_SLOTS",
     "MAX_VIDEO_SLOTS",
     "SecondPassSpec",
+    "align_h3_frame_count",
     "apply_parameters",
     "canonical_h3_language",
     "compile_h3_ref2va_graph",
+    "decide_low_vram_attention",
     "enforce_h3_render_audio_contract",
     "ensure_h3_execution_prompt_contract",
+    "estimate_h3_attention_tokens",
     "evaluate_h3_technical_qc",
+    "extract_comfy_history_error",
     "extract_comfy_prompt_texts",
     "extract_last_frame_png",
     "extract_video_output",
+    "format_comfy_history_error",
     "graph_hash",
     "has_authorized_h3_speech",
+    "is_cuda_oom_error",
+    "is_low_vram_guard_variant",
+    "low_vram_threshold_from_env",
     "reconcile_submission",
     "sanitize_h3_dialogue_text",
     "verified_variants_catalog",

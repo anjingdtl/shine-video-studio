@@ -24,6 +24,10 @@ from shine.comfy.media import (
     family_for_content_type,
     transfer_from_profile,
 )
+from shine.comfy.vram_guard import (
+    extract_comfy_history_error,
+    format_comfy_history_error,
+)
 from shine.comfy.workflow import (
     apply_parameters,
     generic_h3_parameters,
@@ -79,6 +83,7 @@ class ComfyResult:
     content_type: str | None = None
     error: str | None = None
     error_code: str | None = None
+    error_details: dict[str, Any] | None = None
 
 
 def prepare_workflow_submission(
@@ -672,10 +677,16 @@ class ComfyUIRenderService:
         if isinstance(record, dict):
             state, output = _history_outcome(record)
             if state == "failed":
+                error_info = extract_comfy_history_error(record)
+                error_text = format_comfy_history_error(
+                    error_info,
+                    fallback="ComfyUI reported an execution error",
+                )
                 return ComfyResult(
                     status="failed",
-                    error="ComfyUI reported an execution error",
+                    error=error_text,
                     error_code="COMFY_EXECUTION_ERROR",
+                    error_details=error_info,
                 )
             if output:
                 filename = output["filename"]

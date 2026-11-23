@@ -1204,9 +1204,12 @@ def make_render_request(
         # video references without a proven loader) fires at request time -
         # the Worker re-compiles the same deterministic graph before submit.
         from shine.foundation.h3 import (
+            DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD,
             GraphCompileError,
             H3ExecutionError,
             compile_h3_ref2va_graph,
+            decide_low_vram_attention,
+            low_vram_threshold_from_env,
             render_reference_counts,
         )
         from shine.strategy import shot_reference_capability_blockers
@@ -1224,11 +1227,25 @@ def make_render_request(
                 "message": ref_blockers[0]["message"],
                 "blockers": ref_blockers,
             })
+        low_vram_threshold = (
+            int(getattr(settings, "h3_low_vram_attention_token_threshold", DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD))
+            if settings is not None
+            else low_vram_threshold_from_env()
+        )
+        low_vram_decision = decide_low_vram_attention(
+            width=body.output.width if body.output else None,
+            height=body.output.height if body.output else None,
+            duration_s=spec.duration_target_s,
+            threshold=low_vram_threshold,
+            **counts,
+        )
         try:
             compiled_strategy_graph = compile_h3_ref2va_graph(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                low_vram_attention=low_vram_decision.enabled,
+                low_vram_decision=low_vram_decision,
                 **counts,
             )
         except (GraphCompileError, H3ExecutionError) as exc:

@@ -64,6 +64,8 @@ class Settings:
     allow_non_loopback_api: bool = False
     managed_recipe_path: str = ''
     managed_recipe_sha256: str = ''
+    h3_low_vram_attention_token_threshold: int = 45000
+    h3_oom_low_vram_retry_enabled: bool = True
 
     @property
     def comfyops_dir(self) -> Path:
@@ -89,6 +91,15 @@ class Settings:
                 "SHINE_COMFYUI_URL must point at this machine. "
                 "Set SHINE_ALLOW_REMOTE_COMFYUI=1 to allow a remote renderer explicitly."
             )
+        low_vram_threshold = _env_int("SHINE_H3_LOW_VRAM_ATTN_TOKEN_THRESHOLD", 45000)
+        if low_vram_threshold < 0:
+            raise ValueError("SHINE_H3_LOW_VRAM_ATTN_TOKEN_THRESHOLD must be >= 0")
+        oom_low_vram_retry = os.getenv("SHINE_H3_OOM_LOW_VRAM_RETRY", "1").strip().lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         return cls(
             data_dir=data_dir,
             database_url=database_url,
@@ -118,4 +129,6 @@ class Settings:
             # needs this explicit opt-in and a real authentication story.
             allow_non_loopback_api=os.getenv("SHINE_ALLOW_NON_LOOPBACK_API", "").strip().lower()
             in {"1", "true", "yes"},
+            h3_low_vram_attention_token_threshold=low_vram_threshold,
+            h3_oom_low_vram_retry_enabled=oom_low_vram_retry,
         )

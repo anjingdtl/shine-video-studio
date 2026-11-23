@@ -52,6 +52,7 @@ def compile_m4_ref2va_workflow(
     audio_count: int = 0,
     video_count: int = 0,
     object_info: dict[str, Any] | None = None,
+    low_vram_attention: bool | None = None,
 ) -> CompiledWorkflow:
     _ = (aspect_ratio, resolution_scale)
     try:
@@ -63,6 +64,7 @@ def compile_m4_ref2va_workflow(
             audio_count=audio_count,
             video_count=video_count,
             object_info=object_info,
+            low_vram_attention=low_vram_attention,
         )
     except (GraphCompileError, H3ExecutionError) as exc:
         code_map = {
