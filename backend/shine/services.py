@@ -740,15 +740,24 @@ def complete_location_binding(
     location = (location or "").strip()
     if not location:
         return result, None
+    key = character_reference_key(location)
+    filtered: list[ShotBindingInput] = []
     images = 0
     for binding in result:
         if binding.use_as.value == "picture":
             asset = db.get(Asset, binding.asset_id)
             if asset is not None and asset.role == "scene":
-                return result, None
+                if character_reference_key(asset.entity_id or "") == key:
+                    return result, None
+                # A scene master from a different place must not spoof this
+                # shot's location or suppress its RequestedAsset gap.
+                continue
+        filtered.append(binding)
         if binding.use_as.value in {"subject", "picture"}:
             images += 1
-    key = character_reference_key(location)
+    result = filtered
+    for index, binding in enumerate(result):
+        binding.ordinal = index
     masters = [asset for asset in db.scalars(select(Asset).where(
         Asset.project_id == project_id, Asset.kind == "image", Asset.role == "scene",
         Asset.approved.is_(True), Asset.locked.is_(True),

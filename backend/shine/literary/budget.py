@@ -81,6 +81,10 @@ PURPOSE_GOAL_MULTIPLIER = {
     # slot per scene, one registered place), so like the entity catalog its
     # answer grows with the work instead of with the length of one scene.
     "architecture": 0.30,
+    # A full scene shot board carries one DirectedShot object per segment
+    # (blocking, environment, timeline, camera, entry/exit state across 6-12 shots),
+    # so its visible JSON exceeds the generic structured snippet cap on attempt 1.
+    "scene_board": 0.80,
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
@@ -97,6 +101,7 @@ PURPOSE_MIN_GOAL = {
     "scene_prep": 4_096,
     "entity_catalog": 2_048,
     "architecture": 2_048,
+    "scene_board": 12_288,
 }
 
 # The reasoning reserve is decided here, by purpose, for every caller — one
@@ -113,6 +118,7 @@ PURPOSE_REASONING_RESERVE = {
     "outline": LOW_EFFORT_REASONING_RESERVE,
     "entity_catalog": LOW_EFFORT_REASONING_RESERVE,
     "architecture": LOW_EFFORT_REASONING_RESERVE,
+    "scene_board": 4_096,
     "observation": 512,
     "qa": 512,
 }
@@ -135,6 +141,7 @@ PURPOSE_MAX_GOAL = {
     "scene_prep": 6_144,
     "entity_catalog": 16_384,
     "architecture": 16_384,
+    "scene_board": 16_384,
 }
 
 

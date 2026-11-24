@@ -99,14 +99,83 @@ def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
         return data
     aliases = _FIELD_ALIASES.get(model.__name__, {})
     fields = _fields_of(model)
+    # Recover misplaced sibling fields when a nested dict closed its brace late
+    # (for example `shot["camera"]["blocking"]` on DirectedShot): lift only keys
+    # unknown to the child model that are valid parent fields missing above.
+    working = dict(data)
+    if model.__name__ == "DirectedShot":
+        beat_ids = working.get("beat_ids")
+        cuts = working.get("internal_cuts")
+        if isinstance(beat_ids, list) and isinstance(cuts, list) and len(beat_ids) > 1 and cuts:
+            cut_beats = {
+                b for cut in cuts if isinstance(cut, dict)
+                for b in (cut.get("beat_ids") or []) if isinstance(b, str)
+            }
+            if cut_beats:
+                trimmed = list(beat_ids)
+                while len(trimmed) > 1 and isinstance(trimmed[-1], str) and trimmed[-1] in cut_beats:
+                    trimmed.pop()
+                if len(trimmed) < len(beat_ids) and any(
+                    isinstance(b, str) and b not in cut_beats for b in trimmed
+                ):
+                    working["beat_ids"] = trimmed
+                    notes.append(f"{path}.beat_ids:deduped_internal_cut_beats")
+    for key, value in list(data.items()):
+        target = key if key in fields else aliases.get(key)
+        if not target or target not in fields:
+            continue
+        nested = _model_of(fields[target].annotation)
+        if nested is not None and isinstance(value, dict):
+            child_fields = _fields_of(nested)
+            child_aliases = _FIELD_ALIASES.get(nested.__name__, {})
+            cleaned_child = dict(value)
+            moved = False
+            for sub_k, sub_v in value.items():
+                if (sub_k not in child_fields and sub_k not in child_aliases
+                        and sub_k in fields and sub_k not in working):
+                    working[sub_k] = sub_v
+                    cleaned_child.pop(sub_k, None)
+                    notes.append(f"{path}.{key}.{sub_k}:promoted_to_parent")
+                    moved = True
+            if moved:
+                working[key] = cleaned_child
+            continue
+        item = _annotation_items(fields[target].annotation)
+        if item is not None and isinstance(item, type) and issubclass(item, BaseModel) and isinstance(value, list):
+            item_fields = _fields_of(item)
+            item_aliases = _FIELD_ALIASES.get(item.__name__, {})
+            cleaned_list: list[Any] = []
+            list_changed = False
+            for idx, row in enumerate(value):
+                if row in (None, "", []) and len(value) > 1:
+                    notes.append(f"{path}.{key}[{idx}]:empty_non_object_dropped")
+                    list_changed = True
+                    continue
+                if isinstance(row, dict):
+                    cleaned_row = dict(row)
+                    row_moved = False
+                    for sub_k, sub_v in row.items():
+                        if (sub_k not in item_fields and sub_k not in item_aliases
+                                and sub_k in fields and sub_k not in working):
+                            working[sub_k] = sub_v
+                            cleaned_row.pop(sub_k, None)
+                            notes.append(f"{path}.{key}[{idx}].{sub_k}:promoted_to_parent")
+                            row_moved = True
+                    if row_moved:
+                        list_changed = True
+                        cleaned_list.append(cleaned_row)
+                        continue
+                cleaned_list.append(row)
+            if list_changed:
+                working[key] = cleaned_list
     out: dict[str, Any] = {}
-    for key, value in data.items():
+    for key, value in working.items():
         target = key if key in fields else None
         if target is None and key in aliases and aliases[key] in fields:
             # The alias fills its canonical field only when that field did not
             # arrive on its own; otherwise the alias is noise and is dropped.
             target = aliases[key]
-            if target in data:
+            if target in working:
                 notes.append(f"{path}.{key}:alias_ignored({target}_present)")
                 continue
             notes.append(f"{path}.{key}:aliased_to_{target}")
@@ -175,6 +244,27 @@ def salvage_crew_answer(data: Any, contract: type[BaseModel]) -> tuple[Any, list
     return normalized, notes
 
 
+def _has_trailing_cut_beat_overlap(data: Any) -> bool:
+    if not isinstance(data, dict):
+        return False
+    for shot in data.get("shots") or []:
+        if not isinstance(shot, dict):
+            continue
+        beat_ids = shot.get("beat_ids")
+        cuts = shot.get("internal_cuts")
+        if not (isinstance(beat_ids, list) and isinstance(cuts, list) and len(beat_ids) > 1 and cuts):
+            continue
+        cut_beats = {
+            b for cut in cuts if isinstance(cut, dict)
+            for b in (cut.get("beat_ids") or []) if isinstance(b, str)
+        }
+        if cut_beats and isinstance(beat_ids[-1], str) and beat_ids[-1] in cut_beats and any(
+            isinstance(b, str) and b not in cut_beats for b in beat_ids[:-1]
+        ):
+            return True
+    return False
+
+
 def parse_with_salvage(data: Any, contract: type[BaseModel]) -> tuple[BaseModel, list[str]]:
     """Validate directly first; only a refusal triggers the local recovery.
 
@@ -183,6 +273,12 @@ def parse_with_salvage(data: Any, contract: type[BaseModel]) -> tuple[BaseModel,
     failure path reports exactly what the contract refused — never a synthetic
     error that hides the real one.
     """
+    if contract.__name__ == "SceneShotBoard" and _has_trailing_cut_beat_overlap(data):
+        normalized, notes = salvage_crew_answer(data, contract)
+        try:
+            return contract.model_validate(normalized), notes
+        except ValidationError:
+            pass
     direct: ValidationError | None = None
     try:
         return contract.model_validate(data), []

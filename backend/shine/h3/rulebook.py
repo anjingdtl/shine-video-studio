@@ -11,6 +11,7 @@ from typing import Any, Literal
 from pydantic import Field
 from sqlalchemy.orm import Session
 
+from shine.foundation.h3_audio import sanitize_h3_dialogue_text
 from shine.h3.compiler import (
     BASE_RULE_SHA256,
     BASE_SECTION_ORDER,
@@ -18,6 +19,7 @@ from shine.h3.compiler import (
     LEGACY_ANCHORED_COMPILER_VERSION,
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    LEGACY_SEMANTIC_VERSIONS,
     LEGACY_TIMELINE_COMPILER_VERSION,
     REF_RULE_SHA256,
     REF_SECTION_ORDER,
@@ -498,8 +500,13 @@ class H3RulebookRegistry:
         descriptive = QUOTED_OR_DIALOGUE.sub("", text)
         if re.search(r"[\u3400-\u9fff]", descriptive):
             reject("H3_ENGLISH", "compiled_prompt", "CJK found outside dialogue or quoted visible text")
+        uses_raw_line = (
+            replayed_variant == LEGACY_PRE_SANITIZE_COMPILER_VERSION
+            or request.compiler_version in (*LEGACY_SEMANTIC_VERSIONS, LEGACY_PRE_SANITIZE_COMPILER_VERSION)
+        )
         for line in request.shot_spec.dialogue:
-            if line.text not in text or line.end_s > request.expected_duration_s:
+            expected_text = line.text if uses_raw_line else (sanitize_h3_dialogue_text(line.text) or line.text)
+            if expected_text not in text or line.end_s > request.expected_duration_s:
                 reject("H3_DIALOGUE", "shot_spec.dialogue", "Dialogue changed, missing, or outside duration")
         # Dialogue intervals are validated above. Their timestamps may precede
         # editorial cuts even though the compiler appends dialogue after visuals.

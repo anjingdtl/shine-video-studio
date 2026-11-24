@@ -681,6 +681,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
         )
         director_binding = frozen_style.director_style_binding if frozen_style else None
         predecessor = None
+        earlier = None
         if body.previous_shot_id:
             earlier = db.get(Shot, body.previous_shot_id)
             if earlier is None or earlier.project_id != project_id:
@@ -712,10 +713,22 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                 if frozen_style and frozen_style.snapshot.get("max_shot_seconds") is not None
                 else DEFAULT_MAX_SHOT_SECONDS
             )
+            arch_row = db.execute(
+                select(AgentArtifact)
+                .where(AgentArtifact.project_id == project_id, AgentArtifact.kind == "SeriesArchitecture")
+                .order_by(AgentArtifact.created_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+            reg_locs = list(((arch_row.payload_json or {}) if arch_row else {}).get("locations") or [])
             rows, verdict = scene_director.landing_rows(
                 board,
                 scene.payload_json,
-                {"max_shot_seconds": cap, "continuity_predecessor": bool(predecessor)},
+                {
+                    "max_shot_seconds": cap,
+                    "continuity_predecessor": bool(predecessor),
+                    "registered_locations": reg_locs,
+                    **({"previous_blocking": (earlier.spec or {}).get("blocking")} if earlier is not None else {}),
+                },
             )
             if not verdict.accepted:
                 code = verdict.first_code() or "BOARD_CONTINUITY_REFUSED"
@@ -730,7 +743,42 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
             locked_facts = list(board.get("locked_story_facts") or [])
             prompt_facts = list(board.get("prompt_story_facts") or [])
             prompt_style = board.get("prompt_style")
+            # Keep <Subject 1>/<Subject 2> ordinals fixed across shots and unit
+            # boundaries inside the same episode: seed from all already-landed
+            # shots of earlier sections in this episode (plus predecessor if any),
+            # then append new scene performers in order of first appearance.
+            canonical_cast_order: list[str] = []
+
+            def _record_cast(names):
+                for name in names or []:
+                    if isinstance(name, str) and name and name not in canonical_cast_order:
+                        canonical_cast_order.append(name)
+
+            episode_id = str(board.get("episode_id") or "").strip()
+            if episode_id and predecessor is not None:
+                from shine.director.streamline import _latest_plan
+                from shine.materialprep.story import section_storyboard_shot_ids
+
+                ep_plan = _latest_plan(db, project_id)
+                ep_row = next(
+                    (ep for ep in ((ep_plan.payload if ep_plan else {}) or {}).get("episodes") or []
+                     if ep.get("episode_id") == episode_id),
+                    None,
+                )
+                for prior_sec in (ep_row or {}).get("section_ids") or []:
+                    if section_id and prior_sec == section_id:
+                        break
+                    for sid in section_storyboard_shot_ids(db, project_id, prior_sec).get("shot_ids") or []:
+                        prior_shot = db.get(Shot, sid)
+                        if prior_shot is not None:
+                            _record_cast((prior_shot.spec or {}).get("characters"))
+            if earlier is not None:
+                _record_cast((earlier.spec or {}).get("characters"))
             for row in rows:
+                _record_cast(row["cast"])
+            for row in rows:
+                ordered_cast = [n for n in canonical_cast_order if n in row["cast"]]
+                ordered_cast.extend(n for n in row["cast"] if n not in ordered_cast)
                 source = created[-1] if created else predecessor
                 continuity = None
                 if row["mode"] == "last_frame" and source:
@@ -768,7 +816,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     duration_s=row["duration_s"],
                     asset_ids=row["asset_ids"],
                     location=row["location"] or None,
-                    cast=row["cast"],
+                    cast=ordered_cast,
                     dialogue=row["dialogue"],
                     camera_fields=row["camera"],
                     sound_fields=sound_fields,
@@ -1232,6 +1280,22 @@ def _character_coverage(assets: list[dict], breakdown: dict) -> list[str]:
                 if part not in named:
                     named.append(part)
     return [name for name in named if resolve_character_asset(name, character_assets) is None]
+
+
+def _location_coverage(assets: list[dict], location: str | None) -> list[str]:
+    """Return [location] when no approved locked scene master matches it."""
+    from shine.asset_identity import character_reference_key
+
+    loc = (location or "").strip()
+    if not loc:
+        return []
+    key = character_reference_key(loc)
+    known = {
+        character_reference_key(a.get("entity_id") or "")
+        for a in assets
+        if a.get("kind") == "image" and a.get("role") == "scene"
+    }
+    return [] if key in known else [loc]
 
 
 
@@ -1872,13 +1936,28 @@ def generate_storyboard(
                 for beat in (scene.payload_json.get("beats") or [])
             ]
         }
-        missing = _character_coverage(asset_context(db, project_id), scene_beats_for_cov)
-        material_requirements: dict = {"characters": [], "note": ""}
-        if missing:
+        assets_ctx = asset_context(db, project_id)
+        missing = _character_coverage(assets_ctx, scene_beats_for_cov)
+        used_locations: list[str] = []
+        for candidate in [
+            scene.payload_json.get("location"),
+            *[shot.get("location") for shot in (board_payload.get("shots") or []) if isinstance(shot, dict)],
+        ]:
+            loc_name = str(candidate or "").strip()
+            if loc_name and loc_name not in used_locations:
+                used_locations.append(loc_name)
+        missing_locations = []
+        for loc_name in used_locations:
+            for item in _location_coverage(assets_ctx, loc_name):
+                if item not in missing_locations:
+                    missing_locations.append(item)
+        material_requirements: dict = {"characters": [], "locations": [], "note": ""}
+        if missing or missing_locations:
             material_requirements = {
                 "characters": list(missing),
-                "note": "这些角色还没有已确认的主素材；落镜不因此停下，但真实开拍前需要先准备、"
-                        "确认并锁定主素材，否则用到这些角色的镜头会停在素材缺口上。",
+                "locations": list(missing_locations),
+                "note": "这些角色或场景还没有已确认的主素材；落镜不因此停下，但真实开拍前需要先准备、"
+                        "确认并锁定对应主素材，否则用到这些角色或地点的镜头会停在素材缺口上。",
             }
         add_audit(
             db, "film-agent", "STORYBOARD_GENERATED", "project", project.id,
@@ -1898,6 +1977,7 @@ def generate_storyboard(
             "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
             "steps": steps,
             "missing_characters": list(missing),
+            "missing_locations": list(missing_locations),
             "material_requirements": material_requirements,
             "rejections": [],
             "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},

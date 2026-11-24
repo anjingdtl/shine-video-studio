@@ -345,3 +345,73 @@ def test_a_repair_note_names_the_place_in_the_verdict_s_own_numbers():
     assert overlap == (" The previous answer let two lines overlap in time (shot S2, line 2; shot S2, line 3). "
                        "Two lines of one shot never overlap.")
     assert engine.repair_note("SOMETHING_ELSE", []) is None
+
+
+def test_cross_unit_last_frame_enforces_previous_blocking_axis_and_resets_on_break():
+    prev_blocking = {
+        "axis": "counter",
+        "placements": [placement(ZHOU, "left_fg", "facing_right"), placement(GUEST, "right_fg", "facing_left")],
+    }
+    two_hander = {**SCENE, "beats": [{**SCENE["beats"][0], "characters": [ZHOU, GUEST]}, *SCENE["beats"][1:]]}
+    flipped_open = first_of(
+        motivation="continuous_action",
+        placements=[placement(GUEST, "left_fg", "facing_right"), placement(ZHOU, "right_fg", "facing_left")],
+    )
+    verdict = engine.review_scene_board(
+        board(flipped_open, SECOND_SHOT, LAST_SHOT),
+        two_hander,
+        {**CONTEXT, "continuity_predecessor": True, "previous_blocking": prev_blocking},
+    )
+    assert verdict.refusals[0] == {"code": "AXIS_ORDER_FLIPPED", "shot_id": "S1", "left": ZHOU, "right": GUEST}
+
+    changed_axis = first_of(motivation="continuous_action", axis="across-room", placements=list(BOTH))
+    verdict_axis = engine.review_scene_board(
+        board(changed_axis, SECOND_SHOT, LAST_SHOT),
+        two_hander,
+        {**CONTEXT, "continuity_predecessor": True, "previous_blocking": prev_blocking},
+    )
+    assert "AXIS_CHANGED_WITHOUT_BREAK" in codes(verdict_axis)
+
+    cut_reset = first_of(
+        motivation="establishing_reset",
+        placements=[placement(GUEST, "left_fg", "facing_right"), placement(ZHOU, "right_fg", "facing_left")],
+    )
+    verdict_cut = engine.review_scene_board(
+        board(
+            cut_reset,
+            {**SECOND_SHOT, "blocking": {
+                "axis": "counter",
+                "placements": [placement(GUEST, "left_fg", "facing_right"),
+                               placement(ZHOU, "right_fg", "facing_left")],
+            }},
+            {**LAST_SHOT, "blocking": {
+                "axis": "counter", "placements": [placement(GUEST, "left_fg", "facing_right")]}},
+        ),
+        two_hander,
+        {**CONTEXT, "continuity_predecessor": True, "previous_blocking": prev_blocking},
+    )
+    assert verdict_cut.accepted
+    assert verdict_cut.boundaries[0]["mode"] == "cut"
+
+
+def test_cross_space_shot_accepts_registered_location_with_location_switch_cut():
+    indoor = first_of(location="钟表铺")
+    outdoor_cut = {**SECOND_SHOT, "location": "雨夜街巷", "transition_motivation": "time_or_space_jump"}
+    outdoor_stay = {**LAST_SHOT, "location": "雨夜街巷", "transition_motivation": "continuous_action"}
+    reg_ctx = {**CONTEXT, "registered_locations": [{"name": "钟表铺"}, {"name": "雨夜街巷"}]}
+
+    verdict = engine.review_scene_board(board(indoor, outdoor_cut, outdoor_stay), SCENE, reg_ctx)
+    assert verdict.accepted
+    assert verdict.boundaries[1] == {"shot_id": "S2", "mode": "cut", "motivation": "time_or_space_jump"}
+    assert verdict.boundaries[2]["mode"] == "last_frame"
+
+    forced_cut = {**SECOND_SHOT, "location": "雨夜街巷", "transition_motivation": "continuous_action"}
+    verdict_forced = engine.review_scene_board(board(indoor, forced_cut, outdoor_stay), SCENE, reg_ctx)
+    assert verdict_forced.accepted
+    assert verdict_forced.boundaries[1]["mode"] == "cut"
+    assert any(w["code"] == "CONTINUATION_IGNORED_ON_LOCATION_CHANGE" for w in verdict_forced.warnings)
+
+    unreg_shot = {**SECOND_SHOT, "location": "码头", "transition_motivation": "time_or_space_jump"}
+    unregistered = engine.review_scene_board(board(indoor, unreg_shot, LAST_SHOT), SCENE, reg_ctx)
+    assert unregistered.first_code() == "SHOT_LOCATION_CONFLICT"
+

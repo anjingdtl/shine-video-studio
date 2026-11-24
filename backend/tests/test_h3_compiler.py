@@ -1422,3 +1422,59 @@ def test_a_released_version_ignores_the_rich_timeline_fields():
     desc = compiled.sections["detailed_description"]
     for prose in ("From 0.0s", "In frame:", "The shot settles on", "Space:", "It opens on"):
         assert prose not in desc, prose
+
+
+def test_rulebook_accepts_sanitized_dialogue_with_trailing_comma():
+    from shine.h3.compiler import SKILL_SHA256
+    from shine.h3.rulebook import PACK_ID, H3RulebookRegistry, builtin_manifest, digest
+    from shine.models import RulePack
+    from shine.schemas import RenderRequest
+
+    english_style = StyleBible(
+        photography_language="Eye-level medium shot.",
+        shot_blocking="Two performers hold screen axis.",
+        color_palette="Warm tungsten interior.",
+        lighting_tone="Soft desk lamp key.",
+        lens_texture="Clean 50mm realistic texture.",
+        editing_rhythm="Balanced narrative pacing.",
+        sound_performance="Natural Mandarin Chinese speech.",
+    )
+    shot = spec(
+        characters=["老周"],
+        duration_target_s=8.0,
+        story_beat="The old repairman holds out a dry towel across the counter.",
+        camera={"composition": "Eye-level medium shot.", "movement": "The camera holds still.",
+                "lighting": "Warm lamp light.", "axis_rule": "Keep screen axis."},
+        sound={"environment": "Quiet watch shop.", "ambience": "Faint clock ticking."},
+        dialogue=[{"speaker_id": "老周", "text": "擦擦，", "start_s": 0.4, "end_s": 2.0}],
+    )
+    manifest = [item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="老周", role="character")]
+    compiled = H3PromptCompiler().compile(
+        spec=shot, style=english_style, manifest=manifest, project_language="Chinese",
+    )
+    assert "<d>[Chinese] 擦擦</d>" in compiled.prompt
+    manifest_payload = builtin_manifest()
+    pack = RulePack(id=PACK_ID, manifest=manifest_payload, sha256=digest(manifest_payload))
+    req = RenderRequest(
+        idempotency_key="k",
+        shot_id="s",
+        shot_revision=1,
+        shot_spec=shot,
+        style_version_id=shot.style_version_id,
+        style_snapshot=english_style,
+        style_hash=digest(english_style.model_dump(mode="json")),
+        generation_mode=compiled.mode,
+        expected_duration_s=shot.duration_target_s,
+        reference_manifest=manifest,
+        compiled_prompt=compiled.prompt,
+        compiled_prompt_sections=compiled.sections,
+        prompt_sha256=compiled.prompt_sha256,
+        compiler_version=compiled.compiler_version,
+        rule_version=compiled.rule_version,
+        prompt_skill_hash=SKILL_SHA256,
+        rulepack_id=pack.id,
+        rulepack_hash=pack.sha256,
+    )
+    report = H3RulebookRegistry().validate(req, pack)
+    assert report.passed, report.violations
+

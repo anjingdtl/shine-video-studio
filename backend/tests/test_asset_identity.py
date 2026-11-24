@@ -64,3 +64,18 @@ def test_exact_character_asset_uuid_resolves_and_canonicalizes_to_readable_name(
     assert resolve_character_asset(master["id"], [master]) == master
     assert canonical_character_name_for_asset_id(master["id"], [master]) == master["entity_id"]
     assert canonical_character_name_for_asset_id("R01 杜万山", [master]) == "R01 杜万山"
+
+
+def test_parenthetical_qualifier_matches_single_base_character_without_equating_variants():
+    young = {"id": "a-young", "kind": "image", "role": "character", "entity_id": "年轻人"}
+    young_boy = {"id": "a-boy", "kind": "image", "role": "character", "entity_id": "年轻人（少年）"}
+    young_adult = {"id": "a-adult", "kind": "image", "role": "character", "entity_id": "年轻人（成年）"}
+
+    assert character_reference_matches("年轻人（灰风衣青年）", "年轻人")
+    assert not character_reference_matches("年轻人（少年）", "年轻人（成年）")
+    assert resolve_character_asset("年轻人（灰风衣青年）", [young]) == young
+    # Exact match still wins when two qualified variants exist, and bare stem
+    # refuses to guess between them.
+    assert resolve_character_asset("年轻人（少年）", [young_boy, young_adult]) == young_boy
+    assert resolve_character_asset("年轻人", [young_boy, young_adult]) is None
+    assert resolve_character_asset("年轻人（灰风衣青年）", [young_boy, young_adult]) is None

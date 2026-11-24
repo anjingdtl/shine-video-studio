@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+from shine.foundation.h3_audio import sanitize_h3_dialogue_text
 from shine.h3.compiler import BASE_SECTION_ORDER, LABEL_PATTERN, REF_SECTION_ORDER
 from shine.h3.narrator import is_narrator_speaker
 
@@ -144,8 +145,14 @@ def review_h3_prompt(
         ))
 
     rows = _dialogue_fields(dialogue)
-    missing_lines = [str(row.get("text") or "") for row in rows
-                     if row.get("text") and str(row["text"]) not in text]
+    missing_lines = []
+    for row in rows:
+        raw = str(row.get("text") or "")
+        if not raw:
+            continue
+        cleaned = sanitize_h3_dialogue_text(raw) or raw
+        if raw not in text and cleaned not in text:
+            missing_lines.append(raw)
     if missing_lines:
         findings.append(_finding(
             "H3_DIALOGUE",

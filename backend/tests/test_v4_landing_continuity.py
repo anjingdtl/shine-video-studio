@@ -290,6 +290,11 @@ def test_a_declared_place_binds_its_confirmed_scene_master_or_asks_for_it(api):
         one = [ShotBindingInput(asset_id=shop["id"], use_as="picture", ordinal=0)]
         same, request = complete_location_binding(db, project, "钟表铺", one)
         assert [binding.asset_id for binding in same] == [shop["id"]] and request is None
+        # A scene asset from a different place cannot satisfy this location or
+        # hide its RequestedAsset gap.
+        mismatched, mismatch_req = complete_location_binding(db, project, "青石街", one)
+        assert mismatched == []
+        assert mismatch_req is not None and mismatch_req.name == "青石街"
         assert complete_location_binding(db, project, "  ", one) == (one, None)
 
 

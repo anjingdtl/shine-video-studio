@@ -1403,6 +1403,108 @@ def test_crew_salvage_keeps_usable_content_and_refuses_missing_content():
         parse_with_salvage({"beats": [{"id": "B1"}]}, ScriptBreakdown)
 
 
+def test_crew_salvage_promotes_misnested_shot_siblings_from_camera():
+    from shine.agents.crew_salvage import parse_with_salvage
+    from shine.agents.scene_director import SceneShotBoard
+
+    shot_base = {
+        "id": "S01",
+        "beat_ids": ["B1"],
+        "duration_s": 6.0,
+        "visual_description": "Lao Zhou oils a brass pocket watch behind the counter.",
+        "asset_ids": [],
+        "location": "周记钟表铺",
+        "dialogue": [],
+        "camera": {
+            "composition": "Medium shot behind the wooden counter, subject centered.",
+            "shot_size": "MS",
+            "angle": "eye-level",
+            "lens": "50mm",
+            "move": "static",
+            "motive": "",
+            "movement": "The camera holds still.",
+            "lighting": "Warm desk lamp key.",
+            "blocking": {"axis": "group_1", "placements": [
+                {"character": "老周", "zone": "left_fg", "facing": "facing_right", "posture": "seated", "props": []}
+            ]},
+            "environment": {"depth": "Counter foreground, clock wall behind.", "light": "Warm desk lamp.",
+                            "micro_motion": "Dust drifts in the lamplight."},
+            "timeline": [{"start_s": 0.0, "end_s": 6.0, "action": "He oils the brass gears.",
+                          "expression": "Steady focus.", "camera": "The camera holds still."}],
+            "entry_state": "Lao Zhou seated at the counter.",
+            "exit_state": "Lao Zhou lowers the loupe.",
+            "transition_motivation": "match_on_action",
+            "handoff_cue": "rain on the glass door draws his glance",
+            "ambience": "steady clock ticking and rain",
+            "music": "none",
+        },
+        "camera_note": "extra note to drop",
+    }
+    proposal, notes = parse_with_salvage(
+        {"shots": [shot_base]},
+        SceneShotBoard,
+    )
+    assert proposal.shots[0].blocking.axis == "group_1"
+    assert proposal.shots[0].timeline[0].action == "He oils the brass gears."
+    assert any("blocking:promoted_to_parent" in n for n in notes)
+    assert any("camera_note:unknown_field_dropped" in n for n in notes)
+
+    shot_with_root = {
+        **shot_base,
+        "prompt_style": {
+            "photography_language": "Eye-level medium shots",
+            "shot_blocking": "Keep counter axis",
+            "color_palette": "Warm amber",
+            "lighting_tone": "Desk lamp key",
+            "lens_texture": "50mm film texture",
+            "editing_rhythm": "Unhurried beats",
+            "sound_performance": "Natural dialogue",
+        },
+        "prompt_story_facts": [],
+    }
+    proposal2, notes2 = parse_with_salvage(
+        {"shots": [shot_with_root, None]},
+        SceneShotBoard,
+    )
+    assert len(proposal2.shots) == 1
+    assert proposal2.prompt_style is not None
+    assert proposal2.prompt_style.color_palette == "Warm amber"
+    assert any("prompt_style:promoted_to_parent" in n for n in notes2)
+    assert any("empty_non_object_dropped" in n for n in notes2)
+
+    # Lossless trim when a shot repeats internal_cuts[0].beat_ids at the tail of shot.beat_ids
+    cut_overlap_shot = {
+        **shot_base,
+        "beat_ids": ["B1", "B2"],
+        "camera": {
+            "composition": "Medium shot behind the wooden counter, subject centered.",
+            "shot_size": "MS", "angle": "eye-level", "lens": "50mm",
+            "move": "static", "motive": "", "movement": "The camera holds still.",
+            "lighting": "Warm desk lamp key.",
+        },
+        "blocking": shot_base["camera"]["blocking"],
+        "environment": shot_base["camera"]["environment"],
+        "timeline": shot_base["camera"]["timeline"],
+        "entry_state": shot_base["camera"]["entry_state"],
+        "exit_state": shot_base["camera"]["exit_state"],
+        "transition_motivation": "match_on_action",
+        "handoff_cue": "cut on hand motion",
+        "ambience": "steady clock ticking and rain",
+        "music": "none",
+        "internal_cuts": [{"start_s": 3.0, "beat_ids": ["B2"], "visual_description": "Close-up of the watch."}],
+    }
+    proposal3, notes3 = parse_with_salvage({"shots": [cut_overlap_shot]}, SceneShotBoard)
+    assert proposal3.shots[0].beat_ids == ["B1"]
+    assert proposal3.shots[0].internal_cuts[0].beat_ids == ["B2"]
+    assert any("beat_ids:deduped_internal_cut_beats" in n for n in notes3)
+
+    # Preserve B1 duplicate if trimming would leave shot.beat_ids empty (still fails coverage gate).
+    only_cut_beat = {**cut_overlap_shot, "beat_ids": ["B2"]}
+    proposal4, notes4 = parse_with_salvage({"shots": [only_cut_beat]}, SceneShotBoard)
+    assert proposal4.shots[0].beat_ids == ["B2"]
+    assert not any("deduped_internal_cut_beats" in n for n in notes4)
+
+
 def test_crew_chain_records_the_literary_budget(api):
     client, factory, settings = api
     prepared = _prepare_project(client, sections=2)

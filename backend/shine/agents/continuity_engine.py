@@ -274,29 +274,43 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
         return verdict
     shots = board["shots"]
     beats = {beat["id"]: beat for beat in scene_beats(scene)}
+    registered_locations = _location_names(context.get("registered_locations"))
     for view in views:
         verdict.cast[view.id] = list(view.cast)
         _judge_segment(verdict, view, shots[view.index], context.get("max_shot_seconds"),
-                       str(scene.get("location") or "").strip())
+                       str(scene.get("location") or "").strip(),
+                       registered_locations=registered_locations)
         _judge_cast(verdict, view, shots[view.index])
         _judge_camera(verdict, view, shots[view.index])
     _judge_coverage(verdict, views, beats)
     _judge_dialogue(verdict, views, beats)
     _decide_boundaries(verdict, views, shots, bool(context.get("continuity_predecessor")))
-    _judge_axis(verdict, views, shots)
+    _judge_axis(verdict, views, shots, previous_blocking=context.get("previous_blocking"))
     _report_props(verdict, views, shots)
     return verdict
 
 
+def _location_names(raw: Any) -> set[str]:
+    names: set[str] = set()
+    for item in raw or ():
+        name = item.get("name") if isinstance(item, dict) else item
+        text = str(name or "").strip()
+        if text:
+            names.add(text)
+    return names
+
+
 def _judge_segment(verdict: BoardVerdict, view: ShotView, shot: dict[str, Any],
-                   cap: float | None, place: str) -> None:
+                   cap: float | None, place: str,
+                   *, registered_locations: set[str] | None = None) -> None:
     if cap is not None and view.duration_s > float(cap) + 1e-6:
         verdict.refusals.append({"code": "SHOT_DURATION_OVER_LIMIT", "shot_id": view.id,
                                  "duration_s": view.duration_s, "max_shot_seconds": float(cap)})
     location = str(shot.get("location") or "").strip()
-    if place and location != place:
-        # A scene is one place: a shot staged elsewhere is a jump the scene
-        # never wrote.
+    allowed = ({place} if place else set()) | set(registered_locations or ())
+    if place and location not in allowed:
+        # A scene stays in its own place unless switching cleanly between
+        # places explicitly registered in SeriesArchitecture.
         verdict.refusals.append({"code": "SHOT_LOCATION_CONFLICT", "shot_id": view.id,
                                  "location": location, "scene_location": place})
     cuts = shot.get("internal_cuts") or []
@@ -408,6 +422,18 @@ def _decide_boundaries(verdict: BoardVerdict, views: list[ShotView], shots: list
     for view in views:
         motivation = str(shots[view.index].get("transition_motivation") or "")
         continues = motivation in CONTINUE_MOTIVATIONS
+        if view.index > 0 and continues:
+            prev_loc = str(shots[view.index - 1].get("location") or "").strip()
+            cur_loc = str(shots[view.index].get("location") or "").strip()
+            if prev_loc and cur_loc and prev_loc != cur_loc:
+                # Never carry a final frame across two distinct physical places.
+                verdict.warnings.append({
+                    "code": "CONTINUATION_IGNORED_ON_LOCATION_CHANGE",
+                    "shot_id": view.id,
+                    "from": prev_loc,
+                    "to": cur_loc,
+                })
+                continues = False
         if view.index == 0 and continues and not has_predecessor:
             # Nothing of an earlier episode or unit exists to continue: the
             # shot opens on a cut, and the board records that it does.
@@ -427,7 +453,13 @@ def _placed(shot: dict[str, Any]) -> list[tuple[str, int, str]]:
     return rows
 
 
-def _judge_axis(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]]) -> None:
+def _judge_axis(
+    verdict: BoardVerdict,
+    views: list[ShotView],
+    shots: list[dict[str, Any]],
+    *,
+    previous_blocking: dict[str, Any] | None = None,
+) -> None:
     """The 180-degree rule, read from where the board puts people.
 
     The first two performers a group shows together fix which of them stands
@@ -435,17 +467,31 @@ def _judge_axis(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[s
     every later shot of the group two performers may not swap sides, and a
     performer may not look away from the person they were last shown with.
     A new arrangement needs a new group, and a group may only begin at a
-    boundary that can carry people to new places.  A shot with three or more
-    performers is a triangle this rule does not model: order is still checked
-    in it, facing is not.
+    boundary that can carry people to new places.  When ``previous_blocking``
+    is supplied from the episode's prior landed shot, the opening shot of the
+    board inherits that axis and left-right order unless it explicitly opens
+    on a spatial-break cut.  A shot with three or more performers is a triangle
+    this rule does not model: order is still checked in it, facing is not.
     """
     label: str | None = None
     order: set[tuple[str, str]] = set()
     partner: dict[str, str] = {}
+    if isinstance(previous_blocking, dict):
+        prev_axis = str(previous_blocking.get("axis") or "").strip()
+        if prev_axis:
+            label = prev_axis
+        prev_rows = _placed({"blocking": previous_blocking})
+        if len(prev_rows) == 2:
+            (first, first_side, _), (second, second_side, _) = prev_rows
+            if first != second and first_side != second_side:
+                order.add((first, second) if first_side < second_side else (second, first))
+            partner[first], partner[second] = second, first
     for view in views:
         shot = shots[view.index]
         axis = str((shot.get("blocking") or {}).get("axis") or "").strip()
-        if label is not None and axis != label:
+        if view.index == 0 and isinstance(previous_blocking, dict) and view.motivation in BREAK_MOTIVATIONS:
+            order, partner = set(), {}
+        elif label is not None and axis != label:
             if view.motivation not in BREAK_MOTIVATIONS:
                 verdict.refusals.append({"code": "AXIS_CHANGED_WITHOUT_BREAK", "shot_id": view.id,
                                          "motivation": view.motivation})
@@ -512,7 +558,7 @@ REFUSAL_LABELS = {
     "DIALOGUE_OVERLAP": "两句台词在时间上重叠",
     "DIALOGUE_TOO_FAST_TO_SPEAK": "台词分到的时间按正常语速说不完",
     "PLACEMENT_NOT_IN_CAST": "镜头里站了这场戏里没有的人",
-    "SHOT_LOCATION_CONFLICT": "镜头拍的不是这一场戏的地点",
+    "SHOT_LOCATION_CONFLICT": "镜头拍的不是已登记的场景地点",
     "INTERNAL_CUT_COUNT": "一个渲染段里有不止一次镜内切",
     "INTERNAL_CUT_WINDOW": "镜内切离镜头开头或结尾太近，两边都看不清",
     "CAMERA_MOVE_WITHOUT_MOTIVE": "运镜没有说明理由",
@@ -571,8 +617,9 @@ _REPAIRS = {
                                   "long plus a little air, and lengthen the shot if it must.",
     "PLACEMENT_NOT_IN_CAST": "The previous answer placed someone the shot's beats do not show ({where}): "
                              "{character}. blocking places only the people its beats name.",
-    "SHOT_LOCATION_CONFLICT": "The previous answer staged a shot outside the scene's place ({where}): "
-                              "{location}. location is the scene's own location, copied exactly, in every shot.",
+    "SHOT_LOCATION_CONFLICT": "The previous answer staged a shot at an unregistered location ({where}): "
+                              "{location}. Keep each shot at the scene's own location, or another exact name "
+                              "from production_context.registered_locations when stepping across spaces.",
     "INTERNAL_CUT_COUNT": "The previous answer put more than one internal cut in a shot ({where}). A render "
                           "segment carries at most one cut.",
     "INTERNAL_CUT_WINDOW": "The previous answer cut too close to the start or the end of a shot ({where}): "

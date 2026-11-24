@@ -684,6 +684,8 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
             {
                 "max_shot_seconds": context.get("max_shot_seconds"),
                 "continuity_predecessor": bool(production.get("continuity_predecessor")),
+                "previous_blocking": production.get("previous_shot_blocking"),
+                "registered_locations": production.get("registered_locations") or [],
             },
         )
         if verdict.refusals:
@@ -1530,6 +1532,7 @@ class FilmAgentDispatcher:
             # is a long answer. This is a role classification, not a per-call
             # reserve hack.
             crew_purpose = ("architecture" if body.tool == "series_architecture"
+                            else "scene_board" if body.tool == "scene_board"
                             else "observation" if role == "continuity_supervisor" else "structured")
             crew_budget = plan_call_budget(
                 bounded_config, crew_request, purpose=crew_purpose,
@@ -1663,14 +1666,15 @@ class FilmAgentDispatcher:
                 })
             if isinstance(proposal, scene_director.SceneShotBoard):
                 scene_artifact = next((a for a in inputs if a.kind == "DramaSceneScript"), inputs[0])
+                production = context.get("production_context") or {}
                 verdict = continuity_engine.review_scene_board(
                     payload,
                     scene_artifact.payload_json,
                     {
                         "max_shot_seconds": context.get("max_shot_seconds"),
-                        "continuity_predecessor": bool(
-                            (context.get("production_context") or {}).get("continuity_predecessor")
-                        ),
+                        "continuity_predecessor": bool(production.get("continuity_predecessor")),
+                        "previous_blocking": production.get("previous_shot_blocking"),
+                        "registered_locations": production.get("registered_locations") or [],
                     },
                 )
                 payload.update(scene_director.board_server_fields(payload, scene_artifact, context, verdict))

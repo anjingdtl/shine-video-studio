@@ -1279,9 +1279,10 @@ def verified_architecture_context(db, project_id, source_text, supplied):
          for section_id in episode.get("section_ids") or []])
     if source_text != architecture_brief(outline.payload_json, plan.payload, document.text):
         raise ValueError("STORY_ARCHITECTURE_BRIEF_INVALID")
-    # Places an earlier architecture of this outline already registered: a
-    # later plan must keep their names, or the scene masters prepared for
-    # them would never be matched to the new scenes set in the same place.
+    # Places an earlier architecture of this outline already registered, plus
+    # confirmed locked scene masters already in the project asset library:
+    # keeping their names lets the architect reuse existing scene assets when
+    # a scene actually happens there instead of inventing an alias.
     registered: dict[str, dict] = {}
     for row in db.scalars(select(AgentArtifact).where(
             AgentArtifact.project_id == project_id, AgentArtifact.kind == ARCHITECTURE_KIND,
@@ -1291,6 +1292,25 @@ def verified_architecture_context(db, project_id, source_text, supplied):
             for entry in payload.get("locations") or []:
                 if isinstance(entry, dict) and entry.get("name"):
                     registered.setdefault(entry["name"], entry)
+    from shine.models import Asset
+
+    for asset in db.scalars(select(Asset).where(
+            Asset.project_id == project_id, Asset.kind == "image", Asset.role == "scene",
+            Asset.approved.is_(True), Asset.locked.is_(True)).order_by(Asset.created_at.asc())):
+        provenance = asset.provenance or {}
+        if provenance.get("offline_only") or provenance.get("is_mock"):
+            continue
+        name = (asset.entity_id or "").strip()
+        if name and name not in registered:
+            registered[name] = {
+                "name": name,
+                "description": (
+                    "项目库中已存在的场景主图名称。仅当该场戏主要发生在此空间内时才复用此名称；"
+                    "若关键剧情转到室外街道、雨巷等不同空间，必须另行登记新外景地点名称，"
+                    "不要把室外戏硬并入室内名称。"
+                ),
+                "time_variants": [],
+            }
     return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
             "document_id": document.id, "document_sha256": document.sha256,
             "plan_sha256": plan.sha256, "plan": plan.payload,
@@ -1413,6 +1433,29 @@ def verified_production_context(db, project_id, source_text, supplied, *, requir
                **({"creative_source": creative_source, "script_artifact_id": script_artifact_id,
                    "script_sha256": script_sha256} if script_artifact_id else {}),
                "previous_render_status": previous_render_status}
+    prev_shot_id = supplied.get("previous_shot_id")
+    if isinstance(prev_shot_id, str) and prev_shot_id:
+        from shine.models import Shot
+
+        prev_shot = db.get(Shot, prev_shot_id)
+        if prev_shot is not None and prev_shot.project_id == project_id:
+            context["previous_shot_id"] = prev_shot.id
+            prev_spec = prev_shot.spec or {}
+            prev_blocking = prev_spec.get("blocking")
+            if isinstance(prev_blocking, dict):
+                context["previous_shot_blocking"] = prev_blocking
+                prev_props = sorted({
+                    str(prop).strip()
+                    for placement in (prev_blocking.get("placements") or [])
+                    if isinstance(placement, dict)
+                    for prop in (placement.get("props") or [])
+                    if str(prop).strip()
+                })
+                if prev_props:
+                    context["previous_shot_props"] = prev_props
+            prev_exit = str(prev_spec.get("exit_state") or "").strip()
+            if prev_exit:
+                context["previous_shot_exit_state"] = prev_exit[:300]
     if plan is not None:
         context["plan_sha256"] = plan.sha256
     if supplied.get("previous_scene_artifact_id"):
@@ -1443,6 +1486,7 @@ def verified_production_context(db, project_id, source_text, supplied, *, requir
             "episode_blueprint": episode_blueprint(payload, episode_id),
             "locations": [*registered, *(entry for entry in context["locations"]
                                          if not (isinstance(entry, dict) and entry.get("name") in named))],
+            "registered_locations": registered,
         })
         # The scene before this one in the same episode, as its own script left
         # it: read from the ledger, and only ever inside one episode.

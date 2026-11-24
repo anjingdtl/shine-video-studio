@@ -1138,6 +1138,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                     "characters": outline.payload_json.get("characters", []),
                     "continuity_facts": facts,
                     "continuity_predecessor": bool(predecessor),
+                    **({"previous_shot_id": predecessor} if predecessor else {}),
                     "continuity": {"basis": "user_supplied_unverified"},
                     "previous_render_status": "PENDING_SERVER_VERIFICATION"},
                 consent_document_id=document.id, consent_document_sha256=document.sha256,
@@ -1180,6 +1181,8 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                    unit["episode_id"]: {"unit_index": cursor, "status": result["status"],
                                         "failed_role": failed_role,
                                         "failed_task_id": failed_task_id,
+                                        "resume_steps": resume_steps,
+                                        "last_blocked_result": result,
                                         "rejections": rejections}}
         state = {**state, "blocked_episodes": blocked, "cursor": cursor,
                  "failed_unit_index": cursor,
@@ -1674,12 +1677,28 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
         raise HTTPException(409, "EPISODE_NOT_IN_RUN")
     # Rewind to the unit that actually failed (the blocked entry records it);
     # the units of this episode that already landed keep their shots.
-    failed_unit = blocked[episode_id].get("unit_index")
+    blocked_entry = blocked.pop(episode_id)
+    failed_unit = blocked_entry.get("unit_index")
     rewind_to = failed_unit if failed_unit in episode_units else episode_units[0]
-    del blocked[episode_id]
     cursor = min(int(trace.get("cursor") or 0), rewind_to)
-    new_trace = {**trace, "blocked_episodes": blocked, "cursor": cursor,
-                 "retry_episode": episode_id, "retried_at": utcnow().isoformat()}
+    # Restore THIS blocked episode's own retry context (other episodes running
+    # afterward clear or overwrite the top-level fields on trace).
+    resumed_role = blocked_entry.get("failed_role")
+    resumed_task_id = blocked_entry.get("failed_task_id")
+    resumed_steps = dict(blocked_entry.get("resume_steps") or {})
+    new_trace = {
+        **trace,
+        "blocked_episodes": blocked,
+        "cursor": cursor,
+        "failed_unit_index": rewind_to,
+        "failed_role": resumed_role,
+        "failed_task_id": resumed_task_id,
+        "resume_steps": resumed_steps,
+        **({"last_blocked_result": blocked_entry["last_blocked_result"]}
+           if "last_blocked_result" in blocked_entry else {}),
+        "retry_episode": episode_id,
+        "retried_at": utcnow().isoformat(),
+    }
     changed = db.execute(update(AgentTaskRecord).where(
         AgentTaskRecord.id == row.id,
         AgentTaskRecord.state_version == expected_state_version,
@@ -1691,7 +1710,7 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
                                   "message": "任务已更新，请刷新后重试"})
     add_audit(db, actor, "DIRECTOR_STORYBOARD_EPISODE_RETRIED", "agent_task", row.id,
               {"episode_id": episode_id, "rewind_to": rewind_to,
-               "resume_from_role": trace.get("failed_role")}, project_id=project_id)
+               "resume_from_role": resumed_role}, project_id=project_id)
     db.commit()
     db.refresh(row)
     return {"task_id": row.id, "status": row.status, "episode_id": episode_id,

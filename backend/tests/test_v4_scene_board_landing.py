@@ -336,3 +336,179 @@ def test_imported_script_keeps_legacy_chain_and_verbatim_lock(api):
     assert res["status"] == "REJECTED"
     assert res["failed_role"] == "scriptwriter"
     assert res["rejections"][0]["rejection_reason_code"] == "DIALOGUE_NOT_IN_USER_SCRIPT"
+
+
+def test_cross_unit_last_frame_receives_previous_shot_blocking_and_blocks_axis_flip(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=2)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=40)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    base = _chain_responder({"asset": _master(client, project)})
+    seen_prev_blocking: list[dict | None] = []
+    unit2_flip_once = {"on": True}
+
+    def inspect_unit2(messages, schema):
+        ans = base(messages, schema)
+        if schema.get("title") == "SceneShotBoard":
+            ctx = json.loads(messages[-1].content.split(SCHEMA_INSTRUCTION)[0])
+            prod = ctx.get("production_context") or {}
+            if prod.get("continuity_predecessor"):
+                seen_prev_blocking.append(prod.get("previous_shot_blocking"))
+                if unit2_flip_once["on"]:
+                    unit2_flip_once["on"] = False
+                    ans["shots"][0]["transition_motivation"] = "continuous_action"
+                    ans["shots"][0]["blocking"] = {
+                        "axis": "flipped-axis",
+                        "placements": ans["shots"][0]["blocking"]["placements"],
+                    }
+        return ans
+
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=inspect_unit2)
+    _drive(factory, settings, gateway)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert seen_prev_blocking and seen_prev_blocking[0] is not None
+    with factory() as db:
+        refused_rows = [
+            row for row in db.scalars(select(AgentTaskRecord).where(
+                AgentTaskRecord.project_id == project, AgentTaskRecord.role_id == "director",
+            )).all()
+            if (row.trace or {}).get("rejection_reason_code") == "AXIS_CHANGED_WITHOUT_BREAK"
+        ]
+    assert len(refused_rows) == 1
+
+
+def test_retry_blocked_episode_restores_failed_task_after_other_episode_advances(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=4)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    base = _chain_responder({"asset": _master(client, project)})
+    fail_ep1_unit1 = {"remaining": 3}
+
+    def responder(messages, schema):
+        ans = base(messages, schema)
+        if schema.get("title") == "SceneShotBoard":
+            ctx = json.loads(messages[-1].content.split(SCHEMA_INSTRUCTION)[0])
+            prod = ctx.get("production_context") or {}
+            if (
+                prod.get("episode_id") == "ep-01"
+                and prod.get("continuity_predecessor")
+                and fail_ep1_unit1["remaining"] > 0
+            ):
+                fail_ep1_unit1["remaining"] -= 1
+                ans["shots"][0]["location"] = "wrong-place"
+        return ans
+
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=responder)
+    _drive(factory, settings, gateway)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "NEEDS_REVIEW"
+    assert state["episodes"][0]["status"] == "BLOCKED"
+    assert state["episodes"][1]["status"] == "APPLIED"
+
+    # Simulate a remote-provider decided refusal so guard_request requires
+    # explicit replay authorization against ep-01's saved failed_task_id even
+    # though ep-02 subsequently succeeded and cleared top-level failed_task_id.
+    with factory.begin() as db:
+        run_row = db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project,
+            AgentTaskRecord.role_id == streamline.DIRECTOR_STORYBOARD_RUN,
+        )).first()
+        failed_id = run_row.trace["blocked_episodes"]["ep-01"]["failed_task_id"]
+        assert failed_id
+        assert run_row.trace.get("failed_task_id") is None
+        failed_row = db.get(AgentTaskRecord, failed_id)
+        failed_row.trace = {**failed_row.trace, "is_mock": False, "external_outcome": "RESPONSE_RECEIVED"}
+
+    retried = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/retry",
+        json={"expected_state_version": state["state_version"]},
+        headers=LOCAL,
+    )
+    assert retried.status_code == 202, retried.text
+    _drive(factory, settings, gateway)
+
+    final_state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert final_state["status"] == "SUCCEEDED", final_state
+    assert [ep["status"] for ep in final_state["episodes"]] == ["APPLIED", "APPLIED"]
+
+
+def test_architecture_sees_confirmed_scenes_and_subject_ordinals_stay_stable(api):
+    from tests.conftest import PNG, approve_lock, upload_asset
+
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=2)
+    project = prepared["project"]
+    guest = upload_asset(client, project, PNG + b"guest", filename="guest.png", role="character", entity_id="客人")
+    approve_lock(client, guest["id"])
+    shop = upload_asset(client, project, PNG + b"shop", filename="shop.png", role="scene", entity_id="钟表铺")
+    approve_lock(client, shop["id"])
+
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=40)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+
+    base = _chain_responder({"asset": _master(client, project)})
+    seen_registered_locations: list[list[str]] = []
+    seen_prev_exit: list[str | None] = []
+
+    def two_hander(messages, schema):
+        title = schema.get("title")
+        ctx = json.loads(messages[-1].content.split(SCHEMA_INSTRUCTION)[0])
+        prod = ctx.get("production_context") or {}
+        if title == "SeriesArchitecture":
+            seen_registered_locations.append(
+                [row["name"] for row in (prod.get("registered_locations") or [])]
+            )
+            return base(messages, schema)
+        if title == "DramaSceneScript":
+            ans = base(messages, schema)
+            if prod.get("previous_scene"):
+                # Swap cast order in beat characters on Unit 1 to try flipping Subject 1/2.
+                ans["beats"][0]["characters"] = ["客人", "老周"]
+            else:
+                ans["beats"][0]["characters"] = ["老周", "客人"]
+            return ans
+        if title == "SceneShotBoard":
+            if prod.get("continuity_predecessor"):
+                seen_prev_exit.append(prod.get("previous_shot_exit_state"))
+            ans = base(messages, schema)
+            ans["shots"][0]["blocking"] = {
+                "axis": "counter-axis",
+                "placements": [
+                    {"character": "老周", "zone": "left_fg", "facing": "facing_right",
+                     "posture": "standing", "props": []},
+                    {"character": "客人", "zone": "right_fg", "facing": "facing_left",
+                     "posture": "standing", "props": []},
+                ],
+            }
+            return ans
+        return base(messages, schema)
+
+    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=two_hander)
+    _drive(factory, settings, gateway)
+
+    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert state["status"] == "SUCCEEDED", state
+    assert seen_registered_locations and "钟表铺" in seen_registered_locations[0]
+    assert seen_prev_exit and seen_prev_exit[0]
+
+    shot_ids = state["episodes"][0]["shot_ids"]
+    first_subs = [
+        b["asset_id"] for b in client.get(f"/api/v1/shots/{shot_ids[0]}/bindings").json()
+        if b["use_as"] == "subject"
+    ]
+    unit2_subs = [
+        b["asset_id"] for b in client.get(f"/api/v1/shots/{shot_ids[2]}/bindings").json()
+        if b["use_as"] == "subject"
+    ]
+    assert first_subs == unit2_subs == [_master(client, project), guest["id"]]

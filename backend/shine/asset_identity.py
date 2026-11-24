@@ -62,9 +62,31 @@ def character_reference_key(value: str | None) -> str:
         text = text[: -len(suffix)]
 
 
+_PAREN_QUALIFIER = re.compile(r"\([^)]*\)|（[^）]*）|\[[^\]]*\]|【[^】]*】")
+
+
+def _base_reference_key(value: str | None) -> str:
+    """Return comparison key after stripping optional parenthetical qualifiers like ``年轻人（灰风衣青年）``."""
+    if not value:
+        return ""
+    stripped = _PAREN_QUALIFIER.sub("", unicodedata.normalize("NFKC", value))
+    return character_reference_key(stripped)
+
+
 def character_reference_matches(reference: str | None, candidate: str | None) -> bool:
     key = character_reference_key(reference)
-    return bool(key and key == character_reference_key(candidate))
+    other = character_reference_key(candidate)
+    if not key or not other:
+        return False
+    if key == other:
+        return True
+    base_ref = _base_reference_key(reference)
+    base_cand = _base_reference_key(candidate)
+    if not base_ref or base_ref != base_cand:
+        return False
+    # Only bridge when at most one side adds a parenthetical qualifier; never
+    # equate two differently qualified masters like "老王（哥哥）" vs "老王（弟弟）".
+    return (key == base_ref) or (other == base_cand)
 
 
 def resolve_character_asset(reference: str | None, assets: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -79,12 +101,21 @@ def resolve_character_asset(reference: str | None, assets: list[dict[str, Any]])
     ]
     if exact_id_matches:
         return exact_id_matches[0] if len(exact_id_matches) == 1 else None
-    matches = [
+    key = character_reference_key(reference)
+    if not key:
+        return None
+    char_assets = [
         asset
         for asset in assets
-        if asset.get("kind") == "image"
-        and asset.get("role") == "character"
-        and character_reference_matches(reference, asset.get("entity_id"))
+        if asset.get("kind") == "image" and asset.get("role") == "character"
+    ]
+    exact_matches = [
+        asset for asset in char_assets if character_reference_key(asset.get("entity_id")) == key
+    ]
+    if exact_matches:
+        return exact_matches[0] if len(exact_matches) == 1 else None
+    matches = [
+        asset for asset in char_assets if character_reference_matches(reference, asset.get("entity_id"))
     ]
     return matches[0] if len(matches) == 1 else None
 
