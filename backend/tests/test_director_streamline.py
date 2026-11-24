@@ -188,6 +188,201 @@ def _chain_responder(registry: dict, *, fail_section: str | None = None,
                      "characters": [], "spoken_lines": []},
                 ],
             })
+        if title == "SceneShotBoard":
+            if fail_section and section == fail_section:
+                return {"shots": [{"id": "S1", "beat_ids": ["B1"]}]}
+            scene_input = next(
+                (item["payload"] for item in context.get("inputs") or [] if item.get("kind") == "DramaSceneScript"),
+                {},
+            )
+            scene_beats = scene_input.get("beats") or []
+            place = str(scene_input.get("location") or "钟表铺")
+            cap = float(context.get("max_shot_seconds") or 10.0)
+            has_pred = bool(production.get("continuity_predecessor"))
+            approved_ids = {a["id"] for a in (context.get("assets") or [])}
+            default_assets = [registry["asset"]] if registry.get("asset") in approved_ids else []
+            axis_label = "counter-axis"
+
+            def _line_duration(text: str) -> float:
+                chars = len(re.sub(r"\s+", "", text or ""))
+                return round(max(1.2, chars / 4.2) + 0.3, 2)
+
+            def _beat_chars(beat: dict) -> list[str]:
+                names: list[str] = []
+                for entry in beat.get("characters") or []:
+                    if entry and entry not in names:
+                        names.append(entry)
+                for line in beat.get("spoken_lines") or []:
+                    sp = str(line.get("speaker") or "").strip()
+                    if sp and sp not in names:
+                        names.append(sp)
+                return names
+
+            sides: dict[str, tuple[str, str]] = {}
+
+            def _placements_for(names: list[str]) -> list[dict]:
+                rows = []
+                for name in names:
+                    if name not in sides:
+                        if len(sides) % 2 == 0:
+                            sides[name] = ("left_fg", "facing_right")
+                        else:
+                            sides[name] = ("right_fg", "facing_left")
+                    zone, facing = sides[name]
+                    rows.append({
+                        "character": name, "zone": zone, "facing": facing,
+                        "posture": "standing at the counter", "props": [],
+                    })
+                return rows
+
+            shots: list[dict] = []
+            idx = 0
+            while idx < len(scene_beats):
+                b1 = scene_beats[idx]
+                b1_id = f"B{idx + 1}"
+                b1_lines = b1.get("spoken_lines") or []
+                b2 = scene_beats[idx + 1] if idx + 1 < len(scene_beats) else None
+                b2_lines = (b2.get("spoken_lines") or []) if b2 else []
+                can_pair = (
+                    b2 is not None
+                    and len(b1_lines) == 1
+                    and len(b2_lines) == 1
+                    and b1_lines[0].get("speaker") != b2_lines[0].get("speaker")
+                )
+                if can_pair:
+                    d1 = _line_duration(b1_lines[0]["text"])
+                    d2 = _line_duration(b2_lines[0]["text"])
+                    cut_s = round(max(2.2, 0.4 + d1 + 0.4), 2)
+                    total_s = round(max(cut_s + max(2.2, 0.4 + d2 + 0.4), 8.0), 2)
+                    if total_s <= cap + 1e-6:
+                        b2_id = f"B{idx + 2}"
+                        cast = list(dict.fromkeys(_beat_chars(b1) + _beat_chars(b2)))
+                        dialogue = [
+                            {"speaker_id": b1_lines[0]["speaker"], "text": b1_lines[0]["text"],
+                             "start_s": 0.4, "end_s": round(0.4 + d1, 2)},
+                            {"speaker_id": b2_lines[0]["speaker"], "text": b2_lines[0]["text"],
+                             "start_s": round(cut_s + 0.4, 2), "end_s": round(cut_s + 0.4 + d2, 2)},
+                        ]
+                        mid = round(total_s / 2, 2)
+                        shots.append({
+                            "id": f"S{len(shots) + 1}",
+                            "beat_ids": [b1_id],
+                            "duration_s": total_s,
+                            "visual_description": (
+                                "The first speaker leans over the wooden counter under warm lamplight."
+                            ),
+                            "asset_ids": list(default_assets),
+                            "location": place,
+                            "dialogue": dialogue,
+                            "camera": {
+                                "composition": "Medium over-shoulder framing on the first speaker.",
+                                "shot_size": "MS", "angle": "eye-level", "lens": "50mm",
+                                "move": "static", "motive": "",
+                                "movement": "The camera holds still.",
+                                "lighting": "Warm desk lamp key against cool rainlight.",
+                            },
+                            "ambience": "Rain pattering steadily on the shop glass.",
+                            "music": "none",
+                            "blocking": {"axis": axis_label, "placements": _placements_for(cast)},
+                            "environment": {
+                                "depth": "Wooden counter foreground, clock shelves behind.",
+                                "light": "Warm amber desk lamp key with cool window fill.",
+                                "micro_motion": "Fine dust drifting in the lamp beam.",
+                            },
+                            "timeline": [
+                                {"start_s": 0.0, "end_s": mid,
+                                 "action": "First performer speaks across the counter.",
+                                 "expression": "Focused eyes and steady jaw.",
+                                 "camera": "The camera holds still."},
+                                {"start_s": mid, "end_s": total_s,
+                                 "action": "Reverse angle catches the second performer answering.",
+                                 "expression": "Brows tighten before speaking.",
+                                 "camera": "The camera holds still."},
+                            ],
+                            "entry_state": "The wooden counter lit by the warm desk lamp.",
+                            "exit_state": "Both performers hold their gaze across the counter.",
+                            "transition_motivation": (
+                                "continuous_action" if (len(shots) > 0 or has_pred) else "establishing_reset"
+                            ),
+                            "handoff_cue": "steady gaze across the counter",
+                            "internal_cuts": [{
+                                "start_s": cut_s, "beat_ids": [b2_id],
+                                "visual_description": "Reverse medium shot of the second performer across the counter.",
+                                "camera": "The camera holds still.",
+                            }],
+                        })
+                        idx += 2
+                        continue
+                cast = _beat_chars(b1)
+                dialogue = []
+                cursor_s = 0.4
+                for line in b1_lines:
+                    dur = _line_duration(line["text"])
+                    dialogue.append({
+                        "speaker_id": line["speaker"], "text": line["text"],
+                        "start_s": round(cursor_s, 2), "end_s": round(cursor_s + dur, 2),
+                    })
+                    cursor_s += dur + 0.3
+                needed = cursor_s + 0.4 if dialogue else 5.0
+                base_s = 7.0 if dialogue else 6.0
+                total_s = min(cap, max(base_s if needed <= base_s else round(needed, 2), 4.0))
+                mid = round(total_s / 2, 2)
+                shots.append({
+                    "id": f"S{len(shots) + 1}",
+                    "beat_ids": [b1_id],
+                    "duration_s": total_s,
+                    "visual_description": "A watchmaker holds a pocket watch under the warm desk lamp.",
+                    "asset_ids": list(default_assets),
+                    "location": place,
+                    "dialogue": dialogue,
+                    "camera": {
+                        "composition": "Medium close-up at the lamp-lit counter.",
+                        "shot_size": "MCU", "angle": "eye-level", "lens": "50mm",
+                        "move": "static", "motive": "",
+                        "movement": "The camera holds still.",
+                        "lighting": "Warm desk lamp key from screen right.",
+                    },
+                    "ambience": "Rain pattering steadily on the shop glass.",
+                    "music": "none",
+                    "blocking": {"axis": axis_label, "placements": _placements_for(cast)},
+                    "environment": {
+                        "depth": "Velvet tray in foreground, hanging clocks behind.",
+                        "light": "Warm amber desk lamp key with cool window fill.",
+                        "micro_motion": "Fine dust drifting in the lamp beam.",
+                    },
+                    "timeline": [
+                        {"start_s": 0.0, "end_s": mid,
+                         "action": "Performer adjusts posture at the counter.",
+                         "expression": "Quiet concentration, eyes lowered.",
+                         "camera": "The camera holds still."},
+                        {"start_s": mid, "end_s": total_s,
+                         "action": "Performer settles hands onto the counter.",
+                         "expression": "Breath steadies, gaze holds.",
+                         "camera": "The camera holds still."},
+                    ],
+                    "entry_state": "The lamp-lit wooden counter and velvet tray.",
+                    "exit_state": "The performer pauses still by the counter.",
+                    "transition_motivation": (
+                        "continuous_action" if (len(shots) > 0 or has_pred) else "establishing_reset"
+                    ),
+                    "handoff_cue": "continuous action at the counter",
+                    "internal_cuts": [],
+                })
+                idx += 1
+            locked_facts = list(context.get("locked_story_facts") or [])
+            return copy.deepcopy({
+                "shots": shots,
+                "prompt_style": {
+                    "photography_language": "Stable composed frames with clear sightlines.",
+                    "shot_blocking": "Readable blocking between people and story objects.",
+                    "color_palette": "Restrained palette with one clear emphasis.",
+                    "lighting_tone": "Directional lamp light with layered shadow.",
+                    "lens_texture": "Clean, stable optical texture.",
+                    "editing_rhythm": "Deliberate reveals after reactions.",
+                    "sound_performance": "Original dialogue with restrained ambience.",
+                },
+                "prompt_story_facts": [f"Locked story fact {i + 1}." for i in range(len(locked_facts))],
+            })
         if fail_section and section == fail_section and title == "ScriptBreakdown":
             # A decided, answered refusal with genuinely missing content: the
             # salvage step cannot invent the required prose, so the refusal
@@ -680,8 +875,8 @@ def test_a_landing_fault_names_itself_and_retries_without_the_chain_again(api, m
         assert run.trace.get("failed_task_id") is None, (
             "a landing fault must not leave a crew refusal as the retry's reason")
         assert set(run.trace.get("resume_steps") or {}) >= {
-            "scriptwriter", "director", "cinematographer", "continuity_supervisor",
-            "editor_edit_intent"}, "the finished chain must travel with the recovery state"
+            "series_architecture", "drama_scene", "scene_board"}, (
+            "the finished board chain must travel with the recovery state")
 
     monkeypatch.setattr("shine.api_film.apply_camera", real_apply)
     retry = client.post(
@@ -889,7 +1084,7 @@ def test_a_retried_scene_is_told_what_was_refused_before(api):
 
     def chinese_prose(messages, schema):
         plan = base(messages, schema)
-        if schema.get("title") == "DirectorialPlan" and pending_section in "".join(
+        if schema.get("title") == "SceneShotBoard" and pending_section in "".join(
                 message.content for message in messages):
             plan["shots"][0]["visual_description"] = "老周把怀表贴近耳朵，又放回丝绒垫上。"
         return plan
@@ -947,7 +1142,7 @@ def test_a_truncated_retry_does_not_drop_the_lesson_it_was_told(api, monkeypatch
 
     def chinese_prose(messages, schema):
         plan = base(messages, schema)
-        if schema.get("title") == "DirectorialPlan" and pending_section in "".join(
+        if schema.get("title") == "SceneShotBoard" and pending_section in "".join(
                 message.content for message in messages):
             plan["shots"][0]["visual_description"] = "老周把怀表贴近耳朵，又放回丝绒垫上。"
         return plan
@@ -966,7 +1161,7 @@ def test_a_truncated_retry_does_not_drop_the_lesson_it_was_told(api, monkeypatch
     def truncated_first_answer(self, messages, *, schema=None, json_mode=True):
         system = " ".join(message.content for message in messages
                           if message.role == "system")
-        if (schema or {}).get("title") == "DirectorialPlan" and pending_section in "".join(
+        if (schema or {}).get("title") == "SceneShotBoard" and pending_section in "".join(
                 message.content for message in messages):
             plan_calls.append(system)
             if len(plan_calls) == 1:
@@ -1329,6 +1524,32 @@ def test_storyboard_book_exceeding_sections_returns_chinese_guidance(api):
     assert "共 2 个场次" in detail["message"]
 
 
+def _mark_imported_script_units(factory, project: str) -> None:
+    """Attach a confirmed scene script to the queued run's units so legacy crew tests exercise dramatize=False."""
+    from sqlalchemy import select as sa_select
+
+    from shine.h3.rulebook import digest as h3_digest
+    from shine.models import AgentArtifact
+
+    with factory.begin() as db:
+        run = db.scalars(sa_select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project,
+            AgentTaskRecord.role_id == streamline.DIRECTOR_STORYBOARD_RUN,
+        )).first()
+        script_payload = {"section_id": "sec-01", "text": "老周把怀表贴近耳朵。"}
+        script_art = AgentArtifact(
+            project_id=project, kind="FourStageSceneScript", payload_json=script_payload,
+            sha256=h3_digest(script_payload), producer_role="scriptwriter",
+            source_task_id=run.id, approved_by="local-user",
+        )
+        db.add(script_art)
+        db.flush()
+        units = [{**u, "creative_source": "confirmed_scene_script",
+                  "script_artifact_id": script_art.id, "script_sha256": script_art.sha256}
+                 for u in run.trace["units"]]
+        run.trace = {**run.trace, "units": units}
+
+
 def test_unknown_continuity_resend_preserves_failed_role_and_reuses_succeeded_lane(api):
     """Regression for live 2026-11-22: after reconcile + resend-unknown marks the
     failed continuity task SUPERSEDED, episode retry must resume at continuity_supervisor
@@ -1343,6 +1564,7 @@ def test_unknown_continuity_resend_preserves_failed_role_and_reuses_succeeded_la
     book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _mark_imported_script_units(factory, project)
 
     assets = client.get(f"/api/v1/projects/{project}/assets").json()
     master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
@@ -1459,12 +1681,13 @@ def test_fault_code_and_curly_quoted_visible_text_under_h3_english():
 
 
 def test_continuity_conflict_reports_reason_and_retries_director_with_lesson(api):
-    client, _factory, settings = api
+    client, factory, settings = api
     prepared = _prepare_project(client, sections=1)
     project = prepared["project"]
     book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _mark_imported_script_units(factory, project)
 
     assets = client.get(f"/api/v1/projects/{project}/assets").json()
     master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])

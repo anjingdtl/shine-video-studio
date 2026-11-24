@@ -21,7 +21,7 @@ const BOOK = {
   },
 };
 
-it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格', async () => {
+it('旁白设定随分镜书一起提交并进入冻结风格，小说入口不再设对白占比 KPI', async () => {
   const confirms: Array<Record<string, unknown>> = [];
   const stub = new StudioStub([
     { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
@@ -38,7 +38,7 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
   render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
 
   await screen.findByRole('option', { name: /电影专业 Skills 自动/ });
-  await user.click(screen.getByRole('button', { name: '多对白' }));
+  expect(screen.queryByRole('group', { name: '对白设定' })).toBeNull();
   await user.click(screen.getByRole('button', { name: '多旁白' }));
   await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
   await screen.findByText(/计划总时长/);
@@ -47,9 +47,9 @@ it('对白与旁白设定随分镜书一起提交，两项都进入冻结风格'
   await waitFor(() => expect(confirms).toHaveLength(1));
   expect(confirms[0].style).toMatchObject({
     profile_id: '',
-    dialogue_ratio_percent: 70,
     narration_level: 'high',
   });
+  expect((confirms[0].style as Record<string, unknown>).dialogue_ratio_percent).toBeUndefined();
   stub.restore();
 });
 
@@ -104,7 +104,6 @@ it('切页回来读回已持久化的决定，而不是硬编码默认值（三�
     expect((screen.getByLabelText('每集目标秒数') as HTMLInputElement).value).toBe('60');
     expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
   });
-  expect(screen.getByRole('button', { name: '少对白' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByRole('button', { name: '少旁白' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByText(/第 1 版已确认/)).toBeInTheDocument();
   // 模拟切走再回来：重新挂载仍读同一份服务端事实。
@@ -197,8 +196,8 @@ it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注�
     episode_count: 3, target_seconds: 45, tolerance_seconds: 11, max_shot_seconds: DEFAULT_MAX_SHOT_SECONDS,
   });
   expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
-  // The range of the setting itself is H3's own: a person may still choose 15.
-  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('max', '15');
+  // 新本地生产安全上限为 4–10 秒（由后端 DEFAULT_MAX_SHOT_SECONDS 统一收敛）。
+  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('max', '10');
   expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('min', '4');
   stub.restore();
 });

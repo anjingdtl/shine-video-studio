@@ -49,7 +49,7 @@ import {
   type StyleDimension,
   type StyleVersion,
 } from '../api';
-import { DEFAULT_MAX_SHOT_SECONDS, MAX_SHOT_SECONDS, MIN_SHOT_SECONDS, styleFields } from '../constants';
+import { DEFAULT_MAX_SHOT_SECONDS, MIN_SHOT_SECONDS, styleFields } from '../constants';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { assignLibraryVersion, searchLibraryForProject, type LibraryAsset, type LibraryVersion } from '../asset-center/api';
 import {
@@ -65,13 +65,6 @@ const FILM_TYPES = [
   { id: 'animation', label: '动画' },
 ];
 
-/** 对白密度是建议值：它决定分镜书里多少节拍带台词，不是渲染门槛。 */
-const DIALOGUE_LEVELS = [
-  { id: 'high', label: '多对白', ratio: 70 },
-  { id: 'balanced', label: '平衡', ratio: 45 },
-  { id: 'low', label: '少对白', ratio: 20 },
-] as const;
-
 /** 旁白只出声音、不出画面；官方 H3 提示词会明确声明这一点。 */
 const NARRATION_LEVELS = [
   { id: 'none', label: '无旁白' },
@@ -79,7 +72,6 @@ const NARRATION_LEVELS = [
   { id: 'high', label: '多旁白' },
 ] as const;
 
-type DialogueLevelId = (typeof DIALOGUE_LEVELS)[number]['id'];
 type NarrationLevelId = (typeof NARRATION_LEVELS)[number]['id'];
 
 type StyleCatalogEntry = { id: string; name_zh: string; summary_zh: string; version: string };
@@ -114,10 +106,8 @@ export function StoryboardBookPanel({
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
-  // 新分镜书的单镜上限初始值：与后端 StoryboardBookBody 的默认值
-  // （schemas.DEFAULT_MAX_SHOT_SECONDS）同源同值，范围仍是 H3 的 4–15。
+  // 新分镜书的单镜上限初始值与上限：与后端 schemas.DEFAULT_MAX_SHOT_SECONDS 同源同值（4–10 秒）。
   const [maxShotSeconds, setMaxShotSeconds] = useState(DEFAULT_MAX_SHOT_SECONDS);
-  const [dialogueLevel, setDialogueLevel] = useState<DialogueLevelId>('balanced');
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [dimensions, setDimensions] = useState<Style>(() => ({ ...STYLE_PRESETS[0].values }));
   const [dimensionsTouched, setDimensionsTouched] = useState(false);
@@ -204,7 +194,7 @@ export function StoryboardBookPanel({
           if (seconds) setTargetSeconds(seconds);
           const planMaxShot = basis.payload?.source?.max_shot_seconds;
           if (typeof planMaxShot === 'number' && Number.isFinite(planMaxShot)) {
-            setMaxShotSeconds(Math.min(15, Math.max(4, planMaxShot)));
+            setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, planMaxShot)));
           }
         }
         if (latestDraft && (!confirmed || latestDraft.version > confirmed.version)) {
@@ -250,17 +240,11 @@ export function StoryboardBookPanel({
         }
         const filmTypeValue = facts.film_type;
         if (filmTypeValue === 'live_action' || filmTypeValue === 'animation') setFilmType(filmTypeValue);
-        const ratio = Number(facts.dialogue_ratio_percent);
-        if (Number.isFinite(ratio)) {
-          setDialogueLevel(DIALOGUE_LEVELS.reduce((best, row) => (
-            Math.abs(row.ratio - ratio) < Math.abs(best.ratio - ratio) ? row : best
-          )).id);
-        }
         const narration = facts.narration_level;
         if (narration === 'none' || narration === 'low' || narration === 'high') setNarrationLevel(narration);
         const maxSeconds = Number(facts.max_shot_seconds);
         if (Number.isFinite(maxSeconds) && maxSeconds > 0) {
-          setMaxShotSeconds(Math.min(15, Math.max(4, maxSeconds)));
+          setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, maxSeconds)));
         }
       })
       .catch(() => setStyleLoaded(true));
@@ -336,7 +320,6 @@ export function StoryboardBookPanel({
       return;
     }
     setBusy(true); setProblem('');
-    const dialogueRatio = DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45;
     const sevenDimensions = allSevenFilled
       ? {
           photography_language: dimensions.photography_language.trim(),
@@ -356,7 +339,6 @@ export function StoryboardBookPanel({
           profile_id: profileId,
           strength,
           film_type: filmType,
-          dialogue_ratio_percent: dialogueRatio,
           narration_level: narrationLevel,
           max_shot_seconds: maxShotSeconds,
           ...(sevenDimensions ? { dimensions: sevenDimensions } : {}),
@@ -373,7 +355,6 @@ export function StoryboardBookPanel({
         profile_id: profileId,
         strength,
         film_type: filmType,
-        dialogue_ratio_percent: dialogueRatio,
         narration_level: narrationLevel,
         max_shot_seconds: maxShotSeconds,
       });
@@ -399,14 +380,11 @@ export function StoryboardBookPanel({
       && strength !== persistedStyle.strength)
     || (persistedStyle.film_type === 'live_action' || persistedStyle.film_type === 'animation'
       ? filmType !== persistedStyle.film_type : false)
-    || (typeof persistedStyle.dialogue_ratio_percent === 'number'
-      && (DIALOGUE_LEVELS.find((row) => row.id === dialogueLevel)?.ratio ?? 45)
-        !== persistedStyle.dialogue_ratio_percent)
     || (persistedStyle.narration_level === 'none' || persistedStyle.narration_level === 'low'
       || persistedStyle.narration_level === 'high'
       ? narrationLevel !== persistedStyle.narration_level : false)
     || (typeof persistedStyle.max_shot_seconds === 'number'
-      && maxShotSeconds !== persistedStyle.max_shot_seconds)
+      && maxShotSeconds !== Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, persistedStyle.max_shot_seconds)))
     || (persistedHasSeven && allSevenFilled
       && styleFields.some(([field]) => dimensions[field].trim() !== String(persistedStyle[field] ?? '').trim()))
     || (dimensionsTouched && !allSevenFilled)
@@ -424,7 +402,7 @@ export function StoryboardBookPanel({
             onClick: () => void confirm(Boolean(planDeviation)), loading: busy, icon: <Check size={14} /> }
         : null);
   useStageRail('storyboard-book', { priority: 1, primary },
-    [book, busy, confirmedPlan, profileId, strength, filmType, dialogueLevel, narrationLevel,
+    [book, busy, confirmedPlan, profileId, strength, filmType, narrationLevel,
       episodeCount, targetSeconds, maxShotSeconds, dimensions, dimensionsTouched, planDeviation,
       styleDirty, basisPlan, styleLoaded]);
 
@@ -467,9 +445,9 @@ export function StoryboardBookPanel({
           onChange={(event) => setTargetSeconds(Math.max(8, Number(event.target.value) || 60))} />
       </label>
       <label>单镜秒数上限
-        <input type="number" min={MIN_SHOT_SECONDS} max={MAX_SHOT_SECONDS} step={0.5} value={maxShotSeconds}
-          title="第③步镜头拆解里每个渲染镜头的时长上限；H3 单镜最短 4 秒，故可调范围 4–15 秒"
-          onChange={(event) => setMaxShotSeconds(Math.min(MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS,
+        <input type="number" min={MIN_SHOT_SECONDS} max={DEFAULT_MAX_SHOT_SECONDS} step={0.5} value={maxShotSeconds}
+          title="第③步镜头拆解里每个渲染镜头的时长上限；本地安全生产可调范围 4–10 秒"
+          onChange={(event) => setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS,
             Number(event.target.value) || DEFAULT_MAX_SHOT_SECONDS)))} />
       </label>
       <button type="button" className="btn-secondary" disabled={busy} onClick={() => void generate()}>
@@ -478,12 +456,6 @@ export function StoryboardBookPanel({
     </div>
 
     <div className="book-tone">
-      <div className="tone-group" role="group" aria-label="对白设定">
-        <span>对白设定</span>
-        {DIALOGUE_LEVELS.map((row) => <button key={row.id} type="button"
-          className={dialogueLevel === row.id ? 'active' : ''} aria-pressed={dialogueLevel === row.id}
-          onClick={() => setDialogueLevel(row.id)}>{row.label}</button>)}
-      </div>
       <div className="tone-group" role="group" aria-label="旁白设定">
         <span>旁白设定</span>
         {NARRATION_LEVELS.map((row) => <button key={row.id} type="button"
@@ -491,8 +463,7 @@ export function StoryboardBookPanel({
           onClick={() => setNarrationLevel(row.id)}>{row.label}</button>)}
       </div>
       <p className="run-hint">
-        这两项会随分镜书一起冻结进导演风格：对白决定多少节拍带台词；旁白决定是否允许画外旁白。
-        旁白只出声、不出画面，不需要人物参考图。
+        旁白设定会随分镜书一起冻结进导演风格，决定是否允许画外旁白；旁白只出声、不出画面，不需要人物参考图。
       </p>
     </div>
 
@@ -686,7 +657,7 @@ const EPISODE_STATUS_LABELS: Record<string, string> = {
 /** 分镜链的各工种在页面上的人话名（与专家面板同词）。
  *  V4 在剧组之前多了两步，都由编剧一路模型应答：集纲架构、戏剧改编。 */
 const CREW_ROLE_LABELS: Record<string, string> = {
-  series_architecture: '集纲架构', drama_scene: '戏剧改编',
+  series_architecture: '集纲架构', drama_scene: '戏剧改编', scene_board: '场景导演',
   scriptwriter: '编剧', director: '导演', cinematographer: '摄影',
   continuity_supervisor: '场记', editor: '剪辑', editor_edit_intent: '剪辑',
   director_arbitration: '导演裁定',
@@ -709,6 +680,33 @@ const REFUSAL_LABELS: Record<string, string> = {
   DRAMA_LINE_TOO_LONG: '有一句台词太长，按正常语速一个镜头说不完，需要拆句',
   DRAMA_BEAT_SPEECH_TOO_LONG: '一个动作拍的台词太多，一个镜头装不下',
   STORY_ARCHITECTURE_SUPERSEDED: '集纲架构已过期（大纲或分集计划变了），需要重新生成分镜',
+  // 场景导演 / 连续性引擎（V4）：
+  BOARD_WITHOUT_SHOTS: '镜头板里没有任何镜头',
+  DUPLICATE_SHOT_ID: '镜头板里有两个镜头用了同一个编号',
+  SHOT_WITHOUT_BEAT: '有镜头没有说明拍的是哪个动作拍',
+  UNKNOWN_BEAT: '镜头引用了这一场里不存在的动作拍',
+  CUT_WITHOUT_BEAT: '镜内切没有说明切到哪个动作拍',
+  BEAT_NOT_COVERED: '有戏剧动作拍没有被任何镜头拍到',
+  BEAT_COVERED_TWICE: '同一个动作拍被两个镜头重复拍到',
+  BEAT_OUT_OF_ORDER: '镜头顺序和这一场戏的顺序不一致',
+  DIALOGUE_NOT_IN_SCENE: '镜头里有台词不是这一场戏写出来的',
+  DIALOGUE_DROPPED: '这一场戏的台词被漏掉了',
+  DIALOGUE_OUT_OF_ORDER: '台词顺序和这一场戏不一致',
+  DIALOGUE_SPEAKER_CHANGED: '台词的说话人被换了',
+  DIALOGUE_OUTSIDE_SUB_SHOT: '有台词落在了不属于它的画面之外',
+  DIALOGUE_OVERLAP: '两句台词在时间上重叠',
+  DIALOGUE_TOO_FAST_TO_SPEAK: '台词分到的时间按正常语速说不完',
+  PLACEMENT_NOT_IN_CAST: '镜头里站了这场戏里没有的人',
+  SHOT_LOCATION_CONFLICT: '镜头拍的不是这一场戏的地点',
+  INTERNAL_CUT_COUNT: '一个渲染段里有不止一次镜内切',
+  INTERNAL_CUT_WINDOW: '镜内切离镜头开头或结尾太近，两边都看不清',
+  CAMERA_MOVE_WITHOUT_MOTIVE: '运镜没有说明理由',
+  CAMERA_PROSE_MISMATCH: '运镜的文字描述和声明的机位运动对不上',
+  CAMERA_MOVE_IN_CUT_SEGMENT: '带镜内切的镜头里用了过大的运镜',
+  AXIS_ORDER_FLIPPED: '人物的左右站位跨过了 180° 轴线',
+  AXIS_FACING_REVERSED: '人物的视线背离了对话对象，轴线错位',
+  AXIS_CHANGED_WITHOUT_BREAK: '人物站位在没有转场理由的地方变了',
+  EXCLUDED_REFERENCE_USED: '镜头把风格图或末帧图当成了参考图',
 };
 
 function refusalReason(rejection: { code?: string; rejection_reason_code?: string;

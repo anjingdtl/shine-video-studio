@@ -6,6 +6,7 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from sqlalchemy import select
 
+from shine.agents.continuity_engine import refusal_codes as _board_refusal_codes
 from shine.agents.film_contracts import FilmAgentRegistry, StyleInputWire
 from shine.comfyops import approval
 from shine.comfyops.models import ResourceLease
@@ -53,6 +54,8 @@ SAFE_REJECTIONS = {
     "DRAMA_LOCATION_MISSING", "DRAMA_LOCATION_UNKNOWN", "DRAMA_BEATS_MISSING",
     "DRAMA_ENTRY_BRIDGE_MISSING", "DRAMA_ACTION_MISSING", "DRAMA_LINE_EMPTY",
     "DRAMA_LINE_TOO_LONG", "DRAMA_BEAT_SPEECH_TOO_LONG",
+    *_board_refusal_codes(),
+    "EXCLUDED_REFERENCE_USED",
 }
 
 

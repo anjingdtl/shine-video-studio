@@ -267,6 +267,19 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(callout.textContent).toContain('没有给每一场各排一个场次槽位');
     expect(screen.getByRole('button', { name: '重试这一场' })).toBeEnabled();
   });
+
+  it('V4 场景导演连续性拒绝：报出「场景导演」与引擎人话原因，而非裸码', async () => {
+    stubBlockedPanel({
+      external_outcome: 'RESPONSE_RECEIVED', role: 'scene_board',
+      code: 'CONTRACT_OR_POLICY_REJECTED', reason: 'AXIS_ORDER_FLIPPED',
+    });
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    const callout = await screen.findByText(/第 2 场/);
+    expect(callout.textContent).toContain('场景导演');
+    expect(callout.textContent).toContain('人物的左右站位跨过了 180° 轴线');
+    expect(screen.getByRole('button', { name: '重试这一场' })).toBeEnabled();
+  });
 });
 
 describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确认方案', () => {

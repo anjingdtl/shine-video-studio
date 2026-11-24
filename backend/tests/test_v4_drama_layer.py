@@ -124,19 +124,21 @@ def test_the_crew_reads_the_adapted_scene_never_the_novels_prose(api):
     with factory() as db:
         scenes = _artifacts(db, project, "DramaSceneScript")
         architectures = _artifacts(db, project, "SeriesArchitecture")
-        breakdown = _artifacts(db, project, "ScriptBreakdown")[0].payload_json
-    assert len(scenes) == 1 and len(architectures) == 1
+        boards = _artifacts(db, project, "SceneShotBoard")
+    assert len(scenes) == 1 and len(architectures) == 1 and len(boards) == 1
     payload = scenes[0].payload_json
 
     # The writer read the whole scene, prose and all.
     writer_calls = [call for call in calls if call.title == "DramaSceneScript"]
     assert len(writer_calls) == 1 and len(writer_calls[0].brief) > 1200
     assert inner in writer_calls[0].brief
-    # Every crew role read the adapted scene script, and nothing else.
-    crew_calls = [call for call in calls if call.title in CREW]
-    assert {call.title for call in crew_calls} == CREW
-    assert {call.brief for call in crew_calls} == {payload["text"]}
-    assert all(inner not in call.brief for call in crew_calls)
+    # On the novel path the scene director reads ONLY the adapted scene script;
+    # the five-role crew chain is replaced by the single SceneShotBoard call.
+    board_calls = [call for call in calls if call.title == "SceneShotBoard"]
+    assert len(board_calls) == 1
+    assert board_calls[0].brief == payload["text"]
+    assert inner not in board_calls[0].brief
+    assert not (CREW & set(_titles(calls)))
     assert "老周：又停在十二点。" in payload["text"]
 
     # The ledger says where the scene came from and what it is worth.
@@ -147,9 +149,7 @@ def test_the_crew_reads_the_adapted_scene_never_the_novels_prose(api):
     assert payload["architecture_sha256"] == architectures[0].sha256
     assert payload["scene_budget_seconds"] == 60.0
     assert payload["scene_seconds"] > 0
-    # The breakdown is the scene's own numbered beats, with its spoken line.
-    assert [beat["id"] for beat in breakdown["beats"]] == ["B1", "B2"]
-    assert breakdown["beats"][0]["dialogue"][0]["text"] == "又停在十二点。"
+    assert boards[0].payload_json["shots"][0]["dialogue"][0]["text"] == "又停在十二点。"
 
 
 def test_the_architecture_is_written_once_and_gives_every_scene_its_share(api):
@@ -210,7 +210,7 @@ def test_a_retry_from_a_later_role_never_buys_the_scene_again(api):
     broken = {"on": True}
 
     def over_the_ceiling(call, answer):
-        if call.title == "DirectorialPlan" and broken["on"]:
+        if call.title == "SceneShotBoard" and broken["on"]:
             answer["shots"][0]["duration_s"] = 12  # inside H3's 15 s, above the frozen 10 s
         return answer
 
@@ -219,11 +219,11 @@ def test_a_retry_from_a_later_role_never_buys_the_scene_again(api):
     state = _state(client, project)
     episode = state["episodes"][0]
     assert state["status"] == "NEEDS_REVIEW" and episode["status"] == "BLOCKED"
-    # The refusal is the director's own, not the drama layer's.
+    # The refusal is the scene director's own, not the drama layer's.
     blocker = episode["blocker"]
-    assert blocker["failed_role"] == "director"
+    assert blocker["failed_role"] == "scene_board"
     assert blocker["rejections"][0]["rejection_reason_code"] == "SHOT_DURATION_OVER_LIMIT"
-    assert "导演" in blocker["summary"]
+    assert "场景导演" in blocker["summary"]
     before = _titles(calls)
     assert before.count("SeriesArchitecture") == 1 and before.count("DramaSceneScript") == 1
 

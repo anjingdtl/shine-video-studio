@@ -11,7 +11,7 @@ from pydantic import Field, ValidationError
 from sqlalchemy import literal_column, select
 from sqlalchemy.orm import Session
 
-from shine.agents import character_binding
+from shine.agents import character_binding, continuity_engine, scene_director
 from shine.agents.editorial_timing import editorial_timing_preview
 from shine.agents.execution import UNKNOWN_CODES
 from shine.agents.film import (
@@ -43,7 +43,15 @@ from shine.models import (
     WorkflowProfile,
     utcnow,
 )
-from shine.schemas import APIModel, CreateJob, RenderRequest, ShotBindingInput, ShotSpec, StyleBible
+from shine.schemas import (
+    DEFAULT_MAX_SHOT_SECONDS,
+    APIModel,
+    CreateJob,
+    RenderRequest,
+    ShotBindingInput,
+    ShotSpec,
+    StyleBible,
+)
 from shine.security import is_loopback_url
 from shine.services import (
     add_audit,
@@ -329,7 +337,7 @@ class SourceImport(APIModel):
 
 
 class ApplyCamera(APIModel):
-    continuity_artifact_id: str
+    continuity_artifact_id: str | None = None
     arbitration_artifact_id: str | None = None
     name_prefix: str = Field(default="专业分镜", max_length=80)
     previous_shot_id: str | None = Field(
@@ -542,60 +550,136 @@ def _require_beat_coverage(db, project_id: str, script, direction, camera_plan) 
     })
 
 
-@router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
-def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
+def _land_shot(
+    db: Session,
+    project_id: str,
+    project,
+    *,
+    director_binding: dict | None,
+    shot_name: str,
+    shot_key: str,
+    visual: str,
+    duration_s: float,
+    asset_ids: list[str],
+    location: str | None,
+    cast: list[str],
+    dialogue: list[dict],
+    camera_fields: dict[str, str],
+    sound_fields: dict[str, str],
+    internal_cuts: list[dict],
+    locked_story_facts: list[str],
+    prompt_story_facts: list[str],
+    prompt_style,
+    scene_tags: list[str],
+    blocked_style_constraints: list[str],
+    continuity: dict | None,
+    extra_spec_fields: dict,
+    material_notices: list[dict],
+    style_warnings: list[dict],
+) -> str:
+    """Land one directed shot into the authoritative Shot + ShotBinding ledger."""
     from shine.services import complete_character_bindings
 
+    bindings: list[ShotBindingInput] = []
+    shot_notices: list[dict] = []
+    for identity in dict.fromkeys(asset_ids):
+        asset = db.get(Asset, identity)
+        if not asset or asset.project_id != project_id or not asset.approved or not asset.locked:
+            shot_notices.append({
+                "code": "MISSING_IMAGE_MATERIAL",
+                "message": "这一镜缺少已确认的参考图；开拍前需要补上，或改为不使用该参考",
+                "asset_id": identity,
+            })
+            continue
+        use_as = {
+            "image": "subject" if asset.role == "character" else "picture",
+            "audio": "audio",
+            "video": "video",
+        }[asset.kind]
+        bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings)))
+    bindings = complete_character_bindings(db, project_id, cast, bindings)
+    bindings, scene_request = complete_location_binding(db, project_id, location, bindings)
+    camera_out = dict(camera_fields)
+    sound_out = dict(sound_fields)
+    style_resolution = None
+    if director_binding:
+        style_resolution = resolve_frozen_binding(
+            director_binding,
+            scene_tags=scene_tags,
+            blocked_constraints=blocked_style_constraints,
+        )
+        if style_resolution.warnings:
+            style_warnings.extend(
+                {"shot_intent_id": shot_key, "warning": warning}
+                for warning in style_resolution.warnings
+            )
+        visual_rules = camera_style_text(style_resolution)
+        if visual_rules:
+            camera_out["director_style"] = visual_rules
+        sound_rules = sound_style_text(style_resolution)
+        if sound_rules:
+            if not dialogue:
+                sound_rules = non_vocal_ambience_text(sound_rules)
+            if sound_rules:
+                existing_ambience = str(sound_out.get("ambience") or "").strip()
+                sound_out["ambience"] = (
+                    f"{existing_ambience.rstrip('.')}. {sound_rules}" if existing_ambience else sound_rules
+                )
+    spec = ShotSpec(
+        story_beat=visual,
+        duration_target_s=duration_s,
+        style_version_id=project.frozen_style_version_id,
+        director_style_resolution_sha256=(style_resolution.resolution_sha256 if style_resolution else None),
+        director_style_technique_ids=(style_resolution.selected_technique_ids if style_resolution else []),
+        required_asset_ids=[binding.asset_id for binding in bindings],
+        characters=cast,
+        dialogue=dialogue,
+        locked_story_facts=locked_story_facts,
+        prompt_story_facts=prompt_story_facts,
+        prompt_style=prompt_style,
+        camera=camera_out,
+        sound=sound_out,
+        internal_cuts=internal_cuts,
+        requested_assets=[scene_request] if scene_request else [],
+        **({"continuity": continuity} if continuity else {}),
+        **extra_spec_fields,
+    )
+    ordered_assets = {binding.asset_id: db.get(Asset, binding.asset_id) for binding in bindings}
+    bindings = order_bindings_for_cast(bindings, cast, ordered_assets)
+    shot = create_shot_record(db, project, name=shot_name, spec=spec, bindings=bindings)
+    db.flush()
+    try:
+        make_render_request(db, project, shot, CreateJob(shot_id=shot.id))
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        if detail.get("code") not in {"H3_CHARACTER_REFERENCE_MISSING", "H3_SPEAKER_REFERENCE_MISSING"}:
+            raise
+        shot_notices.append({
+            "code": detail["code"],
+            "message": "镜头已落地，使用 Ref2VA 开拍前需补齐对应人物主体",
+            "details": detail.get("details"),
+        })
+    material_notices.extend({**notice, "shot_id": shot.id} for notice in shot_notices)
+    return shot.id
+
+
+@router.post("/projects/{project_id}/film-artifacts/{artifact_id}/apply-camera")
+def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSession):
     try:
         project = require_project(db, project_id)
-        artifact, continuity = load_inputs(db, project_id, [artifact_id, body.continuity_artifact_id])
-        if artifact.kind != "CameraPlan" or continuity.kind != "ContinuityReport":
+        artifact = load_inputs(db, project_id, [artifact_id])[0]
+        if artifact.kind not in {"CameraPlan", "SceneShotBoard"}:
             raise ValueError("WRONG_HANDOFF_KIND")
-        parents = load_inputs(db, project_id, artifact.input_revision_ids)
-        direction = next(a for a in parents if a.kind == "DirectorialPlan")
-        reported = list(continuity.payload_json.get("issues") or [])
-        # A master the material stage has not prepared yet is a request for
-        # that stage, not a continuity conflict: the shot still lands and the
-        # missing picture is generated by H3.
-        requests = material_request_issues(db, project_id, direction.payload_json, reported)
-        issues = [issue for issue in reported if issue not in requests]
-        arbitration = None
-        if artifact_id not in continuity.input_revision_ids:
-            raise ValueError("CONTINUITY_REVIEW_REQUIRED")
-        # Mirror the draft gate: a needs_review recommendation whose issues are
-        # all material requests is answered by the material stage, not by an
-        # arbitration. Only real conflicts (or an unexplained needs_review)
-        # demand a ruling here.
-        if issues or (not requests
-                      and continuity.payload_json.get("recommendation") != "proceed_to_preflight"):
-            # A conflict between the crew roles is released only by a valid
-            # arbitration of the role that owns the shots, on the official
-            # criteria of the locked rule pack.
-            arbitration = _load_arbitration(
-                db, project_id, body.arbitration_artifact_id, continuity.id, artifact_id
-            )
-            if not _arbitration_releases(arbitration, issues):
-                raise ValueError("CONTINUITY_REVIEW_REQUIRED")
         key = f"film-apply:{artifact_id}"
         applied = db.get(AppSetting, key)
         if applied:
             return applied.value
-        scripts = load_inputs(db, project_id, direction.input_revision_ids)
-        script = next(a for a in scripts if a.kind == "ScriptBreakdown")
         frozen_style = (
             db.get(StyleVersion, project.frozen_style_version_id)
             if project.frozen_style_version_id
             else None
         )
         director_binding = frozen_style.director_style_binding if frozen_style else None
-        camera_plan = CameraPlan.model_validate(artifact.payload_json)
-        _require_beat_coverage(db, project_id, script, direction, camera_plan)
-        beats = {b["id"]: b for b in script.payload_json["beats"]}
-        intents = {s["id"]: s for s in direction.payload_json["shots"]}
-        created = []
-        # The shot before this plan, when an earlier unit of the same episode
-        # landed one.  Without it every unit opened on a cut, however clearly the
-        # director said the first shot continues the previous take.
         predecessor = None
         if body.previous_shot_id:
             earlier = db.get(Shot, body.previous_shot_id)
@@ -606,177 +690,216 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "shot_id": body.previous_shot_id,
                 })
             predecessor = earlier.id
+        created: list[str] = []
         material_notices: list[dict] = []
         style_warnings: list[dict] = []
-        for camera in camera_plan.shots:
-            intent = intents[camera.intent_id]
-            beat = beats[intent["beat_id"]]
-            cuts = intent.get("cuts", [])
-            visual = intent["visual_description"]
-            # Plan P0-C: land the in-shot cuts as the structured internal_cuts
-            # field, not as flattened "hard cut" prose.  story_beat stays the
-            # opening segment; the compiler emits the native [Shot N] timeline
-            # from internal_cuts.  ShotIntent.cuts remains the authoritative
-            # upstream — this is its frozen landing, never a second editable copy.
-            internal_cuts: list[dict] = []
-            if cuts:
-                characters = list(beat["characters"])
-                lines = list(beat["dialogue"])
-                for cut in cuts:
-                    cut_beat = beats[cut["beat_id"]]
-                    offset = cut["start_s"]
-                    internal_cuts.append({"start_s": offset, "beat_id": cut["beat_id"],
-                                          "visual_description": cut["visual_description"]})
-                    characters.extend(cut_beat["characters"])
-                    lines.extend({**line, "start_s": round(line["start_s"] + offset, 3),
-                                  "end_s": round(line["end_s"] + offset, 3)} for line in cut_beat["dialogue"])
-                beat = {**beat, "characters": list(dict.fromkeys(characters)), "dialogue": lines}
-            # Spoken timing is the plan's own fact.  validate_output refuses a
-            # shot that does not contain its lines, so nothing is squeezed here:
-            # compressing a line into a shorter window used to hide that conflict
-            # and left H3 rushing or cutting off the end of the line.
-            duration = float(intent["duration_s"])
-            long_lines = [line["text"] for line in beat["dialogue"] if float(line["end_s"]) > duration]
-            if long_lines:
+
+        if artifact.kind == "SceneShotBoard":
+            board = artifact.payload_json
+            scene_id = board.get("drama_scene_artifact_id")
+            scene_sha = board.get("drama_scene_sha256")
+            scene = db.get(AgentArtifact, scene_id) if isinstance(scene_id, str) and scene_id else None
+            if (
+                not scene
+                or scene.project_id != project_id
+                or scene.stale
+                or scene.kind != "DramaSceneScript"
+                or scene.sha256 != scene_sha
+            ):
+                raise ValueError("FILM_HANDOFF_REJECTED")
+            cap = (
+                float(frozen_style.snapshot["max_shot_seconds"])
+                if frozen_style and frozen_style.snapshot.get("max_shot_seconds") is not None
+                else DEFAULT_MAX_SHOT_SECONDS
+            )
+            rows, verdict = scene_director.landing_rows(
+                board,
+                scene.payload_json,
+                {"max_shot_seconds": cap, "continuity_predecessor": bool(predecessor)},
+            )
+            if not verdict.accepted:
+                code = verdict.first_code() or "BOARD_CONTINUITY_REFUSED"
                 raise HTTPException(409, {
-                    "code": "SHOT_DIALOGUE_LONGER_THAN_SHOT",
-                    "message": "这一镜的台词比镜头本身还长，无法按原速说完；请重新生成分镜或调长这一镜",
-                    "intent_id": camera.intent_id, "duration_s": duration, "lines": long_lines[:5],
+                    "code": code,
+                    "message": continuity_engine.refusal_label(code) or "分镜板连续性校验未通过，请重新生成分镜",
+                    "details": verdict.refusals[:12],
+                    "next_action": "regenerate_storyboard",
                 })
-            dialogue = [dict(line) for line in beat["dialogue"]]
-            cast = list(dict.fromkeys(name for entry in beat["characters"] for name in split_character_names(entry)))
-            # A speaker the beat forgot to list is still a speaking character
-            # of this shot (voice-only entities included); the ShotSpec
-            # contract requires every dialogue speaker in characters.
-            for line in beat["dialogue"]:
-                for name in split_character_names(line.get("speaker_id") or ""):
-                    if name and name not in cast:
-                        cast.append(name)
-            bindings = []
-            shot_notices: list[dict] = []
-            for identity in dict.fromkeys(intent["asset_ids"]):
-                asset = db.get(Asset, identity)
-                if (not asset or asset.project_id != project_id
-                        or not asset.approved or not asset.locked):
-                    # 素材不是落镜的硬前置：这一镜照样落，但如实说明它少了哪个
-                    # 参考图——真实开拍时这一镜会停在素材缺口上，不会被伪装成
-                    # “模型会自己画出正式资产”。绝不绑定一个还没确认的素材。
-                    shot_notices.append({
-                        "code": "MISSING_IMAGE_MATERIAL",
-                        "message": "这一镜缺少已确认的参考图；开拍前需要补上，或改为不使用该参考",
-                        "asset_id": identity,
+            existing_names = set(db.scalars(select(Shot.name).where(Shot.project_id == project_id)).all())
+            section_id = str(board.get("production_section_id") or "").strip()
+            locked_facts = list(board.get("locked_story_facts") or [])
+            prompt_facts = list(board.get("prompt_story_facts") or [])
+            prompt_style = board.get("prompt_style")
+            for row in rows:
+                source = created[-1] if created else predecessor
+                continuity = None
+                if row["mode"] == "last_frame" and source:
+                    continuity = {"mode": "last_frame", "previous_shot_id": source}
+                    note = str(row.get("note") or "").strip()
+                    if note:
+                        continuity["notes"] = note[:500]
+                sound_fields: dict[str, str] = {}
+                ambience = str(row.get("ambience") or "").strip()
+                if ambience and not row["dialogue"]:
+                    ambience = non_vocal_ambience_text(ambience)
+                if ambience:
+                    sound_fields["ambience"] = ambience
+                music = str(row.get("music") or "").strip()
+                if music:
+                    sound_fields["music"] = music
+                blocked_style_constraints = ["axis-locked", "duration-locked"]
+                if row["dialogue"]:
+                    blocked_style_constraints.append("dialogue-locked")
+                if row["asset_ids"]:
+                    blocked_style_constraints.append("approved-asset-only")
+                base_name = f"{body.name_prefix}-{row['id']}"
+                shot_name = (
+                    f"{body.name_prefix}-{section_id}-{row['id']}"
+                    if (base_name in existing_names and section_id)
+                    else base_name
+                )
+                existing_names.add(shot_name)
+                shot_id = _land_shot(
+                    db, project_id, project,
+                    director_binding=director_binding,
+                    shot_name=shot_name,
+                    shot_key=row["id"],
+                    visual=row["visual"],
+                    duration_s=row["duration_s"],
+                    asset_ids=row["asset_ids"],
+                    location=row["location"] or None,
+                    cast=row["cast"],
+                    dialogue=row["dialogue"],
+                    camera_fields=row["camera"],
+                    sound_fields=sound_fields,
+                    internal_cuts=row["internal_cuts"],
+                    locked_story_facts=locked_facts,
+                    prompt_story_facts=prompt_facts,
+                    prompt_style=prompt_style,
+                    scene_tags=_scene_style_tags(
+                        {"description": row["visual"], "dialogue": row["dialogue"]},
+                        {"visual_description": row["visual"]},
+                    ),
+                    blocked_style_constraints=blocked_style_constraints,
+                    continuity=continuity,
+                    extra_spec_fields={
+                        "location_id": row["location"] or None,
+                        "transition_motivation": row["motivation"] or None,
+                        "blocking": row["blocking"],
+                        "environment": row["environment"],
+                        "timeline": row["timeline"],
+                        "entry_state": row["entry_state"],
+                        "exit_state": row["exit_state"],
+                    },
+                    material_notices=material_notices,
+                    style_warnings=style_warnings,
+                )
+                created.append(shot_id)
+        else:
+            if not body.continuity_artifact_id:
+                raise ValueError("CONTINUITY_REVIEW_REQUIRED")
+            continuity = load_inputs(db, project_id, [body.continuity_artifact_id])[0]
+            if continuity.kind != "ContinuityReport":
+                raise ValueError("WRONG_HANDOFF_KIND")
+            parents = load_inputs(db, project_id, artifact.input_revision_ids)
+            direction = next(a for a in parents if a.kind == "DirectorialPlan")
+            reported = list(continuity.payload_json.get("issues") or [])
+            requests = material_request_issues(db, project_id, direction.payload_json, reported)
+            issues = [issue for issue in reported if issue not in requests]
+            arbitration = None
+            if artifact_id not in continuity.input_revision_ids:
+                raise ValueError("CONTINUITY_REVIEW_REQUIRED")
+            if issues or (not requests
+                          and continuity.payload_json.get("recommendation") != "proceed_to_preflight"):
+                arbitration = _load_arbitration(
+                    db, project_id, body.arbitration_artifact_id, continuity.id, artifact_id
+                )
+                if not _arbitration_releases(arbitration, issues):
+                    raise ValueError("CONTINUITY_REVIEW_REQUIRED")
+            scripts = load_inputs(db, project_id, direction.input_revision_ids)
+            script = next(a for a in scripts if a.kind == "ScriptBreakdown")
+            camera_plan = CameraPlan.model_validate(artifact.payload_json)
+            _require_beat_coverage(db, project_id, script, direction, camera_plan)
+            beats = {b["id"]: b for b in script.payload_json["beats"]}
+            intents = {s["id"]: s for s in direction.payload_json["shots"]}
+            for camera in camera_plan.shots:
+                intent = intents[camera.intent_id]
+                beat = beats[intent["beat_id"]]
+                cuts = intent.get("cuts", [])
+                visual = intent["visual_description"]
+                internal_cuts: list[dict] = []
+                if cuts:
+                    characters = list(beat["characters"])
+                    lines = list(beat["dialogue"])
+                    for cut in cuts:
+                        cut_beat = beats[cut["beat_id"]]
+                        offset = cut["start_s"]
+                        internal_cuts.append({"start_s": offset, "beat_id": cut["beat_id"],
+                                              "visual_description": cut["visual_description"]})
+                        characters.extend(cut_beat["characters"])
+                        lines.extend({**line, "start_s": round(line["start_s"] + offset, 3),
+                                      "end_s": round(line["end_s"] + offset, 3)} for line in cut_beat["dialogue"])
+                    beat = {**beat, "characters": list(dict.fromkeys(characters)), "dialogue": lines}
+                duration = float(intent["duration_s"])
+                long_lines = [line["text"] for line in beat["dialogue"] if float(line["end_s"]) > duration]
+                if long_lines:
+                    raise HTTPException(409, {
+                        "code": "SHOT_DIALOGUE_LONGER_THAN_SHOT",
+                        "message": "这一镜的台词比镜头本身还长，无法按原速说完；请重新生成分镜或调长这一镜",
+                        "intent_id": camera.intent_id, "duration_s": duration, "lines": long_lines[:5],
                     })
-                    continue
-                # The approved master's role decides the reference family: a
-                # character master is a subject reference, any other picture is
-                # a picture reference; audio and video map to themselves.
-                use_as = {
-                    "image": "subject" if asset.role == "character" else "picture",
-                    "audio": "audio",
-                    "video": "video",
-                }[asset.kind]
-                binding = ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings))
-                bindings.append(binding)
-            bindings = complete_character_bindings(db, project_id, cast, bindings)
-            # The place a shot declares gets its confirmed scene master the same
-            # way a character gets theirs; with none confirmed yet the shot still
-            # lands and asks the material stage for it.
-            bindings, scene_request = complete_location_binding(db, project_id, intent.get("location"), bindings)
-            camera_fields = {
-                "composition": camera.composition,
-                "movement": camera.movement,
-                "lighting": camera.lighting,
-                "axis_rule": camera.axis,
-            }
-            sound_fields: dict[str, str] = {}
-            style_resolution = None
-            if director_binding:
+                dialogue = [dict(line) for line in beat["dialogue"]]
+                cast = list(dict.fromkeys(
+                    name for entry in beat["characters"] for name in split_character_names(entry)
+                ))
+                for line in beat["dialogue"]:
+                    for name in split_character_names(line.get("speaker_id") or ""):
+                        if name and name not in cast:
+                            cast.append(name)
+                camera_fields = {
+                    "composition": camera.composition,
+                    "movement": camera.movement,
+                    "lighting": camera.lighting,
+                    "axis_rule": camera.axis,
+                }
                 blocked_style_constraints = ["axis-locked", "duration-locked"]
                 if beat.get("dialogue"):
                     blocked_style_constraints.append("dialogue-locked")
                 if intent.get("asset_ids"):
                     blocked_style_constraints.append("approved-asset-only")
-                style_resolution = resolve_frozen_binding(
-                    director_binding,
+                declared = intent.get("continuity") or None
+                source = created[-1] if created else predecessor
+                shot_continuity = None
+                if declared and declared.get("mode") not in (None, "cut") and source:
+                    shot_continuity = {"mode": declared["mode"], "previous_shot_id": source}
+                    note = str(declared.get("note") or "").strip()
+                    if note:
+                        shot_continuity["notes"] = note[:500]
+                shot_id = _land_shot(
+                    db, project_id, project,
+                    director_binding=director_binding,
+                    shot_name=f"{body.name_prefix}-{camera.intent_id}",
+                    shot_key=camera.intent_id,
+                    visual=visual,
+                    duration_s=duration,
+                    asset_ids=intent["asset_ids"],
+                    location=intent.get("location"),
+                    cast=cast,
+                    dialogue=dialogue,
+                    camera_fields=camera_fields,
+                    sound_fields={},
+                    internal_cuts=internal_cuts,
+                    locked_story_facts=script.payload_json["locked_story_facts"],
+                    prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
+                    prompt_style=script.payload_json.get("prompt_style"),
                     scene_tags=_scene_style_tags(beat, intent),
-                    blocked_constraints=blocked_style_constraints,
+                    blocked_style_constraints=blocked_style_constraints,
+                    continuity=shot_continuity,
+                    extra_spec_fields={"location_id": intent.get("location") or None},
+                    material_notices=material_notices,
+                    style_warnings=style_warnings,
                 )
-                if style_resolution.warnings:
-                    style_warnings.extend(
-                        {
-                            "shot_intent_id": camera.intent_id,
-                            "warning": warning,
-                        }
-                        for warning in style_resolution.warnings
-                    )
-                visual_rules = camera_style_text(style_resolution)
-                if visual_rules:
-                    camera_fields["director_style"] = visual_rules
-                sound_rules = sound_style_text(style_resolution)
-                if sound_rules:
-                    if not beat["dialogue"]:
-                        sound_rules = non_vocal_ambience_text(sound_rules)
-                    if sound_rules:
-                        sound_fields["ambience"] = sound_rules
-            # The boundary the director asked for, materialised.  The first shot
-            # of a plan continues the shot the previous unit of the same episode
-            # landed; with no earlier shot in the episode there is nothing to
-            # continue and the shot is a cut.
-            declared = intent.get("continuity") or None
-            source = created[-1] if created else predecessor
-            continuity = None
-            if declared and declared.get("mode") not in (None, "cut") and source:
-                continuity = {"mode": declared["mode"], "previous_shot_id": source}
-                note = str(declared.get("note") or "").strip()
-                if note:
-                    continuity["notes"] = note[:500]
-            spec = ShotSpec(
-                story_beat=visual,
-                duration_target_s=intent["duration_s"],
-                style_version_id=project.frozen_style_version_id,
-                director_style_resolution_sha256=(style_resolution.resolution_sha256 if style_resolution else None),
-                director_style_technique_ids=(style_resolution.selected_technique_ids if style_resolution else []),
-                # 只有真正绑上的素材才是这一镜的要求：缺的那个由 H3 自行
-                # 生成，它不再是落镜的前置条件。
-                required_asset_ids=[binding.asset_id for binding in bindings],
-                characters=cast,
-                dialogue=dialogue,
-                locked_story_facts=script.payload_json["locked_story_facts"],
-                prompt_story_facts=script.payload_json.get("prompt_story_facts", []),
-                prompt_style=script.payload_json.get("prompt_style"),
-                camera=camera_fields,
-                sound=sound_fields,
-                internal_cuts=internal_cuts,
-                requested_assets=[scene_request] if scene_request else [],
-                location_id=intent.get("location") or None,
-                **({"continuity": continuity} if continuity else {}),
-            )
-            # The H3 presentation numbers images in one sequence, so a static
-            # workflow profile can only map the slots if the references arrive
-            # in a fixed family order: subjects, then pictures, then the other
-            # media families.  Inside the subject family the beat's own cast
-            # order decides, so <Subject 1> really is the first described person.
-            ordered_assets = {binding.asset_id: db.get(Asset, binding.asset_id) for binding in bindings}
-            bindings = order_bindings_for_cast(bindings, cast, ordered_assets)
-            shot = create_shot_record(
-                db, project, name=f"{body.name_prefix}-{camera.intent_id}", spec=spec, bindings=bindings
-            )
-            db.flush()
-            # Character masters can be prepared after the storyboard lands.
-            # Render admission still requires the missing subjects.
-            try:
-                make_render_request(db, project, shot, CreateJob(shot_id=shot.id))
-            except HTTPException as exc:
-                detail = exc.detail if isinstance(exc.detail, dict) else {}
-                if detail.get("code") not in {"H3_CHARACTER_REFERENCE_MISSING", "H3_SPEAKER_REFERENCE_MISSING"}:
-                    raise
-                shot_notices.append({
-                    "code": detail["code"],
-                    "message": "镜头已落地，使用 Ref2VA 开拍前需补齐对应人物主体",
-                    "details": detail.get("details"),
-                })
-            created.append(shot.id)
-            material_notices.extend({**notice, "shot_id": shot.id} for notice in shot_notices)
+                created.append(shot_id)
         artifact.approved_by = "user"
         artifact.approved_at = utcnow()
         result = {"shot_ids": created, "source_artifact_id": artifact.id,
@@ -972,7 +1095,7 @@ class StoryboardRequest(APIModel):
     # earlier roles already produced.  A failed role is retried from itself
     # instead of paying for the whole chain again.
     start_role: Literal[
-        "series_architecture", "drama_scene",
+        "series_architecture", "drama_scene", "scene_board",
         "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor", "director_arbitration"
     ] | None = None
     resume_steps: dict[str, str] = Field(default_factory=dict, max_length=10)
@@ -1013,6 +1136,7 @@ STORYBOARD_CHAIN = (
 DRAMA_STEPS = ("series_architecture", "drama_scene")
 STORYBOARD_STEP_ROLES = {
     "series_architecture": "scriptwriter", "drama_scene": "scriptwriter",
+    "scene_board": "director",
     "editor_edit_intent": "editor", "director_arbitration": "director",
 }
 
@@ -1204,7 +1328,7 @@ def generate_storyboard(
     if body.production_context is not None:
         from shine.materialprep.story import verified_production_context
         body.production_context = verified_production_context(db, project_id, script_text, body.production_context)
-    needed_roles = STORYBOARD_CHAIN
+    needed_roles = ("scriptwriter", "director") if body.dramatize else STORYBOARD_CHAIN
     routes = {}
     for role in needed_roles:
         try:
@@ -1238,7 +1362,7 @@ def generate_storyboard(
     # calling them again.  The server checks every referenced artifact: it must
     # belong to this project, carry the role's contract kind and not be stale.
     start_role = body.start_role or "scriptwriter"
-    if start_role not in (*DRAMA_STEPS, *STORYBOARD_CHAIN, "director_arbitration"):
+    if start_role not in (*DRAMA_STEPS, "scene_board", *STORYBOARD_CHAIN, "director_arbitration"):
         raise HTTPException(422, "STORYBOARD_RESUME_ROLE_UNKNOWN")
 
     delay = _agent_step_delay_seconds()
@@ -1437,6 +1561,8 @@ def generate_storyboard(
         drama_note = _drama_repair_note(reason or "", failure)
         if drama_note:
             return drama_note
+        if reason in continuity_engine.refusal_codes():
+            return continuity_engine.repair_note(reason, failure.get("refusal_details") or [])
         note = CONTRACT_REPAIR_NOTES.get(reason or "")
         if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):
             note += (
@@ -1677,6 +1803,115 @@ def generate_storyboard(
         "approved_asset_manifest": asset_context(db, project_id),
         "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
     })
+
+    if body.dramatize:
+        for prior in db.scalars(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project_id,
+            AgentTaskRecord.role_id.in_(needed_roles),
+        )):
+            if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
+                continue
+            unresolved = (
+                prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
+                or prior.status == "REJECTED" and prior.error_code in UNKNOWN_CODES
+                and prior.trace.get("external_outcome") != "NOT_SENT"
+                or prior.status == "ABANDONED" and prior.trace.get("external_outcome") == "UNKNOWN"
+            )
+            if unresolved and prior.trace.get("is_mock") is not True:
+                code = ("AGENT_REQUEST_REPLAY_BLOCKED" if prior.status == "ABANDONED"
+                        else "AGENT_REQUEST_RECONCILIATION_REQUIRED")
+                return {
+                    "status": "REJECTED",
+                    "script_source": source,
+                    "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+                    "steps": steps,
+                    "missing_characters": [],
+                    "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id,
+                                    "state_version": prior.state_version,
+                                    "external_outcome": prior.trace.get("external_outcome"),
+                                    "blocking_task": {"task_id": prior.id, "status": prior.status,
+                                                      "external_outcome": prior.trace.get("external_outcome"),
+                                                      "phase": prior.trace.get("phase")}}],
+                    "failed_role": prior.role_id,
+                    "resume_steps": dict(body.resume_steps or {}),
+                }
+        try:
+            steps["scene_board"] = _run(
+                "director",
+                tool="scene_board",
+                brief=script_text,
+                input_revision_ids=[scene.id],
+                locked_story_facts=body.locked_story_facts,
+                allow_remote_text=body.allow_remote_text,
+                request_sha256=storyboard_request_sha256,
+            )
+        except (ValueError, LLMError) as exc:
+            db.rollback()
+            rejection = _rejection("director", exc, storyboard_request_sha256)
+            rejection["role"] = "scene_board"
+            rejections.append(rejection)
+            return {
+                "status": "REJECTED",
+                "script_source": source,
+                "steps": steps,
+                "rejections": rejections,
+                "failed_role": "scene_board",
+                "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+            }
+        board_artifact = db.get(AgentArtifact, steps["scene_board"]["artifact_id"])
+        board_payload = board_artifact.payload_json
+        scene_beats_for_cov = {
+            "beats": [
+                {
+                    "characters": beat.get("characters") or [],
+                    "dialogue": [
+                        {"speaker_id": line.get("speaker") or ""}
+                        for line in (beat.get("spoken_lines") or [])
+                    ],
+                }
+                for beat in (scene.payload_json.get("beats") or [])
+            ]
+        }
+        missing = _character_coverage(asset_context(db, project_id), scene_beats_for_cov)
+        material_requirements: dict = {"characters": [], "note": ""}
+        if missing:
+            material_requirements = {
+                "characters": list(missing),
+                "note": "这些角色还没有已确认的主素材；落镜不因此停下，但真实开拍前需要先准备、"
+                        "确认并锁定主素材，否则用到这些角色的镜头会停在素材缺口上。",
+            }
+        add_audit(
+            db, "film-agent", "STORYBOARD_GENERATED", "project", project.id,
+            {
+                "script_source": source,
+                "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+                "steps": {name: step["sha256"] for name, step in steps.items()},
+                "blocked_by_continuity": False,
+                "arbitrated_by": None,
+            },
+            project_id=project_id,
+        )
+        db.commit()
+        return {
+            "status": "PROPOSED",
+            "script_source": source,
+            "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+            "steps": steps,
+            "missing_characters": list(missing),
+            "material_requirements": material_requirements,
+            "rejections": [],
+            "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+            "continuity_issues": [],
+            "board_warnings": list(board_payload.get("warnings") or []),
+            "prompt_story_facts": board_payload.get("prompt_story_facts", []),
+            "prompt_style": board_payload.get("prompt_style"),
+            "next": {
+                "apply_camera": {
+                    "board_artifact_id": steps["scene_board"]["artifact_id"],
+                }
+            },
+            "user_actions_required": ["APPLY_CAMERA"],
+        }
 
     if start_role != "scriptwriter":
         frozen_style = (

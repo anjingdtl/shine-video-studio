@@ -337,12 +337,23 @@ def crew_prompt(
     max_shot_seconds: float | None = None,
     creative_source: str | None = None,
     cinema_skills_block: str = "",
+    continuity_predecessor: bool = False,
+    translation_supplied: bool = False,
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "series_architecture":
         return series_architect_prompt()
     if tool == "drama_scene":
         return drama_screenwriter_prompt()
+    if tool == "scene_board":
+        from shine.agents.scene_director import scene_director_prompt
+
+        return scene_director_prompt(
+            max_shot_seconds=max_shot_seconds,
+            continuity_predecessor=continuity_predecessor,
+            translation_supplied=translation_supplied,
+            narration_allowed=narration_level in {"low", "high"},
+        )
     if tool == "script_prepare":
         return script_prepare_prompt()
     if tool == "material_image_brief":

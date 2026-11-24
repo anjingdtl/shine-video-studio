@@ -134,9 +134,11 @@ class StoryboardBookBody(APIModel):
     tolerance_seconds: int = Field(default=15, ge=0, le=900)
     # The person's own per-shot ceiling.  A book that does not name one starts
     # from the same default the workbench shows; an explicit null keeps the
-    # style's current value.  The range stays H3's own 4-15, so a style frozen
-    # with any value in it still loads.
-    max_shot_seconds: float | None = Field(default=DEFAULT_MAX_SHOT_SECONDS, ge=4.0, le=15.0)
+    # style's current value.  New books cap at DEFAULT_MAX_SHOT_SECONDS (10 s)
+    # for local VRAM safety; frozen 10-15 s historical styles still load.
+    max_shot_seconds: float | None = Field(
+        default=DEFAULT_MAX_SHOT_SECONDS, ge=4.0, le=DEFAULT_MAX_SHOT_SECONDS,
+    )
 
 
 @router.get("/projects/{project_id}/director/storyboard-book")

@@ -221,8 +221,8 @@ def shot_script_evidence(db: Session, project_id: str,
             continue
         outline_id = next(iter(outline_ids))
         for result_row in (trace.get("results") or []):
-            camera = (((result_row or {}).get("storyboard") or {})
-                      .get("steps", {}).get("cinematographer") or {})
+            steps = ((result_row or {}).get("storyboard") or {}).get("steps") or {}
+            camera = steps.get("cinematographer") or steps.get("scene_board") or {}
             claim(outline_id, camera.get("artifact_id"))
     # The four-stage draft ledger is the same kind of evidence: a unit names
     # its script section, and the apply receipt names the shots it produced.

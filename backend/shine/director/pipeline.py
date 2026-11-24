@@ -2725,8 +2725,8 @@ def volume_storyboard_draft(db, project_id: str, volume_id: str, gateway, data_d
             # finished; these are what the material step has to answer.
             "missing_characters": [str(name) for name in (
                 (result.get("material_requirements") or {}).get("characters") or [])],
-            "camera_artifact_id": apply_info.get("camera_artifact_id"),
-            "camera_sha256": (steps.get("cinematographer") or {}).get("sha256"),
+            "camera_artifact_id": apply_info.get("camera_artifact_id") or apply_info.get("board_artifact_id"),
+            "camera_sha256": (steps.get("cinematographer") or steps.get("scene_board") or {}).get("sha256"),
             "continuity_artifact_id": apply_info.get("continuity_artifact_id"),
             "arbitration_artifact_id": apply_info.get("arbitration_artifact_id"),
         }

@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select, text
 
+from shine.agents import continuity_engine
 from shine.h3.rulebook import digest
 from shine.models import (
     AgentArtifact,
@@ -36,6 +37,7 @@ from shine.models import (
     WorkflowProfile,
     utcnow,
 )
+from shine.schemas import DEFAULT_MAX_SHOT_SECONDS
 from shine.services import add_audit, require_project
 
 logger = logging.getLogger(__name__)
@@ -564,6 +566,13 @@ def _apply_and_freeze_style(db, project, style: dict[str, Any], *, actor: str) -
     dialogue_ratio = style.get("dialogue_ratio_percent")
     narration_level = style.get("narration_level")
     max_shot_seconds = style.get("max_shot_seconds")
+    if max_shot_seconds is not None:
+        ceiling = float(max_shot_seconds)
+        if ceiling < 4.0 or ceiling > DEFAULT_MAX_SHOT_SECONDS:
+            raise HTTPException(422, {
+                "code": "MAX_SHOT_SECONDS_OUT_OF_RANGE",
+                "message": f"单镜秒数上限必须在 4–{int(DEFAULT_MAX_SHOT_SECONDS)} 秒之间",
+            })
     dimensions = style.get("dimensions")
     entry = None
     if profile_id:
@@ -1000,7 +1009,13 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         if not outline or not outline.approved_at or outline.stale or outline.sha256 != state["outline_sha256"]:
             raise HTTPException(409, "STORY_OUTLINE_NOT_CONFIRMED")
         document = db.get(ProjectDocument, state["document_id"])
-        for role in ("scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"):
+        dramatize = not unit.get("script_artifact_id")
+        consent_roles = (
+            ("scriptwriter", "director")
+            if dramatize
+            else ("scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor")
+        )
+        for role in consent_roles:
             profile = gateway.profile_for_role(db, role)
             if not text_consent.allowed(db, project_id, document, role, profile):
                 raise HTTPException(409, "REMOTE_AGENT_CONSENT_REQUIRED")
@@ -1176,19 +1191,27 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         return
     # Land the shots through the same gate the expert apply uses.
     steps = result["steps"]
-    camera_id = steps["cinematographer"]["artifact_id"]
-    continuity_id = steps["continuity_supervisor"]["artifact_id"]
-    arbitration_id = (steps.get("director_arbitration") or {}).get("artifact_id")
+    if "scene_board" in steps:
+        apply_id = steps["scene_board"]["artifact_id"]
+        apply_body = ApplyCamera(
+            name_prefix=f"导演分镜-{unit['episode_id']}",
+            # Same episode only: the first unit of an episode passes None
+            # and opens on a cut.
+            previous_shot_id=_episode_predecessor(state, unit),
+        )
+    else:
+        apply_id = steps["cinematographer"]["artifact_id"]
+        apply_body = ApplyCamera(
+            continuity_artifact_id=steps["continuity_supervisor"]["artifact_id"],
+            arbitration_artifact_id=(steps.get("director_arbitration") or {}).get("artifact_id"),
+            name_prefix=f"导演分镜-{unit['episode_id']}",
+            # Same episode only: the first unit of an episode passes None
+            # and opens on a cut.
+            previous_shot_id=_episode_predecessor(state, unit),
+        )
     try:
         with factory() as db:
-            applied = apply_camera(project_id, camera_id, ApplyCamera(
-                continuity_artifact_id=continuity_id,
-                arbitration_artifact_id=arbitration_id,
-                name_prefix=f"导演分镜-{unit['episode_id']}",
-                # Same episode only: the first unit of an episode passes None
-                # and opens on a cut.
-                previous_shot_id=_episode_predecessor(state, unit),
-            ), db)
+            applied = apply_camera(project_id, apply_id, apply_body, db)
     except Exception as exc:  # noqa: BLE001 - a landing gate must keep the finished chain
         code = _fault_code(exc)
         logger.exception("director_storyboard_landing_fault task=%s code=%s", task_id, code)
@@ -1336,7 +1359,7 @@ def _previous_scene_artifact(state: dict, unit: dict) -> str | None:
 
 
 CREW_ROLE_LABELS = {
-    "series_architecture": "集纲架构", "drama_scene": "戏剧改编",
+    "series_architecture": "集纲架构", "drama_scene": "戏剧改编", "scene_board": "场景导演",
     "scriptwriter": "编剧", "director": "导演", "cinematographer": "摄影",
     "continuity_supervisor": "场记", "editor": "剪辑", "editor_edit_intent": "剪辑",
     "director_arbitration": "导演裁定", "landing": "落镜",
@@ -1401,7 +1424,7 @@ def _rejection_reason_label(rejection: dict) -> str:
     if code == "CONTINUITY_CONFLICT":
         detail = str(rejection.get("message") or "").strip()
         return f"连续性矛盾需要重排：{detail}（{code}）" if detail else f"连续性矛盾需要重排（{code}）"
-    label = _REFUSAL_LABELS.get(code)
+    label = _REFUSAL_LABELS.get(code) or continuity_engine.refusal_label(code)
     return f"{label}（{code}）" if label else (code or "分镜被拒绝")
 
 

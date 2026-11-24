@@ -320,10 +320,10 @@ def test_schema_refusal_records_field_paths_without_values(api):
     base = _chain_responder({"asset": master})
 
     def broken(messages, schema):
-        if schema.get("title") == "DirectorialPlan":
+        if schema.get("title") == "SceneShotBoard":
             # A required creative field is missing: salvage cannot invent it, so
             # the refusal is honest and must name the field path.
-            return {"shots": [{"id": "I1", "beat_id": "B1", "duration_s": 7,
+            return {"shots": [{"id": "S1", "beat_ids": ["B1"], "duration_s": 7,
                                "asset_ids": [master]}]}
         return base(messages, schema)
 

@@ -376,6 +376,7 @@ class FilmRunRequest(APIModel):
         "material_image_brief",
         "series_architecture",
         "drama_scene",
+        "scene_board",
     ] = "propose"
     offline_preview: bool = False
     allow_remote_text: bool = False
@@ -387,7 +388,7 @@ class FilmRunRequest(APIModel):
 
     @model_validator(mode="after")
     def brief_fits_the_tool(self):
-        if self.tool not in {"series_architecture", "drama_scene"} and len(self.brief) > 20000:
+        if self.tool not in {"series_architecture", "drama_scene", "scene_board"} and len(self.brief) > 20000:
             raise ValueError("BRIEF_TOO_LONG")
         return self
 
@@ -421,8 +422,14 @@ class FilmAgentRegistry:
                                                  "continuity_arbitration", "continuity_timing",
                                                  "continuity_physical", "script_prepare",
                                                  "material_image_brief", "series_architecture",
-                                                 "drama_scene"}:
+                                                 "drama_scene", "scene_board"}:
             raise ValueError("ROLE_OR_TOOL_DENIED")
+        if tool == "scene_board":
+            if role != "director":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            from shine.agents.scene_director import SceneShotBoard
+
+            return SceneShotBoard, ()
         if tool in {"series_architecture", "drama_scene"}:
             # The drama layer (V4): the writer who already breaks a script into
             # beats adapts the novel first.  It stands on no upstream artifact;

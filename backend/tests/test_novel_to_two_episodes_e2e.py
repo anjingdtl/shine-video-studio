@@ -24,7 +24,7 @@ from shine.llm.secrets import SecretStore
 from shine.media.delivery_models import DeliveryOrder
 from shine.models import Job, MediaArtifact
 from shine.production.models import ProductionRun, ProductionRunEpisode
-from tests.conftest import make_test_video_bytes, register_workflow_profile
+from tests.conftest import PNG, approve_lock, make_test_video_bytes, register_workflow_profile, upload_asset
 from tests.test_director_streamline import (
     LOCAL,
     _chain_responder,
@@ -62,6 +62,13 @@ def _six_second_responder(master: str):
         if title == "DirectorialPlan":
             for shot in answer["shots"]:
                 shot["duration_s"] = 6.0
+        elif title == "SceneShotBoard":
+            for shot in answer["shots"]:
+                shot["duration_s"] = 6.0
+                if len(shot.get("timeline") or []) == 2:
+                    shot["timeline"][0]["end_s"] = 3.0
+                    shot["timeline"][1]["start_s"] = 3.0
+                    shot["timeline"][1]["end_s"] = 6.0
         elif title == "EditIntentPlan":
             for clip in answer["clips"]:
                 clip["planned_duration_s"] = 6.0
@@ -84,6 +91,10 @@ def test_a_novel_becomes_two_delivered_episodes_without_hand_holding(api, monkey
     # an approved+locked master, a confirmed outline.
     prepared = _prepare_project(client, sections=2)
     project = prepared["project"]
+    shop = upload_asset(
+        client, project, PNG + b"shop", kind="image", role="scene", entity_id="钟表铺", filename="钟表铺.png",
+    )
+    approve_lock(client, shop["id"])
     # Grouping is target-driven and the person's count is a cap: a 60s target
     # would honestly merge both 30s-estimated sections into one episode.  A 20s
     # target (window 10-30) splits them into two episodes, keeps each 30s
@@ -92,8 +103,24 @@ def test_a_novel_becomes_two_delivered_episodes_without_hand_holding(api, monkey
     book = _storyboard_book(client, project, episode_count=2,
                             target_seconds=20, tolerance_seconds=10)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    graph = {
+        **REF2VA_GRAPH,
+        "1": {
+            **REF2VA_GRAPH["1"],
+            "inputs": {
+                **REF2VA_GRAPH["1"]["inputs"],
+                "reference_picture_1": "",
+                "reference_picture_2": "",
+            },
+        },
+    }
+    param_map = {
+        **REF2VA_PARAM_MAP,
+        "reference_picture_1": "1.inputs.reference_picture_1",
+        "reference_picture_2": "1.inputs.reference_picture_2",
+    }
     profile = register_workflow_profile(
-        client, mode="Ref2VA", graph=REF2VA_GRAPH, parameter_map=REF2VA_PARAM_MAP)
+        client, mode="Ref2VA", graph=graph, parameter_map=param_map)
 
     # ③ The five-role chain storyboards both episodes; each episode self-confirms.
     assets = client.get(f"/api/v1/projects/{project}/assets").json()

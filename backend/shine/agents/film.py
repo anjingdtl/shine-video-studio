@@ -14,6 +14,7 @@ from pydantic import ValidationError
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
+from shine.agents import continuity_engine, scene_director
 from shine.agents.cinema_skills import select_skills_for_role
 from shine.agents.crew_prompts import arbiter_prompt, crew_prompt
 from shine.agents.editorial_timing import (
@@ -61,6 +62,7 @@ from shine.models import (
     WorkflowProfile,
     utcnow,
 )
+from shine.schemas import DEFAULT_MAX_SHOT_SECONDS
 from shine.security import is_loopback_url
 from shine.services import add_audit, mark_stale_descendants, require_project, try_transition
 
@@ -670,6 +672,47 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         verdict = scene_verdict(proposal.model_dump(mode="json"), context)
         if verdict.refusals:
             raise _refusal_error(verdict.first_code(), verdict.refusals)
+    elif isinstance(proposal, scene_director.SceneShotBoard):
+        scene_artifact = next((a for a in inputs if a.kind == "DramaSceneScript"), inputs[0] if inputs else None)
+        if scene_artifact is None:
+            raise ValueError("MISSING_OR_AMBIGUOUS_HANDOFF")
+        payload = proposal.model_dump(mode="json")
+        production = context.get("production_context") or {}
+        verdict = continuity_engine.review_scene_board(
+            payload,
+            scene_artifact.payload_json,
+            {
+                "max_shot_seconds": context.get("max_shot_seconds"),
+                "continuity_predecessor": bool(production.get("continuity_predecessor")),
+            },
+        )
+        if verdict.refusals:
+            raise _refusal_error(verdict.first_code(), verdict.refusals)
+        for field, text_value in continuity_engine.english_prose_fields(payload):
+            if re.search(r"[㐀-鿿]", descriptive_text(text_value)):
+                raise _visual_language_error(field)
+        assets_by_id = {a["id"]: a for a in context["assets"]}
+        for shot in proposal.shots:
+            if not set(shot.asset_ids).issubset(assets_by_id):
+                raise ValueError("UNAPPROVED_ASSET_OR_UNKNOWN_BEAT")
+            if any(assets_by_id[aid]["role"] in SHOT_REFERENCE_EXCLUDED_ROLES for aid in shot.asset_ids):
+                raise ValueError("EXCLUDED_REFERENCE_USED")
+        style_values = (context.get("style") or {}).values()
+        if any(re.search(r"[\u3400-\u9fff]", value) for value in style_values if isinstance(value, str)):
+            translated_style = proposal.prompt_style
+            if not translated_style or any(
+                re.search(r"[\u3400-\u9fff]", value)
+                for value in translated_style.model_dump().values()
+                if isinstance(value, str)
+            ):
+                raise ValueError("H3_STYLE_TRANSLATION_REQUIRED")
+        if any(re.search(r"[\u3400-\u9fff]", fact) for fact in body.locked_story_facts):
+            translations = proposal.prompt_story_facts
+            if (
+                len(translations) != len(body.locked_story_facts)
+                or any(not text.strip() or re.search(r"[\u3400-\u9fff]", text) for text in translations)
+            ):
+                raise ValueError("H3_LOCKED_FACT_TRANSLATION_REQUIRED")
 
 
 def _refusal_error(code: str, refusals: list[dict]) -> ValueError:
@@ -1159,6 +1202,11 @@ class FilmAgentDispatcher:
             cap = style.snapshot.get("max_shot_seconds")
             if cap is not None:
                 context["max_shot_seconds"] = float(cap)
+        if body.tool == "scene_board":
+            if context.get("max_shot_seconds") is None:
+                context["max_shot_seconds"] = DEFAULT_MAX_SHOT_SECONDS
+            narration = ((style.snapshot or {}).get("narration_level") if style else None)
+            context["narration_level"] = narration if narration in {"none", "low", "high"} else "none"
         if body.production_context is not None:
             # The architect addresses the whole confirmed plan; every other
             # caller is one unit of the source.
@@ -1407,6 +1455,10 @@ class FilmAgentDispatcher:
                     max_shot_seconds=context.get("max_shot_seconds"),
                     creative_source=(context.get("production_context") or {}).get("creative_source"),
                     cinema_skills_block=skills_block,
+                    continuity_predecessor=bool(
+                        (context.get("production_context") or {}).get("continuity_predecessor")
+                    ),
+                    translation_supplied=False,
                 )
             if repair_visual_language:
                 prompt_text += (
@@ -1609,6 +1661,19 @@ class FilmAgentDispatcher:
                     "outline_sha256": context["production_context"]["outline_sha256"],
                     "plan_sha256": context["production_context"]["plan_sha256"],
                 })
+            if isinstance(proposal, scene_director.SceneShotBoard):
+                scene_artifact = next((a for a in inputs if a.kind == "DramaSceneScript"), inputs[0])
+                verdict = continuity_engine.review_scene_board(
+                    payload,
+                    scene_artifact.payload_json,
+                    {
+                        "max_shot_seconds": context.get("max_shot_seconds"),
+                        "continuity_predecessor": bool(
+                            (context.get("production_context") or {}).get("continuity_predecessor")
+                        ),
+                    },
+                )
+                payload.update(scene_director.board_server_fields(payload, scene_artifact, context, verdict))
             artifact = AgentArtifact(
                 project_id=project_id,
                 kind=contract.__name__,

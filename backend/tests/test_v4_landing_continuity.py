@@ -73,6 +73,10 @@ def test_the_chain_continues_inside_an_episode_and_resets_at_its_first_shot(api)
         if schema.get("title") == "DirectorialPlan":
             for shot in answer["shots"]:
                 shot["continuity"] = {"mode": "last_frame", "note": "the same action continues"}
+        elif schema.get("title") == "SceneShotBoard":
+            for shot in answer["shots"]:
+                shot["transition_motivation"] = "continuous_action"
+                shot["handoff_cue"] = "the same action continues"
         return answer
 
     gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=director_asks_to_continue)
