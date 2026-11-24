@@ -37,7 +37,7 @@ from shine.literary.governor import (
     UnitBudget,
     classify_external_outcome,
 )
-from shine.llm.base import LLMError, ProviderConfig
+from shine.llm.base import DEFAULT_CONTEXT_WINDOW_TOKENS, LLMError, ProviderConfig
 from shine.materialprep.contracts import APPEARANCE_MAX_LENGTH, MaterialImageBrief
 
 __all__ = [
@@ -49,14 +49,6 @@ logger = logging.getLogger(__name__)
 
 CONTEXT_MARGIN_TOKENS = 512
 """The safety margin kept free in the context window (planning estimate)."""
-
-CONSERVATIVE_CONTEXT_WINDOW = 1_000_000
-"""The planning window used by :func:`budget_report` when none is declared.
-
-This is a *queue-time* estimate used to decide whether a unit is too large to
-queue.  It never authorises a send: the Call Governor computes the approved
-budget from the rendered request and refuses an oversized one by name.
-"""
 
 MIN_OUTPUT_RESERVE_TOKENS = 4_096
 MAX_OUTPUT_RESERVE_TOKENS = 131_072
@@ -182,7 +174,7 @@ def budget_report(context: dict[str, Any], schema: dict[str, Any], system_prompt
         schema=schema or {"type": "object"},
     )
     budget = plan_call_budget(config, request, purpose=purpose)
-    window = budget.context_window_tokens or CONSERVATIVE_CONTEXT_WINDOW
+    window = budget.context_window_tokens or DEFAULT_CONTEXT_WINDOW_TOKENS
     available = int(window * input_share)
     total = budget.input_tokens + budget.output_request_tokens + budget.margin_tokens
     return {

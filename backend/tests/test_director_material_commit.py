@@ -786,3 +786,128 @@ def test_recommit_after_revision_1_queued_skips_already_queued_without_409(api):
             MaterialItem.requirement_id == char_req["requirement_id"],
         ).count() == 1
 
+
+def test_post_placement_commit_and_bind_match_parenthetical_character_names(api):
+    """素材后置链路：镜头写「年轻人（陈守义之子）」而主素材写「年轻人」时，
+    commit、bind_adopted_masters_to_shots、evaluate_materials 与 complete_character_bindings
+    共用 asset_identity.character_reference_matches 同一裁决，不再漏绑或 409。"""
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement, PreProductionPlan
+    from shine.director.journey import _shot_material_problems
+    from shine.materialprep.service import bind_adopted_masters_to_shots, evaluate_materials, plan_progress
+    from shine.models import Shot
+    from shine.schemas import ShotBindingInput
+    from shine.services import complete_character_bindings
+    from tests.conftest import PNG, approve_lock, create_project, create_shot, freeze_style, upload_asset
+
+    client, factory, _settings = api
+    project = create_project(client, "括号修饰绑定")
+    style = freeze_style(client, project)
+    shot = create_shot(client, project, style["id"], title="开场", characters=["年轻人（陈守义之子）"])
+    master_a = upload_asset(client, project, content=PNG + b"-young-a",
+                            filename="young_a.png", role="character", entity_id="年轻人")
+    approve_lock(client, master_a["id"])
+    wrong_brother = upload_asset(client, project, content=PNG + b"-wang-bro",
+                                 filename="wang_bro.png", role="character", entity_id="老王（哥哥）")
+    approve_lock(client, wrong_brother["id"])
+
+    # 1) 需求写「年轻人（陈守义之子）」时，选用 entity_id=「年轻人」的主素材可直接确认并绑定到镜头
+    with factory.begin() as db:
+        req = {"family": "character", "entity_id": "年轻人（陈守义之子）",
+               "used_shot_ids": [shot["id"]]}
+        plan = PreProductionPlan(project_id=project, purpose="asset_preparation",
+                                 status="DRAFT", payload={"requirements": [req]}, sha256=graph_hash(req))
+        db.add(plan)
+        db.flush()
+        req_row = AssetRequirement(project_id=project, plan_id=plan.id, status="PROPOSED",
+                                   payload=req, sha256=graph_hash(req))
+        db.add(req_row)
+        db.flush()
+        plan_id, req_id = plan.id, req_row.id
+
+    with factory() as db:
+        snap = plan_progress(db, project)["expected_snapshot"]
+    commit1 = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": plan_id,
+            "expected_snapshot": snap,
+            "decisions": [{
+                "requirement_id": req_id,
+                "strategy": "reuse_master",
+                "entity_id": "年轻人（陈守义之子）",
+                "asset_id": master_a["id"],
+            }],
+            "queue_generation": False,
+        },
+        headers=LOCAL,
+    )
+    assert commit1.status_code == 201, commit1.text
+    assert commit1.json()["confirmation"]["bound_shots"] >= 1
+
+    with factory() as db:
+        s = db.get(Shot, shot["id"])
+        assert [b.asset_id for b in s.bindings] == [master_a["id"]]
+        assert _shot_material_problems(db, s) == []
+        eval1 = evaluate_materials(db, project)
+        assert eval1["materials_ready"] is True, eval1
+        # complete_character_bindings 同样认出同源已选主素材
+        completed = complete_character_bindings(db, project, ["年轻人（陈守义之子）"], [])
+        assert len(completed) == 1 and completed[0].asset_id == master_a["id"]
+    # 切换同角色新主素材 master_b（需求写「年轻人」也匹配镜头「年轻人（陈守义之子）」）
+    master_b = upload_asset(client, project, content=PNG + b"-young-b",
+                            filename="young_b.png", role="character", entity_id="年轻人")
+    approve_lock(client, master_b["id"])
+    with factory.begin() as db:
+        plan2 = PreProductionPlan(project_id=project, purpose="asset_preparation",
+                                  status="CONFIRMED", payload={}, sha256=graph_hash({"v": 2}))
+        db.add(plan2)
+        db.flush()
+        req2 = {"family": "character", "entity_id": "年轻人", "strategy": "reuse_master",
+                "bound_asset_id": master_b["id"], "bound_asset_sha256": master_b["sha256"],
+                "used_shot_ids": [shot["id"]]}
+        db.add(AssetRequirement(project_id=project, plan_id=plan2.id, status="CONFIRMED",
+                                payload=req2, sha256=graph_hash(req2)))
+        plan2_id = plan2.id
+
+    with factory.begin() as db:
+        assert bind_adopted_masters_to_shots(db, project, plan2_id, "local-user") >= 1
+    with factory() as db:
+        s = db.get(Shot, shot["id"])
+        assert [b.asset_id for b in s.bindings] == [master_b["id"]]
+        # 反例：不同括号限定（哥哥 vs 弟弟）绝不互认
+        assert complete_character_bindings(db, project, ["老王（弟弟）"], []) == []
+
+    # 反例：确认「老王（弟弟）」需求时提交「老王（哥哥）」必须 409 ASSET_IDENTITY_MISMATCH
+    with factory.begin() as db:
+        req3 = {"family": "character", "entity_id": "老王（弟弟）", "used_shot_ids": []}
+        plan3 = PreProductionPlan(project_id=project, purpose="asset_preparation",
+                                  status="DRAFT", payload={"requirements": [req3]}, sha256=graph_hash({"v": 3}))
+        db.add(plan3)
+        db.flush()
+        req3_row = AssetRequirement(project_id=project, plan_id=plan3.id, status="PROPOSED",
+                                    payload=req3, sha256=graph_hash(req3))
+        db.add(req3_row)
+        db.flush()
+        plan3_id, req3_id = plan3.id, req3_row.id
+    with factory() as db:
+        snap3 = plan_progress(db, project)["expected_snapshot"]
+    bad = client.post(
+        f"/api/v1/projects/{project}/director/materials/commit",
+        json={
+            "plan_revision_id": plan3_id,
+            "expected_snapshot": snap3,
+            "decisions": [{
+                "requirement_id": req3_id,
+                "strategy": "reuse_master",
+                "entity_id": "老王（弟弟）",
+                "asset_id": wrong_brother["id"],
+            }],
+            "queue_generation": False,
+        },
+        headers=LOCAL,
+    )
+    assert bad.status_code == 409
+    assert bad.json()["detail"] == "ASSET_IDENTITY_MISMATCH"
+    assert ShotBindingInput(asset_id=master_b["id"], use_as="subject").asset_id == master_b["id"]
+

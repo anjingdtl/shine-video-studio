@@ -29,7 +29,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shine.literary.requests import CompiledRequest
-from shine.llm.base import ProviderConfig
+from shine.llm.base import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_MODEL_LIMITS_SOURCE,
+    ProviderConfig,
+)
 from shine.llm.output_budget import CREATIVE_COMPLETION_SHARE, creative_completion_cap
 from shine.llm.transport_policy import streaming_enabled
 
@@ -49,19 +53,12 @@ a 6.4k budget finished the same kind of scene in under two minutes.
 """
 """A request that cannot reserve this much completion room is not sent."""
 
-UNVERIFIED_PLANNING_WINDOW = 262_144
-"""The window an undeclared provider is planned against.
-
-The plan forbids pretending an undeclared model has a 1M window.  This value is
-a *planning* figure, never a capability claim: every budget computed from it is
-marked ``window_verified=False`` and carries ``CONTEXT_WINDOW_UNVERIFIED``.
-"""
-
 SOFT_INPUT_SHARE = 0.80
 BURST_INPUT_SHARE = 0.95
 
 PURPOSE_GOAL_MULTIPLIER = {
     "scene": 0.55,
+    "drama_scene": 0.55,
     "creative": 0.50,
     "outline": 0.45,
     "observation": 0.10,
@@ -88,6 +85,7 @@ PURPOSE_GOAL_MULTIPLIER = {
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
+    "drama_scene": 3_072,
     "creative": 4_096,
     "outline": 4_096,
     "observation": 1_024,
@@ -118,7 +116,8 @@ PURPOSE_REASONING_RESERVE = {
     "outline": LOW_EFFORT_REASONING_RESERVE,
     "entity_catalog": LOW_EFFORT_REASONING_RESERVE,
     "architecture": LOW_EFFORT_REASONING_RESERVE,
-    "scene_board": 4_096,
+    "drama_scene": 8_192,
+    "scene_board": 12_288,
     "observation": 512,
     "qa": 512,
 }
@@ -133,6 +132,7 @@ PURPOSE_REASONING_RESERVE = {
 # more room — it only stops the input-proportional explosion.
 PURPOSE_MAX_GOAL = {
     "scene": 6_144,
+    "drama_scene": 8_192,
     "creative": 12_288,
     "outline": 6_144,
     "observation": 2_048,
@@ -277,9 +277,10 @@ def plan_call_budget(
         requested = min(hard_cap, max(requested, int(output_floor_tokens)))
 
     declared_window = _positive(config.context_window_tokens)
-    window = declared_window or UNVERIFIED_PLANNING_WINDOW
-    window_verified = bool(declared_window)
-    window_source = config.context_window_source if declared_window else "conservative_planning_window"
+    is_project_default = config.context_window_source == DEFAULT_MODEL_LIMITS_SOURCE
+    window = declared_window or DEFAULT_CONTEXT_WINDOW_TOKENS
+    window_verified = bool(declared_window) and not is_project_default
+    window_source = config.context_window_source if declared_window else DEFAULT_MODEL_LIMITS_SOURCE
     if not window_verified:
         warnings.append("CONTEXT_WINDOW_UNVERIFIED")
 

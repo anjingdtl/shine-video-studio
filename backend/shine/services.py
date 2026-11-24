@@ -694,9 +694,14 @@ def complete_character_bindings(
         ) for binding in result):
             continue
         pinned = selection.get(name)
+        if pinned is None:
+            matched_keys = [key for key in selection if character_reference_matches(name, key)]
+            if len(matched_keys) == 1:
+                pinned = selection[matched_keys[0]]
         if pinned:
             asset = masters.get(pinned["bound_asset_id"])
-            if (asset is None or asset.entity_id != (pinned.get("canonical_entity_id") or name)
+            expected_entity = pinned.get("canonical_entity_id") or name
+            if (asset is None or not character_reference_matches(asset.entity_id, expected_entity)
                     or pinned.get("bound_asset_sha256") not in (None, asset.sha256)):
                 continue
         else:

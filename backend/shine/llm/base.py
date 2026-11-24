@@ -76,6 +76,13 @@ class ChatMessage:
     content: str
 
 
+#: 项目默认的模型能力：服务商目录未声明限制的模型一律按 1M 上下文、128K 输出规划，
+#: 仍诚实记为未验证（project_default_model_limits）。
+DEFAULT_CONTEXT_WINDOW_TOKENS = 1_000_000
+DEFAULT_MAX_OUTPUT_TOKENS = 131_072
+DEFAULT_MODEL_LIMITS_SOURCE = "project_default_model_limits"
+
+
 @dataclass(frozen=True)
 class ProviderConfig:
     profile_id: str
@@ -90,7 +97,7 @@ class ProviderConfig:
     generation_options: dict[str, Any] = field(default_factory=dict)
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
-    context_window_source: str = "provider_did_not_declare_limits"
+    context_window_source: str = DEFAULT_MODEL_LIMITS_SOURCE
     streaming: bool = False
     """Whether this request may use the streaming transport.
 

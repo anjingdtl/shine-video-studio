@@ -1331,7 +1331,8 @@ class FilmAgentDispatcher:
         model_context_metadata = model_context_for_profile(profile)
         from shine.llm.gateway import agent_output_config
 
-        bounded_config = agent_output_config(self.gateway.config_for(profile))
+        raw_config = self.gateway.config_for(profile)
+        bounded_config = agent_output_config(raw_config)
         agent_output_limit = (bounded_config.generation_options.get("max_completion_tokens")
                               or bounded_config.generation_options.get("max_tokens"))
         if bounded_config.kind == "anthropic":
@@ -1347,6 +1348,7 @@ class FilmAgentDispatcher:
                 base_context=context,
                 pack=pack,
                 profile=profile,
+                raw_config=raw_config,
                 bounded_config=bounded_config,
                 model_context_metadata=model_context_metadata,
                 agent_output_limit=agent_output_limit,
@@ -1532,10 +1534,11 @@ class FilmAgentDispatcher:
             # is a long answer. This is a role classification, not a per-call
             # reserve hack.
             crew_purpose = ("architecture" if body.tool == "series_architecture"
+                            else "drama_scene" if body.tool == "drama_scene"
                             else "scene_board" if body.tool == "scene_board"
                             else "observation" if role == "continuity_supervisor" else "structured")
             crew_budget = plan_call_budget(
-                bounded_config, crew_request, purpose=crew_purpose,
+                raw_config, crew_request, purpose=crew_purpose,
                 output_ceiling=agent_output_limit,
                 output_floor_tokens=agent_output_limit if escalate_output_budget else None,
             )
@@ -1549,7 +1552,7 @@ class FilmAgentDispatcher:
                     schema=wire_contract.model_json_schema(),
                 )
                 crew_budget = plan_call_budget(
-                    bounded_config, crew_request, purpose=crew_purpose,
+                    raw_config, crew_request, purpose=crew_purpose,
                     output_ceiling=agent_output_limit,
                     output_floor_tokens=agent_output_limit if escalate_output_budget else None,
                 )
@@ -1780,6 +1783,7 @@ class FilmAgentDispatcher:
         base_context: dict,
         pack,
         profile,
+        raw_config,
         bounded_config,
         model_context_metadata: dict,
         agent_output_limit: int | None,
@@ -1951,7 +1955,7 @@ class FilmAgentDispatcher:
                         system=sys_prompt, user=user_json, schema=ContinuityReport.model_json_schema(),
                     )
                     crew_budget = plan_call_budget(
-                        bounded_config, crew_request, purpose="observation",
+                        raw_config, crew_request, purpose="observation",
                         output_ceiling=agent_output_limit,
                         output_floor_tokens=agent_output_limit if escalate_output_budget else None,
                     )
@@ -1961,7 +1965,7 @@ class FilmAgentDispatcher:
                             system=sys_prompt, user=user_json, schema=ContinuityReport.model_json_schema(),
                         )
                         crew_budget = plan_call_budget(
-                            bounded_config, crew_request, purpose="observation",
+                            raw_config, crew_request, purpose="observation",
                             output_ceiling=agent_output_limit,
                             output_floor_tokens=agent_output_limit if escalate_output_budget else None,
                         )

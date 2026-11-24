@@ -26,6 +26,11 @@ from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 
+from shine.asset_identity import (
+    character_reference_key,
+    character_reference_matches,
+    split_character_names,
+)
 from shine.comfy.workflow import graph_hash
 from shine.comfyops.assets import require_rights
 from shine.comfyops.models import (
@@ -349,6 +354,15 @@ def confirmation_snapshot(plan: PreProductionPlan) -> dict[str, Any]:
     }
 
 
+def _entity_matches(family: str | None, left: str | None, right: str | None) -> bool:
+    if left == right:
+        return True
+    if family == "character":
+        return character_reference_matches(left, right)
+    key = character_reference_key(left)
+    return bool(key) and key == character_reference_key(right)
+
+
 def confirmation_snapshot_hash(plan: PreProductionPlan) -> str:
     """The hash the client quotes back in a confirmation.
 
@@ -420,7 +434,11 @@ def confirm(db, actor: str, project_id: str, body: MaterialConfirmation, *,
         selected = db.get(Asset, selected_id) if selected_id else None
         if selected_id and (selected is None or selected.project_id != project_id
                             or selected.role != requirement_payload.get("family")
-                            or selected.entity_id != (canonical_entity or requirement_payload.get("entity_id"))):
+                            or not _entity_matches(
+                                requirement_payload.get("family"),
+                                selected.entity_id,
+                                canonical_entity or requirement_payload.get("entity_id"),
+                            )):
             raise HTTPException(409, "ASSET_IDENTITY_MISMATCH")
         if decision.strategy == "reuse_master" and selected is None:
             raise HTTPException(422, "MATERIAL_EXPLICIT_ASSET_REQUIRED")
@@ -1248,6 +1266,20 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             continue
         if citations is not None:
             evidence = citations.get((str(family), entity))
+            if evidence is None:
+                matched_evidences = [
+                    ev for (fam, ent), ev in citations.items()
+                    if fam == str(family) and _entity_matches(str(family), ent, entity)
+                ]
+                if matched_evidences:
+                    evidence = {
+                        "shot_ids": sorted({
+                            str(s) for ev in matched_evidences for s in (ev.get("shot_ids") or [])
+                        }),
+                        "used_episodes": sorted({
+                            str(e) for ev in matched_evidences for e in (ev.get("used_episodes") or [])
+                        }),
+                    }
             used = {str(s) for s in (evidence or {}).get("shot_ids") or []}
             if evidence is not None and sorted(used) != sorted(str(s) for s in payload.get("used_shot_ids") or []):
                 requirement.payload = {
@@ -1273,13 +1305,20 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             # 场景底图就是这一镜渲染的环境图，Ref2VA 至少一个参考时由它兜底。
             decisions.setdefault(str(shot_id), {})[(str(family), entity)] = asset.id
 
-    entities = {entity for (_, entity, _) in row_citations}
     bound_shot_ids: set[str] = set()
-    if entities:
-        bound_shot_ids = set(db.scalars(
-            sa_select(ShotAssetBinding.shot_id).where(ShotAssetBinding.asset_id.in_(
-                sa_select(Asset.id).where(Asset.project_id == project_id,
-                                          Asset.entity_id.in_(entities))))))
+    if row_citations:
+        matched_asset_ids = [
+            asset.id
+            for asset in db.scalars(sa_select(Asset).where(Asset.project_id == project_id)).all()
+            if any(
+                asset.role == fam and _entity_matches(fam, asset.entity_id, ent)
+                for (fam, ent, _) in row_citations
+            )
+        ]
+        if matched_asset_ids:
+            bound_shot_ids = set(db.scalars(
+                sa_select(ShotAssetBinding.shot_id).where(ShotAssetBinding.asset_id.in_(matched_asset_ids))
+            ))
     touched = sorted({sid for (_, _, used) in row_citations for sid in used} | bound_shot_ids)
     protected = protected_shot_ids(db, project_id, touched)
 
@@ -1287,12 +1326,12 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         """Whether this existing binding is the slot the decision replaces."""
         if link.use_as != ("subject" if family == "character" else "picture"):
             return False
-        if link.role == entity:
+        if _entity_matches(family, link.role, entity):
             return True
         if family == "character" and link.role:
             return False
         old = db.get(Asset, link.asset_id)
-        return old is not None and str(old.entity_id or "") == entity
+        return old is not None and _entity_matches(family, old.entity_id, entity)
 
     scene_row_by_asset: dict[str, Any] = {}
     release_ids: set[str] = set()
@@ -1323,9 +1362,17 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
         ))
         if passed is not None:
             continue
-        declared_characters = list((shot.spec or {}).get("characters") or [])
-        wanted = {key: asset_id for key, asset_id in decisions.get(shot_id, {}).items()
-                  if key[0] != "character" or key[1] in declared_characters}
+        declared_characters = [
+            name
+            for entry in ((shot.spec or {}).get("characters") or [])
+            for name in split_character_names(entry)
+        ]
+        wanted = {
+            key: asset_id
+            for key, asset_id in decisions.get(shot_id, {}).items()
+            if key[0] != "character"
+            or any(character_reference_matches(declared, key[1]) for declared in declared_characters)
+        }
 
         # 2. The target set: keep every valid reference, drop the master a
         #    requirement is being moved off, then add the confirmed ones.
@@ -1480,7 +1527,9 @@ def evaluate_materials(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
         if match is None:
             reason = "ASSET_OR_VOICE_MISSING"
         else:
-            if match.role != family or match.entity_id != (payload.get("canonical_entity_id") or entity_id):
+            if match.role != family or not _entity_matches(
+                family, match.entity_id, payload.get("canonical_entity_id") or entity_id
+            ):
                 reason = "ASSET_IDENTITY_MISMATCH"
             if payload.get("bound_asset_sha256") and payload["bound_asset_sha256"] != match.sha256:
                 reason = "ASSET_HASH_CHANGED"
@@ -1542,16 +1591,25 @@ def plan_progress(db, project_id: str, *, data_dir=None) -> dict[str, Any]:
                 "requirements": [], "runs": [], "blockers": []}
     from shine.models import Asset
 
-    masters = {
-        (a.role, a.entity_id): a
-        for a in db.scalars(select(Asset).where(
+    master_rows = [
+        a for a in db.scalars(select(Asset).where(
             Asset.project_id == project_id, Asset.approved.is_(True), Asset.locked.is_(True)))
         if a.entity_id
-    }
+    ]
+    masters = {(a.role, a.entity_id): a for a in master_rows}
     requirements = []
     for row in db.scalars(select(AssetRequirement).where(AssetRequirement.plan_id == plan.id)).all():
         payload = row.payload or {}
-        master = masters.get((payload.get("family"), payload.get("entity_id")))
+        family = payload.get("family")
+        entity_id = payload.get("entity_id")
+        master = masters.get((family, entity_id))
+        if master is None and entity_id:
+            candidates = [
+                a for a in master_rows
+                if a.role == family and _entity_matches(family, a.entity_id, entity_id)
+            ]
+            if candidates:
+                master = max(candidates, key=lambda a: a.created_at)
         used_shot_ids = payload.get("used_shot_ids") or []
         requirements.append({
             "requirement_id": row.id,

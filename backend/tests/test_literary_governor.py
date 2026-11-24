@@ -136,11 +136,11 @@ def test_a_small_task_asks_for_a_small_completion_not_the_ceiling():
     assert "REASONING_RESERVE_CONSERVATIVE" not in budget.warnings
 
 
-def test_an_undeclared_window_is_planned_conservatively_and_never_called_1m():
+def test_an_undeclared_window_uses_project_default_1m_and_stays_unverified():
     config = _config(context_window_tokens=None, context_window_source="none")
     budget = plan_call_budget(config, compile_request(system="s", user="u", schema=None))
     assert budget.window_verified is False
-    assert budget.context_window_tokens != 1_000_000
+    assert budget.context_window_tokens == 1_000_000
     assert "CONTEXT_WINDOW_UNVERIFIED" in budget.warnings
 
 

@@ -36,11 +36,34 @@ def test_deepseek_model_metadata_supplies_input_and_output_windows():
     assert context["source"] == "provider_models_metadata"
 
 
-def test_unknown_models_keep_full_input_policy_without_fake_small_limit():
+def test_unknown_models_use_project_default_one_million_and_128k_limits():
     context = model_context_from_capabilities({}, "https://llm.example/v1", "unknown-model")
-    assert context["context_window_tokens"] is None
-    assert context["max_output_tokens"] is None
-    assert context["source"] == "provider_did_not_declare_limits"
+    assert context["context_window_tokens"] == 1_000_000
+    assert context["max_output_tokens"] == 131_072
+    assert context["source"] == "project_default_model_limits"
+
+
+def test_unknown_profile_uses_project_default_limits_and_preserves_unverified_basis():
+    profile = ProviderProfile(
+        id="p-unknown", name="AliyunDeepSeek", kind="openai_compatible",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        model="deepseek-v4.1-flash-1017", enabled=True,
+        capabilities={}, generation_options={}, timeout_s=300, max_retries=2, temperature=0.2,
+    )
+    ctx = model_context_for_profile(profile)
+    assert ctx["context_window_tokens"] == 1_000_000
+    assert ctx["max_output_tokens"] == 131_072
+    assert ctx["source"] == "project_default_model_limits"
+    config = LLMGateway(None).config_for(profile)
+    assert config.context_window_tokens == 1_000_000
+    assert config.max_output_tokens == 131_072
+    assert config.context_window_source == "project_default_model_limits"
+    from shine.llm.output_budget import creative_completion_cap
+    cap = creative_completion_cap(config)
+    assert cap["completion_cap"] == 78_643
+    assert cap["output_max_verified"] is False
+    assert cap["capability_basis"] == "project_default_min_chain"
+    assert cap["requires_capability_confirmation"] is True
 
 
 def test_model_list_context_metadata_is_returned_by_connection_check(monkeypatch):

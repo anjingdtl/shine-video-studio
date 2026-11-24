@@ -23,7 +23,7 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
-from shine.llm.base import ProviderConfig
+from shine.llm.base import DEFAULT_MODEL_LIMITS_SOURCE, ProviderConfig
 
 CREATIVE_COMPLETION_SHARE = 0.60
 CONSERVATIVE_DEFAULT_LIMIT = 131_072
@@ -98,12 +98,16 @@ def creative_completion_cap(config: ProviderConfig, *, estimated_input_tokens: i
     probed = _probed_cap(config)
     configured = _positive_int(config.generation_options.get("max_completion_tokens"))
     adapter_cap = _adapter_cap(config)
+    is_project_default = config.context_window_source == DEFAULT_MODEL_LIMITS_SOURCE
 
     if probed:
         sources.append({"source": "probed_output_max", "max": probed, "kind": "capability"})
-    if declared:
+    if declared and not is_project_default:
         sources.append({"source": "provider_declared_max_output", "max": declared,
                         "kind": "capability"})
+    elif declared and is_project_default:
+        sources.append({"source": "project_default_max_output", "max": declared,
+                        "kind": "default"})
     if configured:
         sources.append({"source": "profile_configured_cap", "max": configured,
                         "kind": "constraint"})
@@ -117,6 +121,11 @@ def creative_completion_cap(config: ProviderConfig, *, estimated_input_tokens: i
         cap = int(math.floor(ceiling * CREATIVE_COMPLETION_SHARE))
         verified = True
         basis = "capability_min_chain"
+    elif declared and is_project_default:
+        ceiling = min([declared, *constraints])
+        cap = int(math.floor(ceiling * CREATIVE_COMPLETION_SHARE))
+        verified = False
+        basis = "project_default_min_chain"
     else:
         model = _model_id(config)
         baseline = MINIMAX_M31_FLASH_DEFAULT_LIMIT if model in {

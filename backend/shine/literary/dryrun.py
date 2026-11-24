@@ -151,8 +151,8 @@ def plan_stage_units(
             "it is a risk check, not the output target")
     if not plan.window_verified:
         plan.notes.append(
-            "provider did not declare a context window; the plan uses a conservative "
-            "planning window and no capability claim is made")
+            "provider did not declare a context window; the plan uses the project "
+            "default planning window and no capability claim is made")
     return plan
 
 

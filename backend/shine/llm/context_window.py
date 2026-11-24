@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
+from shine.llm.base import (
+    DEFAULT_CONTEXT_WINDOW_TOKENS,
+    DEFAULT_MAX_OUTPUT_TOKENS,
+    DEFAULT_MODEL_LIMITS_SOURCE,
+)
+
 _MINIMAX_HOSTS = {"api.minimax.cn", "api.minimax.io", "api.minimaxi.com", "platform.minimax.io"}
 
 
@@ -69,10 +75,14 @@ def model_context_from_capabilities(capabilities: dict | None, base_url: str, mo
         if context_window is not None or max_output is not None:
             return {
                 "model": model,
-                "context_window_tokens": context_window or (official or {}).get("context_window_tokens"),
-                "max_output_tokens": max_output or (official or {}).get("max_output_tokens"),
+                "context_window_tokens": (
+                    context_window or (official or {}).get("context_window_tokens") or DEFAULT_CONTEXT_WINDOW_TOKENS
+                ),
+                "max_output_tokens": (
+                    max_output or (official or {}).get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS
+                ),
                 "source": "provider_models_metadata" if context_window is not None else (
-                    "provider_output_with_official_context" if official else "provider_models_metadata"
+                    "provider_output_with_official_context" if official else DEFAULT_MODEL_LIMITS_SOURCE
                 ),
             }
     declared = capabilities.get("model_context")
@@ -82,17 +92,21 @@ def model_context_from_capabilities(capabilities: dict | None, base_url: str, mo
         if context_window is not None or max_output is not None:
             return {
                 "model": model,
-                "context_window_tokens": context_window or (official or {}).get("context_window_tokens"),
-                "max_output_tokens": max_output or (official or {}).get("max_output_tokens"),
+                "context_window_tokens": (
+                    context_window or (official or {}).get("context_window_tokens") or DEFAULT_CONTEXT_WINDOW_TOKENS
+                ),
+                "max_output_tokens": (
+                    max_output or (official or {}).get("max_output_tokens") or DEFAULT_MAX_OUTPUT_TOKENS
+                ),
                 "source": str(declared.get("source") or "provider_models_metadata") if context_window is not None else (
-                    "provider_output_with_official_context" if official else "provider_models_metadata"
+                    "provider_output_with_official_context" if official else DEFAULT_MODEL_LIMITS_SOURCE
                 ),
             }
     return official or {
         "model": model,
-        "context_window_tokens": None,
-        "max_output_tokens": None,
-        "source": "provider_did_not_declare_limits",
+        "context_window_tokens": DEFAULT_CONTEXT_WINDOW_TOKENS,
+        "max_output_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "source": DEFAULT_MODEL_LIMITS_SOURCE,
     }
 
 

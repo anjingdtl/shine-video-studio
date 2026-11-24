@@ -99,3 +99,45 @@ def test_a_huge_input_does_not_explode_the_goal():
         budget = plan_call_budget(config, request, purpose=purpose)
         assert budget.visible_goal_tokens <= PURPOSE_MAX_GOAL[purpose]
         assert budget.output_request_tokens < 100_000
+
+
+def test_film_crew_budget_does_not_double_discount_default_32k_agent_ceiling():
+    import inspect
+
+    import shine.literary.budget as literary_budget
+    import shine.materialprep.agent_call as mat_agent_call
+    import shine.materialprep.brief as mat_brief
+    from shine.llm.gateway import DEFAULT_AGENT_OUTPUT_TOKENS, agent_output_config
+
+    assert not hasattr(literary_budget, "UNVERIFIED_PLANNING_WINDOW")
+    assert not hasattr(mat_agent_call, "CONSERVATIVE_CONTEXT_WINDOW")
+    assert not hasattr(mat_brief, "CONSERVATIVE_CONTEXT_WINDOW")
+    assert "UNVERIFIED_PLANNING_WINDOW" not in inspect.getsource(literary_budget)
+
+    raw_cfg = ProviderConfig(
+        profile_id="p", name="AliyunDeepSeek", kind="openai_compatible",
+        base_url="https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1",
+        model="deepseek-v4.1-flash-1017", api_key="k",
+        timeout_s=300, max_retries=2, temperature=0.2, generation_options={},
+        context_window_tokens=1_000_000, max_output_tokens=131_072,
+        context_window_source="project_default_model_limits",
+    )
+    bounded = agent_output_config(raw_cfg)
+    limit = bounded.generation_options["max_completion_tokens"]
+    assert limit == DEFAULT_AGENT_OUTPUT_TOKENS == 32_768
+
+    drama_req = compile_request(system="s", user="u" * 4_000, schema={"type": "object"})
+    drama_b1 = plan_call_budget(raw_cfg, drama_req, purpose="drama_scene", output_ceiling=limit)
+    assert drama_b1.output_cap_tokens == 32_768
+    assert drama_b1.output_request_tokens >= 11_000
+
+    board_req = compile_request(system="s", user="u" * 18_000, schema={"type": "object"})
+    board_b1 = plan_call_budget(raw_cfg, board_req, purpose="scene_board", output_ceiling=limit)
+    assert board_b1.output_cap_tokens == 32_768
+    assert board_b1.output_request_tokens >= 24_000
+
+    board_esc = plan_call_budget(
+        raw_cfg, board_req, purpose="scene_board",
+        output_ceiling=limit, output_floor_tokens=limit,
+    )
+    assert board_esc.output_request_tokens == 32_768
