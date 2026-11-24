@@ -233,13 +233,16 @@ def test_a_single_row_commit_keeps_the_whole_requirement_list(api):
 def test_derive_reuses_real_masters_and_does_not_force_fill_scenes(api):
     """2026-11-17 用户报障：Ref2VA 最低参考被用「每场一张互不相同的无关场景图」
     满足，且真实需要的人物/场景/道具不被复用。新逻辑：有人物等真实参考时不为每场
-    强造填充场景；已批准锁定的主素材按实体复用（matched_master），不重复生成。"""
+    强造填充场景（如「第1场」「第2场」）；只对 SceneShotBoard 声明的注册地点
+    合并需求，且已批准锁定的主素材按实体复用（matched_master），不重复生成。"""
     client, _factory, settings = api
     project, derived = _episode_one_requirements(client, settings)
     rows = derived["requirements"]
     families = [row["family"] for row in rows]
     assert "character" in families, "点名人物仍是真实需求"
-    assert "scene" not in families, "镜头已有人物参考时不应为每场强造填充场景板"
+    # Not force-filled per section ("第1场", "第2场"): at most the board's declared place ("钟表铺").
+    scene_entities = {row["entity_id"] for row in rows if row["family"] == "scene"}
+    assert scene_entities <= {"钟表铺"}, f"不应为每场强造填充场景板: {scene_entities}"
     character = next(row for row in rows if row["family"] == "character")
     assert character["matched_master"] is not None, "已批准人物主素材应被复用而非重生成"
 
@@ -253,7 +256,7 @@ def test_streamline_project_surfaces_core_scenes_and_props_from_script_preparati
 
     client, factory, settings = api
     project, derived = _episode_one_requirements(client, settings)
-    assert "scene" not in {r["family"] for r in derived["requirements"]}
+    assert "边陲镇中央圆形广场" not in {r["entity_id"] for r in derived["requirements"]}
     payload = {"schema_version": "1.0", "scene_key": "S1", "summary": "", "locked_facts": [],
                "requirements": [
                    {"family": "scene", "name": "边陲镇中央圆形广场", "description": "低矮砖石房屋环绕。",
