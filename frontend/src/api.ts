@@ -1732,7 +1732,6 @@ export type EpisodeStoryboardState = {
                    section_order?: number; section_title?: string }>;
     shot_ids: string[];
     status: 'PENDING' | 'IN_PROGRESS' | 'APPLIED' | 'BLOCKED' | string;
-    fit_closed?: boolean;
     sections?: Array<{ production_section_id: string; section_order?: number;
                        section_title?: string; shot_count: number; state: string;
                        unit_count: number; applied_count: number }>;
@@ -1765,17 +1764,16 @@ export const fetchEpisodeShots = (projectId: string, episodeId: string) =>
         duration_verdict?: { code: string; actual_seconds: number; target_seconds: number;
                              tolerance_seconds: number; window_low_s: number; window_high_s: number;
                              deviation_seconds: number } | null;
-        target_fit?: { shot_count: number; seconds: number; shot_ids: string[] } | null;
         confirmed_seconds?: number | null;
         confirmed_shot_ids?: string[]; confirmed_version?: number | null; confirmation_stale?: boolean }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/shots`);
 
+/** 一集确认的是它全部落下的镜头；时长偏差由 acknowledgeDurationDeviation 显式接受，不裁掉结尾。 */
 export const confirmEpisodeShots = (projectId: string, episodeId: string,
-  acknowledgeDurationDeviation = false, fitTarget = false) =>
+  acknowledgeDurationDeviation = false) =>
   api<{ plan_version: number; episode_id: string; shot_ids: string[] }>(
     `/projects/${projectId}/director/storyboard/episodes/${encodeURIComponent(episodeId)}/confirm`,
-    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation,
-                  fit_target: fitTarget }));
+    json('POST', { acknowledge_duration_deviation: acknowledgeDurationDeviation }));
 
 export const retryEpisodeStoryboard = (projectId: string, episodeId: string, expectedStateVersion: number) =>
   api<{ task_id: string; status: string; episode_id: string }>(

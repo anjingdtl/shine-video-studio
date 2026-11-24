@@ -471,8 +471,6 @@ class EpisodeConfirmBody(APIModel):
     expected_state_version: int | None = None
     #: Explicit acceptance of a landed episode total outside the target window.
     acknowledge_duration_deviation: bool = False
-    #: Confirm the target-fitting prefix of landed shots; the rest stays history.
-    fit_target: bool = False
 
 
 @router.post("/projects/{project_id}/director/storyboard/episodes/{episode_id}/confirm")
@@ -481,8 +479,7 @@ def confirm_episode(project_id: str, episode_id: str, actor: Operator, db: DBSes
     require_project(db, project_id)
     result = streamline.confirm_episode_shots(
         db, project_id, episode_id, actor=actor,
-        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False),
-        fit_target=(body.fit_target if body else False))
+        acknowledge_duration_deviation=(body.acknowledge_duration_deviation if body else False))
     db.commit()
     return result
 

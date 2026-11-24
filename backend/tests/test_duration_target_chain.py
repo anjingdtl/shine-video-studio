@@ -1,20 +1,29 @@
 """The duration-goal control chain (three principles: one fact, one verdict,
 one executor).
 
-``target_seconds`` used to stop at episode grouping and a displayed deviation,
-so the crew only saw the per-shot ceiling and hugged the dialogue minimum — a
-60s target came out as ~26s of 5s shots. These tests pin the goal carried to the
-crew, the one verdict shared by plan and episode confirmation, and the explicit
-acknowledgement a deviating confirmation requires. The continuity guidance that
-keeps a sequence coherent (instead of fragmenting into independent cuts) is
-pinned here too.
+``target_seconds`` is the person's confirmed per-episode goal.  It reaches the
+production in one way: the drama layer shares an episode's goal among its
+scenes by dramatic weight, and each scene is WRITTEN to its share.  It is never
+a landing gate.  These tests pin the one verdict shared by the storyboard book
+and the episode confirmation, the explicit acknowledgement a deviating
+confirmation requires, and the fact that an episode is never cut short because
+its landed seconds reached the goal.  The continuity guidance that keeps a
+sequence coherent (instead of fragmenting into independent cuts) is pinned here
+too.
 """
 
 from __future__ import annotations
 
+import copy
+
+import pytest
+from fastapi import HTTPException
+from sqlalchemy import select
+
 from shine.agents.crew_prompts import crew_prompt
 from shine.director import streamline
 from shine.director.contracts import duration_target_verdict
+from shine.models import AgentTaskRecord, Shot
 from tests.test_director_streamline import (
     LOCAL,
     _confirm_book,
@@ -36,44 +45,16 @@ def test_duration_target_verdict_is_one_window_check():
     assert high and high["deviation_seconds"] == 37.4
 
 
-def test_unit_targets_allocate_the_episode_goal_by_source_length():
-    units = [
-        {"episode_id": "ep-01", "start_offset": 0, "end_offset": 100},
-        {"episode_id": "ep-01", "start_offset": 100, "end_offset": 300},
-        {"episode_id": "ep-02", "start_offset": 300, "end_offset": 500},
-    ]
-    streamline._allocate_unit_targets(units, 60.0)
-    ep1 = [u["target_seconds"] for u in units if u["episode_id"] == "ep-01"]
-    ep2 = [u["target_seconds"] for u in units if u["episode_id"] == "ep-02"]
-    # Each episode's units sum back to the goal; the longer unit carries more.
-    assert round(sum(ep1), 1) == 60.0
-    assert ep1[1] > ep1[0]
-    assert ep2 == [60.0]
-
-
-def test_unit_target_never_below_the_h3_segment_floor():
-    units = [
-        {"episode_id": "ep-01", "start_offset": 0, "end_offset": 10},
-        {"episode_id": "ep-01", "start_offset": 10, "end_offset": 1000},
-    ]
-    streamline._allocate_unit_targets(units, 60.0)
-    # A 1% fragment would allocate 0.6s, below the renderer's 4s minimum: it is
-    # bumped to the floor so the crew is never asked for an impossible segment.
-    assert units[0]["target_seconds"] >= 4.0
-
-
-def test_director_prompt_carries_the_unit_goal_and_prefers_continuity():
-    targeted = crew_prompt("director", tool="storyboard", max_shot_seconds=10,
-                           unit_target_seconds=20)
-    assert "20 seconds of total screen time" in targeted
-    assert "develop each shot's action" in targeted
-    assert "10 seconds" in targeted  # the ceiling is still stated
+def test_the_director_prompt_states_the_ceiling_and_prefers_continuity():
+    prompt = crew_prompt("director", tool="storyboard", max_shot_seconds=10)
+    assert "4-10 second render segment" in prompt  # the per-shot ceiling is stated
+    # The episode goal is not the director's number: a scene arrives already
+    # written to its share of it, and the director shoots that scene whole.
+    assert "total screen time" not in prompt
     # Continuity follows narrative flow: a continuing action prefers last_frame,
     # cut is reserved for a genuine narrative break — not every angle change.
-    assert "prefer" in targeted and "last_frame" in targeted
-    assert "genuine narrative break" in targeted
-    plain = crew_prompt("director", tool="storyboard", max_shot_seconds=10)
-    assert "total screen time" not in plain  # no goal invented when none is given
+    assert "prefer" in prompt and "last_frame" in prompt
+    assert "genuine narrative break" in prompt
 
 
 def test_book_confirm_refuses_duration_deviation_until_acknowledged(api):
@@ -139,134 +120,108 @@ def test_manual_episode_confirm_enforces_the_goal_but_auto_confirm_proceeds(api)
     assert accepted.status_code == 200, accepted.text
 
 
-def test_fit_closed_episode_is_applied_and_confirmable(api):
+def test_an_episode_is_never_cut_short_once_its_landed_seconds_reach_the_goal(api):
     client, factory, settings = api
-    prepared = _prepare_project(client, sections=4, section_seconds=30)
+    # Two 5-second scenes per episode and a 10-second goal: the first scene's
+    # two shots (13 s) already exceed the goal before the second scene runs.
+    prepared = _prepare_project(client, sections=4, section_seconds=5)
     project = prepared["project"]
-    book = _storyboard_book(client, project, episode_count=2, target_seconds=60)
+    book = _storyboard_book(client, project, episode_count=2, target_seconds=10, tolerance_seconds=0)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
-
-    # Simulate an episode that stopped early after hitting target_seconds (fit_closed)
-    # before its second section ran: it must surface as APPLIED (not IN_PROGRESS)
-    # and allow confirmation without rejecting the skipped section.
-    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL).json()
-    task_id = queued["task_id"]
-
-    from shine.llm.gateway import LLMGateway
-    from shine.llm.secrets import SecretStore
-    from shine.models import AgentTaskRecord
-    from tests.test_director_streamline import _chain_responder
-
-    assets = client.get(f"/api/v1/projects/{project}/assets").json()
-    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
-    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
-
-    # Run only the first unit (sec-01 of ep-01), then mark ep-01 fit_closed with 60s
-    # while leaving sec-02 un-run.
-    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
-    with factory.begin() as db:
-        task = db.get(AgentTaskRecord, task_id)
-        trace = dict(task.trace)
-        trace["fit_closed_episodes"] = {"ep-01": {"landed_seconds": 60.0}}
-        task.trace = trace
+    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate",
+                         json={}, headers=LOCAL).json()
+    _run_storyboard_to_rest(client, settings, project, max_ticks=60)
 
     state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
-    ep1 = next(ep for ep in state["episodes"] if ep["episode_id"] == "ep-01")
-    assert ep1["fit_closed"] is True
-    assert ep1["status"] == "APPLIED"
-    assert ep1["shot_ids"]
+    assert state["status"] == "SUCCEEDED", state
+    assert state["cursor"] == state["total_units"] == 4
+    first = next(ep for ep in state["episodes"] if ep["episode_id"] == "ep-01")
+    # The second scene was still storyboarded and landed: the episode is whole.
+    assert [unit["state"] for unit in first["units"]] == ["APPLIED", "APPLIED"]
+    assert len(first["shot_ids"]) == 4
+    assert first["status"] == "APPLIED"
+    assert "fit_closed" not in first
 
-    confirmed = client.post(
-        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
+    with factory() as db:
+        plan = streamline._latest_plan(db, project)
+        run = db.get(AgentTaskRecord, queued["task_id"])
+        run_trace = dict(run.trace)
+    episode = next(e for e in plan.payload["episodes"] if e["episode_id"] == "ep-01")
+    # Confirmed with every landed shot, and the overrun is the recorded
+    # deviation — no scene was declared out of scope to make the number.
+    assert episode["shot_ids"] == first["shot_ids"]
+    assert "sec-02" not in plan.payload["out_of_scope_section_ids"]
+    assert "fit_closed_episodes" not in run_trace
+    assert [unit["production_section_id"] for unit in run_trace["units"]] == [
+        "sec-01", "sec-02", "sec-03", "sec-04"]
+    assert not any("target_seconds" in unit for unit in run_trace["units"])
 
 
-def test_target_window_reached_episode_confirms_without_fit_closed_trace(api):
+def test_a_scene_without_shots_blocks_confirmation_however_long_the_others_ran(api):
     client, factory, settings = api
-    prepared = _prepare_project(client, sections=4, section_seconds=10)
+    prepared = _prepare_project(client, sections=2, section_seconds=5)
     project = prepared["project"]
-    book = _storyboard_book(client, project, episode_count=2, target_seconds=20, tolerance_seconds=10)
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=10, tolerance_seconds=0)
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
-
-    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL).json()
-    task_id = queued["task_id"]
-
-    from shine.llm.gateway import LLMGateway
-    from shine.llm.secrets import SecretStore
-    from shine.models import AgentTaskRecord
-    from tests.test_director_streamline import _chain_responder
-
-    assets = client.get(f"/api/v1/projects/{project}/assets").json()
-    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
-    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
-
-    # Land only sec-01 (13s, inside 20±10 window) and mark task SUCCEEDED without
-    # fit_closed_episodes in trace (simulating pre-fix persisted runs).
-    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
-    with factory.begin() as db:
-        task = db.get(AgentTaskRecord, task_id)
-        trace = dict(task.trace)
-        trace.pop("fit_closed_episodes", None)
-        task.trace = trace
-        task.status = "SUCCEEDED"
-
-    state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
-    ep1 = next(ep for ep in state["episodes"] if ep["episode_id"] == "ep-01")
-    assert ep1["fit_closed"] is True
-    assert ep1["status"] == "APPLIED"
-
-    confirmed = client.post(
-        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-        json={}, headers=LOCAL)
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
-
-
-def test_single_long_section_split_into_units_fit_closed_confirms(api):
-    """A single long section split into multiple units that stops early via fit_closed
-    must keep that section in kept_sections and NOT also list it in out_of_scope."""
-    client, factory, settings = api
-    from shine.llm.gateway import LLMGateway
-    from shine.llm.secrets import SecretStore
-    from tests.test_director_streamline import _approved_outline, _chain_responder, _document
-    from tests.test_film_crew import prepare
-
-    project, _style, _profile = prepare(
-        client, freeze=False, character_entity_id="老周", character_filename="老周.png")
-    # 2000 chars -> split into 2 units by segment_document(max_scene_chars=1200)
-    long_body = ("第1场\n老周把怀表贴近耳朵，又放回丝绒垫上。客人留下硬币，走进雨里。\n" + "。" * 1950 + "\n")
-    document = _document(client, project, "长场.txt", long_body)
-    _approved_outline(factory, project, document, [{
-        "production_section_id": "sec-01", "order": 1, "title": "第1场",
-        "estimated_duration_s": 400.0, "start_offset": 0, "end_offset": len(long_body),
-    }])
-    book = _storyboard_book(client, project, episode_count=1, target_seconds=10, tolerance_seconds=5)
-    assert client.post(
-        f"/api/v1/projects/{project}/director/storyboard-book/confirm",
-        json={"plan_version": book["plan_version"], "expected_sha256": book["plan_sha256"],
-              "style": {"profile_id": "wong-kar-wai", "film_type": "live_action"},
-              "acknowledge_deviation": True},
-        headers=LOCAL).status_code == 200
-
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
-    assets = client.get(f"/api/v1/projects/{project}/assets").json()
-    master = next(a["id"] for a in assets if a["role"] == "character" and a["entity_id"])
-    gateway = LLMGateway(SecretStore(settings.secret_store_dir), mock_responder=_chain_responder({"asset": master}))
-    # Run first unit (13s >= target 10s), then next tick marks ep-01 fit_closed and skips unit 2.
-    assert streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
-    streamline.run_pending_director_storyboard(factory, settings, "worker-test", gateway=gateway)
+    # Only the first scene ran: its 13 s are already past the 10 s goal.
+    _run_storyboard_to_rest(client, settings, project, max_ticks=1)
 
     state = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
-    ep1 = state["episodes"][0]
-    assert ep1["fit_closed"] is True
-    assert ep1["status"] == "APPLIED"
+    episode = state["episodes"][0]
+    assert len(episode["shot_ids"]) == 2 and episode["status"] == "IN_PROGRESS"
 
-    confirmed = client.post(
+    with factory() as db:
+        with pytest.raises(HTTPException) as refused:
+            streamline.confirm_episode_shots(db, project, "ep-01", actor="local-user",
+                                             acknowledge_duration_deviation=True)
+    assert refused.value.status_code == 409
+    assert refused.value.detail["code"] == "EPISODE_SECTION_NOT_STORYBOARDED"
+    assert [row["section_id"] for row in refused.value.detail["pending"]] == ["sec-02"]
+
+
+def test_confirming_a_prefix_of_the_landed_shots_is_no_longer_a_mechanism(api):
+    client, _factory, _settings = api
+    prepared = _prepare_project(client, sections=2, section_seconds=5)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=10, tolerance_seconds=0)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    # The body field that asked for a target-fitting prefix is gone with the
+    # mechanism: it is refused, never silently ignored.
+    response = client.post(
         f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
         json={"fit_target": True}, headers=LOCAL)
-    assert confirmed.status_code == 200, confirmed.text
-    assert confirmed.json()["shot_ids"] == ep1["shot_ids"]
+    assert response.status_code == 422, response.text
 
 
+def test_shots_landed_after_confirmation_make_it_stale(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=2, section_seconds=5)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=10, tolerance_seconds=0)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    _run_storyboard_to_rest(client, settings, project)
+
+    table = client.get(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/shots").json()
+    assert len(table["shots"]) == 4 and table["confirmation_stale"] is False
+    assert "target_fit" not in table
+    assert table["duration_verdict"]["code"] == "DURATION_TARGET_DEVIATION"
+
+    # One more shot is landed after the episode was confirmed (a re-run): the
+    # person has not confirmed it, so the episode is stale — even though the
+    # confirmed shots are still exactly its first four.
+    with factory.begin() as db:
+        landed = db.get(Shot, table["shots"][-1]["shot_id"])
+        extra = Shot(project_id=project, name="重拍", revision=1, spec=copy.deepcopy(landed.spec))
+        db.add(extra)
+        db.flush()
+        run = db.scalar(select(AgentTaskRecord).where(
+            AgentTaskRecord.project_id == project,
+            AgentTaskRecord.role_id == streamline.DIRECTOR_STORYBOARD_RUN))
+        trace = dict(run.trace)
+        results = [dict(result) for result in trace["results"]]
+        results[-1]["apply"] = {**results[-1]["apply"], "shot_ids": [*results[-1]["apply"]["shot_ids"], extra.id]}
+        run.trace = {**trace, "results": results}
+    table = client.get(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/shots").json()
+    assert len(table["shots"]) == 5 and table["confirmation_stale"] is True

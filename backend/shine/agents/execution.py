@@ -43,6 +43,16 @@ SAFE_REJECTIONS = {
     # §6.3): the named reason tells the person to split the unit, not that the
     # model misbehaved.
     "LLM_CREATIVE_CONTEXT_OVERFLOW", "LLM_OUTPUT_BUDGET_STARVED",
+    # The drama layer's zero-token verdicts (V4): an architecture that does
+    # not address the confirmed plan, and speech that cannot be spoken inside
+    # a shot.  Each names itself so the retry is told what to repair.
+    "ARCHITECTURE_LOCATIONS_MISSING", "ARCHITECTURE_LOCATION_REPEATED",
+    "ARCHITECTURE_EPISODE_REPEATED", "ARCHITECTURE_EPISODE_COVERAGE",
+    "ARCHITECTURE_SCENE_COVERAGE", "ARCHITECTURE_LOCATION_UNKNOWN",
+    "ARCHITECTURE_TRANSITION_UNKNOWN",
+    "DRAMA_LOCATION_MISSING", "DRAMA_LOCATION_UNKNOWN", "DRAMA_BEATS_MISSING",
+    "DRAMA_ENTRY_BRIDGE_MISSING", "DRAMA_ACTION_MISSING", "DRAMA_LINE_EMPTY",
+    "DRAMA_LINE_TOO_LONG", "DRAMA_BEAT_SPEECH_TOO_LONG",
 }
 
 

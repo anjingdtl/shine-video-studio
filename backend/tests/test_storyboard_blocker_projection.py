@@ -223,9 +223,10 @@ def test_book_scope_is_governed_by_the_confirmed_target(api):
     assert "还有 2 个场次没有拆成镜头" in stage["blockers"][0]["message"]
 
 
-def test_confirm_fit_target_trims_overrun_to_the_confirmed_seconds(api):
-    """用户裁定：②确认的秒数是因，落镜超窗是果；确认时取最接近目标的前缀，
-    超出部分声明超范围，不回②重排、也不把整剧塞进一集。"""
+def test_an_overrunning_episode_is_confirmed_whole_with_its_deviation(api):
+    """V4 废止「取最接近目标的前缀」：② 确认的秒数由戏剧层在写作时控制体量，
+    落镜超出容差窗时整集确认并如实记录偏差，不砍尾、不把本集的场次改成超范围。
+    ② 阶段定下的范围（sec3-4 不在本次 1 集内）原样保留。"""
     client, factory, settings = api
     prepared = _prepare_project(client, sections=4, section_seconds=10)
     project = prepared["project"]
@@ -238,23 +239,28 @@ def test_confirm_fit_target_trims_overrun_to_the_confirmed_seconds(api):
     _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
     client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
     _run_storyboard_to_rest(client, settings, project)
-    # 每单元落 2 镜(7+6=13s)，两单元 26s > 窗[15,25] → 超窗。
+    # 每单元落 2 镜(7+6=13s)，两单元 26s > 窗[15,25] → 超窗，偏差如实可见。
     table = client.get(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/shots").json()
-    assert table["duration_verdict"] is not None
-    assert table["target_fit"] is not None
-    fit = table["target_fit"]
-    assert fit["seconds"] <= 25
-    confirmed = client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
-                            json={"fit_target": True}, headers=LOCAL)
-    assert confirmed.status_code == 200, confirmed.text
-    assert len(confirmed.json()["shot_ids"]) == fit["shot_count"]
+    assert table["duration_verdict"]["deviation_seconds"] == 6.0
+    assert "target_fit" not in table
     plans = client.get(f"/api/v1/projects/{project}/episode-plans").json()
     latest = next(p for p in plans if p["status"] == "CONFIRMED")
-    ep = latest["payload"]["episodes"][0]
-    assert len(ep["shot_ids"]) == fit["shot_count"]
-    # 超上限的场次进入超范围声明，覆盖门读同一事实。
-    assert "sec-03" in latest["payload"]["out_of_scope_section_ids"]
-    assert "sec-04" in latest["payload"]["out_of_scope_section_ids"]
+    episode = latest["payload"]["episodes"][0]
+    # The whole episode is in the confirmed plan: both scenes, all four shots.
+    assert len(episode["shot_ids"]) == len(table["shots"]) == 4
+    assert episode["section_ids"] == ["sec-01", "sec-02"]
+    # ② 阶段的范围声明原样保留：确认不会把本集自己的场次改成超范围。
+    assert sorted(latest["payload"]["out_of_scope_section_ids"]) == ["sec-03", "sec-04"]
+
+    # The person re-confirming by hand is still told the deviation by name.
+    refused = client.post(f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
+                          json={}, headers=LOCAL)
+    assert refused.status_code == 409 and refused.json()["detail"]["code"] == "EPISODE_DURATION_OUT_OF_TARGET"
+    confirmed = client.post(
+        f"/api/v1/projects/{project}/director/storyboard/episodes/ep-01/confirm",
+        json={"acknowledge_duration_deviation": True}, headers=LOCAL)
+    assert confirmed.status_code == 200, confirmed.text
+    assert len(confirmed.json()["shot_ids"]) == 4
 
 
 def test_guard_refusal_carries_the_blocking_row(api):

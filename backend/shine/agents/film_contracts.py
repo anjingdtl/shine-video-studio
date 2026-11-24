@@ -213,6 +213,97 @@ class ProductionPlan(APIModel):
     blockers: list[str] = Field(default_factory=list, max_length=100)
 
 
+# --- V4 drama layer: the novel becomes a shooting script before the crew reads it
+#
+# Both contracts are answered by the existing ``scriptwriter`` route.  The model
+# writes; every number that decides whether a line can be spoken, and every
+# second a scene is given, is computed by the server (``shine.literary.drama``).
+
+
+class LocationEntry(APIModel):
+    """One distinct place of the work, named once and reused by every scene in it."""
+
+    name: str = Field(min_length=1, max_length=40)
+    description: str = Field(default="", max_length=200)
+    time_variants: list[str] = Field(default_factory=list, max_length=5)
+
+
+class EpisodeBlueprint(APIModel):
+    episode_id: str = Field(min_length=1, max_length=80)
+    opening_hook: str = Field(default="", max_length=200)
+    climax_beat: str = Field(default="", max_length=200)
+    cliffhanger: str = Field(default="", max_length=200)
+
+
+class SceneSlot(APIModel):
+    production_section_id: str = Field(min_length=1, max_length=80)
+    location: str = Field(min_length=1, max_length=40)
+    time_of_day: Literal["dawn", "day", "dusk", "night", "late_night", "unspecified"] = "unspecified"
+    dramatic_goal: str = Field(default="", max_length=200)
+    transition_from_prev: Literal[
+        "episode_open", "continuous_time", "same_day_later", "time_jump",
+        "location_switch", "flashback_in", "flashback_out",
+    ] = "episode_open"
+    #: How much of its episode's running time the scene deserves by dramatic
+    #: importance.  Relative inside one episode; the server turns it into seconds.
+    weight: float = Field(default=1.0, ge=0.1, le=10, allow_inf_nan=False)
+
+
+class SeriesArchitecture(APIModel):
+    """The show-runner's blueprint over the person's confirmed plan.
+
+    The plan is fixed: every episode and every section it lists is addressed
+    exactly once, and every scene stands in a registered place.
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    locations: list[LocationEntry] = Field(min_length=1, max_length=80)
+    episodes: list[EpisodeBlueprint] = Field(min_length=1, max_length=200)
+    scene_slots: list[SceneSlot] = Field(min_length=1, max_length=1000)
+
+    @model_validator(mode="after")
+    def episode_ids_are_unique(self):
+        ids = [entry.episode_id for entry in self.episodes]
+        if len(set(ids)) != len(ids):
+            raise ValueError("ARCHITECTURE_EPISODE_REPEATED")
+        return self
+
+
+class SpokenLine(APIModel):
+    speaker: str = Field(min_length=1, max_length=80)
+    emotion: str = Field(default="", max_length=80)
+    text: str = Field(min_length=1, max_length=200)
+
+
+class DramaBeat(APIModel):
+    """One beat of a shootable scene: what is seen, who is in it, what is said."""
+
+    beat_type: Literal[
+        "establishing", "action", "dialogue_exchange", "reaction", "reveal", "transition_out",
+    ] = "action"
+    visible_action: str = Field(min_length=1, max_length=600)
+    characters: list[str] = Field(default_factory=list, max_length=20)
+    spoken_lines: list[SpokenLine] = Field(default_factory=list, max_length=12)
+    subtext: str = Field(default="", max_length=300)
+
+
+class DramaSceneScript(APIModel):
+    """One scene adapted from the novel into something a camera can record.
+
+    There are no shots, durations or prompt texts here: the storyboard decides
+    those.  What this fixes is the place, the time, the order of events and
+    every word that is spoken.
+    """
+
+    schema_version: Literal["1.0"] = "1.0"
+    location: str = Field(min_length=1, max_length=80)
+    time_of_day: Literal["dawn", "day", "dusk", "night", "late_night", "unspecified"] = "unspecified"
+    weather_atmosphere: str = Field(default="", max_length=120)
+    entry_bridge: str = Field(default="", max_length=300)
+    exit_state: str = Field(default="", max_length=300)
+    beats: list[DramaBeat] = Field(min_length=1, max_length=40)
+
+
 class StyleInputComparison(StyleInputCheck):
     style_text: str = Field(min_length=1, max_length=2000)
     shot_text: str | None = Field(default=None, min_length=1, max_length=8000)
@@ -268,7 +359,10 @@ class StyleInputWire(APIModel):
 
 
 class FilmRunRequest(APIModel):
-    brief: str = Field(default="", max_length=20000)
+    #: A drama writer adapts one whole scene, however long the novel made it:
+    #: splitting it would be the mechanical slicing V4 removes.  Every other
+    #: tool keeps the 20,000-character brief it always had.
+    brief: str = Field(default="", max_length=60000)
     locked_story_facts: list[str] = Field(default_factory=list, max_length=100)
     input_revision_ids: list[str] = Field(default_factory=list, max_length=100)
     tool: Literal[
@@ -280,6 +374,8 @@ class FilmRunRequest(APIModel):
         "continuity_physical",
         "script_prepare",
         "material_image_brief",
+        "series_architecture",
+        "drama_scene",
     ] = "propose"
     offline_preview: bool = False
     allow_remote_text: bool = False
@@ -288,6 +384,12 @@ class FilmRunRequest(APIModel):
     production_context: dict | None = None
     consent_document_id: str | None = None
     consent_document_sha256: str | None = None
+
+    @model_validator(mode="after")
+    def brief_fits_the_tool(self):
+        if self.tool not in {"series_architecture", "drama_scene"} and len(self.brief) > 20000:
+            raise ValueError("BRIEF_TOO_LONG")
+        return self
 
 
 class ComfyOpsProposal(APIModel):
@@ -318,8 +420,16 @@ class FilmAgentRegistry:
         if role not in cls.roles or tool not in {"propose", "style_proposal", "edit_intent",
                                                  "continuity_arbitration", "continuity_timing",
                                                  "continuity_physical", "script_prepare",
-                                                 "material_image_brief"}:
+                                                 "material_image_brief", "series_architecture",
+                                                 "drama_scene"}:
             raise ValueError("ROLE_OR_TOOL_DENIED")
+        if tool in {"series_architecture", "drama_scene"}:
+            # The drama layer (V4): the writer who already breaks a script into
+            # beats adapts the novel first.  It stands on no upstream artifact;
+            # the confirmed outline and plan reach it through the context.
+            if role != "scriptwriter":
+                raise ValueError("ROLE_OR_TOOL_DENIED")
+            return (SeriesArchitecture if tool == "series_architecture" else DramaSceneScript), ()
         if tool == "script_prepare":
             # Pre-production script preparation is a separate, shallower contract
             # than the formal ScriptBreakdown: no shots, no durations, no asset

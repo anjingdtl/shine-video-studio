@@ -972,9 +972,10 @@ class StoryboardRequest(APIModel):
     # earlier roles already produced.  A failed role is retried from itself
     # instead of paying for the whole chain again.
     start_role: Literal[
+        "series_architecture", "drama_scene",
         "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor", "director_arbitration"
     ] | None = None
-    resume_steps: dict[str, str] = Field(default_factory=dict, max_length=8)
+    resume_steps: dict[str, str] = Field(default_factory=dict, max_length=10)
     replace_interrupted_task_id: str | None = Field(default=None, max_length=36)
     # A refused answer that really arrived is a finished call, not an unknown
     # outcome: the user may authorize exactly one new request for the same
@@ -983,8 +984,8 @@ class StoryboardRequest(APIModel):
     authorize_replay_task_id: str | None = Field(default=None, max_length=36)
     # The refusal this retry replaces, as a named lesson for the first call
     # (reason code plus the field that broke the rule).  It carries no answer
-    # text and authorizes nothing: it only stops a retry from re-buying the
-    # very refusal it was launched to repair.
+    # text and authorizes nothing: it only stops a retry from re-buying
+    # the very refusal it was launched to repair.
     retry_lesson: dict | None = None
     production_context: dict | None = None
     consent_document_id: str | None = None
@@ -994,12 +995,32 @@ class StoryboardRequest(APIModel):
     # language template and never blocks on missing masters.  Applying a
     # draft still runs the full apply-camera gates.
     draft: bool = False
+    # The director lane's novel path (V4): the raw source of this unit is
+    # adapted into a drama scene script BEFORE any crew role reads it.  An
+    # imported finished script, and a unit that already has a confirmed scene
+    # script, never set it.
+    dramatize: bool = False
 
 
-# The crew order.  The chain and the resume request both walk this list.
+# The crew order. The chain and the resume request both walk this list.
 STORYBOARD_CHAIN = (
     "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor",
 )
+
+# The drama layer (V4) runs before the crew, on the existing scriptwriter
+# route: the architect ranks the confirmed plan once, then every scene is
+# adapted before any crew role reads it.
+DRAMA_STEPS = ("series_architecture", "drama_scene")
+STORYBOARD_STEP_ROLES = {
+    "series_architecture": "scriptwriter", "drama_scene": "scriptwriter",
+    "editor_edit_intent": "editor", "director_arbitration": "director",
+}
+
+
+def storyboard_step_role(step: str | None) -> str:
+    """The crew role that answers one step of the chain."""
+    step = step or "scriptwriter"
+    return STORYBOARD_STEP_ROLES.get(step, step)
 
 CONTRACT_REPAIR_NOTES = {
     "DIALOGUE_NOT_IN_USER_SCRIPT": (
@@ -1162,7 +1183,7 @@ def generate_storyboard(
         if (
             not replay_target
             or replay_target.project_id != project_id
-            or replay_target.role_id != (body.start_role or "scriptwriter")
+            or replay_target.role_id != storyboard_step_role(body.start_role)
             or replay_target.status not in {"REJECTED", "FAILED"}
             or replay_target.trace.get("external_outcome") != "RESPONSE_RECEIVED"
             or replay_target.trace.get("is_mock") is True
@@ -1195,125 +1216,6 @@ def generate_storyboard(
         if routes[role].kind != "mock" and not is_loopback_url(routes[role].base_url) and not body.allow_remote_text:
             raise HTTPException(403, "REMOTE_AGENT_CONSENT_REQUIRED")
 
-    storyboard_request_sha256 = digest({
-        "project_id": project_id,
-        "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
-        "locked_story_facts": body.locked_story_facts,
-        # The consent scope is part of the request identity: a request made
-        # under one document consent may not be adopted under another.
-        "consent_document_id": body.consent_document_id,
-        "consent_document_sha256": body.consent_document_sha256,
-        **({"production_context": body.production_context} if body.production_context is not None else {}),
-        "style_version_id": project.frozen_style_version_id,
-        "approved_asset_manifest": asset_context(db, project_id),
-        "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
-    })
-    recovered_director = None
-    recovered_editor = None
-    for prior in db.scalars(select(AgentTaskRecord).where(
-        AgentTaskRecord.project_id == project_id,
-        AgentTaskRecord.role_id.in_(needed_roles),
-    )):
-        if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
-            continue
-        # A historical replacement result may be adopted after its successful
-        # response was durably recorded. This path only reads the artifact and
-        # never authorizes another provider request.
-        receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
-        replacement = db.get(AgentTaskRecord, receipt.value.get("replacement_task_id")) if receipt else None
-        writer_id = (body.resume_steps or {}).get("scriptwriter")
-        candidate = db.scalar(select(AgentArtifact).where(
-            AgentArtifact.source_task_id == replacement.id,
-            AgentArtifact.kind == "DirectorialPlan",
-        )) if replacement else None
-        requested_director_id = (body.resume_steps or {}).get("director")
-        requested_director = db.get(AgentArtifact, requested_director_id) if requested_director_id else None
-        repair_source = db.get(AgentTaskRecord, requested_director.source_task_id) if requested_director else None
-        valid_repair = bool(candidate and requested_director and repair_source
-            and requested_director.project_id == project_id and requested_director.kind == "DirectorialPlan"
-            and not requested_director.stale and requested_director.sha256 == digest(requested_director.payload_json)
-            and len(requested_director.input_revision_ids) == 5
-            and requested_director.input_revision_ids[:2] == [writer_id, candidate.id]
-            and repair_source.project_id == project_id and repair_source.role_id == "director"
-            and repair_source.status == "SUCCEEDED"
-            and repair_source.trace.get("storyboard_request_sha256") == storyboard_request_sha256
-            and repair_source.trace.get("output_hash") == requested_director.sha256)
-        if (body.start_role and body.start_role != "scriptwriter" and writer_id
-                and prior.role_id == "director" and prior.status == "ABANDONED"
-                and prior.trace.get("local_interruption_verified") is True
-                and prior.trace.get("external_outcome") == "UNKNOWN"
-                and prior.trace.get("input_revision_ids") == [writer_id]
-                and replacement and replacement.project_id == project_id
-                and replacement.role_id == "director" and replacement.status == "SUCCEEDED"
-                and replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
-                and replacement.trace.get("input_revision_ids") == [writer_id]
-                and candidate and candidate.project_id == project_id and not candidate.stale
-                and candidate.producer_role == "director" and candidate.input_revision_ids == [writer_id]
-                and candidate.sha256 == digest(candidate.payload_json)
-                and replacement.trace.get("output_hash") == candidate.sha256
-                and (not requested_director_id or requested_director_id == candidate.id or valid_repair)):
-            if recovered_director and recovered_director.id != candidate.id:
-                raise HTTPException(409, "STORYBOARD_RECOVERY_AMBIGUOUS")
-            recovered_director = candidate
-            continue
-        # Reuse an already-recorded editor result from a historical run only
-        # when its artifact and input lineage are still intact.
-        if (body.start_role and body.start_role != "scriptwriter" and prior.role_id == "editor"
-                and prior.status == "ABANDONED" and prior.trace.get("local_interruption_verified") is True
-                and prior.trace.get("external_outcome") == "UNKNOWN"):
-            editor_receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
-            editor_replacement = (db.get(AgentTaskRecord, editor_receipt.value.get("replacement_task_id"))
-                                  if editor_receipt else None)
-            editor_artifact = db.scalar(select(AgentArtifact).where(
-                AgentArtifact.source_task_id == editor_replacement.id,
-                AgentArtifact.kind == "EditIntentPlan",
-            )) if editor_replacement else None
-            selected_editor_id = (body.resume_steps or {}).get("editor_edit_intent")
-            valid_editor = bool(
-                editor_replacement and editor_artifact
-                and selected_editor_id == editor_artifact.id
-                and editor_replacement.project_id == project_id and editor_replacement.role_id == "editor"
-                and editor_replacement.status == "SUCCEEDED"
-                and editor_replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
-                and editor_replacement.trace.get("input_revision_ids") == prior.trace.get("input_revision_ids")
-                and editor_artifact.project_id == project_id and not editor_artifact.stale
-                and editor_artifact.producer_role == "editor"
-                and editor_artifact.input_revision_ids == prior.trace.get("input_revision_ids")
-                and editor_artifact.sha256 == digest(editor_artifact.payload_json)
-                and editor_replacement.trace.get("output_hash") == editor_artifact.sha256
-            )
-            if valid_editor:
-                recovered_editor = editor_artifact
-                continue
-        unresolved = (
-            prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
-            or prior.status == "REJECTED" and prior.error_code in UNKNOWN_CODES
-            and prior.trace.get("external_outcome") != "NOT_SENT"
-            or prior.status == "ABANDONED" and prior.trace.get("external_outcome") == "UNKNOWN"
-        )
-        if unresolved and prior.trace.get("is_mock") is not True:
-            code = ("AGENT_REQUEST_REPLAY_BLOCKED" if prior.status == "ABANDONED"
-                    else "AGENT_REQUEST_RECONCILIATION_REQUIRED")
-            return {
-                "status": "REJECTED",
-                "script_source": source,
-                "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
-                "steps": {},
-                "missing_characters": [],
-                # The version travels with the task: the panel reconciles this
-                # exact record, and without the version it could not ask.
-                "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id,
-                                "state_version": prior.state_version,
-                                "external_outcome": prior.trace.get("external_outcome"),
-                                "blocking_task": {"task_id": prior.id, "status": prior.status,
-                                                  "external_outcome": prior.trace.get("external_outcome"),
-                                                  "phase": prior.trace.get("phase")}}],
-                "failed_role": prior.role_id,
-                # Keep the validated resume selection so reconciliation can
-                # inspect the original task without changing its identity.
-                "resume_steps": dict(body.resume_steps or {}),
-            }
-
     dispatcher = FilmAgentDispatcher(
         gateway, request.app.state.settings.data_dir,
         asset_root=_film_asset_root(request, db),
@@ -1336,66 +1238,20 @@ def generate_storyboard(
     # calling them again.  The server checks every referenced artifact: it must
     # belong to this project, carry the role's contract kind and not be stale.
     start_role = body.start_role or "scriptwriter"
-    if start_role not in (*STORYBOARD_CHAIN, "director_arbitration"):
+    if start_role not in (*DRAMA_STEPS, *STORYBOARD_CHAIN, "director_arbitration"):
         raise HTTPException(422, "STORYBOARD_RESUME_ROLE_UNKNOWN")
-    if start_role != "scriptwriter":
-        frozen_style = (
-            db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
-        )
-        ratio = frozen_style.snapshot.get("dialogue_ratio_percent") if frozen_style else None
-        prior_roles = (STORYBOARD_CHAIN if start_role == "director_arbitration"
-                       else STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)])
-        for role in prior_roles:
-            step_name = "editor_edit_intent" if role == "editor" else role
-            artifact_id = (body.resume_steps or {}).get(step_name)
-            if not artifact_id:
-                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_MISSING:{role}")
-            artifact = db.get(AgentArtifact, artifact_id)
-            expected_kind = "EditIntentPlan" if role == "editor" else FilmAgentRegistry.roles[role][1].__name__
-            if (
-                not artifact
-                or artifact.project_id != project_id
-                or artifact.stale
-                or artifact.kind != expected_kind
-            ):
-                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_INVALID:{role}")
-            if role == "scriptwriter":
-                task = db.get(AgentTaskRecord, artifact.source_task_id)
-                previous_ratio = (task.trace.get("dialogue_coverage") or {}).get("target_percent") if task else None
-                if previous_ratio != ratio:
-                    raise HTTPException(409, "STORYBOARD_DIALOGUE_RATIO_CHANGED")
-            steps[step_name] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
-
-    if start_role == "director_arbitration":
-        lineage = [steps[role]["artifact_id"] for role in (
-            "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor_edit_intent")]
-        for index, artifact_id in enumerate(lineage[1:], start=1):
-            artifact = db.get(AgentArtifact, artifact_id)
-            inputs_match = artifact.input_revision_ids == lineage[:index]
-            if index == 1 and len(artifact.input_revision_ids) == 5:
-                repair_inputs = [db.get(AgentArtifact, item) for item in artifact.input_revision_ids]
-                inputs_match = (artifact.input_revision_ids[0] == lineage[0]
-                                and all(item and item.project_id == project_id and not item.stale
-                                        and item.sha256 == digest(item.payload_json) for item in repair_inputs)
-                                and [item.kind for item in repair_inputs] == ["ScriptBreakdown", "DirectorialPlan",
-                                    "CameraPlan", "ContinuityReport", "ContinuityArbitration"])
-            if not inputs_match or artifact.sha256 != digest(artifact.payload_json):
-                raise HTTPException(409, "STORYBOARD_RESUME_LINEAGE_INVALID")
-
-    if recovered_director and start_role == "director":
-        steps["director"] = {"artifact_id": recovered_director.id, "kind": recovered_director.kind,
-                             "sha256": recovered_director.sha256}
-    if recovered_editor and start_role == "editor":
-        steps["editor_edit_intent"] = {"artifact_id": recovered_editor.id, "kind": recovered_editor.kind,
-                                       "sha256": recovered_editor.sha256}
 
     delay = _agent_step_delay_seconds()
     calls_in_request = 0
     # Everything this request records is newer than this instant; anything
     # older belongs to an earlier run and its reason is not this one's.
     request_started_at = utcnow()
+    # The identity of the crew chain's requests.  On the drama path it is only
+    # known once the scene script exists, so the drama steps carry their own.
+    storyboard_request_sha256: str | None = None
 
-    def _run(role: str, *, attempts: int = 3, repair_director: bool = False, **kwargs) -> dict:
+    def _run(role: str, *, attempts: int = 3, repair_director: bool = False,
+             request_sha256: str | None = None, **kwargs) -> dict:
         nonlocal calls_in_request
         # The named refusal this retry replaces (if any) travels with the
         # request so the first call starts already knowing it.
@@ -1420,7 +1276,7 @@ def generate_storyboard(
         # could never run.  The authorization is always the record this request
         # produced, never an unrelated one.
         authorized_replay = (body.authorize_replay_task_id
-                             if role == (body.start_role or "scriptwriter") else None)
+                             if role == storyboard_step_role(body.start_role) else None)
         if authorized_replay:
             # A retry arrives with the record it replaces.  That record's trace
             # is the last refusal, and the first call must already know it:
@@ -1439,7 +1295,7 @@ def generate_storyboard(
                     "rejection_reason_code": seed.get("rejection_reason_code"),
                     "visual_field": seed.get("visual_field"),
                     "provider_finish_reason": seed.get("provider_finish_reason")}
-        if role == (body.start_role or "scriptwriter") and (lesson or {}).get(
+        if role == storyboard_step_role(body.start_role) and (lesson or {}).get(
                 "rejection_reason_code"):
             # The lesson is prompt guidance only: it authorizes nothing and
             # carries no answer text, so a mock or an unauthorized lane may
@@ -1464,7 +1320,6 @@ def generate_storyboard(
                     project_id,
                     role,
                     FilmRunRequest(**kwargs),
-                    storyboard_request_sha256=storyboard_request_sha256,
                     draft=body.draft,
                     repair_visual_language=repair_visual_language,
                     repair_contract_note=repair_contract_note,
@@ -1474,6 +1329,7 @@ def generate_storyboard(
                         if role == body.start_role and role in {"director", "editor"} and not repair_director
                         and kwargs.get("tool") != "continuity_arbitration" else None),
                     authorize_replay_task_id=authorized_replay,
+                    storyboard_request_sha256=request_sha256 or storyboard_request_sha256,
                 )
                 return {"artifact_id": artifact.id, "kind": artifact.kind,
                         "sha256": artifact.sha256, "attempt": attempt}
@@ -1482,7 +1338,7 @@ def generate_storyboard(
                 code = str(exc)
                 if code not in RETRYABLE_REJECTIONS or attempt == attempts:
                     raise
-                failure = _rejection(role, exc)
+                failure = _rejection(role, exc, request_sha256)
                 if failure.get("external_outcome") in {"UNKNOWN", "NOT_SENT"}:
                     # Nothing came back, or nothing was ever sent: another call
                     # would repeat the same refusal or buy the same answer
@@ -1578,6 +1434,9 @@ def generate_storyboard(
                 + ". Revise the shot blocking, character sightlines, and prop/object positions so "
                 "physical state transitions stay strictly consistent across and within shots."
             )
+        drama_note = _drama_repair_note(reason or "", failure)
+        if drama_note:
+            return drama_note
         note = CONTRACT_REPAIR_NOTES.get(reason or "")
         if reason == "DIALOGUE_NOT_IN_USER_SCRIPT" and isinstance(failure.get("offending_line"), str):
             note += (
@@ -1586,7 +1445,81 @@ def generate_storyboard(
             )
         return note
 
-    def _rejection(role: str, exc: Exception) -> dict:
+    def _drama_repair_note(reason: str, failure: dict) -> str | None:
+        """The repair note of a drama-layer refusal, in the verdict's own numbers."""
+        details = [item for item in (failure.get("refusal_details") or []) if isinstance(item, dict)]
+        first = details[0] if details else {}
+
+        def refused(with_lines: bool = False) -> str:
+            labels: list[str] = []
+            for item in details:
+                if "beat" not in item:
+                    continue
+                label = f"beat {item['beat'] + 1}"
+                if with_lines and "line" in item:
+                    label += f", line {item['line'] + 1}"
+                if label not in labels:
+                    labels.append(label)
+            return " and ".join(labels[:6])
+
+        lines = {
+            "DRAMA_LOCATION_MISSING": (
+                " The previous answer left location empty. Copy it from production_context.scene_slot.location."),
+            "DRAMA_LOCATION_UNKNOWN": (
+                f" The previous answer set the scene in a place the architecture did not register: "
+                f"{first.get('location', '')}. Copy location exactly from "
+                "production_context.scene_slot.location."),
+            "DRAMA_BEATS_MISSING": (
+                " The previous answer had no beats. Write the scene as at least one beat with a visible "
+                "action."),
+            "DRAMA_ENTRY_BRIDGE_MISSING": (
+                " The previous answer left entry_bridge empty for a scene that continues the previous one. "
+                "Write the visible action or sound that picks up the previous scene's exit state."),
+            "DRAMA_ACTION_MISSING": (
+                f" The previous answer has a beat without a visible action ({refused()}). Give every beat the "
+                "action a camera records."),
+            "DRAMA_LINE_EMPTY": (
+                f" The previous answer has an empty spoken line ({refused(True)}). Write each line or "
+                "remove it."),
+            "DRAMA_LINE_TOO_LONG": (
+                f" The previous answer has a spoken line of {first.get('characters', '?')} characters "
+                f"({first.get('seconds', '?')} s) in {refused(True)}; one line is at most 27 characters "
+                "(6.5 s). Deliver it as two shorter lines in two beats, each with its own action, or write "
+                "it shorter; never squeeze it into one."),
+            "DRAMA_BEAT_SPEECH_TOO_LONG": (
+                f" The previous answer put {first.get('seconds', '?')} s of speech in one beat "
+                f"({refused()}); one beat carries at most 7.5 s (31 characters). Move a line into its own "
+                "beat with its own action."),
+            "ARCHITECTURE_LOCATIONS_MISSING": (
+                " The previous answer registered no place. locations needs one entry per distinct place "
+                "the scenes are staged in."),
+            "ARCHITECTURE_LOCATION_REPEATED": (
+                " The previous answer registered one place twice. Merge aliases of one place into one "
+                "entry with one name."),
+            "ARCHITECTURE_EPISODE_REPEATED": (
+                " The previous answer listed one episode twice. episodes has exactly one entry per "
+                "episode_id of production_context.plan."),
+            "ARCHITECTURE_EPISODE_COVERAGE": (
+                " The previous answer did not address every episode of the plan exactly once: missing "
+                f"{first.get('missing', [])}, not in the plan {first.get('unknown', [])}. Copy every "
+                "episode_id from production_context.plan and invent none."),
+            "ARCHITECTURE_SCENE_COVERAGE": (
+                " The previous answer did not give every section of the plan exactly one slot: missing "
+                f"{first.get('missing', [])}, not in the plan {first.get('unknown', [])}. Copy every "
+                "section's production_section_id from production_context.plan into one scene_slots entry "
+                "and invent none."),
+            "ARCHITECTURE_LOCATION_UNKNOWN": (
+                " The previous answer staged scenes in places it did not register: "
+                f"{first.get('locations', [])}. Every scene_slots.location must be the name of one "
+                "locations entry."),
+            "ARCHITECTURE_TRANSITION_UNKNOWN": (
+                " The previous answer used a transition_from_prev outside the contract. It is "
+                "episode_open for the first scene of an episode and one of continuous_time, "
+                "same_day_later, time_jump, location_switch, flashback_in, flashback_out otherwise."),
+        }
+        return lines.get(reason or "")
+
+    def _rejection(role: str, exc: Exception, request_sha256: str | None = None) -> dict:
         rejection = {"role": role, "code": getattr(exc, "code", None) or str(exc) or "AGENT_CALL_FAILED"}
         details = getattr(exc, "details", {})
         if isinstance(details, dict) and details.get("external_outcome") in {"NOT_SENT", "UNKNOWN"}:
@@ -1600,8 +1533,9 @@ def generate_storyboard(
                 AgentTaskRecord.project_id == project_id,
                 AgentTaskRecord.role_id == role,
             ).order_by(AgentTaskRecord.created_at.desc()).limit(20)))
-            matching = [row for row in rows
-                        if row.trace.get("storyboard_request_sha256") == storyboard_request_sha256]
+            request = request_sha256 or storyboard_request_sha256
+            matching = [row for row in rows if request
+                        and row.trace.get("storyboard_request_sha256") == request]
             task = next((row for row in matching if row.status != "SUCCEEDED"),
                         matching[0] if matching else None)
         if task:
@@ -1626,6 +1560,10 @@ def generate_storyboard(
                     rejection[key] = value
             if isinstance(task.trace.get("schema_errors"), list):
                 rejection["schema_errors"] = task.trace["schema_errors"]
+            # What the server's own verdict refused (which beat, line or
+            # section): computed numbers and indexes, so a retry may be told.
+            if isinstance(task.trace.get("refusal_details"), list):
+                rejection["refusal_details"] = task.trace["refusal_details"]
             outcome = task.trace.get("external_outcome")
             if outcome in {"NOT_SENT", "UNKNOWN"}:
                 rejection["external_outcome"] = outcome
@@ -1643,6 +1581,260 @@ def generate_storyboard(
             if isinstance(blocking, dict) and blocking.get("task_id"):
                 rejection["blocking_task"] = blocking
         return rejection
+
+    # --- The drama layer (V4): the novel becomes a shooting script first -------
+    #
+    # On the director lane's raw-source path nothing is handed to the crew
+    # until the scene exists as a drama scene script.  Both answers are the
+    # ledger's facts: a scene already written for this unit, architecture and
+    # frozen style is found and reused, so a retry after a later role failed
+    # never buys the scene again, and a crash before the run recorded anything
+    # loses nothing.
+    if body.dramatize:
+        from shine.literary.drama import architecture_brief
+        from shine.materialprep import story
+
+        base = body.production_context
+        if base is None or not base.get("plan_sha256"):
+            raise HTTPException(422, "STORYBOARD_DRAMA_REQUIRES_PLAN")
+        raw_text = script_text
+        outline = db.get(AgentArtifact, base["outline_artifact_id"])
+        document = db.get(ProjectDocument, base["document_id"])
+        plan = story.confirmed_plan(db, project_id, outline, {"plan_sha256": base["plan_sha256"]})
+        writes_drama = body.start_role is None or body.start_role in DRAMA_STEPS
+        active_step = "series_architecture"
+        try:
+            architecture = story.current_architecture(db, project_id, outline.sha256, plan.sha256)
+            if architecture is None and writes_drama:
+                brief = architecture_brief(outline.payload_json, plan.payload, document.text)
+                body.production_context = story.verified_architecture_context(
+                    db, project_id, brief,
+                    {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+                     "plan_sha256": plan.sha256})
+                step_sha = digest({"step": active_step, "production_context": body.production_context})
+                steps[active_step] = _run(
+                    "scriptwriter", tool=active_step, brief=brief,
+                    allow_remote_text=body.allow_remote_text, request_sha256=step_sha)
+                architecture = db.get(AgentArtifact, steps[active_step]["artifact_id"])
+            if architecture is None:
+                # A later role was asked to resume, but the plan has no
+                # architecture: the run restarts from the step that writes it.
+                raise HTTPException(409, "STORYBOARD_ARCHITECTURE_MISSING")
+            steps["series_architecture"] = {"artifact_id": architecture.id, "kind": architecture.kind,
+                                            "sha256": architecture.sha256}
+            active_step = "drama_scene"
+            scene = story.drama_scene_for(
+                db, project_id, outline_sha256=outline.sha256, architecture_sha256=architecture.sha256,
+                production_section_id=base["production_section_id"], source_offsets=base["source_offsets"],
+                style_version_id=project.frozen_style_version_id)
+            if scene is None and writes_drama:
+                body.production_context = story.verified_production_context(
+                    db, project_id, raw_text,
+                    {**base, "architecture_artifact_id": architecture.id,
+                     "architecture_sha256": architecture.sha256},
+                    require_architecture=True)
+                step_sha = digest({"step": active_step, "production_context": body.production_context})
+                steps[active_step] = _run(
+                    "scriptwriter", tool=active_step, brief=raw_text,
+                    allow_remote_text=body.allow_remote_text, request_sha256=step_sha)
+                scene = db.get(AgentArtifact, steps[active_step]["artifact_id"])
+            if scene is None:
+                raise HTTPException(409, "STORYBOARD_DRAMA_SCENE_MISSING")
+        except (ValueError, LLMError) as exc:
+            rejection = _rejection("scriptwriter", exc, digest(
+                {"step": active_step, "production_context": body.production_context}))
+            rejection["role"] = active_step
+            rejections.append(rejection)
+            return {
+                "status": "REJECTED",
+                "script_source": source,
+                "steps": steps,
+                "rejections": rejections,
+                "failed_role": active_step,
+                "resume_steps": {role: step["artifact_id"] for role, step in steps.items()},
+            }
+        steps["drama_scene"] = {"artifact_id": scene.id, "kind": scene.kind, "sha256": scene.sha256}
+        # From here the scene script IS the script: the crew reads it, and the
+        # source range the raw offsets name stays its immutable provenance.
+        script_text = scene.payload_json["text"]
+        body.production_context = story.verified_production_context(
+            db, project_id, script_text,
+            {**base, "architecture_artifact_id": architecture.id, "architecture_sha256": architecture.sha256,
+             "creative_source": "drama_scene_script", "script_artifact_id": scene.id,
+             "script_sha256": scene.sha256},
+            require_architecture=True)
+
+    storyboard_request_sha256 = digest({
+        "project_id": project_id,
+        "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+        "locked_story_facts": body.locked_story_facts,
+        # The consent scope is part of the request identity: a request made
+        # under one document consent may not be adopted under another.
+        "consent_document_id": body.consent_document_id,
+        "consent_document_sha256": body.consent_document_sha256,
+        **({"production_context": body.production_context} if body.production_context is not None else {}),
+        "style_version_id": project.frozen_style_version_id,
+        "approved_asset_manifest": asset_context(db, project_id),
+        "agent_routes": {role: text_provider_snapshot(routes[role]) for role in needed_roles},
+    })
+
+    if start_role != "scriptwriter":
+        frozen_style = (
+            db.get(StyleVersion, project.frozen_style_version_id) if project.frozen_style_version_id else None
+        )
+        ratio = frozen_style.snapshot.get("dialogue_ratio_percent") if frozen_style else None
+        prior_roles = (STORYBOARD_CHAIN if start_role == "director_arbitration"
+                       else STORYBOARD_CHAIN[:STORYBOARD_CHAIN.index(start_role)]
+                       if start_role in STORYBOARD_CHAIN else [])
+        for role in prior_roles:
+            step_name = "editor_edit_intent" if role == "editor" else role
+            artifact_id = (body.resume_steps or {}).get(step_name)
+            if not artifact_id:
+                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_MISSING:{role}")
+            artifact = db.get(AgentArtifact, artifact_id)
+            expected_kind = "EditIntentPlan" if role == "editor" else FilmAgentRegistry.roles[role][1].__name__
+            if (
+                not artifact
+                or artifact.project_id != project_id
+                or artifact.stale
+                or artifact.kind != expected_kind
+            ):
+                raise HTTPException(409, f"STORYBOARD_RESUME_STEP_INVALID:{role}")
+            if role == "scriptwriter":
+                task = db.get(AgentTaskRecord, artifact.source_task_id)
+                previous_ratio = (task.trace.get("dialogue_coverage") or {}).get("target_percent") if task else None
+                if previous_ratio != ratio:
+                    raise HTTPException(409, "STORYBOARD_DIALOGUE_RATIO_CHANGED")
+            steps[step_name] = {"artifact_id": artifact.id, "kind": artifact.kind, "sha256": artifact.sha256}
+
+    if start_role == "director_arbitration":
+        lineage = [steps[role]["artifact_id"] for role in (
+            "scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor_edit_intent")]
+        for index, artifact_id in enumerate(lineage[1:], start=1):
+            artifact = db.get(AgentArtifact, artifact_id)
+            inputs_match = artifact.input_revision_ids == lineage[:index]
+            if index == 1 and len(artifact.input_revision_ids) == 5:
+                repair_inputs = [db.get(AgentArtifact, item) for item in artifact.input_revision_ids]
+                inputs_match = (artifact.input_revision_ids[0] == lineage[0]
+                                and all(item and item.project_id == project_id and not item.stale
+                                        and item.sha256 == digest(item.payload_json) for item in repair_inputs)
+                                and [item.kind for item in repair_inputs] == ["ScriptBreakdown", "DirectorialPlan",
+                                    "CameraPlan", "ContinuityReport", "ContinuityArbitration"])
+            if not inputs_match or artifact.sha256 != digest(artifact.payload_json):
+                raise HTTPException(409, "STORYBOARD_RESUME_LINEAGE_INVALID")
+
+    recovered_director = None
+    recovered_editor = None
+    for prior in db.scalars(select(AgentTaskRecord).where(
+        AgentTaskRecord.project_id == project_id,
+        AgentTaskRecord.role_id.in_(needed_roles),
+    )):
+        if prior.trace.get("storyboard_request_sha256") != storyboard_request_sha256:
+            continue
+        # A historical replacement result may be adopted after its successful
+        # response was durably recorded. This path only reads the artifact and
+        # never authorizes another provider request.
+        receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
+        replacement = db.get(AgentTaskRecord, receipt.value.get("replacement_task_id")) if receipt else None
+        writer_id = (body.resume_steps or {}).get("scriptwriter")
+        candidate = db.scalar(select(AgentArtifact).where(
+            AgentArtifact.source_task_id == replacement.id,
+            AgentArtifact.kind == "DirectorialPlan",
+        )) if replacement else None
+        requested_director_id = (body.resume_steps or {}).get("director")
+        requested_director = db.get(AgentArtifact, requested_director_id) if requested_director_id else None
+        repair_source = db.get(AgentTaskRecord, requested_director.source_task_id) if requested_director else None
+        valid_repair = bool(candidate and requested_director and repair_source
+            and requested_director.project_id == project_id and requested_director.kind == "DirectorialPlan"
+            and not requested_director.stale and requested_director.sha256 == digest(requested_director.payload_json)
+            and len(requested_director.input_revision_ids) == 5
+            and requested_director.input_revision_ids[:2] == [writer_id, candidate.id]
+            and repair_source.project_id == project_id and repair_source.role_id == "director"
+            and repair_source.status == "SUCCEEDED"
+            and repair_source.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+            and repair_source.trace.get("output_hash") == requested_director.sha256)
+        if (body.start_role and body.start_role != "scriptwriter" and writer_id
+                and prior.role_id == "director" and prior.status == "ABANDONED"
+                and prior.trace.get("local_interruption_verified") is True
+                and prior.trace.get("external_outcome") == "UNKNOWN"
+                and prior.trace.get("input_revision_ids") == [writer_id]
+                and replacement and replacement.project_id == project_id
+                and replacement.role_id == "director" and replacement.status == "SUCCEEDED"
+                and replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+                and replacement.trace.get("input_revision_ids") == [writer_id]
+                and candidate and candidate.project_id == project_id and not candidate.stale
+                and candidate.producer_role == "director" and candidate.input_revision_ids == [writer_id]
+                and candidate.sha256 == digest(candidate.payload_json)
+                and replacement.trace.get("output_hash") == candidate.sha256
+                and (not requested_director_id or requested_director_id == candidate.id or valid_repair)):
+            if recovered_director and recovered_director.id != candidate.id:
+                raise HTTPException(409, "STORYBOARD_RECOVERY_AMBIGUOUS")
+            recovered_director = candidate
+            continue
+        # Reuse an already-recorded editor result from a historical run only
+        # when its artifact and input lineage are still intact.
+        if (body.start_role and body.start_role != "scriptwriter" and prior.role_id == "editor"
+                and prior.status == "ABANDONED" and prior.trace.get("local_interruption_verified") is True
+                and prior.trace.get("external_outcome") == "UNKNOWN"):
+            editor_receipt = db.get(AppSetting, f"film-replacement:{prior.id}")
+            editor_replacement = (db.get(AgentTaskRecord, editor_receipt.value.get("replacement_task_id"))
+                                  if editor_receipt else None)
+            editor_artifact = db.scalar(select(AgentArtifact).where(
+                AgentArtifact.source_task_id == editor_replacement.id,
+                AgentArtifact.kind == "EditIntentPlan",
+            )) if editor_replacement else None
+            selected_editor_id = (body.resume_steps or {}).get("editor_edit_intent")
+            valid_editor = bool(
+                editor_replacement and editor_artifact
+                and selected_editor_id == editor_artifact.id
+                and editor_replacement.project_id == project_id and editor_replacement.role_id == "editor"
+                and editor_replacement.status == "SUCCEEDED"
+                and editor_replacement.trace.get("storyboard_request_sha256") == storyboard_request_sha256
+                and editor_replacement.trace.get("input_revision_ids") == prior.trace.get("input_revision_ids")
+                and editor_artifact.project_id == project_id and not editor_artifact.stale
+                and editor_artifact.producer_role == "editor"
+                and editor_artifact.input_revision_ids == prior.trace.get("input_revision_ids")
+                and editor_artifact.sha256 == digest(editor_artifact.payload_json)
+                and editor_replacement.trace.get("output_hash") == editor_artifact.sha256
+            )
+            if valid_editor:
+                recovered_editor = editor_artifact
+                continue
+        unresolved = (
+            prior.status in {"RUNNING", "NEEDS_REVIEW", "RECONCILING"}
+            or prior.status == "REJECTED" and prior.error_code in UNKNOWN_CODES
+            and prior.trace.get("external_outcome") != "NOT_SENT"
+            or prior.status == "ABANDONED" and prior.trace.get("external_outcome") == "UNKNOWN"
+        )
+        if unresolved and prior.trace.get("is_mock") is not True:
+            code = ("AGENT_REQUEST_REPLAY_BLOCKED" if prior.status == "ABANDONED"
+                    else "AGENT_REQUEST_RECONCILIATION_REQUIRED")
+            return {
+                "status": "REJECTED",
+                "script_source": source,
+                "script_sha256": hashlib.sha256(script_text.encode("utf-8")).hexdigest(),
+                "steps": steps,
+                "missing_characters": [],
+                # The version travels with the task: the panel reconciles this
+                # exact record, and without the version it could not ask.
+                "rejections": [{"role": prior.role_id, "code": code, "task_id": prior.id,
+                                "state_version": prior.state_version,
+                                "external_outcome": prior.trace.get("external_outcome"),
+                                "blocking_task": {"task_id": prior.id, "status": prior.status,
+                                                  "external_outcome": prior.trace.get("external_outcome"),
+                                                  "phase": prior.trace.get("phase")}}],
+                "failed_role": prior.role_id,
+                # Keep the validated resume selection so reconciliation can
+                # inspect the original task without changing its identity.
+                "resume_steps": dict(body.resume_steps or {}),
+            }
+
+    if recovered_director and start_role == "director":
+        steps["director"] = {"artifact_id": recovered_director.id, "kind": recovered_director.kind,
+                             "sha256": recovered_director.sha256}
+    if recovered_editor and start_role == "editor":
+        steps["editor_edit_intent"] = {"artifact_id": recovered_editor.id, "kind": recovered_editor.kind,
+                                       "sha256": recovered_editor.sha256}
 
     try:
         if "scriptwriter" not in steps:

@@ -137,7 +137,9 @@ it('③继承②确认的秒数目标并报名偏差；暂停时主按钮与页�
   );
   const hint = await screen.findByText(/②确认目标 60 秒/);
   expect(hint.textContent).toMatch(/低于目标窗 30 秒/);
-  expect(hint.textContent).toContain('按②目标确认');
+  // 超出目标窗的出路是改时长或显式接受偏差：不再有「按目标取前缀」的裁尾确认。
+  expect(hint.textContent).toContain('显式接受偏差');
+  expect(hint.textContent).not.toContain('按②目标确认');
   // 暂停提示名实一致：没有可确认的集就不承诺「先处理已完成的集」，
   // 并给真实出口（范围由②决定）。
   expect(screen.queryByText(/或先确认已完成的集/)).toBeNull();
@@ -153,7 +155,7 @@ it('③继承②确认的秒数目标并报名偏差；暂停时主按钮与页�
   stub.restore();
 });
 
-it('超窗时主操作是「按②目标确认」取最接近前缀，服务端预览数字直接上按钮', async () => {
+it('超窗时确认的是整集全部落镜：不取前缀，偏差由用户显式接受（服务端具名拒绝后）', async () => {
   const overrunState = {
     ...STATE, status: 'SUCCEEDED',
     episodes: [{ ...STATE.episodes[0], status: 'APPLIED', blocker: null }],
@@ -166,21 +168,33 @@ it('超窗时主操作是「按②目标确认」取最接近前缀，服务端�
       target_seconds: 20, tolerance_seconds: 5,
       duration_verdict: { code: 'DURATION_TARGET_DEVIATION', actual_seconds: 26, target_seconds: 20,
         tolerance_seconds: 5, window_low_s: 15, window_high_s: 25, deviation_seconds: 6 },
-      target_fit: { shot_count: 3, seconds: 20, shot_ids: ['s1', 's2', 's3'] },
       confirmed_version: null, confirmation_stale: false,
     }) },
     { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([]) },
     { method: 'POST', pattern: /\/episodes\/ep-01\/confirm$/,
-      respond: (_u, init) => jsonResponse({ plan_version: 2, episode_id: 'ep-01',
-        shot_ids: JSON.parse(String(init?.body)).fit_target ? ['s1', 's2', 's3'] : ['s1', 's2', 's3', 's4'] }) },
+      respond: (_u, init) => {
+        const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (!body.acknowledge_duration_deviation) {
+          return jsonResponse({ detail: { code: 'EPISODE_DURATION_OUT_OF_TARGET',
+            message: '本集落镜总时长超出目标容差窗。', actual_seconds: 26, window_high_s: 25 } }, 409);
+        }
+        return jsonResponse({ plan_version: 2, episode_id: 'ep-01',
+          shot_ids: ['s1', 's2', 's3', 's4'] });
+      } },
   ]);
   render(<EpisodeStoryboardPanel projectId="p1" />);
-  const fitBtn = await screen.findByRole('button', { name: /按②目标确认（取前 3 镜 · 20 秒）/ });
-  await userEvent.setup().click(fitBtn);
+  const confirmAll = await screen.findByRole('button', { name: /确认全部落镜（4 镜）/ });
+  // 没有按目标秒数只取前几镜的入口：一集的结尾不会被砍掉。
+  expect(screen.queryByRole('button', { name: /按②目标确认/ })).toBeNull();
+  await userEvent.setup().click(confirmAll);
+  const accept = await screen.findByRole('button', { name: '接受偏差并确认本集' });
+  const first = stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[0].body as Record<string, unknown>;
+  expect(first).toEqual({ acknowledge_duration_deviation: false });
+  await userEvent.setup().click(accept);
   await waitFor(() => {
-    expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)).toHaveLength(1);
+    expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)).toHaveLength(2);
   });
-  expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[0].body)
-    .toMatchObject({ fit_target: true });
+  expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[1].body)
+    .toEqual({ acknowledge_duration_deviation: true });
   stub.restore();
 });

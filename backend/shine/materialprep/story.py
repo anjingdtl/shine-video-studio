@@ -1140,14 +1140,166 @@ def prior_section_of(section, outline_sections):
     return max(earlier, key=lambda s: s["order"]) if earlier else None
 
 
-def verified_production_context(db, project_id, source_text, supplied):
-    """Rebuild approved context; never trust a caller's outline or source range."""
+def _confirmed_outline_document(db, project_id, supplied):
+    """The approved outline a context names, and the document it was read from."""
     outline = db.get(AgentArtifact, supplied.get("outline_artifact_id"))
     if (not outline or outline.project_id != project_id or outline.kind != "StoryOutline"
             or not outline.approved_at or outline.stale or outline.sha256 != supplied.get("outline_sha256")
             or outline.sha256 != digest(outline.payload_json)):
         raise ValueError("STORY_OUTLINE_NOT_CONFIRMED")
     document = db.get(ProjectDocument, outline.payload_json["document_id"])
+    if document is None or document.sha256 != outline.payload_json["document_sha256"]:
+        raise ValueError("STORY_SOURCE_RANGE_INVALID")
+    return outline, document
+
+
+def _require_current_outline(db, project_id, outline, section_ids):
+    """Refuse an outline a newer confirmed one has changed for these sections."""
+    from shine.models import AppSetting
+
+    current = db.get(AppSetting, f"current-story-outline:{project_id}")
+    latest = db.get(AgentArtifact, current.value.get("artifact_id")) if current else None
+    if not latest or latest.id == outline.id:
+        return
+    latest_sections = {s["production_section_id"]: s for s in latest.payload_json["production_sections"]}
+    for section_id in section_ids:
+        mine = next((s for s in outline.payload_json["production_sections"]
+                     if s["production_section_id"] == section_id), {})
+        now = latest_sections.get(section_id)
+        if (not now or now.get("source_sha256") != mine.get("source_sha256")
+                or latest.payload_json["locked_facts"] != outline.payload_json["locked_facts"]):
+            raise ValueError("STORY_SOURCE_SUPERSEDED")
+
+
+def confirmed_plan(db, project_id, outline, supplied):
+    """The episode plan a context names: confirmed by the person, built on this outline.
+
+    The plan is looked up by the hash the run pinned, never as "the newest
+    plan": landing an episode writes a new plan version, and a run keeps
+    addressing the one it was queued under.
+    """
+    from shine.director.models import DirectorEpisodePlan
+
+    plan = db.scalar(select(DirectorEpisodePlan).where(
+        DirectorEpisodePlan.project_id == project_id,
+        DirectorEpisodePlan.sha256 == supplied.get("plan_sha256")))
+    payload = (plan.payload or {}) if plan is not None else {}
+    if (plan is None or plan.status not in {"CONFIRMED", "SUPERSEDED"}
+            or payload.get("mode") != "sections"
+            or (payload.get("source") or {}).get("outline_sha256") != outline.sha256):
+        raise ValueError("STORY_PLAN_NOT_CONFIRMED")
+    return plan
+
+
+ARCHITECTURE_KIND = "SeriesArchitecture"
+DRAMA_SCENE_KIND = "DramaSceneScript"
+
+
+def current_architecture(db, project_id, outline_sha256, plan_sha256):
+    """The architecture an outline and plan currently have, or ``None``.
+
+    The artifact is the only fact: it carries the hashes it was written for,
+    so a run needs no pointer of its own and a retry after a crash finds the
+    answer that already exists instead of buying it again.
+    """
+    from sqlalchemy import and_
+
+    rows = db.scalars(select(AgentArtifact).where(and_(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == ARCHITECTURE_KIND,
+        AgentArtifact.stale.is_(False))).order_by(AgentArtifact.created_at.desc()))
+    for row in rows:
+        payload = row.payload_json or {}
+        if (payload.get("outline_sha256") == outline_sha256 and payload.get("plan_sha256") == plan_sha256
+                and row.sha256 == digest(payload)):
+            return row
+    return None
+
+
+def drama_scene_for(db, project_id, *, outline_sha256, architecture_sha256, production_section_id,
+                    source_offsets, style_version_id):
+    """The drama scene script already written for one unit, or ``None``.
+
+    It must still be current: not stale, written under the architecture this
+    run uses, from this exact source range, and under the style version the
+    project has frozen now — the narration policy a scene was written for is
+    part of the frozen style.
+    """
+    from sqlalchemy import and_
+
+    span = {"start_offset": source_offsets.get("start_offset"), "end_offset": source_offsets.get("end_offset")}
+    merged = sorted(source_offsets.get("merged_section_ids") or [])
+    rows = db.scalars(select(AgentArtifact).where(and_(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == DRAMA_SCENE_KIND,
+        AgentArtifact.stale.is_(False))).order_by(AgentArtifact.created_at.desc()))
+    for row in rows:
+        payload = row.payload_json or {}
+        written = payload.get("source_offsets") or {}
+        task = db.get(AgentTaskRecord, row.source_task_id)
+        if (payload.get("outline_sha256") == outline_sha256
+                and payload.get("architecture_sha256") == architecture_sha256
+                and payload.get("production_section_id") == production_section_id
+                and written.get("start_offset") == span["start_offset"]
+                and written.get("end_offset") == span["end_offset"]
+                and sorted(written.get("merged_section_ids") or []) == merged
+                and task is not None and task.style_version_id == style_version_id
+                and row.sha256 == digest(payload)):
+            return row
+    return None
+
+
+def _verified_architecture(db, project_id, outline, supplied):
+    """The architecture a context names, with the plan it ranks."""
+    plan = confirmed_plan(db, project_id, outline, supplied)
+    artifact = db.get(AgentArtifact, supplied.get("architecture_artifact_id"))
+    payload = (artifact.payload_json or {}) if artifact is not None else {}
+    if (artifact is None or artifact.project_id != project_id or artifact.kind != ARCHITECTURE_KIND
+            or artifact.stale or artifact.sha256 != supplied.get("architecture_sha256")
+            or artifact.sha256 != digest(payload)
+            or payload.get("outline_sha256") != outline.sha256
+            or payload.get("plan_sha256") != plan.sha256):
+        raise ValueError("STORY_ARCHITECTURE_SUPERSEDED")
+    return artifact, plan
+
+
+def verified_architecture_context(db, project_id, source_text, supplied):
+    """Rebuild the architect's context from confirmed facts only.
+
+    The architect reads the whole confirmed plan, so there is no section or
+    source range to check.  What is checked is that the plan is the person's
+    confirmed one for this outline, and that the brief is exactly the one the
+    server renders from it — a caller cannot hand the model another text.
+    """
+    from shine.literary.drama import architecture_brief
+
+    outline, document = _confirmed_outline_document(db, project_id, supplied)
+    plan = confirmed_plan(db, project_id, outline, supplied)
+    _require_current_outline(
+        db, project_id, outline,
+        [section_id for episode in (plan.payload or {}).get("episodes") or []
+         for section_id in episode.get("section_ids") or []])
+    if source_text != architecture_brief(outline.payload_json, plan.payload, document.text):
+        raise ValueError("STORY_ARCHITECTURE_BRIEF_INVALID")
+    # Places an earlier architecture of this outline already registered: a
+    # later plan must keep their names, or the scene masters prepared for
+    # them would never be matched to the new scenes set in the same place.
+    registered: dict[str, dict] = {}
+    for row in db.scalars(select(AgentArtifact).where(
+            AgentArtifact.project_id == project_id, AgentArtifact.kind == ARCHITECTURE_KIND,
+            AgentArtifact.stale.is_(False)).order_by(AgentArtifact.created_at.desc())):
+        payload = row.payload_json or {}
+        if payload.get("outline_sha256") == outline.sha256 and row.sha256 == digest(payload):
+            for entry in payload.get("locations") or []:
+                if isinstance(entry, dict) and entry.get("name"):
+                    registered.setdefault(entry["name"], entry)
+    return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+            "document_id": document.id, "document_sha256": document.sha256,
+            "plan_sha256": plan.sha256, "plan": plan.payload,
+            "registered_locations": list(registered.values())}
+
+
+def verified_production_context(db, project_id, source_text, supplied, *, require_architecture=False):
+    """Rebuild approved context; never trust a caller's outline or source range."""
+    outline, document = _confirmed_outline_document(db, project_id, supplied)
     sections_by_id = {s["production_section_id"]: s
                       for s in outline.payload_json["production_sections"]}
     section = sections_by_id.get(supplied.get("production_section_id"))
@@ -1160,7 +1312,7 @@ def verified_production_context(db, project_id, source_text, supplied):
     range_sections = [section] if section is not None else []
     for merged_id in span.get("merged_section_ids") or []:
         merged = sections_by_id.get(merged_id)
-        if merged is None or document is None or is_narrative_fragment(
+        if merged is None or is_narrative_fragment(
                 document.text[merged["start_offset"]:merged["end_offset"]]):
             range_sections = []
             break
@@ -1175,15 +1327,26 @@ def verified_production_context(db, project_id, source_text, supplied):
                                      for s in ordered) == max_end - min_start
     else:
         covered, min_start, max_end = False, 0, 0
-    if (document is None or document.sha256 != outline.payload_json["document_sha256"] or section is None
-            or type(left) is not int or type(right) is not int
+    if (section is None or type(left) is not int or type(right) is not int
             or not covered or not min_start <= left < right <= max_end):
         raise ValueError("STORY_SOURCE_RANGE_INVALID")
+    section_id = section["production_section_id"]
+    # The drama layer (V4): a scene is adapted under the architecture that
+    # ranks it, and the architecture stands on the person's confirmed plan.
+    architecture = plan = None
+    if supplied.get("architecture_artifact_id"):
+        architecture, plan = _verified_architecture(db, project_id, outline, supplied)
+    elif supplied.get("plan_sha256"):
+        plan = confirmed_plan(db, project_id, outline, supplied)
+    if architecture is None and require_architecture:
+        raise ValueError("STORY_ARCHITECTURE_REQUIRED")
+    _require_current_outline(db, project_id, outline, [section_id])
     # Creative-input selection (plan P0-A): the brief may be the raw source slice
     # OR the confirmed scene script provably adapted from that exact slice.  The
     # single lineage adjudicator decides; an unconfirmed, superseded or mismatched
     # script never widens the source range, and the raw offsets stay the immutable
-    # source evidence.
+    # source evidence.  A drama scene script the server itself wrote into the
+    # ledger for this unit and this architecture is the third such source.
     creative_text = None
     creative_source = "raw_document"
     script_artifact_id = None
@@ -1198,18 +1361,21 @@ def verified_production_context(db, project_id, source_text, supplied):
             creative_source = "confirmed_scene_script"
             script_artifact_id = script.id
             script_sha256 = script.sha256
+    if supplied.get("creative_source") == "drama_scene_script" and architecture is not None:
+        project = db.get(Project, project_id)
+        drama = drama_scene_for(
+            db, project_id, outline_sha256=outline.sha256, architecture_sha256=architecture.sha256,
+            production_section_id=section_id, source_offsets=span,
+            style_version_id=project.frozen_style_version_id if project is not None else None)
+        if (drama is not None and drama.id == supplied.get("script_artifact_id")
+                and drama.sha256 == supplied.get("script_sha256")):
+            creative_text = drama.payload_json["text"]
+            creative_source = "drama_scene_script"
+            script_artifact_id = drama.id
+            script_sha256 = drama.sha256
     if (source_text.strip() != document.text[left:right].strip()
             and (creative_text is None or source_text.strip() != creative_text.strip())):
         raise ValueError("STORY_SOURCE_RANGE_INVALID")
-    from shine.models import AppSetting
-    current = db.get(AppSetting, f"current-story-outline:{project_id}")
-    latest = db.get(AgentArtifact, current.value.get("artifact_id")) if current else None
-    if latest and latest.id != outline.id:
-        current_section = next((s for s in latest.payload_json["production_sections"]
-                                if s["production_section_id"] == section["production_section_id"]), None)
-        if (not current_section or current_section.get("source_sha256") != section.get("source_sha256")
-                or latest.payload_json["locked_facts"] != outline.payload_json["locked_facts"]):
-            raise ValueError("STORY_SOURCE_SUPERSEDED")
     continuity = supplied.get("continuity") or {}
     if continuity.get("basis") == "verified_section_state":
         # The run was planned against a specific frozen end state of the prior
@@ -1232,21 +1398,69 @@ def verified_production_context(db, project_id, source_text, supplied):
         # User free text remains an explicitly unverified carry-over: it may
         # guide the crew but is never evidence that a prior render happened.
         previous_render_status, continuity_evidence = "NOT_CLAIMED", {"basis": "user_supplied_unverified"}
-    return {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
-            "document_id": document.id, "document_sha256": document.sha256,
-            "production_section_id": section["production_section_id"], "source_offsets": span,
-            "story_line": outline.payload_json.get("story_line", []),
-            "timeline": outline.payload_json.get("timeline", []),
-            "characters": outline.payload_json.get("characters", []),
-            "locations": outline.payload_json.get("locations", []),
-            "continuity_facts": supplied.get("continuity_facts", []),
-            "continuity": continuity_evidence,
-            # The run's own fact: an earlier unit of this episode already landed
-            # shots, so this unit's first shot may continue the last of them.
-            "continuity_predecessor": bool(supplied.get("continuity_predecessor")),
-            **({"creative_source": creative_source, "script_artifact_id": script_artifact_id,
-                "script_sha256": script_sha256} if script_artifact_id else {}),
-            "previous_render_status": previous_render_status}
+    context = {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+               "document_id": document.id, "document_sha256": document.sha256,
+               "production_section_id": section_id, "source_offsets": span,
+               "story_line": outline.payload_json.get("story_line", []),
+               "timeline": outline.payload_json.get("timeline", []),
+               "characters": outline.payload_json.get("characters", []),
+               "locations": outline.payload_json.get("locations", []),
+               "continuity_facts": supplied.get("continuity_facts", []),
+               "continuity": continuity_evidence,
+               # The run's own fact: an earlier unit of this episode already landed
+               # shots, so this unit's first shot may continue the last of them.
+               "continuity_predecessor": bool(supplied.get("continuity_predecessor")),
+               **({"creative_source": creative_source, "script_artifact_id": script_artifact_id,
+                   "script_sha256": script_sha256} if script_artifact_id else {}),
+               "previous_render_status": previous_render_status}
+    if plan is not None:
+        context["plan_sha256"] = plan.sha256
+    if supplied.get("previous_scene_artifact_id"):
+        # Carried, not trusted yet: it is read from the ledger once the
+        # architecture that ranks both scenes is verified below.
+        context["previous_scene_artifact_id"] = supplied["previous_scene_artifact_id"]
+    if architecture is not None:
+        from shine.literary.drama import episode_blueprint, scene_budgets, scene_slot
+
+        payload = architecture.payload_json
+        slot = scene_slot(payload, section_id)
+        episode_id = next((str(episode.get("episode_id")) for episode in (plan.payload or {}).get("episodes") or []
+                           if section_id in (episode.get("section_ids") or [])), None)
+        if slot is None or episode_id is None:
+            # The plan moved this section after the architecture ranked it.
+            raise ValueError("STORY_ARCHITECTURE_SUPERSEDED")
+        budgets = scene_budgets(payload, plan.payload)
+        registered = [entry for entry in payload.get("locations") or [] if isinstance(entry, dict)]
+        named = {entry.get("name") for entry in registered}
+        context.update({
+            "architecture_artifact_id": architecture.id, "architecture_sha256": architecture.sha256,
+            "episode_id": episode_id,
+            "section": {"order": section.get("order"), "title": section.get("title")},
+            # The scene's share of its episode's confirmed seconds, by the weight
+            # the architecture gave it: what the writer aims the scene at.
+            "scene_budget_seconds": budgets.get(section_id),
+            "scene_slot": {**slot, "budget_seconds": budgets.get(section_id)},
+            "episode_blueprint": episode_blueprint(payload, episode_id),
+            "locations": [*registered, *(entry for entry in context["locations"]
+                                         if not (isinstance(entry, dict) and entry.get("name") in named))],
+        })
+        # The scene before this one in the same episode, as its own script left
+        # it: read from the ledger, and only ever inside one episode.
+        previous = db.get(AgentArtifact, supplied.get("previous_scene_artifact_id")) \
+            if supplied.get("previous_scene_artifact_id") else None
+        written = (previous.payload_json or {}) if previous is not None else {}
+        beats = [beat for beat in written.get("beats") or [] if isinstance(beat, dict)]
+        if previous is not None:
+            if (previous.project_id != project_id or previous.kind != DRAMA_SCENE_KIND or previous.stale
+                    or previous.sha256 != digest(written)
+                    or written.get("architecture_sha256") != architecture.sha256
+                    or written.get("episode_id") != episode_id):
+                raise ValueError("STORY_PREVIOUS_SCENE_SUPERSEDED")
+            context["previous_scene"] = {
+                "artifact_id": previous.id, "location": written.get("location"),
+                "exit_state": written.get("exit_state") or "",
+                "last_action": (beats[-1].get("visible_action") if beats else "") or ""}
+    return context
 
 
 def select_outline_revision(db, project_id, outline):

@@ -33,6 +33,31 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
   EDITORIAL_TIMING_CONFLICT: { reason: '台词放不进生成段，或生成段时长与剧本切点表对不上', why: '重试会把这条规则明确告诉模型：镜头要装得下它承载的每一句台词。', action: { label: '重试这一场', target: 'retry-scene' } },
   SHOT_LOCATION_UNKNOWN: { reason: '镜头的地点不在已登记的场景里', action: { label: '重试这一场', target: 'retry-scene' } },
   SHOT_DIALOGUE_LONGER_THAN_SHOT: { reason: '这一镜的台词比镜头还长，按原速说不完', why: '落镜不再悄悄压缩台词时间；重新生成会要求导演把镜头拉长到装得下台词。', action: { label: '重试这一场', target: 'retry-scene' } },
+  // 戏剧层（V4）：小说先改编成可拍的戏，再进分镜。重试会把服务器算出的数字
+  // （第几个动作拍、第几句、多少字）告诉模型，不会悄悄把台词改短。
+  DRAMA_LINE_TOO_LONG: {
+    reason: '有一句台词太长，一个镜头说不完',
+    why: '按正常语速（每秒 4.2 字）单句最多 27 字；重试会告诉编剧是哪一句、多少字，由它拆成两句分到两个动作拍。',
+    action: { label: '重试这一集', target: 'retry-scene' },
+  },
+  DRAMA_BEAT_SPEECH_TOO_LONG: {
+    reason: '一个动作拍的台词太多，一个镜头装不下',
+    why: '一个动作拍的台词合计最多 31 字；重试会让编剧把其中一句移到另一个动作拍。',
+    action: { label: '重试这一集', target: 'retry-scene' },
+  },
+  ARCHITECTURE_SCENE_COVERAGE: {
+    reason: '集纲架构没有给每一场各排一个场次槽位',
+    action: { label: '重试这一集', target: 'retry-scene' },
+  },
+  ARCHITECTURE_EPISODE_COVERAGE: {
+    reason: '集纲架构没有逐集覆盖已确认的分集计划',
+    action: { label: '重试这一集', target: 'retry-scene' },
+  },
+  STORY_ARCHITECTURE_SUPERSEDED: {
+    reason: '集纲架构已过期：大纲或分集计划在它写好之后变了',
+    why: '分镜只能按你最新确认的大纲与分集计划来做；重新生成分镜会先重写集纲架构。',
+    action: { label: '去重新生成分镜', target: 'plan-stage' },
+  },
   LLM_TIMEOUT: { reason: '云端模型响应超时', action: { label: '重试这一场', target: 'retry-scene' } },
   LLM_RATE_LIMIT: { reason: '云端模型限流，稍后重试', action: { label: '重试这一场', target: 'retry-scene' } },
   MATERIAL_IDENTITY_AMBIGUOUS: { reason: '同一人物在多场外观描述不一致', action: { label: '按单场拆分计划', target: 'split-plan' } },

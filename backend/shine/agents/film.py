@@ -27,11 +27,13 @@ from shine.agents.film_contracts import (
     ContinuityArbitration,
     ContinuityReport,
     DirectorialPlan,
+    DramaSceneScript,
     EditDecisionList,
     EditIntentPlan,
     FilmAgentRegistry,
     FilmRunRequest,
     ScriptBreakdown,
+    SeriesArchitecture,
     SoundPlan,
     StyleInputAssessment,
     StyleInputWire,
@@ -648,6 +650,50 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
         # The server binds the authoritative issue text of every ruling.
         for ruling in proposal.rulings:
             ruling.issue = issues[ruling.issue_index]
+    elif isinstance(proposal, SeriesArchitecture):
+        # The plan is the person's: an architecture that invents, drops or
+        # repeats one of its episodes or sections, or stages a scene in a place
+        # it never registered, is refused by name.  The same verdict reads the
+        # same confirmed plan the architect read.
+        from shine.literary.drama import architecture_verdict
+
+        refusals = architecture_verdict(proposal.model_dump(mode="json"), context)
+        if refusals:
+            raise _refusal_error(refusals[0]["code"], refusals)
+    elif isinstance(proposal, DramaSceneScript):
+        # Speech that cannot be spoken inside a shot is the one hard refusal:
+        # no storyboard can film a line that does not fit.  An inner state or
+        # a character the story never established is reported with the scene,
+        # never used to send it back.
+        from shine.literary.drama import scene_verdict
+
+        verdict = scene_verdict(proposal.model_dump(mode="json"), context)
+        if verdict.refusals:
+            raise _refusal_error(verdict.first_code(), verdict.refusals)
+
+
+def _refusal_error(code: str, refusals: list[dict]) -> ValueError:
+    """A named refusal that carries its details for the retry's repair note."""
+    error = ValueError(code)
+    error.details = {"refusal_details": refusals[:12]}
+    return error
+
+
+def verified_context(db: Session, project_id: str, body: FilmRunRequest) -> dict:
+    """The one reader of a crew call's verified production context.
+
+    Before and after every model call the context a caller claims is rebuilt
+    from the ledger.  The architect addresses a whole confirmed plan; every
+    other tool addresses one unit of the source, and the drama writer must
+    find the architecture that ranks its scene.
+    """
+    from shine.materialprep import story
+
+    if body.tool == "series_architecture":
+        return story.verified_architecture_context(db, project_id, body.brief, body.production_context)
+    return story.verified_production_context(
+        db, project_id, body.brief, body.production_context,
+        require_architecture=body.tool == "drama_scene")
 
 
 def canonicalize_script_character_asset_ids(proposal, assets: list[dict]):
@@ -829,8 +875,6 @@ def _continuity_lane_context(
                if "editorial_timing_plan" in base_context else {}),
             **({"production_context": base_context["production_context"]}
                if "production_context" in base_context else {}),
-            **({"unit_target_seconds": base_context["unit_target_seconds"]}
-               if "unit_target_seconds" in base_context else {}),
         }
         return lane_ctx, [a.id for a in lane_artifacts]
 
@@ -854,8 +898,6 @@ def _continuity_lane_context(
                if "max_shot_seconds" in base_context else {}),
             **({"production_context": base_context["production_context"]}
                if "production_context" in base_context else {}),
-            **({"unit_target_seconds": base_context["unit_target_seconds"]}
-               if "unit_target_seconds" in base_context else {}),
         }
         return lane_ctx, [a.id for a in lane_artifacts]
 
@@ -926,6 +968,11 @@ def _record_task_failure(db: Session, task_id: str, role: str, exc: Exception) -
                           "offending_speaker": exc.details.get("speaker")}
                          if isinstance(getattr(exc, "details", None), dict)
                          and isinstance(exc.details.get("offending_line"), str) else {}),
+                      # Which beat, line or section the server refused, as the
+                      # verdict computed it: the retry is told exactly that.
+                      **({"refusal_details": exc.details["refusal_details"]}
+                         if isinstance(getattr(exc, "details", None), dict)
+                         and isinstance(exc.details.get("refusal_details"), list) else {}),
                       **({"provider_finish_reason": exc.details["finish_reason"]}
                          if isinstance(exc, LLMError)
                          and isinstance(exc.details.get("finish_reason"), str) else {}),
@@ -1081,6 +1128,14 @@ class FilmAgentDispatcher:
             if role == "editor"
             else [],
         }
+        if contract is DramaSceneScript:
+            # The narration policy is the storyboard's own frozen decision; the
+            # drama writer reads the same one the beat breakdown reads.
+            narration = ((style.snapshot or {}).get("narration_level") if style else None)
+            context["narration_level"] = narration if narration in {"none", "low", "high"} else "none"
+            context["project_spoken_language"] = (
+                canonical_spoken_language(project.language) or DEFAULT_SPOKEN_LANGUAGE
+            )
         if contract is ScriptBreakdown and project.frozen_style_version_id and style:
             ratio = style.snapshot.get("dialogue_ratio_percent")
             if ratio is not None:
@@ -1105,22 +1160,16 @@ class FilmAgentDispatcher:
             if cap is not None:
                 context["max_shot_seconds"] = float(cap)
         if body.production_context is not None:
-            from shine.materialprep.story import verified_production_context
-            context["production_context"] = verified_production_context(
-                db, project_id, body.brief, body.production_context)
-            # The episode plan's duration goal, allocated to this unit by source
-            # length. The director aims for it (developing the action, not hugging
-            # the dialogue minimum) and the landing verdict checks against it —
-            # the same fact the plan recorded, now carried to the executor.
-            unit_target = body.production_context.get("unit_target_seconds")
-            if unit_target is not None:
-                context["unit_target_seconds"] = float(unit_target)
+            # The architect addresses the whole confirmed plan; every other
+            # caller is one unit of the source.
+            context["production_context"] = verified_context(db, project_id, body)
         if role in {"scriptwriter", "director"}:
             memory_view = _storyboard_memory_view(db, project_id, role=role)
             if memory_view is not None:
                 context["memory"] = memory_view
         refusal: dict | None = None
-        if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"}:
+        if role in {"scriptwriter", "director", "cinematographer", "continuity_supervisor", "editor"} \
+                and body.tool == "propose":
             cap = context.get("max_shot_seconds")
             timing = editorial_timing_preview(
                 body.brief, max_segment_s=cap if cap is not None else MAX_SEGMENT_S)
@@ -1356,7 +1405,7 @@ class FilmAgentDispatcher:
                     dialogue_ratio_percent=context.get("dialogue_ratio_percent"),
                     narration_level=context.get("narration_level"),
                     max_shot_seconds=context.get("max_shot_seconds"),
-                    unit_target_seconds=context.get("unit_target_seconds"),
+                    creative_source=(context.get("production_context") or {}).get("creative_source"),
                     cinema_skills_block=skills_block,
                 )
             if repair_visual_language:
@@ -1425,8 +1474,11 @@ class FilmAgentDispatcher:
             # reviews the sequence and returns a small issues list, so sizing it
             # like a plan (6k goal ceiling) let it deliberate until the transport
             # wall (measured 323s) while an observation-sized budget answers in
-            # seconds. This is a role classification, not a per-call reserve hack.
-            crew_purpose = "observation" if role == "continuity_supervisor" else "structured"
+            # seconds. The architect ranks every scene of a plan at once, which
+            # is a long answer. This is a role classification, not a per-call
+            # reserve hack.
+            crew_purpose = ("architecture" if body.tool == "series_architecture"
+                            else "observation" if role == "continuity_supervisor" else "structured")
             crew_budget = plan_call_budget(
                 bounded_config, crew_request, purpose=crew_purpose,
                 output_ceiling=agent_output_limit,
@@ -1479,7 +1531,7 @@ class FilmAgentDispatcher:
             db.commit()  # A returned response is durable evidence even if the contract rejects it.
             if body.production_context is not None:
                 db.expire_all()
-                verified_production_context(db, project_id, body.brief, body.production_context)
+                verified_context(db, project_id, body)
             response_data = response.parsed
             if (contract is ScriptBreakdown and isinstance(response_data, dict)
                     and "locked_story_facts" not in response_data):
@@ -1545,6 +1597,18 @@ class FilmAgentDispatcher:
                 )
                 validate_output(role, proposal, body, inputs, context)
             payload = proposal.model_dump(mode="json")
+            if isinstance(proposal, DramaSceneScript):
+                # The model wrote the scene; the server writes where it came
+                # from, how long it is, what it chose not to trust and the one
+                # rendering of it the storyboard crew will read.
+                from shine.literary.drama import drama_server_fields
+
+                payload.update(drama_server_fields(payload, context))
+            if isinstance(proposal, SeriesArchitecture):
+                payload.update({
+                    "outline_sha256": context["production_context"]["outline_sha256"],
+                    "plan_sha256": context["production_context"]["plan_sha256"],
+                })
             artifact = AgentArtifact(
                 project_id=project_id,
                 kind=contract.__name__,
@@ -1790,7 +1854,6 @@ class FilmAgentDispatcher:
                     tool=item["tool"],
                     plan=item["context"].get("editorial_timing_plan"),
                     max_shot_seconds=item["context"].get("max_shot_seconds"),
-                    unit_target_seconds=item["context"].get("unit_target_seconds"),
                     cinema_skills_block=skills_block,
                 )
                 if repair_contract_note:
@@ -1934,8 +1997,7 @@ class FilmAgentDispatcher:
                     db.commit()
                     if body.production_context is not None:
                         db.expire_all()
-                        from shine.materialprep.story import verified_production_context
-                        verified_production_context(db, project_id, body.brief, body.production_context)
+                        verified_context(db, project_id, body)
                     proposal, salvage_notes = parse_with_salvage(resp.parsed, ContinuityReport)
                     if salvage_notes:
                         task.trace = {**task.trace, "salvage_notes": salvage_notes}

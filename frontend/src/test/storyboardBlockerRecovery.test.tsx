@@ -35,9 +35,14 @@ type RejectionOverrides = {
   external_outcome?: string;
   provider_finish_reason?: string | null;
   provider_text_chars?: number | null;
+  /** V4 戏剧层的两步也是这条链上的工种名：集纲架构 / 戏剧改编。 */
+  role?: string;
+  reason?: string;
+  code?: string;
 };
 
 function blockedState(rejection: RejectionOverrides) {
+  const role = rejection.role ?? 'scriptwriter';
   return {
     task_id: 'run-1', status: 'NEEDS_REVIEW', state_version: 6,
     error_code: 'DIRECTOR_STORYBOARD_EPISODE_BLOCKED', cursor: 6, total_units: 6,
@@ -54,11 +59,11 @@ function blockedState(rejection: RejectionOverrides) {
       shot_ids: ['s1', 's2'],
       status: 'BLOCKED',
       blocker: {
-        unit_index: 1, status: 'REJECTED', failed_role: 'scriptwriter',
+        unit_index: 1, status: 'REJECTED', failed_role: role,
         failed_task_id: FAILED_TASK,
         rejections: [{
-          role: 'scriptwriter', code: 'LLM_FORMAT', task_id: FAILED_TASK, state_version: 1,
-          rejection_reason_code: 'LLM_FORMAT',
+          role, code: rejection.code ?? 'LLM_FORMAT', task_id: FAILED_TASK, state_version: 1,
+          rejection_reason_code: rejection.reason ?? 'LLM_FORMAT',
           provider_finish_reason: rejection.provider_finish_reason ?? null,
           provider_text_chars: rejection.provider_text_chars ?? null,
           external_outcome: rejection.external_outcome ?? 'UNKNOWN',
@@ -230,6 +235,38 @@ describe('镜头拆解被阻塞：哪一场、为什么、能点什么', () => {
     expect(callout.textContent).not.toContain('连不上远端模型');
     expect(screen.getByRole('button', { name: '核对这次请求并重试' })).toBeEnabled();
   });
+
+  it('V4 戏剧改编被拒：报出「戏剧改编」与人话原因，仍由同一个重试入口续跑', async () => {
+    // 小说先改编成戏再进分镜；一句台词一个镜头说不完时，服务器按字数具名拒绝。
+    // 页面必须说清是改编这一步、为什么，而不是裸码或错报成「编剧」。
+    const retried = vi.fn();
+    stubBlockedPanel({
+      external_outcome: 'RESPONSE_RECEIVED', role: 'drama_scene',
+      code: 'CONTRACT_OR_POLICY_REJECTED', reason: 'DRAMA_LINE_TOO_LONG',
+    }, retried);
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    const callout = await screen.findByText(/第 2 场/);
+    expect(callout.textContent).toContain('戏剧改编');
+    expect(callout.textContent).not.toContain('编剧');
+    expect(callout.textContent).toContain('有一句台词太长');
+    expect(callout.textContent).toContain('DRAMA_LINE_TOO_LONG');
+    await userEvent.setup().click(screen.getByRole('button', { name: '重试这一场' }));
+    await waitFor(() => expect(retried).toHaveBeenCalledTimes(1));
+  });
+
+  it('V4 集纲架构缺场：报出「集纲架构」与缺的场次槽位，而不是裸码', async () => {
+    stubBlockedPanel({
+      external_outcome: 'RESPONSE_RECEIVED', role: 'series_architecture',
+      code: 'CONTRACT_OR_POLICY_REJECTED', reason: 'ARCHITECTURE_SCENE_COVERAGE',
+    });
+    render(<EpisodeStoryboardPanel projectId={PROJECT} />);
+
+    const callout = await screen.findByText(/第 2 场/);
+    expect(callout.textContent).toContain('集纲架构');
+    expect(callout.textContent).toContain('没有给每一场各排一个场次槽位');
+    expect(screen.getByRole('button', { name: '重试这一场' })).toBeEnabled();
+  });
 });
 
 describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确认方案', () => {
@@ -308,7 +345,7 @@ describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确
     expect(screen.queryByRole('button', { name: '去导演包' })).toBeNull();
   });
 
-  it('两集都已落镜达标但未确认时，右栏提供确认入口而非「再跑一遍」，且每集按钮可点击', async () => {
+  it('两集都已整集落镜但未确认时，右栏提供确认入口而非「再跑一遍」，且每集按钮可点击', async () => {
     const ep1Shots = [liveShot('ep1-s1', 1), liveShot('ep1-s2', 2)];
     const ep2Shots = [liveShot('ep2-s1', 1), liveShot('ep2-s2', 2)];
     const confirmedMap: Record<string, string[]> = {};
@@ -317,20 +354,20 @@ describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确
         task_id: 'run-1', status: 'SUCCEEDED', state_version: 5, cursor: 4, total_units: 4,
         episodes: [
           { episode_id: 'ep-01', order: 1, units: [], shot_ids: ['ep1-s1', 'ep1-s2'],
-            status: 'APPLIED', fit_closed: true, landed_shot_count: 2 },
+            status: 'APPLIED', landed_shot_count: 2 },
           { episode_id: 'ep-02', order: 2, units: [], shot_ids: ['ep2-s1', 'ep2-s2'],
-            status: 'APPLIED', fit_closed: false, landed_shot_count: 2 },
+            status: 'APPLIED', landed_shot_count: 2 },
         ],
       }) });
     stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-01\/shots$/,
       respond: () => jsonResponse({
         episode_id: 'ep-01', shots: ep1Shots, total_editorial_seconds: 60, shot_count: 2,
-        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null, target_fit: null,
+        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null,
       }) });
     stub.add({ method: 'GET', pattern: /projects\/p1\/director\/storyboard\/episodes\/ep-02\/shots$/,
       respond: () => jsonResponse({
         episode_id: 'ep-02', shots: ep2Shots, total_editorial_seconds: 60, shot_count: 2,
-        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null, target_fit: null,
+        target_seconds: 60, tolerance_seconds: 30, duration_verdict: null,
       }) });
     stub.add({ method: 'GET', pattern: /projects\/p1\/episode-plans$/,
       respond: () => jsonResponse([{
@@ -367,8 +404,11 @@ describe('重跑拆镜后：当前镜头事实跟随最新 run，而非陈旧确
       expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)).toHaveLength(1);
       expect(stub.callsOf('POST', /episodes\/ep-02\/confirm$/)).toHaveLength(1);
     });
-    expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[0].body).toMatchObject({ fit_target: true });
-    expect(stub.callsOf('POST', /episodes\/ep-02\/confirm$/)[0].body).toMatchObject({ fit_target: false });
+    // 确认的是整集：请求体只带「是否接受偏差」，没有按目标取前缀的开关。
+    expect(stub.callsOf('POST', /episodes\/ep-01\/confirm$/)[0].body)
+      .toEqual({ acknowledge_duration_deviation: false });
+    expect(stub.callsOf('POST', /episodes\/ep-02\/confirm$/)[0].body)
+      .toEqual({ acknowledge_duration_deviation: false });
     expect(await screen.findByRole('button', { name: '去素材准备' })).toBeInTheDocument();
   });
 });

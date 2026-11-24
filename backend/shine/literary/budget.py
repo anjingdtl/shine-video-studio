@@ -77,6 +77,10 @@ PURPOSE_GOAL_MULTIPLIER = {
     # prop list), not creative writing; its answer grows with the cast, so it has
     # its own wider goal ceiling below rather than the creative fallback.
     "entity_catalog": 0.30,
+    # The series architecture is one structured answer for the whole work (one
+    # slot per scene, one registered place), so like the entity catalog its
+    # answer grows with the work instead of with the length of one scene.
+    "architecture": 0.30,
 }
 PURPOSE_MIN_GOAL = {
     "scene": 2_048,
@@ -92,6 +96,7 @@ PURPOSE_MIN_GOAL = {
     # rather than flooring at 4k and returning an empty completion.
     "scene_prep": 4_096,
     "entity_catalog": 2_048,
+    "architecture": 2_048,
 }
 
 # The reasoning reserve is decided here, by purpose, for every caller — one
@@ -107,6 +112,7 @@ PURPOSE_REASONING_RESERVE = {
     "scene_prep": LOW_EFFORT_REASONING_RESERVE,
     "outline": LOW_EFFORT_REASONING_RESERVE,
     "entity_catalog": LOW_EFFORT_REASONING_RESERVE,
+    "architecture": LOW_EFFORT_REASONING_RESERVE,
     "observation": 512,
     "qa": 512,
 }
@@ -128,6 +134,7 @@ PURPOSE_MAX_GOAL = {
     "structured": 6_144,
     "scene_prep": 6_144,
     "entity_catalog": 16_384,
+    "architecture": 16_384,
 }
 
 

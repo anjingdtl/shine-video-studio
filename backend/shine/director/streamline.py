@@ -675,32 +675,6 @@ def ensure_project_rulepack(db, project_id: str) -> str | None:
     return lock.rulepack_id
 
 
-def _allocate_unit_targets(units: list[dict], target_seconds: float) -> None:
-    """Split each episode's duration goal across its units by source length.
-
-    One fact (the episode plan target) becomes one per-unit goal the crew aims
-    for; the units of an episode sum back to the target. A unit's goal is its
-    total screen time, not a single shot's — the per-shot ceiling still applies
-    to every shot the director plans inside the unit. A unit produces at least
-    one H3 segment, so its goal never sits below the renderer's 4s floor; a
-    short fragment is bumped up to it (the episode total keeps its tolerance).
-    """
-    from shine.agents.editorial_timing import MIN_SEGMENT_S
-
-    by_episode: dict[str, list[dict]] = {}
-    for unit in units:
-        by_episode.setdefault(unit["episode_id"], []).append(unit)
-    for episode_units in by_episode.values():
-        total_chars = sum(max(0, u["end_offset"] - u["start_offset"]) for u in episode_units)
-        if total_chars <= 0:
-            for u in episode_units:
-                u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds / len(episode_units)), 1)
-            continue
-        for u in episode_units:
-            share = max(0, u["end_offset"] - u["start_offset"]) / total_chars
-            u["target_seconds"] = round(max(MIN_SEGMENT_S, target_seconds * share), 1)
-
-
 def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: int | None = None) -> dict:
     """Queue one durable run that storyboards every section of the confirmed
     episode plan, in script order, landing each unit's shots before the next.
@@ -714,7 +688,7 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
     from shine.api_director import _confirmed_outline
     from shine.director.contracts import EpisodePlanPayload
     from shine.materialprep import story
-    from shine.materialprep.source_spans import merge_non_narrative_fragments, segment_document
+    from shine.materialprep.source_spans import merge_non_narrative_fragments
 
     project = require_project(db, project_id)
     if not project.frozen_style_version_id:
@@ -739,29 +713,26 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
     asset_hash = digest(asset_context(db, project_id))
     units = []
     for episode in payload.episodes:
-        # Collect every source fragment of this episode first, then merge the
-        # title-only / empty ones into an adjacent narrative fragment.  A bare
-        # volume or chapter heading is not a creation unit: the crew cannot
-        # storyboard a title, and asking it to buys an empty or contract-breaking
-        # answer.  Merging stays inside the episode (never across a frozen episode
-        # boundary) and keeps the source coverage exact.
+        # One unit is one whole scene.  The novel's prose is never sliced into
+        # fixed-length pieces on its way to the storyboard: a scene is adapted
+        # as a whole by the drama layer and shot as a whole, however long the
+        # novel made it.  Only the title-only / empty fragments are merged into
+        # an adjacent narrative one: a bare volume or chapter heading is not a
+        # creation unit.  Merging stays inside the episode (never across a
+        # frozen episode boundary) and keeps the source coverage exact.
         fragments = []
         for section_id in episode.section_ids:
             section = sections_by_id.get(section_id)
             if section is None:
                 raise HTTPException(409, "EPISODE_PLAN_SECTION_UNKNOWN")
-            raw = document.text[section["start_offset"]:section["end_offset"]]
-            offset = section["start_offset"]
-            for fragment in segment_document(raw, max_scene_chars=1200):
-                fragments.append({
-                    "episode_id": episode.episode_id,
-                    "production_section_id": section_id,
-                    "section_order": section.get("order"),
-                    "start_offset": offset,
-                    "end_offset": offset + len(fragment.text),
-                    "text": fragment.text,
-                })
-                offset += len(fragment.text)
+            fragments.append({
+                "episode_id": episode.episode_id,
+                "production_section_id": section_id,
+                "section_order": section.get("order"),
+                "start_offset": section["start_offset"],
+                "end_offset": section["end_offset"],
+                "text": document.text[section["start_offset"]:section["end_offset"]],
+            })
         for merged in merge_non_narrative_fragments(fragments):
             units.append({
                 "episode_id": merged["episode_id"],
@@ -789,13 +760,11 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
             unit["script_artifact_id"] = selection["script_artifact_id"]
             unit["script_sha256"] = selection["script_sha256"]
             adopted_scripts += 1
-    # The episode plan's target_seconds is the one duration goal. It used to
-    # stop at episode grouping and a displayed deviation, so the crew only ever
-    # saw the per-shot ceiling and hugged the dialogue minimum — a 60s target
-    # came out as ~26s of 5s shots. Allocate the goal to each unit by its source
-    # length (the same length-driven basis as segmentation) so the units of an
-    # episode sum back to the target, and carry it to the crew as a fact.
-    _allocate_unit_targets(units, float(payload.target_seconds))
+    # The episode plan's target_seconds reaches the crew as the length each
+    # scene is WRITTEN to: the drama layer shares an episode's seconds among
+    # its scenes by dramatic weight (``literary.drama.scene_budgets``).  It is
+    # never a landing gate: nothing is skipped or cut because an episode's
+    # landed seconds reached the goal, so a story is never cut off half-way.
     identity = digest({"tool": DIRECTOR_STORYBOARD_RUN, "outline": outline.sha256,
                        "plan": plan.sha256, "units": units,
                        "style": project.frozen_style_version_id, "assets": asset_hash})
@@ -818,7 +787,7 @@ def queue_director_storyboard(db, project_id: str, *, actor: str, plan_version: 
                "locked_facts": outline.payload_json.get("locked_facts", []),
                "stage": "STORYBOARD", "units": units, "cursor": 0, "results": [],
                "creative_scripts_adopted": adopted_scripts,
-               "blocked_episodes": {}, "fit_closed_episodes": {}, "automatic_replay": False},
+               "blocked_episodes": {}, "automatic_replay": False},
     )
     db.add(row)
     db.flush()
@@ -998,34 +967,6 @@ def run_pending_director_storyboard(factory, settings, worker_id, *, gateway=Non
     return True
 
 
-def _update_fit_closed_episodes(factory, project_id: str, state: dict) -> dict:
-    """Record episodes whose landed shots have already reached ``target_seconds``."""
-    units = state.get("units") or []
-    blocked = state.get("blocked_episodes") or {}
-    fit_closed = dict(state.get("fit_closed_episodes") or {})
-    target = state.get("target_seconds")
-    if target is None:
-        return state
-    from shine.director.contracts import planned_seconds
-    from shine.models import Shot
-
-    with factory() as db:
-        for ep_id in {u["episode_id"] for u in units}:
-            if ep_id in fit_closed or ep_id in blocked:
-                continue
-            landed = 0.0
-            for result in state.get("results", []):
-                if (result.get("unit") or {}).get("episode_id") != ep_id:
-                    continue
-                for sid in (result.get("apply") or {}).get("shot_ids", []):
-                    shot = db.get(Shot, sid)
-                    if shot is not None and shot.project_id == project_id:
-                        landed += planned_seconds(shot)
-            if landed >= float(target):
-                fit_closed[ep_id] = {"landed_seconds": round(landed, 1)}
-    return {**state, "fit_closed_episodes": fit_closed}
-
-
 def _advance_director_unit(factory, settings, gateway, task_id, version, worker_id, project_id, state):
     from types import SimpleNamespace
 
@@ -1037,22 +978,16 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
     units = state["units"]
     cursor = state.get("cursor", 0)
     blocked = state.get("blocked_episodes", {})
-    # The confirmed per-episode seconds are the cause: once an episode's
-    # landed shots reach the goal, its remaining units are out of scope and
-    # must not buy more model calls.
-    state = _update_fit_closed_episodes(factory, project_id, state)
-    fit_closed = state.get("fit_closed_episodes") or {}
-    # Skip units whose episode already failed or reached its confirmed target:
-    # an independent episode continues.
-    while cursor < len(units) and (units[cursor]["episode_id"] in blocked
-                                   or units[cursor]["episode_id"] in fit_closed):
+    # Skip the units of an episode that already failed: an independent
+    # episode continues.  Every unit of every other episode is storyboarded
+    # in order to the end of the episode; an episode's landed seconds are
+    # never a reason to leave its last scenes unshot.
+    while cursor < len(units) and units[cursor]["episode_id"] in blocked:
         cursor += 1
     if cursor >= len(units):
         status = "NEEDS_REVIEW" if blocked else "SUCCEEDED"
         _finish_step(factory, task_id, version, worker_id, {**state, "cursor": cursor}, status,
                      "DIRECTOR_STORYBOARD_EPISODE_BLOCKED" if blocked else None)
-        for ep_id in fit_closed:
-            _auto_confirm_completed_episode(factory, project_id, state, ep_id)
         return
     unit = units[cursor]
     request_like = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=settings)))
@@ -1118,7 +1053,7 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
                 # refusal again.  Mock lanes are included — a mock retry that
                 # repeats a refusal is just as wasteful as a real one.
                 lesson = {key: failed_trace.get(key) for key in (
-                    "rejection_reason_code", "visual_field", "provider_finish_reason")}
+                    "rejection_reason_code", "visual_field", "provider_finish_reason", "refusal_details")}
             # A real provider's decided refusal needs the one-call replay
             # authorisation; a mock record never replays through that gate
             # (the API boundary refuses mock targets by design).
@@ -1162,19 +1097,27 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
         try:
             result = (pending["result"] if landing_retry else
                       generate_storyboard(project_id, StoryboardRequest(
+                # A unit that already has a confirmed scene script is shot from
+                # that script; every other unit of the director lane is the
+                # novel's own prose, which the drama layer adapts first.
                 text=unit.get("creative_text") or document.text[unit["start_offset"]:unit["end_offset"]],
                 locked_story_facts=state["locked_facts"], allow_remote_text=True,
                 start_role=effective_start_role,
                 resume_steps=effective_resume_steps,
                 authorize_replay_task_id=authorize,
                 retry_lesson=lesson,
+                dramatize=not unit.get("script_artifact_id"),
                 production_context={
                     "outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
+                    "plan_sha256": state["plan_sha256"],
                     "production_section_id": unit["production_section_id"], "source_offsets": unit,
+                    # Where the previous scene of this episode left its people:
+                    # the writer's entry bridge picks it up.  None at an
+                    # episode's first scene.
+                    "previous_scene_artifact_id": _previous_scene_artifact(state, unit),
                     **({"creative_source": unit["creative_source"],
                         "script_artifact_id": unit["script_artifact_id"],
                         "script_sha256": unit["script_sha256"]} if unit.get("script_artifact_id") else {}),
-                    "unit_target_seconds": unit.get("target_seconds"),
                     "story_line": outline.payload_json.get("story_line", []),
                     "timeline": outline.payload_json.get("timeline", []),
                     "characters": outline.payload_json.get("characters", []),
@@ -1279,7 +1222,6 @@ def _advance_director_unit(factory, settings, gateway, task_id, version, worker_
              "resume_steps": {}, "pending_landing": None,
              "results": [*state.get("results", []),
                          {"unit": unit, "storyboard": result, "apply": applied}]}
-    state = _update_fit_closed_episodes(factory, project_id, state)
     _finish_step(factory, task_id, version, worker_id, state)
     # Confirm only after the landed unit is durable in the run trace: the episode
     # coverage gate reads its shots from that trace, not from this local state.
@@ -1303,8 +1245,7 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
         return
     applied_offsets = {(r.get("unit") or {}).get("start_offset")
                        for r in state.get("results", [])}
-    fit_closed = episode_id in (state.get("fit_closed_episodes") or {})
-    if not fit_closed and not all(u.get("start_offset") in applied_offsets for u in episode_units):
+    if not all(u.get("start_offset") in applied_offsets for u in episode_units):
         return
     try:
         with factory.begin() as db:
@@ -1317,11 +1258,13 @@ def _auto_confirm_completed_episode(factory, project_id: str, state: dict, episo
                 # Already materialised (or absent): nothing to confirm again.
                 return
             # Auto-confirm is the authorised continuation of a plan the person
-            # already confirmed: the confirmed seconds govern, so an overrun is
-            # trimmed to the fitting prefix (fit_target) and the rest declared
-            # out of scope, never forced into the episode.
+            # already confirmed.  The episode is confirmed whole: every scene
+            # that landed is in it.  A total outside the target window is
+            # accepted as the deviation the drama layer and the storyboard
+            # produced, and recorded as such — the story is never cut to make
+            # the number.
             confirm_episode_shots(db, project_id, episode_id, actor="local-user",
-                                  acknowledge_duration_deviation=True, fit_target=True)
+                                  acknowledge_duration_deviation=True)
     except HTTPException as exc:
         logger.warning("director_auto_confirm_blocked project=%s episode=%s detail=%s",
                        project_id, episode_id, exc.detail)
@@ -1353,13 +1296,12 @@ def _prior_section_id(state, cursor) -> str | None:
     return prior["production_section_id"] if prior else None
 
 
-def _episode_predecessor(state: dict, unit: dict) -> str | None:
-    """The last shot the previous unit of this episode landed, if any.
+def _previous_unit_result(state: dict, unit: dict) -> dict | None:
+    """The run's record of the unit before this one inside the same episode.
 
-    This is the only source of a plan's ``previous_shot_id``.  It reads the
-    run's own ledger of landed units, never another episode: the first unit of
-    an episode has no predecessor, so its first shot is a cut and no final
-    frame is ever carried from one episode into the next.
+    It reads the run's own ledger of landed units, never another episode: the
+    first unit of an episode has none, so nothing of the previous episode —
+    a shot to continue or a scene to bridge from — is carried into this one.
     """
     for result in reversed(state.get("results") or []):
         landed = result.get("unit") or {}
@@ -1369,12 +1311,32 @@ def _episode_predecessor(state: dict, unit: dict) -> str | None:
                 and landed.get("start_offset") == unit.get("start_offset")):
             # The unit asking is never its own predecessor.
             continue
-        shot_ids = (result.get("apply") or {}).get("shot_ids") or []
-        return shot_ids[-1] if shot_ids else None
+        return result
     return None
 
 
+def _episode_predecessor(state: dict, unit: dict) -> str | None:
+    """The last shot the previous unit of this episode landed, if any.
+
+    This is the only source of a plan's ``previous_shot_id``.
+    """
+    result = _previous_unit_result(state, unit)
+    shot_ids = ((result or {}).get("apply") or {}).get("shot_ids") or []
+    return shot_ids[-1] if shot_ids else None
+
+
+def _previous_scene_artifact(state: dict, unit: dict) -> str | None:
+    """The drama scene script the previous scene of this episode was shot from.
+
+    The writer of a scene that continues the previous one needs to know where
+    that scene left its people; the ledger's own scene script is that fact.
+    """
+    result = _previous_unit_result(state, unit) or {}
+    return (((result.get("storyboard") or {}).get("steps") or {}).get("drama_scene") or {}).get("artifact_id")
+
+
 CREW_ROLE_LABELS = {
+    "series_architecture": "集纲架构", "drama_scene": "戏剧改编",
     "scriptwriter": "编剧", "director": "导演", "cinematographer": "摄影",
     "continuity_supervisor": "场记", "editor": "剪辑", "editor_edit_intent": "剪辑",
     "director_arbitration": "导演裁定", "landing": "落镜",
@@ -1398,6 +1360,28 @@ _REFUSAL_LABELS = {
     "SHOT_CONTINUITY_PREDECESSOR_UNKNOWN": "接拍依赖的上一镜不存在或不属于本作品",
     "UNAPPROVED_VOICE": "镜头引用了未批准的音色",
     "EDL_SOURCE_NOT_PASSED_OR_INVALID_RANGE": "剪辑引用的源镜头未通过或入出点无效",
+    # The drama layer's own verdicts: the retry is told the same reason.
+    "STORY_PLAN_NOT_CONFIRMED": "分集计划不是已确认的那一版，需要先在分镜书里确认",
+    "STORY_ARCHITECTURE_MISSING": "这份分集计划还没有集纲架构",
+    "STORYBOARD_DRAMA_SCENE_MISSING": "这一场还没有改编剧本",
+    "STORY_ARCHITECTURE_SUPERSEDED": "集纲架构已过期（大纲或分集计划变了），需要重新生成分镜",
+    "STORY_ARCHITECTURE_REQUIRED": "这一场缺少集纲架构，无法改编",
+    "STORY_PREVIOUS_SCENE_SUPERSEDED": "本集上一场的改编剧本已失效，需要先重做上一场",
+    "ARCHITECTURE_LOCATIONS_MISSING": "集纲架构没有登记任何场景",
+    "ARCHITECTURE_LOCATION_REPEATED": "集纲架构把同一个地点登记了两次",
+    "ARCHITECTURE_EPISODE_REPEATED": "集纲架构把同一集列了两次",
+    "ARCHITECTURE_EPISODE_COVERAGE": "集纲架构没有逐集覆盖已确认的分集计划",
+    "ARCHITECTURE_SCENE_COVERAGE": "集纲架构没有给每一场各排一个场次槽位",
+    "ARCHITECTURE_LOCATION_UNKNOWN": "集纲架构把某一场排在了没登记的地点",
+    "ARCHITECTURE_TRANSITION_UNKNOWN": "集纲架构用了合同之外的场间转场方式",
+    "DRAMA_LOCATION_MISSING": "改编剧本没有写明场景地点",
+    "DRAMA_LOCATION_UNKNOWN": "改编剧本把这一场放在了没登记的地点",
+    "DRAMA_BEATS_MISSING": "改编剧本没有任何戏剧动作拍",
+    "DRAMA_ENTRY_BRIDGE_MISSING": "承接上一场的戏没有写开场衔接动作",
+    "DRAMA_ACTION_MISSING": "改编剧本里有动作拍没有可拍摄的动作",
+    "DRAMA_LINE_EMPTY": "改编剧本里有空的台词",
+    "DRAMA_LINE_TOO_LONG": "有一句台词太长，按正常语速一个镜头说不完，需要拆句",
+    "DRAMA_BEAT_SPEECH_TOO_LONG": "一个动作拍的台词太多，一个镜头装不下，需要拆到别的动作拍",
 }
 
 
@@ -1497,9 +1481,12 @@ def _episode_blocker_view(db, project_id: str, episode: dict, entry: dict) -> di
         # reconcile endpoint re-verdicts before any release.
         holder_id = rejection.get("task_id")
         if not holder_id:
+            from shine.api_film import storyboard_step_role
+
+            # The drama steps are answered by the writer's own route.
             holder = db.scalars(select(AgentTaskRecord).where(
                 AgentTaskRecord.project_id == project_id,
-                AgentTaskRecord.role_id == role,
+                AgentTaskRecord.role_id == storyboard_step_role(role),
                 AgentTaskRecord.status.in_(["RUNNING", "NEEDS_REVIEW", "RECONCILING"]),
             ).order_by(AgentTaskRecord.created_at.desc())).first()
             holder_id = holder.id if holder else None
@@ -1554,14 +1541,9 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
                if section is not None else {}),
         })
     episodes: list[dict] = []
-    fit_closed_episodes = trace.get("fit_closed_episodes") or {}
     plan = _latest_plan(db, project_id)
     plan_payload = (plan.payload or {}) if plan is not None else {}
     if plan is not None and plan_payload.get("mode") == "sections":
-        from shine.director.contracts import duration_target_verdict, planned_seconds
-
-        plan_target = float(plan.target_seconds)
-        plan_tolerance = float(plan.tolerance_seconds)
         for order, episode in enumerate(plan_payload.get("episodes", []), start=1):
             episode_id = episode.get("episode_id")
             scenes = episode_scene_facts(db, project_id, episode, section_index)
@@ -1586,21 +1568,12 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
             shot_ids = [sid for sec in scenes for sid in sec["shot_ids"]]
             active = [sec for sec in scenes if sec["state"] != "MERGED"]
             pending_count = sum(1 for sec in active if not sec["shot_count"])
-            fit_closed = episode_id in fit_closed_episodes
-            if (not fit_closed and pending_count > 0 and shot_ids and marker is None
-                    and row.status in {"SUCCEEDED", "NEEDS_REVIEW", "PAUSED"}):
-                ep_shots = [s for s in (db.get(Shot, sid) for sid in shot_ids)
-                            if s is not None and s.project_id == project_id]
-                ep_total = sum(planned_seconds(s) for s in ep_shots)
-                if ep_total >= plan_target or duration_target_verdict(ep_total, plan_target, plan_tolerance) is None:
-                    fit_closed = True
-            if fit_closed:
-                for sec in scenes:
-                    if sec["state"] == "IN_PROGRESS" and sec["shot_count"] > 0:
-                        sec["state"] = "APPLIED"
+            # An episode is APPLIED only when every one of its scenes landed
+            # shots.  There is no "reached the target, stop here": a half-shot
+            # episode is in progress, never complete.
             if marker is not None:
                 status = "BLOCKED"
-            elif (active and all(sec["shot_count"] for sec in active)) or (fit_closed and shot_ids):
+            elif active and all(sec["shot_count"] for sec in active):
                 status = "APPLIED"
             elif shot_ids:
                 status = "IN_PROGRESS"
@@ -1609,7 +1582,6 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
             episodes.append({
                 "episode_id": episode_id, "order": order,
                 "units": ep_units, "shot_ids": shot_ids, "status": status,
-                "fit_closed": fit_closed,
                 "blocker": marker, "sections": scenes,
                 "landed_shot_count": len(shot_ids),
                 "pending_section_count": pending_count,
@@ -1709,8 +1681,7 @@ def retry_director_episode(db, project_id: str, episode_id: str, *, expected_sta
 
 
 def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
-                          acknowledge_duration_deviation: bool = False,
-                          fit_target: bool = False) -> dict[str, Any]:
+                          acknowledge_duration_deviation: bool = False) -> dict[str, Any]:
     """Land one episode's storyboarded sections into the confirmed plan.
 
     Only the target episode's sections must be applied; other episodes keep
@@ -1720,14 +1691,12 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     Re-confirming an already-landed episode reuses its shots — it never adds
     duplicates.
 
-    ``fit_target`` honours the person's confirmed per-episode seconds as the
-    cause: when the landed shots overrun the target window, the confirmation
-    selects the prefix that fits (the same single episode-splitter verdict,
-    cutting only between shots at continuity-safe boundaries) and declares the
-    remaining sections out of scope.  The overrun stays landed history; it is
-    never forced into the episode nor silently dropped.
+    The episode is confirmed whole.  Every one of its sections must have landed
+    its shots, and every landed shot goes into the episode; a total outside the
+    target window is a deviation the person accepts by name, never a reason to
+    leave the shots that do not fit out of the episode.
     """
-    from shine.director.contracts import EpisodePlanPayload, derive_episode_plan
+    from shine.director.contracts import EpisodePlanPayload
     from shine.director.models import DirectorEpisodePlan
     from shine.materialprep.story import section_storyboard_shot_ids
 
@@ -1742,26 +1711,20 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     if target is None:
         raise HTTPException(404, "EPISODE_NOT_IN_PLAN")
     pending = []
-    merged_sections: list[str] = []
     shot_ids: list[str] = []
-    section_of_shot: dict[str, str] = {}
     for section_id in target.section_ids:
         resolved = section_storyboard_shot_ids(db, project_id, section_id)
         if resolved.get("merged_into"):
             # A bare title merged into a narrative neighbour is satisfied by the
             # merge; it owns no shots and must not block the episode or duplicate
             # the owner's shots.
-            merged_sections.append(section_id)
             continue
         if resolved["missing"] or not resolved["shot_ids"]:
             pending.append({"section_id": section_id,
                             "missing": resolved["missing"] or [{"reason": "SECTION_HAS_NO_SHOTS"}]})
-        for sid in resolved["shot_ids"]:
-            section_of_shot[sid] = section_id
         shot_ids.extend(resolved["shot_ids"])
     # The landed total is checked against the same target window the plan was
-    # confirmed under: the crew aims for the goal, and the person confirms an
-    # episode that actually reaches it (or explicitly accepts the deviation).
+    # confirmed under, so the person sees a real deviation by name.
     from shine.director.contracts import duration_target_verdict, planned_seconds
     from shine.models import Shot
 
@@ -1770,57 +1733,23 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
     actual_total = sum(planned_seconds(s) for s in ordered_shots)
     duration_verdict = duration_target_verdict(
         actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
-    latest_run = db.scalars(select(AgentTaskRecord).where(
-        AgentTaskRecord.project_id == project_id,
-        AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
-    ).order_by(AgentTaskRecord.created_at.desc())).first()
-    run_fit_closed = bool(
-        latest_run is not None
-        and episode_id in ((latest_run.trace or {}).get("fit_closed_episodes") or {})
-    )
-    target_reached = bool(shot_ids) and (
-        run_fit_closed or duration_verdict is None or actual_total >= float(payload.target_seconds)
-    )
-    if pending and not fit_target and not target_reached:
+    if pending:
         raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                   "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
                                   "pending": pending[:50]})
-    out_of_scope = list(payload.out_of_scope_section_ids)
-    kept_sections = list(target.section_ids)
-    if fit_target or (target_reached and pending):
-        if fit_target and not shot_ids:
-            raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
-                                      "message": "本集还没有落镜，没有可按目标确认的内容",
-                                      "episode_id": episode_id})
-        if fit_target and duration_verdict and ordered_shots:
-            fit = derive_episode_plan(
-                ordered_shots, target_seconds=payload.target_seconds,
-                tolerance_seconds=payload.tolerance_seconds)
-            shot_ids = list(fit.episodes[0].shot_ids)
-            ordered_shots = [s for s in ordered_shots if s.id in set(shot_ids)]
-            actual_total = sum(planned_seconds(s) for s in ordered_shots)
-            duration_verdict = duration_target_verdict(
-                actual_total, float(payload.target_seconds), float(payload.tolerance_seconds))
-        selected_sections = {section_of_shot[sid] for sid in shot_ids}
-        kept_sections = [sid for sid in target.section_ids
-                         if sid in selected_sections or sid in merged_sections]
-        unproduced = [
-            sid for sid in target.section_ids
-            if sid not in selected_sections and sid not in merged_sections and sid not in out_of_scope
-        ]
-        if fit_target:
-            out_of_scope += unproduced
-        out_of_scope += [
-            row["section_id"] for row in pending
-            if row["section_id"] not in selected_sections
-            and row["section_id"] not in merged_sections
-            and row["section_id"] not in out_of_scope
-        ]
+    # The episode is confirmed whole: every one of its sections has landed and
+    # every landed shot goes into it.  The landed total is still checked
+    # against the target window the plan was confirmed under, but a total
+    # outside it is a deviation the person accepts by name (or repairs by
+    # changing shot durations) — never repaired by keeping only the shots that
+    # fit and leaving the rest of the story out of the episode.
     if duration_verdict and not acknowledge_duration_deviation:
         raise HTTPException(409, {**duration_verdict,
                                   "code": "EPISODE_DURATION_OUT_OF_TARGET",
                                   "message": "本集落镜总时长超出目标容差窗：用「改时长」调整镜头，或显式确认接受偏差",
                                   "episode_id": episode_id})
+    out_of_scope = list(payload.out_of_scope_section_ids)
+    kept_sections = list(target.section_ids)
     episodes = []
     for episode in payload.episodes:
         if episode.episode_id == episode_id:
@@ -1861,7 +1790,6 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
               {"episode_id": episode_id, "version": new_row.version,
                "shots": len(shot_ids), "streamline": True,
                "actual_seconds": round(actual_total, 1),
-               "fit_target": bool(fit_target),
                "out_of_scope_sections": len(out_of_scope),
                "duration_acknowledged": bool(duration_verdict and acknowledge_duration_deviation)},
               project_id=project_id)
@@ -1959,13 +1887,11 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
             ShotSubtitle.shot_id.in_(shot_ids))).all()
     } if shot_ids else {}
     rows = []
-    ordered_shots = []
     total = 0.0
     for position, shot_id in enumerate(shot_ids):
         shot = db.get(Shot, shot_id)
         if shot is None or shot.project_id != project_id:
             continue
-        ordered_shots.append(shot)
         spec = shot.spec or {}
         prompt_row = frozen_prompts.get(shot.id)
         # A frozen prompt is only "in effect" while it still describes this
@@ -2027,39 +1953,27 @@ def episode_shot_table(db, project_id: str, episode_id: str) -> dict[str, Any]:
     # ③ inherits ②'s confirmed duration goal: the same verdict function the
     # confirmation gate uses, so the table can never show a bare total that
     # silently disagrees with the storyboard book.
-    from shine.director.contracts import derive_episode_plan, duration_target_verdict, planned_seconds
+    from shine.director.contracts import duration_target_verdict, planned_seconds
 
     target = float(plan.target_seconds) if plan is not None else None
     tolerance = float(plan.tolerance_seconds) if plan is not None else None
     verdict = (duration_target_verdict(total, target, tolerance)
                if target is not None and rows else None)
-    # The same single splitter verdict previews the target-fitting prefix, so
-    # the panel's "confirm per target" button shows exactly what the server
-    # will confirm — never a client-side guess.
-    target_fit = None
-    if verdict and ordered_shots:
-        fit = derive_episode_plan(ordered_shots, target_seconds=int(target),
-                                  tolerance_seconds=int(tolerance))
-        first = fit.episodes[0]
-        target_fit = {"shot_count": len(first.shot_ids),
-                      "seconds": round(first.planned_seconds, 1),
-                      "shot_ids": list(first.shot_ids)}
     confirmed_seconds = None
     if confirmed_shot_ids:
         confirmed_seconds = round(sum(
             planned_seconds(s) for s in
             (db.get(Shot, sid) for sid in confirmed_shot_ids)
             if s is not None and s.project_id == project_id), 1)
-    # A fit-trimmed confirmation is a prefix of the live landed shots: that is
-    # the person's deliberate scope, not a stale re-run.  A retake that replaces
-    # shots breaks the prefix and is stale.
+    # An episode is confirmed as exactly the shots that were live when it was
+    # confirmed.  Any difference — a retake that replaced a shot, or a re-run
+    # that landed more — is a new storyboard the person has not confirmed.
     stale = bool(confirmed_version is not None and confirmed_shot_ids
-                 and live_ids != confirmed_shot_ids
-                 and live_ids[:len(confirmed_shot_ids)] != confirmed_shot_ids)
+                 and live_ids != confirmed_shot_ids)
     return {"episode_id": episode_id, "shots": rows,
             "total_editorial_seconds": round(total, 3), "shot_count": len(rows),
             "target_seconds": target, "tolerance_seconds": tolerance,
-            "duration_verdict": verdict, "target_fit": target_fit,
+            "duration_verdict": verdict,
             "confirmed_shot_ids": confirmed_shot_ids,
             "confirmed_version": confirmed_version,
             "confirmed_seconds": confirmed_seconds,

@@ -683,12 +683,14 @@ const EPISODE_STATUS_LABELS: Record<string, string> = {
   PENDING: '待生成', IN_PROGRESS: '生成中', APPLIED: '可确认', BLOCKED: '被阻塞',
 };
 
-/** 分镜链的五个工种在页面上的人话名（与专家面板同词）。 */
+/** 分镜链的各工种在页面上的人话名（与专家面板同词）。
+ *  V4 在剧组之前多了两步，都由编剧一路模型应答：集纲架构、戏剧改编。 */
 const CREW_ROLE_LABELS: Record<string, string> = {
+  series_architecture: '集纲架构', drama_scene: '戏剧改编',
   scriptwriter: '编剧', director: '导演', cinematographer: '摄影',
   continuity_supervisor: '场记', editor: '剪辑', editor_edit_intent: '剪辑',
   director_arbitration: '导演裁定',
-  // 五个工种都成功、落镜闸门拒绝时的归属：它不是一个模型工种。
+  // 各工种都成功、落镜闸门拒绝时的归属：它不是一个模型工种。
   landing: '落镜',
 };
 
@@ -701,6 +703,12 @@ const REFUSAL_LABELS: Record<string, string> = {
   SHOT_LOCATION_UNKNOWN: '镜头的地点不在已登记的场景里',
   SHOT_DIALOGUE_LONGER_THAN_SHOT: '这一镜的台词比镜头还长，按原速说不完',
   SHOT_CONTINUITY_PREDECESSOR_UNKNOWN: '接拍依赖的上一镜不存在或不属于本作品',
+  // 戏剧层：小说先改编成可拍的戏，再进分镜。
+  ARCHITECTURE_SCENE_COVERAGE: '集纲架构没有给每一场各排一个场次槽位',
+  ARCHITECTURE_EPISODE_COVERAGE: '集纲架构没有逐集覆盖已确认的分集计划',
+  DRAMA_LINE_TOO_LONG: '有一句台词太长，按正常语速一个镜头说不完，需要拆句',
+  DRAMA_BEAT_SPEECH_TOO_LONG: '一个动作拍的台词太多，一个镜头装不下',
+  STORY_ARCHITECTURE_SUPERSEDED: '集纲架构已过期（大纲或分集计划变了），需要重新生成分镜',
 };
 
 function refusalReason(rejection: { code?: string; rejection_reason_code?: string;
@@ -736,7 +744,6 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     shots: EpisodeShotRow[]; total: number;
     target?: number | null; tolerance?: number | null;
     verdict?: { deviation_seconds: number } | null;
-    targetFit?: { shot_count: number; seconds: number } | null;
     confirmedSeconds?: number | null;
     stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number;
   }>>({});
@@ -763,7 +770,6 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
       const next: Record<string, { shots: EpisodeShotRow[]; total: number;
         target?: number | null; tolerance?: number | null;
         verdict?: { deviation_seconds: number } | null;
-        targetFit?: { shot_count: number; seconds: number } | null;
         confirmedSeconds?: number | null;
         stale?: boolean; confirmedVersion?: number | null; confirmedCount?: number }> = {};
       await Promise.all(rows.episodes.map(async (episode) => {
@@ -772,7 +778,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
           next[episode.episode_id] = {
             shots: table.shots, total: table.total_editorial_seconds,
             target: table.target_seconds, tolerance: table.tolerance_seconds,
-            verdict: table.duration_verdict, targetFit: table.target_fit,
+            verdict: table.duration_verdict,
             confirmedSeconds: table.confirmed_seconds,
             stale: table.confirmation_stale, confirmedVersion: table.confirmed_version,
             confirmedCount: table.confirmed_shot_ids?.length,
@@ -834,10 +840,12 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     await queueDirectorStoryboard(projectId);
     onMessage?.('分镜任务已排队；关掉页面也会由常驻 Worker 继续逐场拆镜。');
   });
-  const confirmEpisode = (episodeId: string, acknowledge = false, fitTarget = false) =>
+  // 一集确认的是它全部落下的镜头。时长超出目标窗时由用户逐镜改时长或显式接受偏差，
+  // 不再按目标秒数只取「装得下的前缀」——那会把一集的结尾砍掉。
+  const confirmEpisode = (episodeId: string, acknowledge = false) =>
     act(`confirm-${episodeId}`, async () => {
       try {
-        await confirmEpisodeShots(projectId, episodeId, acknowledge, fitTarget);
+        await confirmEpisodeShots(projectId, episodeId, acknowledge);
         setDurationDeviation(null);
         onJourneyRefresh?.();
       } catch (error) {
@@ -846,8 +854,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
         }
         throw error;
       }
-    }, fitTarget ? `已按②确认的秒数取最接近的镜头落定第 ${episodeId} 集；超出部分保留为历史。`
-      : `第 ${episodeId} 集镜头已落定。`);
+    }, `第 ${episodeId} 集镜头已落定。`);
   const retryEpisode = (episodeId: string) => {
     if (!state?.state_version) return;
     const version = state.state_version;
@@ -908,23 +915,22 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
   // 的再跑按钮，也不能跳过素材准备直接去导演包。
   const allConfirmed = episodes.length > 0 && readyCount === episodes.length
     && !episodes.some((row) => tables[row.episode_id]?.stale);
-  // 一套事实、一个裁决：已落镜或达到②目标秒数停跑（fit_closed）且尚未确认（或有新拆镜待重确认）的集，
+  // 一套事实、一个裁决：整集的场次都已落镜（APPLIED）且尚未确认（或有新拆镜待重确认）的集，
   // 才属于待确认集；右边框体与每集按钮共享同一份可确认清单与同一个确认执行者。
+  // 一集只在全部场次落镜后才算落定：不存在「达到目标秒数就停跑」的半集。
   const confirmableEpisodes = episodes.filter((row) => {
     if (episodeShotCount(row) <= 0) return false;
     if (tables[row.episode_id]?.stale) return true;
     if (confirmedEpisodes[row.episode_id]) return false;
-    return row.status === 'APPLIED' || Boolean(row.fit_closed);
+    return row.status === 'APPLIED';
   });
   const confirmableCount = confirmableEpisodes.length;
   const landedTotal = episodes.reduce((sum, row) => sum + episodeShotCount(row), 0);
   const confirmAllReady = () =>
     act('confirm-all', async () => {
       for (const episode of confirmableEpisodes) {
-        const table = tables[episode.episode_id];
-        const fitTarget = Boolean(table?.targetFit || episode.fit_closed);
         try {
-          await confirmEpisodeShots(projectId, episode.episode_id, false, fitTarget);
+          await confirmEpisodeShots(projectId, episode.episode_id, false);
         } catch (error) {
           if (error instanceof ApiError && error.code === 'EPISODE_DURATION_OUT_OF_TARGET') {
             setDurationDeviation({ episodeId: episode.episode_id, text: error.message });
@@ -1204,7 +1210,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
                       {table.verdict
                         ? <>。当前{table.verdict.deviation_seconds > 0 ? '超出' : '低于'}目标窗 {
                             Math.abs(Math.round(table.verdict.deviation_seconds))} 秒：
-                            可「按②目标确认」取最接近的镜头，或逐镜「改时长」。</>
+                            可逐镜「改时长」把总时长调进目标窗，或确认时显式接受偏差。</>
                         : table.target != null ? <>，在目标窗内。</> : <>。</>}</>}
                 提示词与字幕都可以逐镜人工接管；规范检查只给建议，不阻断。
               </p>
@@ -1214,23 +1220,17 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
               </p>
             </>}
           </>}
-          {table?.targetFit && (!confirmedVersion || table.stale) && <button type="button"
-            className="btn-primary" disabled={busy !== ''}
-            onClick={() => confirmEpisode(episode.episode_id, false, true)}>
-            <Check size={13} /> 按②目标确认（取前 {table.targetFit.shot_count} 镜 · {
-              Math.round(table.targetFit.seconds)} 秒）
-          </button>}
-          {(applied || episode.fit_closed) && !confirmedVersion && <button type="button"
-            className={table?.targetFit ? 'btn-secondary' : 'btn-primary'}
+          {applied && !confirmedVersion && <button type="button"
+            className="btn-primary"
             disabled={busy !== '' || episodeShotCount(episode) === 0}
-            onClick={() => confirmEpisode(episode.episode_id, false, Boolean(episode.fit_closed))}>
+            onClick={() => confirmEpisode(episode.episode_id, false)}>
             <Check size={13} /> 确认全部落镜（{episodeShotCount(episode)} 镜）
           </button>}
           {confirmedVersion && table?.stale && <div className="notice" role="alert">
             <p>最新拆镜落了 {episodeShotCount(episode)} 镜，与已确认的 v{confirmedVersion}（{table.confirmedCount ?? 0} 镜）不同。
               重新确认本集才会用新镜头替换旧确认；旧镜头与已出片产物作为历史保留，不会被改写。</p>
             <button type="button" className="btn-primary" disabled={busy !== '' || episodeShotCount(episode) === 0}
-              onClick={() => confirmEpisode(episode.episode_id, false, Boolean(episode.fit_closed))}>
+              onClick={() => confirmEpisode(episode.episode_id, false)}>
               <Check size={13} /> 重新确认本集（采用最新 {episodeShotCount(episode)} 镜）
             </button>
           </div>}

@@ -129,17 +129,65 @@ def _confirm_book(client, project: str, plan_version: int, plan_sha: str) -> dic
     return response.json()
 
 
-def _chain_responder(registry: dict, *, fail_section: str | None = None):
-    """The five-role chain answer, optionally broken for one section."""
+def _chain_responder(registry: dict, *, fail_section: str | None = None,
+                     fail_drama: bool = False):
+    """The chain's answer, optionally broken for one section or for the drama writer."""
     character = "老周"
 
     def respond(messages, schema):
+        import json
         import re
 
         title = schema.get("title")
         blob = "".join(message.content for message in messages)
         match = re.search(r'"production_section_id"\s*:\s*"([^"]+)"', blob)
         section = match.group(1) if match else ""
+        # The drama layer's two answers are derived from the context the server
+        # sends: the plan the architect must address, and the slot the writer
+        # must write into.  (The user message is that context, then the schema.)
+        from shine.literary.requests import SCHEMA_INSTRUCTION
+
+        context = json.loads(messages[-1].content.split(SCHEMA_INSTRUCTION)[0])
+        production = context.get("production_context") or {}
+        if title == "SeriesArchitecture":
+            plan = production["plan"]
+            place = (production.get("registered_locations") or [{"name": "钟表铺"}])[0]["name"]
+            return copy.deepcopy({
+                "locations": [{"name": place,
+                               "description": "一间挂满钟的狭长店铺，柜台临街。",
+                               "time_variants": ["night"]}],
+                "episodes": [{"episode_id": episode["episode_id"], "opening_hook": "怀表停在十二点",
+                              "climax_beat": "老周修好怀表", "cliffhanger": "客人走进雨里"}
+                             for episode in plan["episodes"]],
+                "scene_slots": [
+                    {"production_section_id": section_id, "location": place, "time_of_day": "night",
+                     "dramatic_goal": "老周修好怀表，客人留下硬币",
+                     "transition_from_prev": "episode_open" if position == 0 else "location_switch",
+                     "weight": 1.0}
+                    for episode in plan["episodes"]
+                    for position, section_id in enumerate(episode["section_ids"])],
+            })
+        if title == "DramaSceneScript":
+            if fail_drama:
+                # One line a shot cannot hold: the server's own verdict refuses it.
+                return {"location": production["scene_slot"]["location"], "beats": [
+                    {"visible_action": "老周说话。",
+                     "spoken_lines": [{"speaker": character, "text": "又停在十二点。" * 6}]}]}
+            return copy.deepcopy({
+                "location": production["scene_slot"]["location"],
+                "time_of_day": production["scene_slot"]["time_of_day"],
+                "weather_atmosphere": "雨",
+                "entry_bridge": "老周没有抬头。",
+                "exit_state": "灯灭了。",
+                "beats": [
+                    {"beat_type": "action",
+                     "visible_action": "老周把怀表贴近耳朵，又放回丝绒垫上。",
+                     "characters": [character],
+                     "spoken_lines": [{"speaker": character, "emotion": "压低声音", "text": "又停在十二点。"}]},
+                    {"beat_type": "transition_out", "visible_action": "客人留下硬币，走进雨里。",
+                     "characters": [], "spoken_lines": []},
+                ],
+            })
         if fail_section and section == fail_section and title == "ScriptBreakdown":
             # A decided, answered refusal with genuinely missing content: the
             # salvage step cannot invent the required prose, so the refusal
