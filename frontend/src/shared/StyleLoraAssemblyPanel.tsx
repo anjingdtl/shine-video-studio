@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowDown, ArrowUp, Plus, RefreshCw, Sparkles, Trash2, Upload } from 'lucide-react';
+import type { ImageVramAdvice } from '../api';
+import { ImageVramAdvicePanel } from './ImageVramAdvicePanel';
 
 export type StyleLoraConfig = {
   lora_id: string;
@@ -119,6 +121,7 @@ export function StyleLoraAssemblyPanel({
   const isImage = baseModel === 'qwen_image_21';
   const [items, setItems] = useState<StyleLoraAssetItem[]>([]);
   const [presets, setPresets] = useState<ImagePreset[]>([]);
+  const [vramAdvice, setVramAdvice] = useState<ImageVramAdvice | null>(null);
   const [comfyReachable, setComfyReachable] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
@@ -157,6 +160,7 @@ export function StyleLoraAssemblyPanel({
       }
       setItems(Array.isArray(payload.items) ? payload.items : []);
       setPresets(Array.isArray(payload.presets) ? payload.presets : []);
+      setVramAdvice(isImage && payload.vram_advice ? payload.vram_advice : null);
       setComfyReachable(Boolean(payload.comfy_reachable));
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取 LoRA 台账失败');
@@ -430,6 +434,8 @@ export function StyleLoraAssemblyPanel({
         可选挂载 0–{MAX_STYLE_LORAS} 个风格 LoRA；未选择时不修改工作流且不引入额外检查。
         {comfyReachable ? ' ComfyUI 实时列表已连接。' : ' 当前按本地受管路径登记。'}
       </p>
+
+      {isImage && vramAdvice && <ImageVramAdvicePanel advice={vramAdvice} compact />}
 
       {!isImage && !loraSupported && (
         <div className="style-lora-warn" role="status">

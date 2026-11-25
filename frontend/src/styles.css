@@ -2789,3 +2789,22 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .style-lora-origin{font-size:11px;color:var(--muted)}
 .style-lora-meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
 .style-lora-lib-actions{display:inline-flex;align-items:center;gap:5px}
+
+/* ---- 生图显存适配建议（只读提示，不拦截出图） ------------------------------ */
+.image-vram-advice{margin:8px 0;padding:10px 12px;border:1px solid var(--border,var(--line));border-radius:9px;background:var(--surface-2,rgba(255,255,255,.04));display:flex;flex-direction:column;gap:6px;font-size:var(--fs-caption);color:var(--ink-2)}
+.image-vram-advice.is-compact{padding:8px 10px}
+.image-vram-advice[data-status="fits"]{border-color:var(--ok-line,#9ec8a9)}
+.image-vram-advice[data-status="unverified"],.image-vram-advice[data-status="unknown"]{border-color:var(--warn-line,#d9c49a)}
+.image-vram-advice[data-status="cannot_start"]{border-color:var(--danger-line,#e0a0a0)}
+.image-vram-advice-head{display:flex;align-items:center;gap:6px;flex-wrap:wrap;color:var(--ink)}
+.image-vram-tag{display:inline-flex;align-items:center;padding:1px 6px;border-radius:6px;font-size:11px;border:1px solid var(--border,var(--line));color:var(--muted)}
+.image-vram-tag.is-evidence{color:var(--ink-2)}
+.image-vram-advice-meta{display:flex;flex-direction:column;gap:2px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.image-vram-advice-headline{margin:0;color:var(--ink)}
+.image-vram-advice-detail{margin:0;color:var(--muted)}
+.image-vram-advice-notes{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:2px}
+.image-vram-classes{width:100%;border-collapse:collapse;font-size:11px;margin-top:2px}
+.image-vram-classes th,.image-vram-classes td{padding:4px 6px;text-align:left;border-top:1px solid var(--line,var(--border));vertical-align:top}
+.image-vram-classes th{color:var(--muted);font-weight:600;border-top:0}
+.image-vram-classes tr.is-current{background:var(--panel,var(--surface-3));font-weight:600;color:var(--ink)}
+.image-vram-current-tag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:5px;border:1px solid var(--accent);color:var(--accent);font-size:10px;font-weight:600}

@@ -202,6 +202,8 @@ def image_vram_advice(
         elif klass["id"] == "16gb":
             advice["headline"] = (
                 f"实测可用：出图时整卡占用约 {peak_mb} MB，本卡余量约 {advice['headroom_mb']} MB。"
+                if advice["headroom_mb"] is not None
+                else f"实测可用：出图时整卡占用约 {peak_mb} MB，本卡接近占用上限。"
             )
         else:
             advice["headline"] = "据 RTX 4070 Super 12 GB 用户反馈，这一档可以正常出图。"

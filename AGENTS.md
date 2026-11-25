@@ -2591,36 +2591,50 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   exit 0、`shards_with_failure_markers=0`）、前端 488/488 与 `tsc`/Vite build、Ruff 均通过。
   证据与未完成项见 `docs/ACCEPTANCE_20261123_H3_LOW_VRAM_ATTENTION_GUARD.md`。
 
-## 2026-11-25 统一素材生图 LoRA 与剧本对齐提示词 V1（接手 Codex 额度中断轮）
+## 2026-11-25 统一素材生图 LoRA 与剧本对齐提示词 V1（2026-11-26 配方裁定与显存适配建议收尾）
 
 - **生图 LoRA 与 H3 LoRA 同一张台账，靠 `base_model` 区分**（`minimax_h3` / `qwen_image_21`）。唯一裁决仍是
   `evaluate_style_lora_selection()`，两条生图线提交前都走 `resolve_live_image_loras()`；唯一挂载口是
   `attach_qwen_style_loras()`，节点 `4511 → 4512 → 4513` 串在 UNET 与 `QwenImage21Cache` 之间（T2I 缓存 `480`、
   编辑图缓存 `469`）；唯一注词口是 `apply_image_lora_prompts()`。**不要再在 `api_asset_center.py` /
   `api_material.py` 里写平行的 LoRA 校验或节点拼装。**
-- **零 LoRA 基线不变**：图谱原样，25 步 / cfg 1.0 / euler / simple，零额外下载、零额外门禁。选了配方按
-  35 / 30 / 30 步、cfg 3.5；手工装配 LoRA 而未选配方时 30 步、cfg 3.5。
-- **`material-image-v6-qwen21` 的运行时指纹含模板合同摘要。** 模板升级让旧 `RENDER_VERIFIED` 凭证失效，升级后
-  重跑一次 `POST /api/v1/setup/image-runtime/validate`。幂等键绑定着已结束的运行，重试要换新键。
+- **零 LoRA 基线不变**：图谱原样，25 步 / cfg 1.0 / euler / simple，零额外下载、零额外门禁。2026-11-26 用户裁定
+  删除赛博朋克配方，出厂保留两套配方（电影级写实摄影 35 步、暗黑奇幻插画 30 步，均为 `cfg=3.5`、`euler/simple`）；
+  「Qwen 多视角镜头」LoRA（约 319 MB）暂留可选下载包（约 740 MiB）供手动挂载，是否移出待用户决定。手工装配 LoRA
+  而未选配方时按 30 步、`cfg=3.5`、`euler/simple`。
+- **`material-image-v6-qwen21` 的运行时指纹含模板合同摘要。** 模板升级让旧 `RENDER_VERIFIED` 凭证按设计失效，
+  每台机器更新后必须先重跑一次 `POST /api/v1/setup/image-runtime/validate`（三类小样），`can_generate` 才会恢复
+  （与显存无关）。幂等键绑定着已结束的运行，重试要换新键。
 - **被单独暂停的安装记录要用 attempt 级 `resume` 恢复。** 对同一请求再次「确认整备」时，任务仍在
   `QUEUED/RUNNING` 就原样返回，不会恢复它；此时整备摘要显示「正在下载并安装」，因为 `_DOWNLOAD_ACTIVE`
-  含 `PAUSED`（既有行为，未改）。
+  含 `PAUSED`（既有行为，留待下次收尾修复）。
 - **ComfyUI 提示线程死亡而 HTTP 存活时，工作台识别不了。** `/history` 永远为空、`/system_stats` 返回 500，
   要等满 `POLL_LIMIT=1800`（约 31 分钟）才进 `NEEDS_REVIEW`，期间 `image-runtime/stop` 被在途保护拒绝。
   既有出口依次是：取消运行（停掉未开始的项）→ 等轮询上限 → `managed-processes/release` → 租约由对账释放
   → `image-runtime/stop` 把启动记录改写为 `STOPPED`。
-- **真机显存事实（RTX 5080 16GB）**：Qwen-Image-2.1 int8 ConvRot 出图峰值约 15.5 GB，基线 0.9 GB 时余
-  830 MiB，挂 LoRA 不增加峰值。`materialprep/execution.py` 的 `IMAGE_BUDGET_MB = 12000` 低于实测需求，
-  空闲 12 GB 就放行，随后在 ComfyUI 内 OOM。未改，待裁决。
-- **MULTIREF 上不要叠配方。** 配方的正向核心词是为 T2I 写的场景描述，追加到编辑提示词后主体消失或缩没
-  （只加词、不挂 LoRA 即可复现），多视角 `<mva>` 进一步恶化；零 LoRA 的 MULTIREF 正常。未改，待裁决。
+- **显存真相与适配建议唯一落点（2026-11-26 收尾）**：
+  - `comfyops/scheduler.py` 仅互斥台账（`enqueue` 只在 `budget_mb > 16384` 名义容量时拒绝，`admit` 不读真实显存），
+    `IMAGE_BUDGET_MB = 12000` 仅是租约名义预算；**唯一的实测显存准入在 `comfyops/image_renderer.py` 启动处**
+    （空闲 ≥ `IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"] = 8000`，否则 `IMAGE_RENDERER_MEMORY_INSUFFICIENT`）。
+  - RTX 5080 16 GB 实测整卡峰值 `15473` MiB（`model_mb = 14580` + 桌面 `894`）；输出尺寸 640–1024、是否挂 LoRA、
+    步数均不改变显存占用（绝不写「调低分辨率省显存」）。RTX 4070 Super 12 GB 用户反馈可正常出图（ComfyUI 0.39
+    动态换页至 32 GB 级系统内存），记为 `reported_by_users`，不得写成实测；LoRA 配方在 12 GB 上未验证过。
+  - 唯一裁决：`comfyops/capability.py::image_vram_advice()` / `image_vram_advice_for_host()`，**永不拦截**
+    （`blocks=False`）；`config/deployment/qwen-image-2.1-windows-x64.json` 的 `platform.min_vram_mb` 同步降至 `11776`
+    （12 GB 档下限），`_floor_notes()` 对齐 `qualify` 的 `effective_floor_mb` 与固件保留内存规则。
+  - 后端三处返回 `vram_advice`：`api_loras.py::get_loras`（仅 `base_model=qwen_image_21`）、`materialprep/runtime.py::readiness()`、
+    `comfyops/recommendation.py::recommend()`（`image_prep` 选项经 `_selected_card_memory(env)`）。前端共享只读组件
+    `frontend/src/shared/ImageVramAdvicePanel.tsx` 复用在 `StyleLoraAssemblyPanel.tsx`、`ImageCapabilityCard.tsx` 与
+    `DeploymentRecommendationCard.tsx`（含 `reported_by_users` 标签）。
+- **MULTIREF 上不要叠配方（留待下次收尾修复）。** 现存两套配方的正向核心词仍原样追加到编辑提示词后面，在 MULTIREF
+  等编辑模式下会压过「保留参考图主体」指令（电影级配方做 I2I 正常，暗黑奇幻配方未在编辑模式测过；零 LoRA 正常）。
 - **GPU 任务进行中关掉 NVIDIA App 的驱动自动更新。** 本轮 21:39 驱动被后台从 621.24 热升到 621.40，
   正在加载模型的渲染器随即 CUDA OOM。
 - **长轮询的验收脚本给 `httpx.Client` 加 `Connection: close`**：5 秒轮询会撞 uvicorn 默认 5 秒 keep-alive，
   偶发 `RemoteProtocolError: Server disconnected`。
-- **跑分片回归前先确认保留数。** 本轮终检用了默认的保留 1 次，清掉了 `F:\ShineTest` 下 28 个更早的归档
-  日志。需要留历史时显式传 `-KeepRuns`。
-- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。回归：最终树后端 8 分片
-  315 文件（`shards-20261125-224438-993`，8 分片全部 exit 0、`shards_with_failure_markers=0`）、前端 497/497
-  与 `tsc` / Vite build、Ruff 均通过。证据、出图对比与遗留问题见
+- **跑分片回归前先确认保留数。** 11-25 首轮终检用了默认的保留 1 次，清掉了 `F:\ShineTest` 下 28 个更早的归档
+  日志。需要留历史时必须显式传 `-KeepRuns`。
+- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。2026-11-26 收尾终检：Ruff 全部通过、
+  前端 `tsc` / Vitest（96 文件 506/506）/ Vite build 全部通过、后端 8 分片 316 文件（`shards-20261126-010210-636`，
+  墙钟 `863.8s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）全部通过。证据、更正与遗留问题见
   `docs/ACCEPTANCE_20261125_IMAGE_LORA_AND_PROMPT_V1.md`。

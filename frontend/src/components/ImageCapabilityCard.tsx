@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { AlertTriangle, Check, CircleDashed, Image as ImageIcon } from 'lucide-react';
-import { api } from '../api';
+import { api, type ImageVramAdvice } from '../api';
+import { ImageVramAdvicePanel } from '../shared/ImageVramAdvicePanel';
 
 export type ImageFamilyReadiness = {
   layer: string;
@@ -32,6 +33,7 @@ export type ImageReadiness = {
   graph_report: { complete: boolean; missing_nodes?: string[]; missing_inputs?: unknown[] } | null;
   prompt_template: { template_version: string; families: string[] };
   blockers: { code: string; layer?: string; detail?: string; remediation?: string }[];
+  vram_advice?: ImageVramAdvice;
   license: { name: string; scope: string; note: string };
   upstream: {
     template_repository: string;
@@ -153,6 +155,8 @@ export function ImageCapabilityCard({ projectId }: { projectId: string; busy?: b
           </div>
         </div>
       ))}
+
+      {state?.vram_advice && <ImageVramAdvicePanel advice={state.vram_advice} />}
 
       <div className="image-capability-foot">
         <span>

@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { AlertTriangle, Check, Cpu, RefreshCw } from 'lucide-react';
 import { ApiError, getDeploymentRecommendation, type DeploymentOption, type DeploymentRecommendation } from '../api';
+import { ImageVramAdvicePanel } from '../shared/ImageVramAdvicePanel';
 
 const EVIDENCE_LABELS: Record<string, string> = {
   measured_on_this_machine: '本机实测',
   measured_on_similar_hardware: '相近硬件实测',
+  reported_by_users: '用户反馈（未实测）',
   estimated: '估算（尚未实测）',
 };
 
@@ -131,6 +133,9 @@ export function DeploymentRecommendationCard({ onChoice }: { onChoice?: (choice:
               {option.blockers.map((blocker) => <em key={blocker.code} className="recommend-blocker">{blockerText(blocker)}</em>)}
               {(option.warnings ?? []).map((warning) => <em key={warning.code}>{WARNING_LABELS[warning.code] ?? warning.code}</em>)}
               {option.skippable && !checked && <em>你选择全部自行上传素材：可以不装生图，正式视频生产不受影响。</em>}
+              {option.purpose === 'image_prep' && option.vram_advice && (
+                <ImageVramAdvicePanel advice={option.vram_advice} gpuName={data.host.gpu} compact />
+              )}
             </div>
           </li>;
         })}

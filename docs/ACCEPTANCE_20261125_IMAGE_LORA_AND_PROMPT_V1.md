@@ -16,11 +16,12 @@
 | 全量回归（最终树） | 通过 | 后端 8 分片 315 个文件、前端 95 个文件 497 项，全部一次通过 |
 | M4 ① 四枚权重下载、校验、自动纳管 | 通过 | 逐枚 SHA-256 复核；台账 4 行 |
 | M4 ② 生图运行时 V6 指纹刷新与验证 | 通过 | 三类家族升到 `RENDER_VERIFIED`。首次尝试失败，原因见 §M4-2 |
-| M4 ③ 零 LoRA 与三套配方 T2I | 通过 | 4 张真实出图，风格与负向词生效 |
-| M4 ③ I2I | 通过 | 身份保留，负向通道已通 |
+| M4 ③ 零 LoRA 与三套配方 T2I（2026-11-25 历史） | 通过 | 4 张真实出图，风格与负向词生效（赛博朋克配方已于 2026-11-26 按用户裁定删除，出厂保留两套） |
+| M4 ③ I2I | 通过 | 身份保留，负向通道已通（使用电影级写实摄影配方；暗黑奇幻配方未在编辑模式测过） |
 | M4 ③ MULTIREF | 管线通过，画面不达标 | 叠加配方后人物被压没，见遗留问题 1 |
 | M4 ③ 剧本角色外貌、时代服饰与一致性 | 通过，有保留 | 硬特征命中；未写入剧本的特征会漂移 |
 | M4 ④ GPU 释放与租约残留 | 通过 | 15 条租约全部 `RELEASED`，渲染器进程 0 个 |
+| 2026-11-26 裁定与显存适配建议收尾 | 通过 | 删赛博配方留 2 套；目录门槛 11776；`image_vram_advice` 前后端、专项测试与 2026-11-26 终检全部通过 |
 
 **本文不声称的事：**
 
@@ -31,6 +32,9 @@
 - 「确认整备所选能力」的下载是通过它背后的接口触发的，没有走浏览器点击。
 - 没有在真正的新机器上验证零 LoRA 零下载；本轮的隔离目录里出图模型本来就在。
 - 本轮未修改 `worker.py`、`preproduction.py`、`comfy/client.py`，不触发 VLM 重校准，也没有做 VLM 校准。
+- **没有在 12 GB 显卡上做过真机实测**（本机只有 RTX 5080 16 GB）。12 GB 档「可正常出图」依据的是 RTX 4070 Super 12 GB 用户的真实反馈（`reported_by_users`），且两套 LoRA 配方在 12 GB 显卡上均未验证过，本文不替 12 GB 打包票。
+
+> **发版说明（与显存无关）：** 提示词模板升级到 `material-image-v6-qwen21` 后，旧的小样验证凭证按设计失效。每台机器更新后必须先重新跑一次三类小样验证，`can_generate` 才会恢复。
 
 ## 建设结果（M1–M3，Codex 记录）
 
@@ -47,7 +51,7 @@
 
 | 原则 | 代码落点 | 真机复核 |
 | --- | --- | --- |
-| 一套事实 | `style_lora_assets`、固定部署清单、只读配方、任务冻结快照 | H3 和 Qwen 通过 `base_model` 区分。安装 Worker 写入的 4 行台账，与 `GET /api/v1/loras?base_model=qwen_image_21` 返回的是同一组 SHA-256，三套配方的槽位状态由它投影。 |
+| 一套事实 | `style_lora_assets`、固定部署清单、只读配方、任务冻结快照 | H3 和 Qwen 通过 `base_model` 区分。安装 Worker 写入的 4 行台账，与 `GET /api/v1/loras?base_model=qwen_image_21` 返回的是同一组 SHA-256；2026-11-26 裁定后出厂配方调整为两套，槽位状态由同一台账投影。 |
 | 一个裁决 | `evaluate_style_lora_selection()`、`_ensure_lora_not_in_use()` | 两条生图线提交前都走 `resolve_live_image_loras()`。真机只走到通过路径；拒绝路径由离线用例覆盖。 |
 | 一个执行者 | 原安装 Worker、原素材 Worker、`attach_qwen_style_loras()`、`apply_image_lora_prompts()` | ComfyUI 历史里的 LoRA 节点只出现在 `451 → 4511 → 4512 → 缓存节点` 这一条链上。项目线的预览提示词与实际提交的提示词逐字相同（选配方与不选配方各验证一次）。 |
 
@@ -55,8 +59,7 @@
 基础 T2I 图谱 SHA-256 保持 `83a2bafb67af29f3a8a5a4b4572f19f940ff5f2c31b64b0cef024eb726d42d85`（真机就绪接口读数一致），
 编辑系适配器模板文件未被修改。
 
-三套配方固定为 35、30、30 步，`cfg=3.5`，`euler/simple`。用户手工装配 LoRA 且未选配方时采用 30 步、`cfg=3.5`、
-`euler/simple`。未选 LoRA 或配方继续使用原来 25 步、`cfg=1.0`、`euler/simple` 的默认值。以上均与真机 ComfyUI 历史里的采样参数一致。
+**2026-11-26 配方裁定：** 原先三套配方中的「赛博朋克」（`cyberpunk_neo_noir`）已于 2026-11-26 按用户裁定删除，出厂保留「电影级写实摄影」（35 步）和「暗黑奇幻插画」（30 步）两套，均为 `cfg=3.5`、`euler/simple`；`docs/evidence/20261125-image-lora-prompt-v1/` 中的赛博朋克出图作为 2026-11-25 真机历史证据保留。原本只给赛博朋克按需挂载的「Qwen 多视角镜头」LoRA（`qwen-image-2.1-lora-multiple-angles`，约 319 MB）暂留在可选下载包内（包仍约 740 MiB）可供手动挂载，是否移出待用户决定。用户手工装配 LoRA 且未选配方时采用 30 步、`cfg=3.5`、`euler/simple`；未选 LoRA 或配方继续使用原来 25 步、`cfg=1.0`、`euler/simple` 的默认值。以上均与真机 ComfyUI 历史里的采样参数一致。
 
 ## 合拢与全量回归
 
@@ -74,7 +77,30 @@
 2. 回归之后又改了 `deployment.py`、`installation_worker.py`、`test_image_lora_assembly.py`（20:55–21:02，下载分段与后台线程），
    当时只有 41 项定向测试覆盖。
 
-### 终检（本轮，最终树，22:44–23:07）
+#### 3. 2026-11-26 收尾终检（最终树，00:59–01:17）
+
+| 检查 | 命令 | 结果 |
+| --- | --- | --- |
+| Ruff | `backend\.venv\Scripts\python.exe -m ruff check backend/shine backend/tests backend/alembic/versions` | 全部通过（exit 0） |
+| 类型 | `npx.cmd tsc --noEmit` | 全部通过（exit 0） |
+| 前端全量 | `npx.cmd vitest run --no-file-parallelism` | 96 个文件、506 项通过（138.49s） |
+| 构建 | `npm.cmd run build` | 通过（1.43s；主包 1,002.86 kB，仍提示大于 500 kB） |
+| 后端全量 | `pwsh -NoProfile -File .\run_backend_shards.ps1 -WorkRoot F:\ShineTest -Shards 8 -KeepRuns 5` | 8 分片全部退出码 0，316 个文件，墙钟 863.8 秒，`shards_with_failure_markers=0` |
+
+| 分片 | 文件数 | 退出码 | 耗时（秒） |
+| --- | ---: | ---: | ---: |
+| 0 | 40 | 0 | 425.0 |
+| 1 | 38 | 0 | 622.5 |
+| 2 | 38 | 0 | 657.0 |
+| 3 | 38 | 0 | 513.5 |
+| 4 | 39 | 0 | 831.1 |
+| 5 | 44 | 0 | 767.5 |
+| 6 | 40 | 0 | 863.0 |
+| 7 | 39 | 0 | 719.2 |
+
+归档在 `F:\ShineTest\shards-20261126-010210-636`（保留最近 5 次）。脚本清理旧目录与 `bt-5` 内个别只读 git pack/object 文件时有 `Access denied` 提示，不影响测试通过判定。
+
+### 2026-11-25 终检（主线 `762cbf5` 树，22:44–23:07）
 
 M4 期间没有改动任何产品文件，终检的对象就是提交的这棵树。
 
@@ -201,11 +227,11 @@ M4 期间没有改动任何产品文件，终检的对象就是提交的这棵�
 | `zero` | 素材中心 | T2I | 无 | 无 | 25 步 / cfg 1.0 | 640² |
 | `cinematic` | 素材中心 | T2I | 电影级写实摄影 | fix 0.75 → 自然曝光 0.60 | 35 步 / cfg 3.5 | 640² |
 | `fantasy` | 素材中心 | T2I | 暗黑奇幻插画 | anything2real 0.55 | 30 步 / cfg 3.5 | 640² |
-| `cyberpunk` | 素材中心 | T2I | 赛博朋克 | fix 0.80 | 30 步 / cfg 3.5 | 640² |
+| `cyberpunk`（2026-11-25 历史） | 素材中心 | T2I | 赛博朋克（2026-11-26 已删） | fix 0.80 | 30 步 / cfg 3.5 | 640² |
 | `i2i` | 素材中心 | I2I | 电影级写实摄影 | fix 0.75 → 自然曝光 0.60 | 35 步 / cfg 3.5 | 640² |
-| `multiref` | 素材中心 | MULTIREF | 赛博朋克 + 多视角 | fix 0.80 → 多视角 0.80 | 30 步 / cfg 3.5 | 640² |
+| `multiref`（2026-11-25 历史） | 素材中心 | MULTIREF | 赛博朋克 + 多视角（配方已删） | fix 0.80 → 多视角 0.80 | 30 步 / cfg 3.5 | 640² |
 | `multiref_zero` | 对照 | MULTIREF | 无 | 无 | 25 步 / cfg 1.0 | 640² |
-| `multiref_fix_only` | 对照 | MULTIREF | 赛博朋克 | fix 0.80 | 30 步 / cfg 3.5 | 640² |
+| `multiref_fix_only`（2026-11-25 历史） | 对照 | MULTIREF | 赛博朋克（配方已删） | fix 0.80 | 30 步 / cfg 3.5 | 640² |
 | `multiref_words_only` | 对照 | MULTIREF | 无，手工写入赛博配方词 | 无 | 25 步 / cfg 1.0 | 640² |
 | `aligned_character` | 项目线 | T2I | 电影级写实摄影 | fix 0.75 → 自然曝光 0.60 | 35 步 / cfg 3.5 | 1024² |
 | `aligned_character_zero` | 项目线对照 | T2I | 无 | 无 | 25 步 / cfg 1.0 | 1024² |
@@ -226,13 +252,44 @@ M4 期间没有改动任何产品文件，终检的对象就是提交的这棵�
 | 三类小样 | 894 MiB | 15473 MiB | 830 MiB |
 | 出图与对照 | 1094 MiB | 15464 MiB | 839 MiB |
 
-每出完一张，工作台的空闲保持逻辑把显存放回 1.3–1.4 GB，下一张再重新载入。挂 LoRA 不增加采样期峰值。
+每出完一张，工作台的空闲保持逻辑把显存放回 1.3–1.4 GB，下一张再重新载入。**实测不变量：** 输出尺寸在 640 到 1024 之间、是否挂载 LoRA、采样步数，均不改变采样期显存占用（因此不应给出“小显存调低分辨率”这类没有依据的建议）。
+
+### 2026-11-26 显存适配建议与错误表述更正
+
+#### 1. 更正前任表述中的 6 处事实误差
+
+1. **调度器与显存准入口径**：`backend/shine/comfyops/scheduler.py` 是纯粹的互斥台账——`enqueue()` 仅在 `budget_mb` 超过名义容量 `16384` 时拒绝（`VRAM_BUDGET_EXCEEDED`），`admit()` 不读真实显存；`materialprep/execution.py` 的 `IMAGE_BUDGET_MB = 12000` 只是租约的名义预算。**唯一的实测显存准入在渲染器启动处**（`comfyops/image_renderer.py`，空闲 ≥ `IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"] = 8000`，否则 `IMAGE_RENDERER_MEMORY_INSUFFICIENT`）。先前「空闲 12 GB 放行后在 ComfyUI 内 OOM」的表述错误，已删除。
+2. **12 GB 显卡能力口径**：RTX 4070 Super 12 GB 用户明确反馈在本轮改造前就能正常出图。RTX 5080 16 GB 实测到的约 14.5 GB（`model_mb = 14580`、含桌面 `894` 整卡峰值 `15473` MiB）是显存富余时的常驻占用量，**不是最低需求**；ComfyUI 0.39 会把放不下的权重动态换页到系统内存。12 GB 档按「可用（据 RTX 4070 Super 12 GB 用户反馈，仓库无该档实测记录）」处理，证据等级记为 `reported_by_users`，不写成实测。
+3. **改动前 12 GB 界面实际表现**：此前 `15360` 门槛仅存在于后端两条路径——部署推荐的 `qualify()` 与 `/setup/prepare-plan` 的 `runtime_advisories`，但当前前端均未展示这两处（`DeploymentRecommendationCard` 未挂载到界面，前端也不调用 `/setup/prepare-plan` 或读取 `runtime_advisories`）。因此改动前 12 GB 用户在界面上看不到任何出图显存建议。
+4. **LoRA 与 12 GB 的诚实边界**：两套 LoRA 配方在 12 GB 显卡上均未验证过（本机仅 16 GB 显卡）。同时确认加 LoRA 没有抬高显存门槛：本轮未改主机探测、调度器与显存探测；零 LoRA 图谱哈希与改造前逐字节相同；16 GB 上挂 LoRA 前后峰值相同（`15464` 对 `15473` MiB）。
+5. **V6 升级凭证失效**：`material-image-v6-qwen21` 升级后旧的小样验证凭证按设计失效，每台机器更新后必须重新跑一次三类小样验证才能恢复 `can_generate`，与显存无关。
+6. **实测不变量**：输出尺寸 640–1024、是否挂 LoRA、步数均不改变显存占用。
+
+#### 2. 显存适配建议实现（唯一事实 · 永不拦截）
+
+- **唯一裁决与实测基线**（`backend/shine/comfyops/capability.py`）：
+  - `IMAGE_VRAM_MEASUREMENT` 记录 RTX 5080 16 GB / ComfyUI 0.39.0 / 2026-11-25 实测基线：`peak_total_mb = 15473`、`model_mb = 14580`、`desktop_mb = 894`。
+  - `image_vram_advice(total_mb, free_mb, *, supported_floor_mb, runtime_verified=None)` 是唯一裁决函数，**永远返回 `blocks=False`**，只做建议、不新增门禁；`image_vram_advice_for_host()` 读不到显卡时返回 `status="unknown"`，绝不抛错。
+  - 目录门槛统一：`config/deployment/qwen-image-2.1-windows-x64.json` 的 `platform.min_vram_mb` 由 `15360` 降至 `11776`（12 GB 档下限，未升 `catalog_version`）；`_floor_notes` 改用 `effective_floor_mb`，与 `qualify` 共享「实装内存可补足固件保留部分」规则。
+- **后端三处投影与前端三处复用**：
+  - 后端接入：`GET /api/v1/loras?base_model=qwen_image_21`（仅生图基座带 `vram_advice`，H3 基座不带）、`GET /api/v1/setup/image-readiness`、`comfyops/recommendation.py::recommend()` 的 `image_prep` 选项（经 `_selected_card_memory(env)`）。
+  - 前端共享只读组件 `frontend/src/shared/ImageVramAdvicePanel.tsx`（含类型补齐 `frontend/src/api.ts`），复用在 `StyleLoraAssemblyPanel.tsx`（仅 `qwen_image_21`）、`ImageCapabilityCard.tsx` 与 `DeploymentRecommendationCard.tsx`（同时补全 `reported_by_users` 证据标签），仅展示显卡/显存、结论、证据等级、说明与五档位建议高亮表，不禁用任何控件。
+
+| 档位 | 下限（MB） | 状态 | 证据等级 | 口径 |
+| --- | ---: | --- | --- | --- |
+| 24 GB 档 | 23040 | `fits` | `estimated` | 由 16 GB 实测推算，余量充足 |
+| 16 GB 档 | 15360 | `fits` | `measured_on_similar_hardware` | RTX 5080 16 GB 实测可用，余量约 0.8 GB |
+| 12 GB 档 | 11776 | `fits` | `reported_by_users` | RTX 4070 Super 12 GB 用户反馈可用，靠换页至 32 GB 级内存运行，配方未验证 |
+| 12 GB 以下 | 8000 | `unverified` | `estimated` | 渲染器可启动，能否出图无记录 |
+| 8 GB 以下 | 0 | `cannot_start` | `estimated` | 低于 8000 MB 启动门槛，无法启动（界面仍只提示不禁用） |
+
+> 注：若 `runtime_verified=True`（本机三类小样已全部通过），`evidence.level` 升为 `measured_on_this_machine`。
 
 ### M4-4 出图质量对比
 
 拼图入库在 `docs/evidence/20261125-image-lora-prompt-v1/`，全分辨率原图在验收目录，摘要见 `summary.json`。
 
-**T2I 三套风格**（`01-t2i-styles.jpg`）
+**T2I 三套风格**（`01-t2i-styles.jpg`，2026-11-25 历史拼图；赛博朋克配方已于 2026-11-26 删除）
 
 | 图 | 观察 | 结论 |
 | --- | --- | --- |
@@ -288,25 +345,19 @@ MULTIREF 用同一提示词、同一对参考图（人物肖像 + 赛博街景�
 
 ## 遗留问题
 
-均未修改，按影响排序，等待裁决。
+均未修改，**留待下次收尾修复**（本轮按用户裁定仅记录、不改代码）：
 
-1. **MULTIREF 叠加配方后画面不达标。** 配方的正向核心词原样追加到编辑提示词后面，赛博配方会让主体消失或缩没，
-   多视角 LoRA 进一步恶化。两个修法都改动方案的注入规则：编辑模式只注入 LoRA 触发词与负向过滤词；或为每套配方
-   单列一份只含光影、色彩、质感词的编辑用词。
-2. **16 GB 显卡上出图余量不足 1 GB，而准入预算低于实测需求。** 实测需求约 14.5 GB，`IMAGE_BUDGET_MB = 12000`。
-   空闲 12 GB 就会放行，随后在 ComfyUI 内部 OOM，而不是由工作台回答「等待显卡」。直接把预算提到 15 GB 会让
-   桌面占用超过 1.3 GB 时永远不批准出图，取舍需要更多机型数据。
-3. **ComfyUI 提示线程死亡但 HTTP 存活时，工作台没有识别。** 要等满 31 分钟轮询上限才收敛，期间「停止运行时」被
-   在途保护拒绝。本次进程还因卡在驱动更换中而超出 20 秒核验窗，被如实报为 `unverified`。
-4. **被暂停的安装记录在整备摘要里显示成「正在下载并安装…（关闭页面也会继续）」。** `_DOWNLOAD_ACTIVE` 包含
-   `PAUSED`。另外对同一请求再次「确认整备」会原样返回运行中的任务，不会恢复被单独暂停的记录，恢复要走 attempt 级
-   的 `resume` 端点。前端没有暂停控件，普通用户从界面进不到这个状态。
-5. **僵尸渲染器记录改写为 `STOPPED` 后，就绪投影仍挂着 `IMAGE_RENDERER_GONE`。** 整体层级停留在 `FILES_VERIFIED`，
-   直到下一次渲染器启动替换记录。
-6. **纯生图 LoRA 安装线程是非守护线程。** 下载进行中停止工作台时的行为本轮没有验证，因为接手时下载已完成。
-7. **后台 CDN 传输在本机网络下反复停顿。** 字节会保留，用户可以继续，但体验差；本次靠前台续传完成。
-8. **未写入剧本的特征会漂移。** 胡须、发型、首服需要进实体档案与 `must_keep`，否则同一人物每次不同。
-9. **环境。** NVIDIA App 在 GPU 任务进行中自动升级了驱动；`F:\ShineTest` 当前占用 341 GB，是历史残留，本轮未动。
+1. **配方正向词在 MULTIREF 等编辑模式下压过编辑指令。** 配方的正向核心词原样追加到编辑提示词后面，在 MULTIREF 上会压过「保留参考图主体」的编辑指令；现存两套配方仍适用该规则（其中电影级写实摄影做 I2I 正常，暗黑奇幻插画未在编辑模式测过；零 LoRA 路径不受影响）。两个修法都会改动注入规则：编辑模式只注入 LoRA 触发词与负向过滤词，或为配方单列编辑用词。
+2. **ComfyUI 提示线程死亡但 HTTP 存活时，工作台识别不了。** `/history` 为空而 `/system_stats` 返回 500 时，要等满轮询上限（`POLL_LIMIT=1800`，约 31 分钟）才收敛进 `NEEDS_REVIEW`，期间「停止运行时」被在途保护拒绝（该次进程还因卡在驱动升级中超出 20 秒核验窗，被如实报为 `unverified`）。
+3. **被暂停的安装记录在整备摘要里显示成「正在下载并安装…（关闭页面也会继续）」。** `_DOWNLOAD_ACTIVE` 包含 `PAUSED`；且对同一请求再次「确认整备」会原样返回运行中的任务，不会恢复被单独暂停的记录，需走 attempt 级 `resume` 端点。
+4. **僵尸渲染器记录改写为 `STOPPED` 后，就绪投影仍挂着 `IMAGE_RENDERER_GONE` 阻塞。** 整体层级停留在 `FILES_VERIFIED`，直到下一次渲染器启动替换记录。
+5. **纯生图 LoRA 安装线程是非守护线程。** 下载进行中停止工作台的行为尚未验证。
+6. **本机网络下后台 CDN 传输反复停顿。** 字节会保留，需要断点续传或多次重试。
+7. **剧本未写的特征（胡须、发型、首服）会漂移。** 需要写进实体档案与 `must_keep`，否则同一人物每次不同。
+8. **基线 `cfg=1.0` 对细节特征跟随较弱。** 实测中「一绺银白」在 `cfg=1.0` 下偏花白，在 `cfg=3.5` 下前额白发更明确；基线采样参数未改，因果未做单独验证。
+9. **NVIDIA App 会在 GPU 任务进行中自动升级驱动。** 21:39 热升（`621.24 → 621.40`）直接触发正在加载模型的渲染器 CUDA OOM。
+10. **`F:\ShineTest` 占用约 341 GB 历史残留。** 含更早多轮测试目录残留，本轮仅清理本轮临时 basetemp，未清理历史残留。
+11. **「Qwen 多视角镜头」LoRA（`qwen-image-2.1-lora-multiple-angles`，约 319 MB）是否从可选下载包移出待用户决定。** 它原只给赛博朋克配方按需挂载；用户只裁定删配方，故暂留在可选包（约 740 MiB）供手动挂载。
 
 ## 证据位置
 

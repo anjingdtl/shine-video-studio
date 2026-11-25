@@ -1102,6 +1102,44 @@ export function uploadScriptDocument(projectId: string, file: File) {
 
 /* ======================= 新机部署组合推荐 ======================= */
 
+export type ImageVramEvidenceLevel =
+  | 'measured_on_this_machine'
+  | 'measured_on_similar_hardware'
+  | 'reported_by_users'
+  | 'estimated';
+
+export type ImageVramClassInfo = {
+  id: string;
+  label: string;
+  min_mb: number;
+  evidence?: ImageVramEvidenceLevel | string | null;
+};
+
+export type ImageVramClassRow = {
+  id: string;
+  label: string;
+  min_mb: number;
+  evidence: ImageVramEvidenceLevel | string | null;
+  advice: string;
+};
+
+export type ImageVramAdvice = {
+  blocks: boolean;
+  gpu: { total_mb: number; free_mb: number | null } | null;
+  status: 'fits' | 'unverified' | 'cannot_start' | 'unknown' | string;
+  class: ImageVramClassInfo | null;
+  evidence: { level: ImageVramEvidenceLevel | string | null; detail: string };
+  usage_mb: number;
+  peak_total_mb: number;
+  measured_on: string;
+  start_free_mb: number;
+  supported_total_mb: number | null;
+  headroom_mb: number | null;
+  headline: string;
+  notes: string[];
+  classes: ImageVramClassRow[];
+};
+
 export type DeploymentOption = {
   purpose: 'h3_video' | 'image_prep' | string;
   label: string;
@@ -1117,6 +1155,7 @@ export type DeploymentOption = {
   evidence?: { level: string; verified: boolean; detail?: string; measured_at?: string;
     peak_vram_mb?: number; peak_ram_mb?: number; duration_s?: number };
   verified?: boolean;
+  vram_advice?: ImageVramAdvice;
 };
 
 export type DeploymentRecommendation = {
