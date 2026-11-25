@@ -858,3 +858,71 @@ it('四阶排片重拍前提示用户是否需要调整提示词，产出成片�
     subtitle_font_size: 56,
   });
 });
+
+it('Manual4App 在无 initialStage 时仅首次自动落到推荐阶段，手动切换页签及刷新后不再跳回', async () => {
+  const completedOverview: M4Overview = {
+    project: {
+      id: 'p-done',
+      title: '已完结四阶',
+      description: '',
+      language: 'zh',
+      max_shot_seconds: 8,
+      workflow_kind: 'manual4',
+      created_at: '2026-11-25T00:00:00Z',
+    },
+    worker_online: true,
+    gpu: { busy: false, active_leases: [], reconcile_required: [] },
+    readiness: {
+      project_id: 'p-done',
+      workflow_kind: 'manual4',
+      all_done: true,
+      next_stage: 'delivery',
+      can_confirm_storyboard: true,
+      can_start_production: true,
+      can_assemble_delivery: true,
+      summary: {},
+      stages: [
+        { key: 'storyboard', title: '① 人工分镜书', done: true, status: 'done', blocker_count: 0, blockers: [], facts: {} },
+        { key: 'materials', title: '② 素材生成', done: true, status: 'done', blocker_count: 0, blockers: [], facts: {} },
+        { key: 'production', title: '③ 排片生产', done: true, status: 'done', blocker_count: 0, blockers: [], facts: {} },
+        { key: 'delivery', title: '④ 产出成片', done: true, status: 'done', blocker_count: 0, blockers: [], facts: {} },
+      ],
+    },
+    production_progress: null,
+    recent_events: [],
+  };
+  let overviewCalls = 0;
+  stub.restore();
+  stub = new StudioStub([
+    { method: 'GET', pattern: /manual4\/system\/status$/, respond: () => jsonResponse({ line: 'manual4', runtime_version: '2.0', schema_version: '1', environment: { capabilities: {} } }) },
+    {
+      method: 'GET',
+      pattern: /manual4\/projects\/p-done\/overview$/,
+      respond: () => {
+        overviewCalls += 1;
+        return jsonResponse(completedOverview);
+      },
+    },
+    { method: 'GET', pattern: /manual4\/projects\/p-done\/production\/state$/, respond: () => jsonResponse({ confirmed_revision: null, episodes: [], runs: [], options: { variants: [], accelerators: [], frames: [] }, readiness: completedOverview.readiness }) },
+    { method: 'GET', pattern: /manual4\/projects\/p-done\/delivery\/state$/, respond: () => jsonResponse({ episodes: [], deliveries: [], readiness: completedOverview.readiness }) },
+  ]);
+
+  const user = userEvent.setup();
+  const rendered = render(<Manual4App projectId="p-done" onBackToProjects={() => {}} onMessage={() => {}} />);
+  await screen.findByText(/按①冻结顺序从本次四阶已通过的真实视频产物/);
+  expect(overviewCalls).toBe(1);
+
+  await user.click(screen.getByRole('button', { name: /③ 排片生产/ }));
+  const prodTab = screen.getByRole('button', { name: /③ 排片生产/ });
+  expect(prodTab).toHaveClass('active');
+
+  // Re-rendering with a fresh inline onMessage callback must NOT re-trigger refresh or kick back to delivery.
+  rendered.rerender(<Manual4App projectId="p-done" onBackToProjects={() => {}} onMessage={() => {}} />);
+  await waitFor(() => expect(prodTab).toHaveClass('active'));
+  expect(overviewCalls).toBe(1);
+
+  // Explicit refresh while viewing stage 3 must ALSO preserve the user-selected stage.
+  await user.click(screen.getByRole('button', { name: /刷新四阶状态/ }));
+  await waitFor(() => expect(overviewCalls).toBe(2));
+  expect(screen.getByRole('button', { name: /③ 排片生产/ })).toHaveClass('active');
+});

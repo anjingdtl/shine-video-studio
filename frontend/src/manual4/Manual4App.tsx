@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, CheckCircle2, Clapperboard, RefreshCw } from 'lucide-react';
 import { SETUP_CAPABILITY_LABEL } from '../api';
 import './styles/manual4.css';
@@ -52,6 +52,9 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState('');
   const [activeStage, setActiveStage] = useState<M4StageKey>(initialStage ?? 'storyboard');
+  const onMessageRef = useRef(onMessage);
+  onMessageRef.current = onMessage;
+  const autoLandedProjectRef = useRef<string | null>(null);
 
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     const silent = Boolean(opts?.silent);
@@ -66,7 +69,8 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
       ]);
       setOverview(data);
       if (status) setSysStatus(status);
-      if (!silent && !initialStage) {
+      if (!silent && !initialStage && autoLandedProjectRef.current !== projectId) {
+        autoLandedProjectRef.current = projectId;
         setActiveStage(data.readiness.next_stage);
         window.history.replaceState(null, '', `#m4/${data.readiness.next_stage}`);
       }
@@ -74,12 +78,12 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
       if (!silent) {
         const msg = error instanceof Error ? error.message : '读取四阶概览失败';
         setLoadError(msg);
-        onMessage?.(msg, 'error');
+        onMessageRef.current?.(msg, 'error');
       }
     } finally {
       if (!silent) setLoading(false);
     }
-  }, [projectId, initialStage, onMessage]);
+  }, [projectId, initialStage]);
 
   useEffect(() => {
     void refresh();
@@ -108,6 +112,7 @@ export function Manual4App({ projectId, initialStage, onBackToProjects, onMessag
   const comfyUI = environment?.services_verified ? '已就绪' : environment?.comfyui_root ? '待核验' : '待配置';
 
   const selectStage = (key: M4StageKey) => {
+    autoLandedProjectRef.current = projectId;
     setActiveStage(key);
     window.history.replaceState(null, '', `#m4/${key}`);
   };

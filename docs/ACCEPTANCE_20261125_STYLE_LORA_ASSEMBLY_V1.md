@@ -142,9 +142,11 @@
 
 ---
 
-## 七、未验证项与运行注意事项
+## 七、未验证项与运行注意事项（含后续午后轮更新）
 
-1. **VLM 评审标识失效影响**：本次修改了 `backend/shine/worker.py` 与 `backend/shine/comfy/client.py`，按 `client_review_identity` 约束会使历史 VLM 校准版本自动失效；生产项目在需要 VLM 自动复核前需按流程重新执行正负例校准并发布新版本。
-2. **三 LoRA 真机实拍**：本机磁盘仅存 2 个不同的有效 MiniMax-H3 风格 LoRA `.safetensors` 权重文件，因此 RTX 5080 真机验证覆盖了 0/1/2 个 LoRA 串联，3 LoRA 串联（`"11" -> "111" -> "112"`）由后端自动化单测/集成测试覆盖，真机 3 LoRA 实拍标记为受本机可用权重数量限制的未验证项。
-3. **W6A8 真机推理组合**：W6A8 + LoRA 拒绝已在 API 创单、装配裁决器与图编译器层面实测拦截（`409 VARIANT_LORA_UNSUPPORTED`）；因 W6A8 禁止与风格 LoRA 同时入图，无实际 W6A8+LoRA GPU 推理出片，W6A8 零 LoRA 真机出片行为本轮未单独实拍。
-4. **隔离环境预检与租约说明**：隔离库未配置 VLM/ASR 路由且直接由外部进程拉起独立 8195 ComfyUI（未构造完整托管安装 Recipe），因此七阶段单镜验收中跳过可选 VLM/ASR 预检开关，并在每镜确认 `comfy_client.free_models()` 后通过 `ResourceScheduler.release(..., reconciled=True)` 协调释放已完成租约以衔接下一镜。
+> 补充见 [ACCEPTANCE_20261125_BROWSER_AND_SHORT_DRAMA_E2E.md](ACCEPTANCE_20261125_BROWSER_AND_SHORT_DRAMA_E2E.md)：2026-11-25 午后已完成 `start_shine.ps1` 全托管栈 + Chromium 真浏览器双流水线穿测，关闭了下方第 2、4 项。
+
+1. **VLM 评审标识失效影响（仍受本机权重缺失限制）**：本次修改了 `backend/shine/worker.py` 与 `backend/shine/comfy/client.py`，按 `client_review_identity` 约束会使历史 VLM 校准版本自动失效；经 `#d/setup` 核实本机 `qwen3-vl-8b-fp8`（0/13，缺 9.9 GiB）与 `qwen3-asr-0.6b`（缺 10 文件，1.8 GiB）均未下载，需后续安装后执行重校准。
+2. **三 LoRA 真机实拍（已由午后轮关闭 ✅）**：初轮误判仅存 2 枚；午后轮核验 `minimax_h3_fl2v_lightx2v_turbo_4step_v0.1_comfy_resized_avg_rank_21_bf16.safetensors`（`3a069f26...`）同为有效 H3 ComfyUI LoRA 后，已在四阶段 `ep01-s03`（`job 02c91433`）完成三 LoRA（`0.45 + 0.20 + 0.15`）RTX 5080 实拍串联并通过（`7.998s`，`ffmpeg -v error` 零报错）。
+3. **W6A8 真机推理组合（仍受本机权重缺失限制）**：W6A8 + LoRA 拒绝已在 API 创单、装配裁决器与图编译器层面实测拦截（`409 VARIANT_LORA_UNSUPPORTED`）；经 `#d/setup` 核实本机缺少 `ref2va-lowend-candidate` 权重文件，因此 W6A8 零 LoRA 真实 GPU 出片仍为未验证项。
+4. **隔离环境预检与租约说明（已由午后轮全托管栈验证关闭 ✅）**：初轮在独立 `8195` 端口手动验证；午后轮已通过 `scripts/start_shine.ps1 -Provider comfyui` 拉起完整托管 Recipe（动态注入 `--extra-model-paths-config shine-style-loras.yaml`）、API、Web、Supervisor 与双 Worker，在浏览器无值守跑通七阶段 7 镜与四阶段 3 镜 + UI 触发词重拍，并确认停机后 `resource_leases` 零残留。
