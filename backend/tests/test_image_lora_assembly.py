@@ -83,6 +83,9 @@ def test_verified_packages_discover_once_and_project_preset_availability(tmp_pat
         assert (angle.trigger_word, angle.trigger_position) == ("<mva>", "prefix")
         listed = loras.list_style_loras(db, settings, base_model=loras.IMAGE_LORA_BASE, probe_comfy=False)
         assert {row.id for row in db.scalars(select(StyleLoraAsset))} == {row["id"] for row in listed["items"]}
+        # Only the live-action and fantasy recipes ship (user ruling, 2026-11-25).
+        assert [preset["id"] for preset in listed["presets"]] == [
+            "cinematic_photorealism", "dark_fantasy_illustration"]
         cinematic = listed["presets"][0]
         assert {row["status"] for row in cinematic["loras"]} == {"COMFY_UNREACHABLE"}
     yaml = loras.style_lora_extra_paths_file(settings).read_text(encoding="utf-8")

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from shine.comfyops import deployment
+from shine.comfyops.capability import image_vram_advice
 from shine.comfyops.variants import (
     ACCEPTANCE_SUPPORTED,
     STATUS_BLOCKED,
@@ -247,6 +248,14 @@ def recommend(
             })
             continue
         result = evaluate(catalog, env, validation=validation, reuse_root=reuse_root)
+        if purpose == "image_prep":
+            # The verdict says whether the card meets the declared floor.  The
+            # advice adds what generating really occupies and how well that is
+            # evidenced, from the one function every surface reads.
+            result["vram_advice"] = image_vram_advice(
+                *_selected_card_memory(env),
+                supported_floor_mb=result["requirements"].get("min_vram_mb"),
+            )
         options.append({
             "purpose": purpose,
             "label": entry["label"],
@@ -285,6 +294,17 @@ def vram_tier(vram_mb: int | None) -> str:
     if vram_mb >= LOWEND_VRAM_MIN_MB:
         return TIER_LOWEND
     return TIER_BELOW_LOWEND
+
+
+def _selected_card_memory(env: dict[str, Any]) -> tuple[int | None, int | None]:
+    """Total and free VRAM of the card ``qualify`` judged.
+
+    The verdict and the advice must describe the same card, so this reads the
+    host report instead of probing the machine a second time.
+    """
+    cards = [row for row in env.get("gpus") or [] if isinstance(row, dict)]
+    card = next((row for row in cards if row.get("selected")), cards[0] if cards else env.get("gpu") or {})
+    return card.get("vram_total_mb") or card.get("vram_mb"), card.get("vram_free_mb")
 
 
 def _host_vram_mb(env: dict[str, Any]) -> int | None:

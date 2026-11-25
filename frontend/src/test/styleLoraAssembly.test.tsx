@@ -41,7 +41,7 @@ describe('StyleLoraAssemblyPanel（共享 LoRA 装配组件）', () => {
       negative_trigger_word: 'overexposed', sha256: 'b'.repeat(64) });
     const slot = (it: typeof fix) => ({ component_id: it.id, lora_id: it.id, strength_model: 0.8, status: 'READY' });
     const stub = new StudioStub([{ method: 'GET', pattern: /\/api\/v1\/loras\?base_model=qwen_image_21$/, respond: () => jsonResponse({
-      items: [fix, angle], comfy_reachable: true, presets: [{ id: 'cyberpunk_neo_noir', display_name: '赛博朋克',
+      items: [fix, angle], comfy_reachable: true, presets: [{ id: 'sample_recipe', display_name: '示例配方',
         loras: [slot(fix)], optional_loras: [slot(angle)] }],
     }) }]);
     function Example() {
@@ -53,13 +53,13 @@ describe('StyleLoraAssemblyPanel（共享 LoRA 装配组件）', () => {
     }
     const user = userEvent.setup();
     render(<Example />);
-    const presetButton = await screen.findByRole('button', { name: '赛博朋克' });
+    const presetButton = await screen.findByRole('button', { name: '示例配方' });
     await user.click(presetButton);
     expect(presetButton).toHaveAttribute('aria-pressed', 'true');
     await user.click(screen.getByRole('button', { name: '多视角' }));
     expect(screen.getByText(/自动前置 <mva>/)).toHaveTextContent('负向 overexposed');
     expect(JSON.parse(screen.getAllByRole('status').find((row) => row.tagName === 'OUTPUT')!.textContent!)).toEqual({
-      style_preset: 'cyberpunk_neo_noir', style_loras: [fix, angle].map((item) => ({
+      style_preset: 'sample_recipe', style_loras: [fix, angle].map((item) => ({
         lora_id: item.id, sha256: item.sha256, strength_model: 0.8,
       })),
     });

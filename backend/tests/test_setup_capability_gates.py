@@ -98,8 +98,11 @@ def test_the_image_weights_are_prepared_on_a_4070_without_the_h3_gate(prep, monk
 def test_the_image_plan_states_its_own_runtime_floor_honestly(prep, monkeypatch):
     """The image capability reports what it needs to *run* - without blocking.
 
-    A 4070 has 12 GB; the Qwen Image catalog asks for 15 GB.  The download is
-    allowed (bytes on disk), but the machine is never told it can run it.
+    A 4070 has 12 GB.  Owners of RTX 4070 Super cards reported that the image
+    runtime generates normally on them, so the catalog floor is the 12 GB class
+    and this card is inside it: no VRAM advisory.  The 32 GB kit with a
+    firmware-reserved part is not short of RAM either.  (Until 2026-11-26 the
+    catalog asked for 15 GB and this test locked the opposite.)
     """
     client, _, _ = prep
     monkeypatch.setattr("shine.comfyops.host_env.probe_host_facts", _rtx_4070_host)
@@ -109,10 +112,33 @@ def test_the_image_plan_states_its_own_runtime_floor_honestly(prep, monkeypatch)
         "catalog": IMAGE_CATALOG, "components": IMAGE_COMPONENTS,
         "project_id": project, "disk_free": 500 * 1024 ** 3,
     }).json()
-    assert body["runtime_requirements"]["min_vram_mb"] == 15360
-    advisory = next(row for row in body["runtime_advisories"] if row["code"] == "VRAM_BELOW_CAPABILITY_FLOOR")
-    assert advisory["required"] == 15360
-    assert advisory["actual"] == 12282
+    assert body["runtime_requirements"]["min_vram_mb"] == 11776
+    codes = [row["code"] for row in body["runtime_advisories"]]
+    assert not [code for code in codes if code.startswith("VRAM_")]
+    assert not [code for code in codes if code.startswith("RAM_")]
+
+
+def test_a_card_below_the_lowest_evidenced_class_is_told_so_and_still_downloads(prep, monkeypatch):
+    """Nothing has shown the image runtime to work under 12 GB: say it, don't block it."""
+    def _rtx_3070_host(*args, **kwargs) -> dict:
+        facts = _rtx_4070_host(*args, **kwargs)
+        for card in (facts["gpus"][0], facts["gpu"]):
+            card.update({"vram_mb": 8188, "vram_total_mb": 8188, "vram_free_mb": 8188,
+                         "name": "NVIDIA GeForce RTX 3070"})
+        return facts
+
+    client, _, _ = prep
+    monkeypatch.setattr("shine.comfyops.host_env.probe_host_facts", _rtx_3070_host)
+    project = create_project(client)
+
+    response = _plan(client, {
+        "catalog": IMAGE_CATALOG, "components": IMAGE_COMPONENTS,
+        "project_id": project, "disk_free": 500 * 1024 ** 3,
+    })
+    assert response.status_code == 200, response.text
+    advisory = next(row for row in response.json()["runtime_advisories"]
+                    if row["code"] == "VRAM_BELOW_CAPABILITY_FLOOR")
+    assert (advisory["required"], advisory["actual"]) == (11776, 8188)
 
 
 def test_the_h3_plan_is_still_refused_on_the_same_4070(prep, monkeypatch):

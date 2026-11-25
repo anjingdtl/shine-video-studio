@@ -31,6 +31,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from shine.comfyops.capability import image_vram_advice_for_host
 from shine.materialprep import qwen_workflow
 from shine.materialprep.image_prompts import template_evidence
 from shine.models import utcnow
@@ -542,6 +543,13 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         "graph_report": graph_report,
         "prompt_template": template_evidence(),
         "blockers": blockers,
+        # The setup card states the four layers; the card's own VRAM class and
+        # the advice for it belong in the same answer.  ``verified`` is empty
+        # unless the runtime reached GRAPH_VERIFIED, so the advice then says
+        # honestly that the small samples have not passed on this machine.
+        "vram_advice": image_vram_advice_for_host(
+            settings, runtime_verified=all(family in verified for family in FAMILIES),
+        ),
         "license": {
             "name": "Qwen RESEARCH LICENSE AGREEMENT",
             "release_date": "2026-09-20",

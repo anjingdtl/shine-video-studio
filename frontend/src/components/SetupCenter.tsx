@@ -649,7 +649,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
         <label className="setup-cap">
           <input type="checkbox" checked={caps.image_loras} disabled={!!running}
             onChange={(event) => toggleCap('image_loras', false, event.target.checked)} />
-          <Sparkles size={14} /><span><b>生图风格 LoRA 包（写实 / 奇幻 / 赛博，约 740 MiB）</b>
+          <Sparkles size={14} /><span><b>生图风格 LoRA 包（写实 / 奇幻，约 740 MiB）</b>
             <em>{imageLoraPack?.summary ?? '正在读取本机文件状态'}</em></span>
         </label>
       </div>

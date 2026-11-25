@@ -91,6 +91,13 @@ def get_loras(request: Request, db: DBSession, base_model: StyleLoraBase = H3_LO
     else:
         result = list_style_loras(db, settings)
     db.commit()
+    if base_model == IMAGE_LORA_BASE:
+        # The generation forms read this ledger to let a person assemble a
+        # style, so the card's VRAM advice rides along: "does a recipe fit this
+        # GPU" is answered where the choice is made.  It is advice, never a gate.
+        from shine.comfyops.capability import image_vram_advice_for_host
+
+        result["vram_advice"] = image_vram_advice_for_host(settings)
     return result
 
 

@@ -77,30 +77,6 @@
       },
       "positive_prompt": "Dark fantasy concept art, oil painting texture, visible impasto brushstrokes, epic scale, gothic architecture, ominous atmosphere, volumetric fog, dramatic rim lighting, intricate ornate armor, muted desaturated palette with glowing embers, masterpiece",
       "negative_prompt": "anime, flat color, bright cheerful colors, modern, clean vector, smooth digital art"
-    },
-    {
-      "id": "cyberpunk_neo_noir",
-      "display_name": "赛博朋克",
-      "loras": [
-        {
-          "component_id": "qwen-image-2.1-lora-fix",
-          "strength_model": 0.8
-        }
-      ],
-      "optional_loras": [
-        {
-          "component_id": "qwen-image-2.1-lora-multiple-angles",
-          "strength_model": 0.8
-        }
-      ],
-      "sampling": {
-        "steps": 30,
-        "cfg": 3.5,
-        "sampler_name": "euler",
-        "scheduler": "simple"
-      },
-      "positive_prompt": "Cyberpunk aesthetic, neo-noir, rain-slicked asphalt streets, vibrant neon reflections, cyan and magenta lighting, dense futuristic megacity, holographic advertisements, volumetric steam, wide-angle lens, ray tracing reflections, hyper-detailed, high contrast",
-      "negative_prompt": "daylight, sunny, minimalist, low detail, washed out, blurry"
     }
   ]
 }
