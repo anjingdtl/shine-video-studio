@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String
+from sqlalchemy import JSON, BigInteger, Boolean, DateTime, Float, ForeignKey, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from shine.db import Base
@@ -140,3 +140,25 @@ class ResourceLease(Base):
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+
+
+class StyleLoraAsset(Base):
+    """Single authoritative ledger for discovered and user-imported style LoRAs.
+
+    Persists immutable file/metadata identity only; ComfyUI visibility and
+    runtime readiness are projected dynamically on read and never cached here.
+    """
+
+    __tablename__ = "style_lora_assets"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    storage_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True, nullable=False)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    default_strength: Mapped[float] = mapped_column(Float, default=0.65, nullable=False)
+    trigger_word: Mapped[str] = mapped_column(String(160), default="", nullable=False)
+    origin: Mapped[str] = mapped_column(String(24), default="imported", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)

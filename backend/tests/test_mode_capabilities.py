@@ -86,7 +86,7 @@ def test_base_mode_and_resource_closure_work_without_legacy_templates(monkeypatc
     assert {graph["accelerator_id"] for graph in contract["graphs"]} == {"native20", "pdd8"}
     assert "MiniMaxH3ReferenceToVideo" in mode_capabilities.core_mode_node_types()
     assert {row["component_id"] for row in required_h3_components(binding.catalog)} == {
-        "minimax-h3-diffusion", "minimax-h3-text-encoder", "minimax-h3-vae", "minimax-h3-lora",
+        "minimax-h3-diffusion", "minimax-h3-text-encoder", "minimax-h3-vae",
     }
     assert {row["component_id"] for row in mode_capabilities.required_node_packs(binding.catalog)} == {
         "ComfyUI-KJNodes", "ComfyUI-SolAttn_triton",

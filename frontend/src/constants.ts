@@ -265,7 +265,7 @@ export const auditEntityLabels: Record<string, string> = {
   project_document: '项目文档', resource_lease: '资源占用', comfy_instance: '渲染器实例',
   relay_upscale_item: '接力放大条目', app_setting: '应用设置', setup_task: '环境准备任务',
   voice_runtime: '声音运行时', variant: '变体', tool_repair: '基础程序修复', artifact: '产物',
-  system: '系统',
+  style_lora: '风格 LoRA', system: '系统',
 };
 
 /** 审计事件：精编过的事件名。键必须与后端实际写下的事件码一致。 */
@@ -277,6 +277,8 @@ export const auditEventLabels: Record<string, string> = {
   CANDIDATE_CREATED: '创建候选素材', CANDIDATE_PROMOTED: '候选素材转正',
   STYLE_DRAFT_UPDATED: '更新风格草稿', STYLE_FROZEN: '冻结风格版本',
   STYLE_IMPACT_ANALYZED: '分析风格影响', STYLE_APPLIED_TO_SHOTS: '风格应用到分镜',
+  STYLE_LORA_IMPORTED: '导入风格 LoRA', STYLE_LORA_UPDATED: '修改风格 LoRA 配置',
+  STYLE_LORA_DELETED: '删除风格 LoRA',
   SHOT_CREATED: '新建分镜', SHOT_BINDINGS_UPDATED: '更新分镜素材绑定',
   SHOT_CONTINUITY_SET: '设置分镜连续性', SHOT_REVISION_REWRITTEN: '重写分镜修订',
   SHOT_PROMPT_SAVED: '保存分镜提示词', SHOT_PROMPT_FROZEN: '冻结分镜提示词',

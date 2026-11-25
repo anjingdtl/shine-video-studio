@@ -59,11 +59,12 @@ def h3_strategy_blockers(
     variant_id: str,
     accelerator_id: str,
     second_pass: dict[str, Any] | None = None,
+    style_loras: list[dict[str, Any]] | None = None,
     db: Session | None = None,
     settings: Any | None = None,
 ) -> list[dict[str, Any]]:
     """Validate strategy availability through the single ``strategy_blockers`` adjudicator."""
-    from shine.strategy import GenerationStrategy, SecondPassConfig, strategy_blockers
+    from shine.strategy import GenerationStrategy, SecondPassConfig, StyleLoraConfig, strategy_blockers
 
     strategy_obj = GenerationStrategy(
         model_variant_id=variant_id,
@@ -73,6 +74,7 @@ def h3_strategy_blockers(
             denoise=float((second_pass or {}).get("denoise", 0.25)),
             latent_scale=float((second_pass or {}).get("latent_scale", 1.0)),
         ),
+        style_loras=[StyleLoraConfig.model_validate(item) for item in (style_loras or [])],
     )
     return strategy_blockers(strategy_obj, db, settings)
 
@@ -195,6 +197,7 @@ def check_capability(
     accelerator_id = str(req.get("accelerator_id") or BASELINE_ACCELERATOR_ID)
     sp_raw = req.get("second_pass") or {}
     up_raw = req.get("upscale") or {}
+    loras_raw = req.get("style_loras") or []
     audio_count = int(req.get("audio_count") or 0)
     video_count = int(req.get("video_count") or 0)
 
@@ -211,6 +214,8 @@ def check_capability(
                 "source_evidence": {"variant_id": variant_id, "accelerator_id": accelerator_id},
             }
         try:
+            from shine.strategy import StyleLoraConfig
+
             strategy = GenerationStrategy(
                 model_variant_id=variant_id,
                 accelerator_id=accelerator_id,
@@ -220,6 +225,7 @@ def check_capability(
                     latent_scale=float(sp_raw.get("latent_scale", 1.0)),
                 ),
                 upscale=UpscaleConfig(enabled=bool(up_raw.get("enabled"))),
+                style_loras=[StyleLoraConfig.model_validate(item) for item in loras_raw],
             )
         except Exception as exc:
             return {
@@ -630,6 +636,9 @@ def resolve_shared_comfy_launch(
             *whitelist,
         ]
         _append_optional_comfy_launch_flags(argv)
+        style_lora_yaml = (storage_root(settings.data_dir) / "setup" / "shine-style-loras.yaml").resolve()
+        if style_lora_yaml.is_file() and str(style_lora_yaml) not in argv:
+            argv.extend(["--extra-model-paths-config", str(style_lora_yaml)])
         pinned_files = [
             str(python_exe),
             str(comfy_root / "main.py"),

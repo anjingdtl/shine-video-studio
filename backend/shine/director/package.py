@@ -277,7 +277,8 @@ def build_package(
         # The dynamic per-shot round: the package freezes the user's strategy
         # (variant / accelerator / second pass / upscale) instead of one
         # static profile; every shot compiles its own graph from it.
-        from shine.strategy import GenerationStrategy, strategy_blockers
+        from shine.comfyops.loras import StyleLoraError, evaluate_style_lora_selection
+        from shine.strategy import GenerationStrategy, StyleLoraConfig, strategy_blockers
 
         if workflow_profile_id:
             raise HTTPException(422, {
@@ -292,6 +293,23 @@ def build_package(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
+        if strategy_contract.style_loras:
+            try:
+                resolved_loras = evaluate_style_lora_selection(
+                    db,
+                    settings,
+                    strategy_contract.style_loras,
+                    variant_id=strategy_contract.model_variant_id,
+                )
+            except StyleLoraError as exc:
+                raise HTTPException(exc.http_status, {
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                }) from exc
+            strategy_contract = strategy_contract.model_copy(
+                update={"style_loras": [StyleLoraConfig(**spec.canonical_dict()) for spec in resolved_loras]}
+            )
         blockers = strategy_blockers(strategy_contract, db, settings)
         if blockers:
             raise HTTPException(409, {
@@ -678,6 +696,7 @@ def _compiled_shot_blockers(
                         second_pass=strategy_contract.second_pass_spec(),
                         low_vram_attention=low_vram_decision.enabled,
                         low_vram_decision=low_vram_decision,
+                        style_loras=strategy_contract.style_lora_specs(),
                         **counts,
                     )
                 except (GraphCompileError, H3ExecutionError) as exc:

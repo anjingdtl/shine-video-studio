@@ -160,6 +160,19 @@ class ComfyUIClient:
     def object_info(self) -> dict[str, Any]:
         return self._get("/object_info", timeout=max(self.timeout_s, 30)).json()
 
+    def object_info_node(
+        self,
+        node_class: str,
+        *,
+        timeout_s: float | None = None,
+        max_retries: int | None = None,
+    ) -> dict[str, Any]:
+        return self._get(
+            f"/object_info/{node_class}",
+            timeout=timeout_s or self.timeout_s,
+            max_retries=max_retries,
+        ).json()
+
     def queue(self, *, timeout_s: float | None = None, max_retries: int | None = None) -> dict[str, Any]:
         return self._get("/queue", timeout=timeout_s, max_retries=max_retries).json()
 

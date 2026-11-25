@@ -213,6 +213,7 @@ class FakeComfyServer(_BaseServer):
         self.torch_vram_free = 0
         self.vram_free = 0
         self.comfyui_version = "fake"
+        self.extra_object_info: dict[str, Any] = {}
         super().__init__()
 
     def _history_record(self, prompt_id: str) -> dict[str, Any] | None:
@@ -281,23 +282,41 @@ class FakeComfyServer(_BaseServer):
                     )
                     return
                 if parsed.path == "/object_info":
-                    self._json(
-                        200,
-                        {
-                            "H3BaseSampler": {
-                                "input": {
-                                    "required": {
-                                        "positive_prompt": ["STRING"],
-                                        "seed": ["INT"],
-                                        "duration": ["FLOAT"],
-                                    }
+                    merged = {
+                        "H3BaseSampler": {
+                            "input": {
+                                "required": {
+                                    "positive_prompt": ["STRING"],
+                                    "seed": ["INT"],
+                                    "duration": ["FLOAT"],
                                 }
-                            },
-                            "SaveVideo": {"input": {"required": {"images": ["IMAGE"]}}},
-                            "LoadVideo": {"input": {"required": {"video": ["STRING"]}}},
-                            "LoadAudio": {"input": {"required": {"audio": ["STRING"]}}},
+                            }
                         },
-                    )
+                        "SaveVideo": {"input": {"required": {"images": ["IMAGE"]}}},
+                        "LoadVideo": {"input": {"required": {"video": ["STRING"]}}},
+                        "LoadAudio": {"input": {"required": {"audio": ["STRING"]}}},
+                        **outer.extra_object_info,
+                    }
+                    self._json(200, merged)
+                    return
+                if parsed.path.startswith("/object_info/"):
+                    node_name = parsed.path.split("/object_info/", 1)[-1]
+                    merged = {
+                        "H3BaseSampler": {
+                            "input": {
+                                "required": {
+                                    "positive_prompt": ["STRING"],
+                                    "seed": ["INT"],
+                                    "duration": ["FLOAT"],
+                                }
+                            }
+                        },
+                        "SaveVideo": {"input": {"required": {"images": ["IMAGE"]}}},
+                        "LoadVideo": {"input": {"required": {"video": ["STRING"]}}},
+                        "LoadAudio": {"input": {"required": {"audio": ["STRING"]}}},
+                        **outer.extra_object_info,
+                    }
+                    self._json(200, {node_name: merged[node_name]} if node_name in merged else {})
                     return
                 if parsed.path == "/queue":
                     self._json(200, {"queue_running": outer.queue_running, "queue_pending": outer.queue_pending})

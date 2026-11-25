@@ -25,8 +25,10 @@ import {
   type ProductionRun,
   type ProductionStrategy,
   type StrategyOptions,
+  type StyleLoraConfig,
   type VariantAvailability,
 } from '../api';
+import { StyleLoraAssemblyPanel } from '../shared/StyleLoraAssemblyPanel';
 import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orientation } from '../outputFrame';
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
@@ -150,7 +152,7 @@ export function describeAccelerator(acceleratorId: string, steps?: number): stri
 const FALLBACK_OPTIONS: StrategyOptions = {
   model_variants: [{
     variant_id: 'h3-ref2va-int8-convrot', label: 'h3-ref2va-int8-convrot',
-    acceptance_status: 'SUPPORTED', verified: false, default_recommended: true,
+    acceptance_status: 'SUPPORTED', verified: false, lora_supported: true, default_recommended: true,
   }],
   accelerators: [
     { accelerator_id: 'pdd8', steps: 8, verified: false },
@@ -159,6 +161,25 @@ const FALLBACK_OPTIONS: StrategyOptions = {
   second_pass: { supported: false, recipes: ['h3-tail-refine-v1'] },
   upscale: [],
 };
+
+function sanitizeStoredLoras(raw: unknown): StyleLoraConfig[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((row): row is StyleLoraConfig => (
+      Boolean(row) && typeof row === 'object'
+      && typeof (row as Record<string, unknown>).lora_id === 'string'
+      && typeof (row as Record<string, unknown>).lora_name === 'string'
+      && typeof (row as Record<string, unknown>).sha256 === 'string'
+    ))
+    .slice(0, 3)
+    .map((row) => ({
+      lora_id: row.lora_id,
+      lora_name: row.lora_name,
+      sha256: row.sha256,
+      strength_model: typeof row.strength_model === 'number' && Number.isFinite(row.strength_model) ? row.strength_model : 0.65,
+      trigger_word: typeof row.trigger_word === 'string' ? row.trigger_word : '',
+    }));
+}
 
 export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpoch, activeJob, attentionJobs, onMessage, onRefresh, onNavigate, onGoSetup, onAbandon }: {
   projectId: string;
@@ -193,9 +214,16 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const [resolutionScale, setResolutionScale] = useState(typeof stored?.resolutionScale === 'number' ? stored.resolutionScale : 1.0);
   const [secondPass, setSecondPass] = useState(typeof stored?.secondPass === 'boolean' ? stored.secondPass : false);
   const [upscale, setUpscale] = useState(typeof stored?.upscale === 'boolean' ? stored.upscale : false);
+  const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>(() => sanitizeStoredLoras(stored?.styleLoras));
   useEffect(() => {
-    rememberShootStrategy(projectId, { variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale });
-  }, [projectId, variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale]);
+    rememberShootStrategy(projectId, { variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale, styleLoras });
+  }, [projectId, variantId, acceleratorId, orientation, resolutionScale, secondPass, upscale, styleLoras]);
+
+  const selectedVariantLoraSupported = useMemo(() => {
+    const found = options.model_variants.find((row) => row.variant_id === variantId);
+    if (found && typeof found.lora_supported === 'boolean') return found.lora_supported;
+    return variantId === 'h3-ref2va-int8-convrot';
+  }, [options.model_variants, variantId]);
   const [busy, setBusy] = useState('');
   const [problem, setProblem] = useState('');
   const [styleGap, setStyleGap] = useState(false);
@@ -366,6 +394,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         upscale: upscale && upscaleReady
           ? { enabled: true, engine: 'relayvsr', variant: 'x2', quality_preset: 'balanced' }
           : { enabled: false },
+        style_loras: styleLoras,
       };
       const frame = frameSize(orientation, resolutionScale);
       const result = await startDirectorProduction(projectId, {
@@ -395,7 +424,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     }
   }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh,
     options.second_pass.supported, options.upscale, orientation,
-    projectId, resolutionScale, secondPass, selected, upscale, variantId]);
+    projectId, resolutionScale, secondPass, selected, styleLoras, upscale, variantId]);
 
   const applyStyle = async () => {
     setBusy('style'); setProblem('');
@@ -459,7 +488,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     : [];
   useStageRail(`director-shoot-${mode}`, { priority: 1, primary, secondary },
     [mode, selected, busy, demo, running, chosenVariantAvailable,
-      variantId, acceleratorId, secondPass, upscale, run, orientation, resolutionScale]);
+      variantId, acceleratorId, secondPass, upscale, run, orientation, resolutionScale, styleLoras]);
 
   const blockedEpisodes = episodes.filter((row) => !shootable.includes(row.episode_id));
 
@@ -513,6 +542,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
               {' · '}{row.binding ? row.binding.mode : '方案未绑定'}
               {row.binding?.output?.width && row.binding?.output?.height
                 ? ` · ${row.binding.output.width}×${row.binding.output.height}` : ''}
+              {row.binding?.strategy?.style_loras?.length
+                ? ` · LoRA(${row.binding.strategy.style_loras.map((l) => `${l.lora_name}@${l.strength_model}`).join('+')})`
+                : ''}
               {' · '}{row.episode_count} 集 {row.shot_count} 镜
             </span>
             <span className="pvh-time">{versionTime(row.created_at)}{row.confirmed_at ? ' · 已确认' : ' · 待确认'}</span>
@@ -653,6 +685,12 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
               </label>
             ))}
           </div>
+          <StyleLoraAssemblyPanel
+            value={styleLoras}
+            onChange={setStyleLoras}
+            loraSupported={selectedVariantLoraSupported}
+            disabled={running || busy !== ''}
+          />
         </div>
 
         {problem && <p role="alert" className="form-error">{problem}</p>}

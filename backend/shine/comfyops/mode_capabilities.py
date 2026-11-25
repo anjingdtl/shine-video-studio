@@ -51,7 +51,10 @@ def sealed_mode_nodes_compatible(sealed: Any, variant_id: str = INT8_VARIANT_ID)
     if not isinstance(sealed, list) or not all(isinstance(item, str) and item for item in sealed):
         return False
     workflows = mode_workflows(variant_id)
-    known = {node for workflow in workflows for node in workflow.required_nodes} | {"VHS_LoadAudioUpload"}
+    known = (
+        {node for workflow in workflows for node in workflow.required_nodes}
+        | {"VHS_LoadAudioUpload", "LoraLoaderModelOnly"}
+    )
     core = core_mode_node_types(variant_id)
     sealed_set = set(sealed)
     return bool(core) and len(sealed_set) == len(sealed) and core <= sealed_set <= known

@@ -2753,3 +2753,37 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-grant-choice-row em{font-style:normal;color:var(--muted);white-space:nowrap}
 .copilot-grant-details dd{margin:0;word-break:break-all;font-family:var(--mono)}
 .copilot-grant-loading{display:flex;align-items:center;gap:6px;margin:7px 0 0;font-size:var(--fs-caption);color:var(--muted)}
+
+/* ---- 风格 LoRA 装配面板（7 阶 / 4 阶共用） ---------------------------------- */
+.style-lora-panel{margin:8px 0;padding:10px 12px;border:1px solid var(--border,var(--line));border-radius:9px;background:var(--surface-2,rgba(255,255,255,.04));display:flex;flex-direction:column;gap:8px}
+.style-lora-head{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.style-lora-title{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-caption)}
+.style-lora-count{font-size:11px;color:var(--muted)}
+.style-lora-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.style-lora-warn{padding:6px 9px;border-radius:6px;background:var(--warn-bg-3,#f6ead3);color:var(--warn-2,#8a6a2f);font-size:var(--fs-caption)}
+.style-lora-error{padding:6px 9px;border-radius:6px;background:var(--danger-bg,rgba(180,45,45,.12));color:var(--danger-deep,#a62b2b);font-size:var(--fs-caption);margin:0}
+.style-lora-notice{padding:6px 9px;border-radius:6px;background:var(--ok-bg-2,rgba(47,106,63,.12));color:var(--ok-ink,#2f6a3f);font-size:var(--fs-caption)}
+.style-lora-mounted{display:flex;flex-direction:column;gap:6px}
+.style-lora-slot{border:1px solid var(--line,var(--border));border-radius:8px;padding:8px 10px;background:var(--panel,var(--surface-3));display:flex;flex-direction:column;gap:6px}
+.style-lora-slot-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap;font-size:var(--fs-caption)}
+.style-lora-order{font-weight:700;color:var(--accent)}
+.style-lora-file{font-family:var(--mono);font-size:11px;color:var(--muted);word-break:break-all}
+.style-lora-slot-btns{margin-left:auto;display:inline-flex;gap:4px;align-items:center}
+.style-lora-slot-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:var(--fs-caption)}
+.style-lora-field{display:inline-flex;align-items:center;gap:6px;color:var(--ink-2)}
+.style-lora-num{width:64px;padding:3px 6px;border:1px solid var(--line,var(--border));border-radius:6px;background:var(--field,var(--surface-2))}
+.style-lora-trigger-field input{width:190px;padding:3px 8px;border:1px solid var(--line,var(--border));border-radius:6px;background:var(--field,var(--surface-2))}
+.style-lora-badge{display:inline-flex;align-items:center;padding:1px 6px;border-radius:6px;font-size:11px;border:1px solid var(--border,var(--line))}
+.style-lora-badge.tone-ok{color:var(--ok-ink,#2f6a3f);border-color:var(--ok-line,#9ec8a9)}
+.style-lora-badge.tone-warn{color:var(--warn-2,#8a6a2f);border-color:var(--warn-line,#d9c49a)}
+.style-lora-badge.tone-bad{color:var(--danger-deep,#a62b2b);border-color:var(--danger-line,#e0a0a0)}
+.style-lora-import{border:1px dashed var(--line,var(--border));border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px}
+.style-lora-import-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.style-lora-import-row input[type="text"],.style-lora-import-row input[type="number"]{flex:1;min-width:160px;padding:4px 8px;border:1px solid var(--line,var(--border));border-radius:6px;background:var(--field,var(--surface-2));font-size:var(--fs-caption)}
+.style-lora-upload.disabled{opacity:.5;pointer-events:none}
+.style-lora-library{display:flex;flex-direction:column;gap:5px}
+.style-lora-lib-row{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:5px 8px;border-radius:7px;border:1px solid var(--line,var(--border));background:var(--panel,var(--surface-3));font-size:var(--fs-caption)}
+.style-lora-lib-info{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.style-lora-origin{font-size:11px;color:var(--muted)}
+.style-lora-meta{font-size:11px;color:var(--muted);font-family:var(--mono)}
+.style-lora-lib-actions{display:inline-flex;align-items:center;gap:5px}

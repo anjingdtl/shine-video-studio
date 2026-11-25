@@ -36,10 +36,14 @@ from shine.foundation.h3 import (
     H3ExecutionRequest,
     H3ReferenceInput,
     SecondPassSpec,
+    StyleLoraError,
+    StyleLoraSpec,
+    apply_style_lora_triggers,
     compile_h3_ref2va_graph,
     decide_low_vram_attention,
     enforce_h3_render_audio_contract,
     evaluate_h3_technical_qc,
+    evaluate_style_lora_selection,
     extract_comfy_prompt_texts,
     extract_last_frame_png,
     extract_video_output,
@@ -532,11 +536,17 @@ def _execute_single_job(
         shot = db.get(M4Shot, job.shot_id)
         prompt_row = db.get(M4ManualPromptRevision, job.prompt_revision_id) if job.prompt_revision_id else None
         ok, err_code = validate_frozen_prompt_for_shot(db, shot, prompt_row) if shot else (False, "M4_SHOT_NOT_FOUND")
+        raw_style_loras = list((run_info.get("config") or {}).get("style_loras") or [])
+        expected_effective_sha = (
+            sha256_bytes(apply_style_lora_triggers(prompt_row.prompt_text, raw_style_loras).encode())
+            if prompt_row is not None
+            else ""
+        )
         actual_snap_sha = sha256_bytes(prompt_text.encode())
         if (
             not ok
             or prompt_row is None
-            or prompt_row.prompt_sha256 != job.prompt_sha256
+            or expected_effective_sha != job.prompt_sha256
             or actual_snap_sha != job.prompt_sha256
         ):
             job.status = "FAILED"
@@ -594,6 +604,7 @@ def _execute_single_job(
         seed = int(snap_item["seed"])
         variant_id = str(cfg.get("variant_id", "h3-ref2va-int8-convrot"))
         accelerator_id = str(cfg.get("accelerator_id", "pdd8"))
+        raw_style_loras = list(cfg.get("style_loras") or [])
 
     # 2. Disk I/O, SHA checks & FFmpeg tail frame extraction OUTSIDE any SQLite transaction
     h3_refs: list[H3ReferenceInput] = []
@@ -761,6 +772,31 @@ def _execute_single_job(
             else os.getenv("SHINE_H3_OOM_LOW_VRAM_RETRY", "1").strip().lower() not in {"0", "false", "no", "off"}
         )
 
+        resolved_loras: tuple[StyleLoraSpec, ...] = ()
+        if raw_style_loras:
+            if video_stub is None and comfy_client is not None and object_info is None:
+                object_info = comfy_client.object_info()
+            if platform_factory is not None:
+                with platform_factory() as pdb:
+                    resolved_loras = evaluate_style_lora_selection(
+                        pdb,
+                        settings,
+                        raw_style_loras,
+                        variant_id=variant_id,
+                        object_info=object_info,
+                    )
+            else:
+                resolved_loras = tuple(
+                    StyleLoraSpec(
+                        lora_id=str(item.get("lora_id") or ""),
+                        lora_name=str(item.get("lora_name") or ""),
+                        sha256=str(item.get("sha256") or "").lower(),
+                        strength_model=float(item.get("strength_model", 0.65)),
+                        trigger_word=str(item.get("trigger_word") or ""),
+                    )
+                    for item in raw_style_loras
+                )
+
         if video_stub is not None:
             stub_img_count = len(img_items) + (1 if prev_video_rel is not None else 0)
             stub_decision = decide_low_vram_attention(
@@ -782,8 +818,9 @@ def _execute_single_job(
                 object_info=object_info,
                 low_vram_attention=stub_decision.enabled,
                 low_vram_decision=stub_decision,
+                style_loras=resolved_loras,
             )
-    except (H3ExecutionError, GraphCompileError) as exc:
+    except (H3ExecutionError, GraphCompileError, StyleLoraError) as exc:
         return _fail_job_precheck(
             m4_factory,
             job_id,
@@ -912,6 +949,7 @@ def _execute_single_job(
                 ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
                 low_vram_attention_token_threshold=low_vram_threshold,
                 retry_on_oom_with_low_vram=oom_retry_enabled,
+                style_loras=resolved_loras,
             )
             render_timeout_s = float(
                 max(60, int(getattr(settings, "comfy_render_timeout_seconds", 3600) or 3600))

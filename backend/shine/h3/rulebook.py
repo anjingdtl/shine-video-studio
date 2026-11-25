@@ -100,6 +100,22 @@ def recompile_for_provenance(request: RenderRequest):
         project_language=request.project_language,
     )
     compiled = compiler.compile(compiler_version=pinned, **kwargs)
+    strategy_obj = getattr(request, "strategy", None)
+    strategy_loras = (
+        strategy_obj.get("style_loras")
+        if isinstance(strategy_obj, dict)
+        else None
+    )
+    if strategy_loras:
+        from shine.foundation.h3 import apply_style_lora_triggers
+
+        triggered_prompt = apply_style_lora_triggers(compiled.prompt, strategy_loras)
+        compiled = compiled.model_copy(
+            update={
+                "prompt": triggered_prompt,
+                "prompt_sha256": hashlib.sha256(triggered_prompt.encode("utf-8")).hexdigest(),
+            }
+        )
     if _compiled_matches_request(compiled, request):
         return compiled, None
     replay_variant = {
@@ -108,6 +124,16 @@ def recompile_for_provenance(request: RenderRequest):
     }.get(pinned)
     if replay_variant:
         replay = compiler.compile(compiler_version=replay_variant, **kwargs)
+        if strategy_loras:
+            from shine.foundation.h3 import apply_style_lora_triggers
+
+            triggered_replay = apply_style_lora_triggers(replay.prompt, strategy_loras)
+            replay = replay.model_copy(
+                update={
+                    "prompt": triggered_replay,
+                    "prompt_sha256": hashlib.sha256(triggered_replay.encode("utf-8")).hexdigest(),
+                }
+            )
         if _compiled_matches_request(replay, request):
             return replay, replay_variant
     return compiled, None

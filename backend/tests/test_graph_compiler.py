@@ -254,7 +254,7 @@ def test_execution_identity_snapshot_is_complete_and_hashable():
     compiled = compile_ref2va_workflow(
         image_count=3, audio_count=1, second_pass=SecondPassSpec(denoise=0.3))
     identity = compiled.execution_identity()
-    assert identity["compiler"] == "shine.graph_compiler.v1"
+    assert identity["compiler"] == "shine.graph_compiler.v3"
     assert identity["reference_counts"] == {"image": 3, "audio": 1, "video": 0}
     assert identity["second_pass"]
     assert identity["recipe_sha256"] == compiled.recipe_sha256
@@ -341,18 +341,30 @@ def test_p1_refusals_do_not_substitute_or_drop_references():
 
 
 def test_p1_preserves_the_archived_recipe_and_graph_identities():
-    for variant, accelerator, images, audio, graph_sha, recipe_sha in (
-        ("h3-ref2va-int8-convrot", "pdd8", 1, 0,
+    # Pre-V1 archived hashes reproduce identically with _legacy_realism_lora=True;
+    # W6A8 candidate stays unchanged; V3 0-LoRA INT8 baseline hashes are pinned.
+    for variant, accelerator, images, audio, legacy, graph_sha, recipe_sha in (
+        ("h3-ref2va-int8-convrot", "pdd8", 1, 0, True,
          "4fc50291b9bca55f0167e9a4a2bbd7371b03358fa8a97c8db66f3d63b4339645",
          "d06e3ed501cb649cd144f49a952ea89fe9c3892a7eb834a00fdef29d74086666"),
-        ("h3-ref2va-int8-convrot", "native20", 9, 3,
+        ("h3-ref2va-int8-convrot", "native20", 9, 3, True,
          "888ca8d95aca0aebcbf6651e039df5d838938d778721245eb45e423d09443399",
          "e79973410e21c6b70a83ab58f9c652623cd4bffe5a7f1658d9018e62d7ae1ff8"),
-        ("ref2va-lowend-candidate", "native20", 2, 0,
+        ("h3-ref2va-int8-convrot", "pdd8", 1, 0, False,
+         "82f57e25882ce132f7b83b88893f204f7eb370064a95ac84208545fb5ff1c59e",
+         "c0f5989aff9936efb208f89ed66c15b8c7cd8d734237944db2bcabb5bd6121eb"),
+        ("h3-ref2va-int8-convrot", "native20", 9, 3, False,
+         "f095226c1c2e4d575935de913864305f15aa6e837fc2ccfdde2d03f5a3c825bb",
+         "c73b7356166e0fd0f22c3d7f47d568bf2a3ab5a1cae3472bc5048232222e541f"),
+        ("ref2va-lowend-candidate", "native20", 2, 0, False,
          "4d5a3a7f7d291af900fda352cd0acb353fba8c469cb3b95db48a2671a1889d9b",
          "f712222daa69e2fd906052a98efef42393256453bcd12f3034cc840ae6b634fc"),
     ):
         compiled = compile_ref2va_workflow(
-            variant_id=variant, accelerator_id=accelerator, image_count=images, audio_count=audio,
+            variant_id=variant,
+            accelerator_id=accelerator,
+            image_count=images,
+            audio_count=audio,
+            _legacy_realism_lora=legacy,
         )
         assert (compiled.graph_sha256, compiled.recipe_sha256) == (graph_sha, recipe_sha)

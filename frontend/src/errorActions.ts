@@ -147,6 +147,61 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
     why: '再点一次「一键准备」会重新批准同一份计划并从停下的步骤继续；已完成的步骤与已下载的字节都会保留。',
     action: { label: '重新发起一键准备', target: 'setup-env' },
   },
+  VARIANT_LORA_UNSUPPORTED: {
+    reason: '当前模型量化变体不支持挂载风格 LoRA',
+    why: 'V1 版本仅在 INT8 主线启用风格 LoRA 动态串联，W6A8 暂不允许叠加 LoRA。',
+    action: { label: '回到制作策略改选 INT8 或移除 LoRA', target: 'package-stage' },
+  },
+  STYLE_LORA_LIMIT_EXCEEDED: {
+    reason: '挂载的风格 LoRA 数量超过了上限（3 个）',
+    why: '为了保障 Ref2VA 主体一致性和显存边界，单次渲染最多串联 3 个风格 LoRA。',
+    action: { label: '精简风格 LoRA 列表', target: 'package-stage' },
+  },
+  STYLE_LORA_DUPLICATE: {
+    reason: '同一个风格 LoRA 被重复挂载了多次',
+    why: '重复串联同一个 LoRA 会导致权重叠加失真且无法冻结唯一策略哈希。',
+    action: { label: '删除重复挂载项', target: 'package-stage' },
+  },
+  STYLE_LORA_STRENGTH_OUT_OF_RANGE: {
+    reason: '风格 LoRA 权重超出了允许范围 [0.00, 1.50]',
+    why: '过高或负值的 LoRA 强度会破坏 MiniMax-H3 基础动态先验。',
+    action: { label: '将强度调回 0.00–1.50 范围内', target: 'package-stage' },
+  },
+  STYLE_LORA_INVALID_TRIGGER: {
+    reason: '风格 LoRA 触发词格式不合法',
+    why: '触发词仅支持 ASCII 字母、数字、空格与常用英文标点（最多 160 字符），禁止包含 H3 保留标签。',
+    action: { label: '修正或留空触发词', target: 'package-stage' },
+  },
+  LORA_FILE_MISSING: {
+    reason: '台账里的风格 LoRA 文件在磁盘上找不到了',
+    why: '可能被移动、删除或未挂载进当前受管模型目录，生产无法按冻结快照继续。',
+    action: { label: '刷新 LoRA 台账或重新导入文件', target: 'package-stage' },
+  },
+  LORA_HASH_MISMATCH: {
+    reason: '风格 LoRA 磁盘文件的 SHA-256 与冻结台账不一致',
+    why: '禁止静默用被篡改或替换的权重继续渲染，以免同一批次或续镜风格漂移。',
+    action: { label: '核实原始权重并重新导入', target: 'package-stage' },
+  },
+  LORA_NOT_VISIBLE_IN_COMFYUI: {
+    reason: '运行中的 ComfyUI 未能看到该风格 LoRA',
+    why: 'ComfyUI 可能在新增 extra_model_paths 配置前启动，需要重启或重新绑定受管 ComfyUI 进程后再检测。',
+    action: { label: '检查 ComfyUI 并点击「检测可见性」', target: 'package-stage' },
+  },
+  LORA_CORRUPT_HEADER: {
+    reason: '这个 .safetensors 文件头校验失败',
+    why: '文件可能下载不完整、损坏或不是标准的 safetensors 权重。',
+    action: { label: '更换完整的 safetensors 文件重试', target: 'package-stage' },
+  },
+  LORA_INVALID_EXTENSION: {
+    reason: '只支持 .safetensors 格式的风格 LoRA',
+    why: '为了防止不安全反序列化和元数据缺失，非 .safetensors 权重无法入库。',
+    action: { label: '选择 .safetensors 文件导入', target: 'package-stage' },
+  },
+  LORA_IN_USE: {
+    reason: '这个风格 LoRA 正在被在途任务或最近生产配置引用',
+    why: '防止删除仍在使用的权重导致执行图找不到模型；请等对应任务完成后再移除。',
+    action: { label: '等待关联任务结束', target: 'package-stage' },
+  },
 };
 
 /** 把服务端 blocker 映射为可行动条目；未知码保留原文，不编造动作。 */

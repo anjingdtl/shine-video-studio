@@ -127,6 +127,17 @@ export const ERROR_CODE_LABELS: Record<string, string> = {
   OUTPUT_DIRECTORY_SOURCE_INVALID: '有源文件与台账不一致，已停止迁移，输出目录未切换。',
   OUTPUT_DIRECTORY_TARGET_CONFLICT: '目标目录里有同名但内容不同的文件，已停止迁移。',
   OUTPUT_DIRECTORY_COPY_FAILED: '复制文件失败，已停止迁移，输出目录未切换。',
+  VARIANT_LORA_UNSUPPORTED: '当前选择的模型量化变体暂不支持风格 LoRA（V1 仅 INT8 主线支持），请切回 INT8 或移除风格 LoRA。',
+  STYLE_LORA_LIMIT_EXCEEDED: '单个生产策略最多只能串联 3 个风格 LoRA。',
+  STYLE_LORA_DUPLICATE: '同一风格 LoRA 不能在同一生产策略中重复挂载。',
+  STYLE_LORA_STRENGTH_OUT_OF_RANGE: '风格 LoRA 强度必须在 0.00 到 1.50 之间。',
+  STYLE_LORA_INVALID_TRIGGER: '风格 LoRA 触发词仅允许 ASCII 字母、数字、空格与常用标点，且不超过 160 个字符，禁止 H3 保留标签。',
+  LORA_FILE_MISSING: '已选择的风格 LoRA 文件不在磁盘上，请刷新台账或重新导入。',
+  LORA_HASH_MISMATCH: '风格 LoRA 文件哈希与台账记录不一致，可能已被修改，已拒绝用于生产。',
+  LORA_NOT_VISIBLE_IN_COMFYUI: 'ComfyUI 实时模型列表中尚未发现该风格 LoRA，请确认 ComfyUI 加载了额外的 LoRA 路径配置并点击检测。',
+  LORA_CORRUPT_HEADER: '该风格 LoRA 不是有效的 safetensors 权重文件（文件头损坏或体积不足）。',
+  LORA_INVALID_EXTENSION: '风格 LoRA 仅支持 .safetensors 格式权重文件。',
+  LORA_IN_USE: '该风格 LoRA 正被排片/生产任务引用，不能直接删除。',
 };
 
 /**
@@ -880,6 +891,7 @@ export type DirectorPackage = {
   binding: {
     workflow_profile_id: string; mode: string; graph_sha256: string; checkpoint_id: string;
     generation_mode: string | null; output: Record<string, unknown>;
+    strategy?: ProductionStrategy | null;
   } | null;
   policy: Record<string, unknown> | null;
   episodes: Array<{
@@ -2066,7 +2078,15 @@ export type DirectorShootResult = {
   episodes: Array<{ episode_id: string; position: number; shot_count: number }>;
 };
 
-/** 用户可选的生产策略：量化模型 + 加速 + 二次精修 + 高清视频。 */
+export type StyleLoraConfig = {
+  lora_id: string;
+  lora_name: string;
+  sha256: string;
+  strength_model: number;
+  trigger_word: string;
+};
+
+/** 用户可选的生产策略：量化模型 + 加速 + 二次精修 + 高清视频 + 可选风格 LoRA。 */
 export type ProductionStrategy = {
   schema_version: '1';
   generation_mode: 'Ref2VA';
@@ -2074,6 +2094,7 @@ export type ProductionStrategy = {
   accelerator_id: string;
   second_pass: { enabled: boolean; recipe_id?: string; denoise?: number; latent_scale?: number };
   upscale: { enabled: boolean; engine?: string; variant?: string; quality_preset?: string };
+  style_loras?: StyleLoraConfig[];
 };
 
 export type StrategyOptions = {
@@ -2082,6 +2103,7 @@ export type StrategyOptions = {
     label: string;
     acceptance_status: string;
     verified: boolean;
+    lora_supported?: boolean;
     tier?: string | null;
     default_recommended?: boolean;
   }>;

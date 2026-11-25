@@ -157,6 +157,7 @@ def _same_render_binding(source: dict, retake: dict, key: str) -> bool:
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                style_loras=strategy.style_lora_specs(),
                 **render_reference_counts(manifest),
             )
             for request in (source, retake)

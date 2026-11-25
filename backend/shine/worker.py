@@ -2752,11 +2752,13 @@ def _run_comfy_job(
         from shine.foundation.h3 import (
             GraphCompileError,
             H3ExecutionError,
+            StyleLoraError,
             compile_h3_ref2va_graph,
             decide_low_vram_attention,
+            evaluate_style_lora_selection,
             is_low_vram_guard_variant,
-            low_vram_attention_form_of_graph,
             render_reference_counts,
+            resolve_frozen_graph_form,
         )
         from shine.strategy import GenerationStrategy
 
@@ -2801,6 +2803,17 @@ def _run_comfy_job(
                 }, project_id=project_id)
             return job_id
         try:
+            resolved_loras = ()
+            frozen_specs = strategy.style_lora_specs()
+            if strategy.style_loras:
+                with session_factory() as ro_db:
+                    resolved_loras = evaluate_style_lora_selection(
+                        ro_db,
+                        settings,
+                        strategy.style_loras,
+                        variant_id=strategy.model_variant_id,
+                        object_info=live_object_info,
+                    )
             ref_counts = render_reference_counts(manifest)
             low_vram_decision = decide_low_vram_attention(
                 width=request.output_width,
@@ -2812,15 +2825,27 @@ def _run_comfy_job(
             )
             # The frozen request is the authority for the graph it demands.  One
             # shot has two legal graphs (MiniMaxLowVRAMAttention mounted or not);
-            # a request frozen before the high-watermark gate names the mounted
-            # one and keeps rendering exactly as it was frozen.
-            frozen_form = low_vram_attention_form_of_graph(
+            # a request frozen before the high-watermark gate (or pre-v3 LoRA
+            # migration) keeps rendering exactly as it was frozen.
+            resolved_form = resolve_frozen_graph_form(
                 request.workflow_profile_hash,
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                style_loras=resolved_loras,
                 **ref_counts,
             )
+            if resolved_form is None and frozen_specs and resolved_loras != frozen_specs:
+                resolved_form = resolve_frozen_graph_form(
+                    request.workflow_profile_hash,
+                    variant_id=strategy.model_variant_id,
+                    accelerator_id=strategy.accelerator_id,
+                    second_pass=strategy.second_pass_spec(),
+                    style_loras=frozen_specs,
+                    **ref_counts,
+                )
+            frozen_form = resolved_form[0] if resolved_form is not None else None
+            legacy_realism_lora = resolved_form[1] if resolved_form is not None else False
             if (not is_oom_fallback_attempt and frozen_form is not None
                     and frozen_form != low_vram_decision.enabled):
                 low_vram_decision = replace(
@@ -2832,9 +2857,40 @@ def _run_comfy_job(
                 object_info=live_object_info,
                 low_vram_attention=low_vram_decision.enabled,
                 low_vram_decision=low_vram_decision,
+                style_loras=resolved_loras,
+                _legacy_realism_lora=legacy_realism_lora,
                 **ref_counts,
             )
             hash_matches = profile.graph_sha256 == request.workflow_profile_hash
+            if (
+                not hash_matches
+                and resolved_loras
+                and frozen_specs
+                and [(s.lora_id, s.sha256, s.strength_model, s.trigger_word) for s in resolved_loras]
+                == [(s.lora_id, s.sha256, s.strength_model, s.trigger_word) for s in frozen_specs]
+            ):
+                frozen_profile = compile_h3_ref2va_graph(
+                    variant_id=strategy.model_variant_id,
+                    accelerator_id=strategy.accelerator_id,
+                    second_pass=strategy.second_pass_spec(),
+                    object_info=live_object_info,
+                    low_vram_attention=low_vram_decision.enabled,
+                    low_vram_decision=low_vram_decision,
+                    style_loras=frozen_specs,
+                    _legacy_realism_lora=legacy_realism_lora,
+                    **ref_counts,
+                )
+                hash_matches = frozen_profile.graph_sha256 == request.workflow_profile_hash
+                if not hash_matches and is_oom_fallback_attempt and low_vram_decision.enabled:
+                    hash_matches = is_low_vram_guard_variant(
+                        frozen_profile.graph_sha256,
+                        expected_graph_sha256=request.workflow_profile_hash,
+                        variant_id=strategy.model_variant_id,
+                        accelerator_id=strategy.accelerator_id,
+                        second_pass=strategy.second_pass_spec(),
+                        style_loras=frozen_specs,
+                        **ref_counts,
+                    )
             if not hash_matches and is_oom_fallback_attempt and low_vram_decision.enabled:
                 hash_matches = is_low_vram_guard_variant(
                     profile.graph_sha256,
@@ -2842,6 +2898,7 @@ def _run_comfy_job(
                     variant_id=strategy.model_variant_id,
                     accelerator_id=strategy.accelerator_id,
                     second_pass=strategy.second_pass_spec(),
+                    style_loras=resolved_loras,
                     **ref_counts,
                 )
             if not hash_matches or profile.checkpoint_id != request.model_checkpoint_id:
@@ -2849,7 +2906,7 @@ def _run_comfy_job(
                     "WORKFLOW_IDENTITY_CHANGED", "逐镜执行图与冻结请求的图哈希或 checkpoint 不一致。",
                     {"expected": request.workflow_profile_hash, "actual": profile.graph_sha256},
                 )
-        except (GraphCompileError, H3ExecutionError) as exc:
+        except (GraphCompileError, H3ExecutionError, StyleLoraError) as exc:
             with session_factory.begin() as db:
                 guarded = _guard_claimed_job(
                     db, job_id=job_id, expected_state_version=expected_version,
@@ -2857,7 +2914,7 @@ def _run_comfy_job(
                 if guarded is None:
                     return job_id
                 job, attempt = guarded
-                job.failure_code = f"STRATEGY_COMPILE_{exc.code}"
+                job.failure_code = exc.code if isinstance(exc, StyleLoraError) else f"STRATEGY_COMPILE_{exc.code}"
                 job.lease_owner = None
                 job.lease_expires_at = None
                 attempt.status = "FAILED"

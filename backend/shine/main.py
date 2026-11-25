@@ -593,6 +593,9 @@ def create_app(
     from shine.api_output import router as output_router
 
     app.include_router(output_router)
+    from shine.api_loras import router as loras_router
+
+    app.include_router(loras_router)
 
     from shine.manual4.api.router import router as manual4_router
     from shine.platform_projects import router as platform_router

@@ -290,6 +290,7 @@ export function baseRoutes(project = baseProject()): Route[] {
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/models$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/nodes$/, respond: () => jsonResponse([]) },
     { method: 'GET', pattern: /\/api\/v1\/comfyops\/resource-status$/, respond: () => jsonResponse([]) },
+    { method: 'GET', pattern: /\/api\/v1\/loras$/, respond: () => jsonResponse({ items: [], comfy_reachable: false, max_style_loras: 3 }) },
     { method: 'GET', pattern: /\/api\/v1\/projects$/, respond: () => jsonResponse([project]) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1$/, respond: () => jsonResponse(project) },
     { method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/assets$/, respond: () => jsonResponse([]) },

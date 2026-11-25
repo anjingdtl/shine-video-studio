@@ -18,6 +18,7 @@ import {
   type M4RunConfigInput,
   type M4StageSummary,
 } from '../api/client';
+import { StyleLoraAssemblyPanel, type StyleLoraConfig } from '../../shared/StyleLoraAssemblyPanel';
 
 type Props = {
   overview: M4Overview;
@@ -36,7 +37,27 @@ type M4ScheduleConfigSnapshot = {
   seed: number;
   secondPassEnabled: boolean;
   secondPassScale: number;
+  styleLoras: StyleLoraConfig[];
 };
+
+function sanitizeM4Loras(raw: unknown): StyleLoraConfig[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((row): row is StyleLoraConfig => (
+      Boolean(row) && typeof row === 'object'
+      && typeof (row as Record<string, unknown>).lora_id === 'string'
+      && typeof (row as Record<string, unknown>).lora_name === 'string'
+      && typeof (row as Record<string, unknown>).sha256 === 'string'
+    ))
+    .slice(0, 3)
+    .map((row) => ({
+      lora_id: row.lora_id,
+      lora_name: row.lora_name,
+      sha256: row.sha256,
+      strength_model: typeof row.strength_model === 'number' && Number.isFinite(row.strength_model) ? row.strength_model : 0.65,
+      trigger_word: typeof row.trigger_word === 'string' ? row.trigger_word : '',
+    }));
+}
 
 function latestJobPromptId(job?: M4Job | null): string | null {
   const attempts = job?.attempts;
@@ -67,6 +88,7 @@ function readScheduleSnapshot(projectId: string): M4ScheduleConfigSnapshot | nul
       seed: typeof parsed.seed === 'number' && Number.isFinite(parsed.seed) ? parsed.seed : 77,
       secondPassEnabled: Boolean(parsed.secondPassEnabled),
       secondPassScale: typeof parsed.secondPassScale === 'number' && parsed.secondPassScale >= 1 ? parsed.secondPassScale : 1.0,
+      styleLoras: sanitizeM4Loras(parsed.styleLoras),
     };
   } catch {
     return null;
@@ -112,10 +134,17 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
   const [seed, setSeed] = useState(initialSnapshotRef.current?.seed ?? 77);
   const [secondPassEnabled, setSecondPassEnabled] = useState(initialSnapshotRef.current?.secondPassEnabled ?? false);
   const [secondPassScale, setSecondPassScale] = useState(initialSnapshotRef.current?.secondPassScale ?? 1.0);
+  const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>(initialSnapshotRef.current?.styleLoras ?? []);
   const [snapshotPreview, setSnapshotPreview] = useState<{
     snapshot_sha256: string;
     items: Array<Record<string, unknown>>;
   } | null>(null);
+
+  const selectedVariantObj = state?.options.variants.find((v) => v.variant_id === variantId);
+  const selectedVariantLoraSupported =
+    typeof selectedVariantObj?.lora_supported === 'boolean'
+      ? selectedVariantObj.lora_supported
+      : variantId === 'h3-ref2va-int8-convrot';
 
   useEffect(() => {
     if (!hasPersistedOrEditedRef.current) return;
@@ -128,8 +157,9 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
       seed,
       secondPassEnabled,
       secondPassScale,
+      styleLoras,
     });
-  }, [projectId, scopeKind, selectedEpId, variantId, acceleratorId, resolutionScale, seed, secondPassEnabled, secondPassScale]);
+  }, [projectId, scopeKind, selectedEpId, variantId, acceleratorId, resolutionScale, seed, secondPassEnabled, secondPassScale, styleLoras]);
 
   const markEdited = () => {
     hasPersistedOrEditedRef.current = true;
@@ -163,6 +193,7 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
           } else {
             setSecondPassEnabled(false);
           }
+          setStyleLoras(sanitizeM4Loras(cfg.style_loras));
         }
       }
 
@@ -234,8 +265,9 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
         : null,
       seed,
       provider: 'comfyui',
+      style_loras: styleLoras,
     }),
-    [scopeKind, selectedEpId, variantId, acceleratorId, resolutionScale, secondPassEnabled, secondPassScale, seed],
+    [scopeKind, selectedEpId, variantId, acceleratorId, resolutionScale, secondPassEnabled, secondPassScale, seed, styleLoras],
   );
 
   const applyState = async (next: M4ProductionState) => {
@@ -618,6 +650,17 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
           )}
         </div>
 
+        <StyleLoraAssemblyPanel
+          value={styleLoras}
+          onChange={(next) => {
+            markEdited();
+            setStyleLoras(next);
+          }}
+          loraSupported={selectedVariantLoraSupported}
+          disabled={busyKey !== null}
+          onMessage={(msg) => onMessage?.(msg, 'success')}
+        />
+
         <div className="m4-toolbar">
           <button
             type="button"
@@ -943,6 +986,9 @@ export function ScheduleProduceStagePage({ overview, stage, onRefresh, onNextSta
                 <div className="m4-toolbar">
                   <span>
                     批次 {r.id.slice(0, 8)} · 范围 {r.scope_kind} · 状态 <strong>{r.status}</strong> · 镜头数 {r.jobs.length}
+                    {r.config?.style_loras?.length
+                      ? ` · LoRA(${r.config.style_loras.map((l) => `${l.lora_name}@${l.strength_model}`).join('+')})`
+                      : ''}
                   </span>
                   {(r.status === 'PENDING' || r.status === 'RUNNING') && (
                     <button

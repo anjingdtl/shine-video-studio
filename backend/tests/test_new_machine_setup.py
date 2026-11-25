@@ -209,7 +209,6 @@ def test_next_instance_plan_state_machine(prep):
             "diffusion_models": "minimax-h3-diffusion",
             "text_encoders": "minimax-h3-text-encoder",
             "vae": "minimax-h3-vae",
-            "loras": "minimax-h3-lora",
         }
 
 

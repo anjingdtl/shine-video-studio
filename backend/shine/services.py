@@ -969,8 +969,10 @@ def make_render_request(
         from shine.strategy import DEFAULT_STRATEGY
 
         strategy_payload = DEFAULT_STRATEGY
+    resolved_loras = ()
     if strategy_payload is not None:
-        from shine.strategy import GenerationStrategy, strategy_blockers
+        from shine.comfyops.loras import StyleLoraError, evaluate_style_lora_selection
+        from shine.strategy import GenerationStrategy, StyleLoraConfig, strategy_blockers
 
         try:
             strategy = GenerationStrategy.model_validate(strategy_payload)
@@ -980,6 +982,23 @@ def make_render_request(
                 "message": "生产策略合同不合法。",
                 "details": str(exc)[:500],
             }) from exc
+        if strategy.style_loras:
+            try:
+                resolved_loras = evaluate_style_lora_selection(
+                    db,
+                    settings,
+                    strategy.style_loras,
+                    variant_id=strategy.model_variant_id,
+                )
+            except StyleLoraError as exc:
+                raise HTTPException(exc.http_status, detail={
+                    "code": exc.code,
+                    "message": exc.message,
+                    "details": exc.details,
+                }) from exc
+            strategy = strategy.model_copy(
+                update={"style_loras": [StyleLoraConfig(**spec.canonical_dict()) for spec in resolved_loras]}
+            )
         blockers = strategy_blockers(strategy, db, settings)
         if blockers:
             raise HTTPException(409, detail={
@@ -1200,6 +1219,18 @@ def make_render_request(
             warnings=manual_warnings,
         )
 
+    if resolved_loras:
+        from shine.foundation.h3 import apply_style_lora_triggers
+
+        triggered_prompt = apply_style_lora_triggers(compiled.prompt, resolved_loras)
+        if triggered_prompt != compiled.prompt:
+            compiled = compiled.model_copy(
+                update={
+                    "prompt": triggered_prompt,
+                    "prompt_sha256": hashlib.sha256(triggered_prompt.encode("utf-8")).hexdigest(),
+                }
+            )
+
     workflow_hash = None
     transfer_warning_lines: list[str] = []
     if profile is not None:
@@ -1308,6 +1339,7 @@ def make_render_request(
                 second_pass=strategy.second_pass_spec(),
                 low_vram_attention=low_vram_decision.enabled,
                 low_vram_decision=low_vram_decision,
+                style_loras=resolved_loras,
                 **counts,
             )
         except (GraphCompileError, H3ExecutionError) as exc:

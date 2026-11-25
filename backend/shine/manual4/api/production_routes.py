@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from shine.foundation.h3 import MAX_STYLE_LORAS, StyleLoraConfig
 from shine.manual4.api.deps import (
     M4DB,
     M4Operator,
@@ -89,6 +90,7 @@ class M4SnapshotConfigBody(BaseModel):
     seed: int = Field(default=77, ge=0)
     provider: str = "comfyui"
     idempotency_key: str | None = None
+    style_loras: list[StyleLoraConfig] = Field(default_factory=list, max_length=MAX_STYLE_LORAS)
 
 
 class M4ReconcileBody(BaseModel):
@@ -218,6 +220,7 @@ def m4_preview_snapshot(
         second_pass=body.second_pass.model_dump() if body.second_pass else None,
         seed=body.seed,
         provider=body.provider,
+        style_loras=[item.model_dump() for item in body.style_loras],
         platform_db=platform_db,
         settings=settings,
     )
@@ -247,6 +250,7 @@ def m4_create_run(
         seed=body.seed,
         provider=body.provider,
         idempotency_key=body.idempotency_key,
+        style_loras=[item.model_dump() for item in body.style_loras],
         platform_db=platform_db,
         settings=settings,
     )
@@ -294,6 +298,7 @@ def m4_retake_shot(
         second_pass=body.second_pass.model_dump() if body.second_pass else None,
         seed=body.seed,
         provider=body.provider,
+        style_loras=[item.model_dump() for item in body.style_loras],
         platform_db=platform_db,
         settings=settings,
     )

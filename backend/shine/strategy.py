@@ -18,15 +18,23 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from shine.comfy.graph_compiler import (
     ACCELERATORS,
     BASELINE_ACCELERATOR_ID,
+    INT8_VARIANT_ID,
     LATENT_UPSCALER,
+    MAX_STYLE_LORAS,
     PDD_FILE,
+    STYLE_LORA_STRENGTH_MAX,
+    STYLE_LORA_STRENGTH_MIN,
+    STYLE_LORA_TRIGGER_MAX_LENGTH,
     VARIANT_ACCELERATORS,
+    GraphCompileError,
     SecondPassSpec,
+    StyleLoraSpec,
+    validate_style_lora_trigger_word,
 )
 from shine.comfy.workflow import graph_hash as _dict_hash
 
@@ -60,6 +68,48 @@ class UpscaleConfig(BaseModel):
     quality_preset: Literal["balanced", "quality", "fast"] = "balanced"
 
 
+class StyleLoraConfig(BaseModel):
+    """One selected style LoRA entry in a frozen GenerationStrategy."""
+
+    model_config = ConfigDict(extra="forbid")
+    lora_id: str = Field(min_length=1, max_length=64)
+    lora_name: str = Field(default="", max_length=512)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    strength_model: float = Field(default=0.65, ge=STYLE_LORA_STRENGTH_MIN, le=STYLE_LORA_STRENGTH_MAX)
+    trigger_word: str = Field(default="", max_length=STYLE_LORA_TRIGGER_MAX_LENGTH)
+
+    @field_validator("sha256", mode="before")
+    @classmethod
+    def _normalize_sha256(cls, value: object) -> str:
+        return str(value or "").strip().lower()
+
+    @field_validator("trigger_word")
+    @classmethod
+    def _check_trigger_word(cls, value: str) -> str:
+        try:
+            return validate_style_lora_trigger_word(value)
+        except GraphCompileError as exc:
+            raise ValueError(exc.message) from exc
+
+    def canonical_dict(self) -> dict:
+        return {
+            "lora_id": self.lora_id,
+            "lora_name": self.lora_name,
+            "sha256": self.sha256,
+            "strength_model": round(float(self.strength_model), 4),
+            "trigger_word": self.trigger_word.strip(),
+        }
+
+    def to_spec(self) -> StyleLoraSpec:
+        return StyleLoraSpec(
+            lora_id=self.lora_id,
+            lora_name=self.lora_name,
+            sha256=self.sha256,
+            strength_model=round(float(self.strength_model), 4),
+            trigger_word=self.trigger_word.strip(),
+        )
+
+
 class GenerationStrategy(BaseModel):
     """Everything the user picks before one-click shooting."""
 
@@ -71,12 +121,33 @@ class GenerationStrategy(BaseModel):
     accelerator_id: str = Field(default="pdd8", max_length=32)
     second_pass: SecondPassConfig = Field(default_factory=SecondPassConfig)
     upscale: UpscaleConfig = Field(default_factory=UpscaleConfig)
+    style_loras: list[StyleLoraConfig] = Field(default_factory=list, max_length=MAX_STYLE_LORAS)
+
+    @model_validator(mode="after")
+    def _check_unique_loras(self) -> GenerationStrategy:
+        seen_ids: set[str] = set()
+        seen_hashes: set[str] = set()
+        for item in self.style_loras:
+            if item.lora_id in seen_ids or item.sha256 in seen_hashes:
+                raise ValueError(f"STYLE_LORA_DUPLICATE: duplicate lora {item.lora_id}")
+            seen_ids.add(item.lora_id)
+            seen_hashes.add(item.sha256)
+        return self
 
     def strategy_sha256(self) -> str:
-        return _dict_hash(self.model_dump())
+        payload = self.model_dump()
+        if not self.style_loras:
+            # Preserve byte-identical historical hashes for pre-LoRA frozen strategies.
+            payload.pop("style_loras", None)
+        else:
+            payload["style_loras"] = [item.canonical_dict() for item in self.style_loras]
+        return _dict_hash(payload)
 
     def second_pass_spec(self) -> SecondPassSpec | None:
         return self.second_pass.to_spec()
+
+    def style_lora_specs(self) -> tuple[StyleLoraSpec, ...]:
+        return tuple(item.to_spec() for item in self.style_loras)
 
 
 DEFAULT_STRATEGY = GenerationStrategy(accelerator_id=BASELINE_ACCELERATOR_ID)
@@ -110,6 +181,7 @@ def model_variant_options() -> list[dict]:
             "label": str(manifest.get("display_name") or variant_id),
             "acceptance_status": acceptance,
             "verified": acceptance in ("SUPPORTED", "EXPERIMENTAL") and variant_id in VARIANT_ACCELERATORS,
+            "lora_supported": variant_id == INT8_VARIANT_ID,
             "tier": manifest.get("tier"),
             "default_recommended": bool(manifest.get("default_recommended")),
         })
@@ -413,6 +485,23 @@ def strategy_blockers(strategy: GenerationStrategy, db, settings=None) -> list[d
                 "engine": strategy.upscale.engine,
                 "detail": readiness.get("blockers") or readiness.get("status"),
             })
+    if strategy.style_loras:
+        from shine.comfyops.loras import StyleLoraError, evaluate_style_lora_selection
+
+        try:
+            evaluate_style_lora_selection(
+                db,
+                settings,
+                strategy.style_loras,
+                variant_id=strategy.model_variant_id,
+            )
+        except StyleLoraError as exc:
+            blockers.append({
+                "code": exc.code,
+                "message": exc.message,
+                "detail": exc.message,
+                "details": exc.details,
+            })
     return blockers
 
 
@@ -424,5 +513,6 @@ def strategy_summary(strategy: GenerationStrategy) -> dict:
         "accelerator_id": strategy.accelerator_id,
         "second_pass_enabled": strategy.second_pass.enabled,
         "upscale_enabled": strategy.upscale.enabled,
+        "style_loras": [item.canonical_dict() for item in strategy.style_loras],
         "strategy_sha256": strategy.strategy_sha256(),
     }

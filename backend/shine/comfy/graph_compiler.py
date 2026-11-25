@@ -17,6 +17,9 @@ all work unchanged.
 """
 from __future__ import annotations
 
+import math
+import re
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +38,14 @@ AUDIO_REFERENCE_LIMIT = 3
 VIDEO_REFERENCE_LIMIT = 3
 TOTAL_REFERENCE_LIMIT = 12
 
+MAX_STYLE_LORAS = 3
+STYLE_LORA_STRENGTH_MIN = 0.0
+STYLE_LORA_STRENGTH_MAX = 1.5
+STYLE_LORA_TRIGGER_MAX_LENGTH = 160
+STYLE_LORA_NODE_IDS = ("11", "111", "112")
+_SHA256_RE = re.compile(r"^[a-f0-9]{64}$")
+_TIMESTAMP_INJECTION_RE = re.compile(r"\bAt\s+\d{2}:\d{2}\.\d{3}\b", flags=re.IGNORECASE)
+
 WIDTH_DEFAULT = 1344
 HEIGHT_DEFAULT = 768
 FPS = 24.0
@@ -50,7 +61,10 @@ CLIP = "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors"
 VIDEO_VAE = "MiniMax-H3(1)\\minimax_h3_video_vae_fp16.safetensors"
 AUDIO_VAE = "MiniMax-H3(1)\\minimax_h3_audio_vae_fp32.safetensors"
 W6A8_VIDEO_VAE = "MiniMax-H3(1)\\minimax_h3_video_vae_int8_convrot.safetensors"
-REALISM_LORA = "MiniMax-H3\\h3-realism-people-t2v-i2v-r2v.safetensors"
+#: Historical pre-v3 realism LoRA reference retained strictly for verifying
+#: pre-upgrade frozen graphs during worker recovery; never mounted by default.
+LEGACY_REALISM_LORA = "MiniMax-H3\\h3-realism-people-t2v-i2v-r2v.safetensors"
+LEGACY_REALISM_LORA_STRENGTH = 0.65
 PDD_FILE = "MiniMax-H3-Ref2VA-Acc-8Step.safetensors"
 LATENT_UPSCALER = "minimax_h3_latent_upscaler_3d_conv_v1_bf16.safetensors"
 
@@ -112,6 +126,142 @@ class GraphCompileError(ValueError):
         self.details = details or {}
 
 
+def validate_style_lora_trigger_word(value: str | None) -> str:
+    """Validate and normalize an optional style LoRA trigger phrase.
+
+    Trigger words are injected into the English H3 prompt before hashing, so
+    they must remain printable ASCII without CJK, control characters, H3
+    reference/dialogue tags, or timeline timestamp injections.
+    """
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) > STYLE_LORA_TRIGGER_MAX_LENGTH:
+        raise GraphCompileError(
+            "STYLE_LORA_INVALID_TRIGGER",
+            f"风格 LoRA 触发词长度不能超过 {STYLE_LORA_TRIGGER_MAX_LENGTH} 个字符。",
+            {"length": len(cleaned), "limit": STYLE_LORA_TRIGGER_MAX_LENGTH},
+        )
+    if any(ord(ch) < 0x20 or ord(ch) > 0x7E for ch in cleaned):
+        raise GraphCompileError(
+            "STYLE_LORA_INVALID_TRIGGER",
+            "风格 LoRA 触发词仅允许英文可打印 ASCII 短语，禁止中文、非 ASCII 或控制字符。",
+            {"trigger_word": cleaned},
+        )
+    if "<" in cleaned or ">" in cleaned:
+        raise GraphCompileError(
+            "STYLE_LORA_INVALID_TRIGGER",
+            "风格 LoRA 触发词禁止包含 '<' 或 '>' 等 H3 保留标签字符。",
+            {"trigger_word": cleaned},
+        )
+    if _TIMESTAMP_INJECTION_RE.search(cleaned):
+        raise GraphCompileError(
+            "STYLE_LORA_INVALID_TRIGGER",
+            "风格 LoRA 触发词禁止包含时间轴标记 'At MM:SS.mmm'。",
+            {"trigger_word": cleaned},
+        )
+    return cleaned
+
+
+@dataclass(frozen=True)
+class StyleLoraSpec:
+    """Immutable compiled specification of one chained style LoRA."""
+
+    lora_id: str
+    lora_name: str
+    sha256: str
+    strength_model: float = 0.65
+    trigger_word: str = ""
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            "lora_id": self.lora_id,
+            "lora_name": self.lora_name,
+            "sha256": self.sha256,
+            "strength_model": round(float(self.strength_model), 4),
+            "trigger_word": self.trigger_word.strip(),
+        }
+
+
+def validate_style_lora_specs(
+    style_loras: Sequence[StyleLoraSpec],
+    *,
+    variant_id: str,
+) -> tuple[StyleLoraSpec, ...]:
+    """Compiler-level last line of defense for style LoRA assembly."""
+    specs = tuple(style_loras or ())
+    if not specs:
+        return ()
+    if len(specs) > MAX_STYLE_LORAS:
+        raise GraphCompileError(
+            "STYLE_LORA_LIMIT_EXCEEDED",
+            f"风格 LoRA 最多允许串联 {MAX_STYLE_LORAS} 个，当前选择了 {len(specs)} 个。",
+            {"count": len(specs), "limit": MAX_STYLE_LORAS},
+        )
+    if variant_id != INT8_VARIANT_ID:
+        raise GraphCompileError(
+            "VARIANT_LORA_UNSUPPORTED",
+            f"模型变体 {variant_id} 暂不支持挂载风格 LoRA（V1 仅在 INT8 主线启用）。",
+            {"variant_id": variant_id},
+        )
+    seen_ids: set[str] = set()
+    seen_hashes: set[str] = set()
+    normalized: list[StyleLoraSpec] = []
+    for item in specs:
+        lora_id = str(item.lora_id or "").strip()
+        lora_name = str(item.lora_name or "").strip()
+        sha = str(item.sha256 or "").strip().lower()
+        if not lora_id or not lora_name:
+            raise GraphCompileError(
+                "LORA_NOT_VISIBLE_IN_COMFYUI",
+                "风格 LoRA 缺少有效标识或 ComfyUI 可见模型名。",
+                {"lora_id": lora_id, "lora_name": lora_name},
+            )
+        if not _SHA256_RE.fullmatch(sha):
+            raise GraphCompileError(
+                "LORA_HASH_MISMATCH",
+                f"风格 LoRA「{lora_id}」缺少有效的 SHA-256 摘要。",
+                {"lora_id": lora_id},
+            )
+        if lora_id in seen_ids or sha in seen_hashes:
+            raise GraphCompileError(
+                "STYLE_LORA_DUPLICATE",
+                f"风格 LoRA「{lora_id}」重复选择，同一套风格 LoRA 只允许挂载一次。",
+                {"lora_id": lora_id, "sha256": sha},
+            )
+        try:
+            strength = float(item.strength_model)
+        except (TypeError, ValueError) as exc:
+            raise GraphCompileError(
+                "STYLE_LORA_STRENGTH_OUT_OF_RANGE",
+                f"风格 LoRA「{lora_id}」权重格式无效。",
+                {"lora_id": lora_id},
+            ) from exc
+        if (
+            not math.isfinite(strength)
+            or strength < STYLE_LORA_STRENGTH_MIN
+            or strength > STYLE_LORA_STRENGTH_MAX
+        ):
+            raise GraphCompileError(
+                "STYLE_LORA_STRENGTH_OUT_OF_RANGE",
+                f"风格 LoRA 权重必须在 [{STYLE_LORA_STRENGTH_MIN}, {STYLE_LORA_STRENGTH_MAX}] 之间。",
+                {"lora_id": lora_id, "strength_model": item.strength_model},
+            )
+        trigger = validate_style_lora_trigger_word(item.trigger_word)
+        seen_ids.add(lora_id)
+        seen_hashes.add(sha)
+        normalized.append(
+            StyleLoraSpec(
+                lora_id=lora_id,
+                lora_name=lora_name,
+                sha256=sha,
+                strength_model=round(strength, 4),
+                trigger_word=trigger,
+            )
+        )
+    return tuple(normalized)
+
+
 @dataclass(frozen=True)
 class SecondPassSpec:
     """Parameters of the true second sampling stage.
@@ -155,24 +305,31 @@ class CompiledWorkflow:
     model_identity: dict[str, Any]
     reference_counts: dict[str, int]
     validated_against: dict[str, Any] | None = field(default=None)
+    style_loras: tuple[StyleLoraSpec, ...] = field(default=())
+    compiler_version: str = field(default="")
 
     def execution_identity(self) -> dict[str, Any]:
         """The frozen execution snapshot fields persisted with the attempt."""
         return {
             "definition": REF2VA_WORKFLOW_DEFINITION,
-            "compiler": _recipe_version(self.variant_id),
+            "compiler": self.compiler_version or _recipe_version(self.variant_id),
             "variant_id": self.variant_id,
             "accelerator_id": self.accelerator_id,
             "second_pass": (self.second_pass.recipe_hash() if self.second_pass else None),
+            "style_loras": [spec.canonical_dict() for spec in self.style_loras],
             "reference_counts": dict(self.reference_counts),
             "recipe_sha256": self.recipe_sha256,
             "graph_sha256": self.graph_sha256,
         }
 
 
-def _recipe_version(variant_id: str) -> str:
+def _recipe_version(variant_id: str, *, legacy_realism_lora: bool = False) -> str:
     # Historical recipe digests stay reproducible for frozen snapshots/plans.
-    return "shine.graph_compiler.v2" if variant_id == W6A8_VARIANT_ID else "shine.graph_compiler.v1"
+    if variant_id == W6A8_VARIANT_ID:
+        return "shine.graph_compiler.v2"
+    if legacy_realism_lora:
+        return "shine.graph_compiler.v1"
+    return "shine.graph_compiler.v3"
 
 
 def _candidate_weights() -> tuple[str, str]:
@@ -202,17 +359,46 @@ def _model_stack(
     sage_attention: bool,
     lowend: bool,
     low_vram_attention: bool = True,
+    style_loras: tuple[StyleLoraSpec, ...] = (),
+    legacy_realism_lora: bool = False,
 ) -> tuple[dict[str, Any], list[Any]]:
     """Parameterize the shared model chain with the variant's audited patches."""
-    nodes = {
+    nodes: dict[str, Any] = {
         "10": {"class_type": "UNETLoader", "inputs": {"unet_name": unet, "weight_dtype": "default"}},
-        "11": {
-            "class_type": "LoraLoaderModelOnly",
-            "inputs": {"model": ["10", 0], "lora_name": REALISM_LORA, "strength_model": 0.65},
-        },
+    }
+    model_input_ref: list[Any] = ["10", 0]
+    if not lowend:
+        if legacy_realism_lora:
+            nodes["11"] = {
+                "class_type": "LoraLoaderModelOnly",
+                "inputs": {
+                    "model": ["10", 0],
+                    "lora_name": LEGACY_REALISM_LORA,
+                    "strength_model": LEGACY_REALISM_LORA_STRENGTH,
+                },
+            }
+            model_input_ref = ["11", 0]
+        else:
+            for idx, spec in enumerate(style_loras):
+                node_id = STYLE_LORA_NODE_IDS[idx]
+                nodes[node_id] = {
+                    "class_type": "LoraLoaderModelOnly",
+                    "inputs": {
+                        "model": list(model_input_ref),
+                        "lora_name": spec.lora_name,
+                        "strength_model": round(float(spec.strength_model), 4),
+                    },
+                }
+                model_input_ref = [node_id, 0]
+
+    nodes.update({
         "12": {
             "class_type": "MiniMaxH3SigmaShift",
-            "inputs": {"model": ["11", 0], "shift_video": 12.0, "shift_audio": 3.0},
+            "inputs": {
+                "model": list(model_input_ref),
+                "shift_video": 12 if lowend else 12.0,
+                "shift_audio": 3 if lowend else 3.0,
+            },
         },
         "13": {
             "class_type": "MiniMaxChunkFeedForward",
@@ -244,7 +430,7 @@ def _model_stack(
                 "dense_blocks": "39-43",
             },
         },
-    }
+    })
     if sage_attention:
         prev: list[Any] = ["14", 0]
     else:
@@ -258,8 +444,6 @@ def _model_stack(
         del nodes["15"]
 
     if lowend:
-        del nodes["11"]
-        nodes["12"]["inputs"].update(model=["10", 0], shift_video=12, shift_audio=3)
         del nodes["16"]
         if low_vram_attention:
             nodes["16"] = nodes.pop("15")
@@ -325,6 +509,8 @@ def compile_ref2va_workflow(
     object_info: dict[str, Any] | None = None,
     low_vram_attention: bool | None = None,
     low_vram_decision: LowVramAttentionDecision | None = None,
+    style_loras: Sequence[StyleLoraSpec] = (),
+    _legacy_realism_lora: bool = False,
 ) -> CompiledWorkflow:
     """Compile one shot's Ref2VA execution graph from audited recipes.
 
@@ -398,6 +584,13 @@ def compile_ref2va_workflow(
     candidate = variant == W6A8_VARIANT_ID
     if candidate and (accelerator_id not in VARIANT_ACCELERATORS[variant] or second_pass is not None):
         raise GraphCompileError("VARIANT_RECIPE_UNVERIFIED", "该候选模型仅登记 native20 单采配方。")
+    normalized_loras = validate_style_lora_specs(style_loras, variant_id=variant)
+    if _legacy_realism_lora and (candidate or normalized_loras):
+        raise GraphCompileError(
+            "VARIANT_LORA_UNSUPPORTED",
+            "历史默认 LoRA 兼容路径仅适用于无自定义 LoRA 的 INT8 基线。",
+            {"variant_id": variant},
+        )
     checkpoint, candidate_digest = _candidate_weights() if candidate else (UNET_BASELINE, None)
     steps = int(ACCELERATORS[accelerator_id]["steps"])
     if low_vram_attention is not None:
@@ -411,6 +604,8 @@ def compile_ref2va_workflow(
         sage_attention=accelerator_id != "pdd8",
         lowend=candidate,
         low_vram_attention=effective_low_vram,
+        style_loras=normalized_loras,
+        legacy_realism_lora=_legacy_realism_lora,
     )
     sampling, guider_model_input, sampler_sigmas_input = _sampling_stack(
         accelerator_id,
@@ -616,8 +811,9 @@ def compile_ref2va_workflow(
     if video_count:
         media_transfers["video"] = dict(VIDEO_TRANSFER)
 
-    recipe_payload = {
-        "compiler": _recipe_version(variant),
+    compiler_version = _recipe_version(variant, legacy_realism_lora=_legacy_realism_lora)
+    recipe_payload: dict[str, Any] = {
+        "compiler": compiler_version,
         "variant_id": variant_id,
         "checkpoint_id": checkpoint,
         "accelerator_id": accelerator_id,
@@ -626,6 +822,16 @@ def compile_ref2va_workflow(
         "image_count": image_count,
         "audio_count": audio_count,
     }
+    if not _legacy_realism_lora and not candidate:
+        recipe_payload["style_loras"] = [
+            {
+                "lora_id": spec.lora_id,
+                "sha256": spec.sha256,
+                "strength_model": round(float(spec.strength_model), 4),
+                "trigger_word": spec.trigger_word.strip(),
+            }
+            for spec in normalized_loras
+        ]
     if video_count:
         recipe_payload["video_count"] = video_count
     if candidate_digest:
@@ -638,6 +844,11 @@ def compile_ref2va_workflow(
     if object_info is not None:
         validated_against = validate_against_object_info(graph, parameter_map, object_info)
 
+    graph_version = (
+        "dynamic-compiler-v2"
+        if candidate
+        else ("dynamic-compiler-v1" if _legacy_realism_lora else "dynamic-compiler-v3")
+    )
     model_identity = {
         "model_family": "MiniMax-H3",
         "generation_mode": "Ref2VA",
@@ -645,7 +856,7 @@ def compile_ref2va_workflow(
         "variant_verified": variant_id in (None, "", "h3-ref2va-int8-convrot"),
         "accelerator_id": accelerator_id,
         "second_pass": bool(second_pass),
-        "graph_version": "dynamic-compiler-v2" if candidate else "dynamic-compiler-v1",
+        "graph_version": graph_version,
         "source": "per_shot_compiled_recipe",
         "continuity_modes": (
             ["soft_reference_continuity", "video_reference_continuity"]
@@ -656,6 +867,7 @@ def compile_ref2va_workflow(
         "media_transfer_families": sorted(media_transfers),
         "dynamic_autogrow": True,
         "recipe_sha256": recipe_sha256,
+        "style_loras": [spec.canonical_dict() for spec in normalized_loras],
         "low_vram_attention": effective_low_vram,
     }
     if low_vram_decision is not None:
@@ -677,7 +889,56 @@ def compile_ref2va_workflow(
         model_identity=model_identity,
         reference_counts={"image": image_count, "audio": audio_count, "video": video_count},
         validated_against=validated_against,
+        style_loras=normalized_loras,
+        compiler_version=compiler_version,
     )
+
+
+def resolve_frozen_graph_form(
+    frozen_graph_sha256: str | None,
+    *,
+    variant_id: str = INT8_VARIANT_ID,
+    accelerator_id: str = "pdd8",
+    second_pass: SecondPassSpec | None = None,
+    image_count: int,
+    audio_count: int = 0,
+    video_count: int = 0,
+    style_loras: Sequence[StyleLoraSpec] = (),
+) -> tuple[bool, bool] | None:
+    """Resolve ``(low_vram_attention, legacy_realism_lora)`` for a frozen graph hash.
+
+    Checks the current v3/v2 forms for ``style_loras`` first; when ``style_loras``
+    is empty on the INT8 baseline, falls back to the pre-v3 legacy form
+    (single ``LEGACY_REALISM_LORA @ 0.65``) so in-flight historical requests
+    keep rendering cleanly across the upgrade.
+    """
+    if not frozen_graph_sha256:
+        return None
+    normalized_loras = tuple(style_loras or ())
+    identity = {
+        "variant_id": variant_id,
+        "accelerator_id": accelerator_id,
+        "second_pass": second_pass,
+        "image_count": image_count,
+        "audio_count": audio_count,
+        "video_count": video_count,
+        "style_loras": normalized_loras,
+    }
+    for form in (True, False):
+        if compile_ref2va_workflow(low_vram_attention=form, **identity).graph_sha256 == frozen_graph_sha256:
+            return (form, False)
+    if not normalized_loras and (variant_id or INT8_VARIANT_ID) != W6A8_VARIANT_ID:
+        for form in (True, False):
+            if (
+                compile_ref2va_workflow(
+                    low_vram_attention=form,
+                    _legacy_realism_lora=True,
+                    **identity,
+                ).graph_sha256
+                == frozen_graph_sha256
+            ):
+                return (form, True)
+    return None
 
 
 def low_vram_attention_form_of_graph(
@@ -689,6 +950,7 @@ def low_vram_attention_form_of_graph(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    style_loras: Sequence[StyleLoraSpec] = (),
 ) -> bool | None:
     """Name which ``MiniMaxLowVRAMAttention`` form a frozen graph hash is.
 
@@ -699,20 +961,17 @@ def low_vram_attention_form_of_graph(
     name the two; ``None`` means the hash is neither, i.e. a forged or drifted
     graph.
     """
-    if not frozen_graph_sha256:
-        return None
-    identity = {
-        "variant_id": variant_id,
-        "accelerator_id": accelerator_id,
-        "second_pass": second_pass,
-        "image_count": image_count,
-        "audio_count": audio_count,
-        "video_count": video_count,
-    }
-    for form in (True, False):
-        if compile_ref2va_workflow(low_vram_attention=form, **identity).graph_sha256 == frozen_graph_sha256:
-            return form
-    return None
+    resolved = resolve_frozen_graph_form(
+        frozen_graph_sha256,
+        variant_id=variant_id,
+        accelerator_id=accelerator_id,
+        second_pass=second_pass,
+        image_count=image_count,
+        audio_count=audio_count,
+        video_count=video_count,
+        style_loras=style_loras,
+    )
+    return resolved[0] if resolved is not None else None
 
 
 def is_low_vram_guard_variant(
@@ -725,10 +984,27 @@ def is_low_vram_guard_variant(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    style_loras: Sequence[StyleLoraSpec] = (),
 ) -> bool:
     """Verify ``actual_graph_sha256`` is the exact LowVRAM-enabled variant of this shot."""
     if not actual_graph_sha256:
         return False
+    normalized_loras = tuple(style_loras or ())
+    legacy_mode = False
+    if expected_graph_sha256 is not None:
+        resolved = resolve_frozen_graph_form(
+            expected_graph_sha256,
+            variant_id=variant_id,
+            accelerator_id=accelerator_id,
+            second_pass=second_pass,
+            image_count=image_count,
+            audio_count=audio_count,
+            video_count=video_count,
+            style_loras=normalized_loras,
+        )
+        if resolved is None:
+            return False
+        legacy_mode = resolved[1]
     guarded = compile_ref2va_workflow(
         variant_id=variant_id,
         accelerator_id=accelerator_id,
@@ -737,20 +1013,12 @@ def is_low_vram_guard_variant(
         audio_count=audio_count,
         video_count=video_count,
         low_vram_attention=True,
+        style_loras=normalized_loras,
+        _legacy_realism_lora=legacy_mode,
     )
     if actual_graph_sha256 != guarded.graph_sha256:
         return False
     if expected_graph_sha256 is not None:
-        if low_vram_attention_form_of_graph(
-            expected_graph_sha256,
-            variant_id=variant_id,
-            accelerator_id=accelerator_id,
-            second_pass=second_pass,
-            image_count=image_count,
-            audio_count=audio_count,
-            video_count=video_count,
-        ) is None:
-            return False
         unguarded = compile_ref2va_workflow(
             variant_id=variant_id,
             accelerator_id=accelerator_id,
@@ -759,6 +1027,8 @@ def is_low_vram_guard_variant(
             audio_count=audio_count,
             video_count=video_count,
             low_vram_attention=False,
+            style_loras=normalized_loras,
+            _legacy_realism_lora=legacy_mode,
         )
         if unguarded.recipe_sha256 != guarded.recipe_sha256:
             return False

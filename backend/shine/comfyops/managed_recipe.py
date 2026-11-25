@@ -261,6 +261,20 @@ def build_renderer_launch(recipe, *, port=None, token=None):
     })
     if recipe.get("log_file"):
         env["SHINE_COMFY_LOG_FILE"] = str(recipe["log_file"])
+    # Expose Shine's single managed style LoRA directory (<comfyops_dir>/models/loras)
+    # via a separate extra_model_paths config when present, without mutating
+    # pinned runtime files or touching adopted user ComfyUI trees.
+    comfyops_candidates: list[Path] = []
+    if recipe.get("log_file"):
+        comfyops_candidates.append(Path(str(recipe["log_file"])).resolve().parent.parent)
+    runtime_data = Path(str(recipe.get("runtime_data_root") or "")).resolve()
+    if runtime_data.parent.name == "adopted-runtime":
+        comfyops_candidates.append(runtime_data.parent.parent)
+    for base in comfyops_candidates:
+        style_lora_yaml = base / "setup" / "shine-style-loras.yaml"
+        if style_lora_yaml.is_file() and str(style_lora_yaml) not in argv:
+            argv.extend(["--extra-model-paths-config", str(style_lora_yaml)])
+            break
     # The renderer still belongs to the recorded installation. Its bootstrap
     # imports the selected source tree even when that tree is stored separately.
     return argv, recipe["base_directory"], env, pins, token, port

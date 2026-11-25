@@ -12,7 +12,7 @@ import shutil
 import subprocess
 import time
 from collections import Counter
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict
@@ -30,15 +30,19 @@ from shine.comfy.graph_compiler import (
     AUDIO_REFERENCE_LIMIT,
     IMAGE_REFERENCE_LIMIT,
     INT8_VARIANT_ID,
+    MAX_STYLE_LORAS,
     TOTAL_REFERENCE_LIMIT,
     VARIANT_ACCELERATORS,
     VIDEO_REFERENCE_LIMIT,
     CompiledWorkflow,
     GraphCompileError,
     SecondPassSpec,
+    StyleLoraSpec,
     compile_ref2va_workflow,
     is_low_vram_guard_variant,
     low_vram_attention_form_of_graph,
+    resolve_frozen_graph_form,
+    validate_style_lora_trigger_word,
 )
 from shine.comfy.provider import (
     find_output,
@@ -59,6 +63,12 @@ from shine.comfy.vram_guard import (
     low_vram_threshold_from_env,
 )
 from shine.comfy.workflow import apply_parameters, graph_hash
+from shine.comfyops.loras import (
+    StyleLoraError,
+    apply_style_lora_triggers,
+    evaluate_style_lora_selection,
+    extract_comfy_lora_names,
+)
 from shine.foundation.h3_audio import (
     canonical_h3_language,
     enforce_h3_render_audio_contract,
@@ -68,6 +78,7 @@ from shine.foundation.h3_audio import (
     sanitize_h3_dialogue_text,
 )
 from shine.quality.technical import TechnicalExpectations, TechnicalQC
+from shine.strategy import StyleLoraConfig
 
 MAX_IMAGE_SLOTS = IMAGE_REFERENCE_LIMIT
 MAX_AUDIO_SLOTS = AUDIO_REFERENCE_LIMIT
@@ -122,6 +133,7 @@ class H3ExecutionRequest:
     low_vram_attention_token_threshold: int = DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD
     force_low_vram_attention: bool | None = None
     retry_on_oom_with_low_vram: bool = True
+    style_loras: tuple[StyleLoraSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,6 +161,7 @@ def verified_variants_catalog() -> list[dict[str, Any]]:
             "variant_id": row["variant_id"],
             "label": row["label"],
             "verified": True,
+            "lora_supported": bool(row.get("lora_supported", False)),
             "accelerators": list(VARIANT_ACCELERATORS[row["variant_id"]]),
         }
         for row in model_variant_options()
@@ -183,6 +196,8 @@ def compile_h3_ref2va_graph(
     object_info: dict[str, Any] | None = None,
     low_vram_attention: bool | None = None,
     low_vram_decision: LowVramAttentionDecision | None = None,
+    style_loras: Sequence[StyleLoraSpec] = (),
+    _legacy_realism_lora: bool = False,
 ) -> CompiledWorkflow:
     """Compile the single Ref2VA definition for the frozen reference layout."""
     try:
@@ -196,6 +211,8 @@ def compile_h3_ref2va_graph(
             object_info=object_info,
             low_vram_attention=low_vram_attention,
             low_vram_decision=low_vram_decision,
+            style_loras=style_loras,
+            _legacy_realism_lora=_legacy_realism_lora,
         )
     except GraphCompileError as exc:
         if exc.code == "REF2VA_IMAGE_REFERENCE_REQUIRED":
@@ -315,6 +332,15 @@ class ComfyH3Executor:
 
         if object_info is None:
             object_info = client.object_info()
+        if request.style_loras:
+            available_loras = extract_comfy_lora_names(object_info) or []
+            missing_loras = [spec.lora_name for spec in request.style_loras if spec.lora_name not in available_loras]
+            if missing_loras:
+                raise H3ExecutionError(
+                    "LORA_NOT_VISIBLE_IN_COMFYUI",
+                    f"ComfyUI 当前未扫描到风格 LoRA：{', '.join(missing_loras)}",
+                    {"missing_loras": missing_loras},
+                )
         video_ref_durations = [v.duration_s for v in videos if v.duration_s is not None and v.duration_s > 0]
         avg_video_ref_duration = (
             sum(video_ref_durations) / len(video_ref_durations) if video_ref_durations else 3.0
@@ -340,6 +366,7 @@ class ComfyH3Executor:
             object_info=object_info,
             low_vram_attention=decision.enabled,
             low_vram_decision=decision,
+            style_loras=request.style_loras,
         )
         if request.recipe_sha256 and compiled.recipe_sha256 != request.recipe_sha256:
             raise H3ExecutionError(
@@ -503,6 +530,7 @@ class ComfyH3Executor:
                             object_info=object_info,
                             low_vram_attention=True,
                             low_vram_decision=current_decision,
+                            style_loras=request.style_loras,
                         )
                         fb_validation = current_compiled.validated_against or {}
                         if fb_validation["missing_nodes"] or fb_validation["missing_inputs"]:
@@ -599,11 +627,16 @@ __all__ = [
     "LowVramAttentionDecision",
     "MAX_AUDIO_SLOTS",
     "MAX_IMAGE_SLOTS",
+    "MAX_STYLE_LORAS",
     "MAX_TOTAL_SLOTS",
     "MAX_VIDEO_SLOTS",
     "SecondPassSpec",
+    "StyleLoraConfig",
+    "StyleLoraError",
+    "StyleLoraSpec",
     "align_h3_frame_count",
     "apply_parameters",
+    "apply_style_lora_triggers",
     "canonical_h3_language",
     "compile_h3_ref2va_graph",
     "decide_low_vram_attention",
@@ -611,7 +644,9 @@ __all__ = [
     "ensure_h3_execution_prompt_contract",
     "estimate_h3_attention_tokens",
     "evaluate_h3_technical_qc",
+    "evaluate_style_lora_selection",
     "extract_comfy_history_error",
+    "extract_comfy_lora_names",
     "extract_comfy_prompt_texts",
     "extract_last_frame_png",
     "extract_video_output",
@@ -623,6 +658,8 @@ __all__ = [
     "low_vram_attention_form_of_graph",
     "low_vram_threshold_from_env",
     "reconcile_submission",
+    "resolve_frozen_graph_form",
     "sanitize_h3_dialogue_text",
+    "validate_style_lora_trigger_word",
     "verified_variants_catalog",
 ]

@@ -522,6 +522,14 @@ export type M4Job = {
   }>;
 };
 
+export type M4StyleLoraConfig = {
+  lora_id: string;
+  lora_name: string;
+  sha256: string;
+  strength_model: number;
+  trigger_word: string;
+};
+
 export type M4ProductionRun = {
   id: string;
   project_id: string;
@@ -536,6 +544,7 @@ export type M4ProductionRun = {
     second_pass?: { enabled?: boolean; denoise?: number; latent_scale?: number; nfe?: string } | null;
     seed?: number;
     provider?: string;
+    style_loras?: M4StyleLoraConfig[];
   } | null;
   status: string;
   worker_id: string | null;
@@ -577,7 +586,7 @@ export type M4ProductionState = {
   }>;
   runs: M4ProductionRun[];
   options: {
-    variants: Array<{ variant_id: string; label: string; verified: boolean; accelerators: string[] }>;
+    variants: Array<{ variant_id: string; label: string; verified: boolean; lora_supported?: boolean; accelerators: string[] }>;
     accelerators: Array<{
       id: string;
       steps: number;
@@ -607,6 +616,7 @@ export type M4RunConfigInput = {
   second_pass?: { enabled: boolean; denoise: number; latent_scale: number; nfe: string } | null;
   seed: number;
   provider?: string;
+  style_loras?: M4StyleLoraConfig[];
 };
 
 export function fetchM4ProductionState(projectId: string): Promise<M4ProductionState> {

@@ -14,7 +14,11 @@ from shine.manual4.comfy.h3_adapter import (
     ACCELERATORS,
     M4GraphCompileError,
     M4SecondPassSpec,
+    StyleLoraError,
+    StyleLoraSpec,
+    apply_style_lora_triggers,
     compile_m4_ref2va_workflow,
+    evaluate_style_lora_selection,
     verified_variants_catalog,
 )
 from shine.manual4.h3.output_frame import frame_options, frame_size
@@ -379,7 +383,7 @@ def resolve_m4_continuity_source_job(
         if (
             ok_prev_prompt
             and prev_prompt is not None
-            and cand.prompt_sha256 == prev_prompt.prompt_sha256
+            and (cand.prompt_sha256 == prev_prompt.prompt_sha256 or cand.prompt_revision_id == prev_prompt.id)
             and cand.reference_manifest_sha256 == prev_manifest_sha
             and cand.output_storage_path
         ):
@@ -449,6 +453,7 @@ def _build_snapshot_payload(
     second_pass: dict[str, Any] | None,
     seed: int,
     provider: str,
+    style_loras: list[dict[str, Any]] | None = None,
     previous_passed_job_id: str | None = None,
     platform_db: Session | None = None,
     settings: Any | None = None,
@@ -461,6 +466,34 @@ def _build_snapshot_payload(
     )
     if confirmed is None:
         raise HTTPException(409, {"code": "M4_STORYBOARD_NOT_CONFIRMED", "message": "请先在①确认分镜计划。"})
+
+    resolved_loras: tuple[StyleLoraSpec, ...] = ()
+    raw_loras = list(style_loras or [])
+    if raw_loras:
+        if platform_db is not None:
+            try:
+                resolved_loras = evaluate_style_lora_selection(
+                    platform_db,
+                    settings,
+                    raw_loras,
+                    variant_id=variant_id,
+                )
+            except StyleLoraError as exc:
+                raise HTTPException(
+                    exc.http_status,
+                    {"code": exc.code, "message": exc.message, "details": exc.details},
+                ) from exc
+        else:
+            resolved_loras = tuple(
+                StyleLoraSpec(
+                    lora_id=str(item.get("lora_id") or ""),
+                    lora_name=str(item.get("lora_name") or ""),
+                    sha256=str(item.get("sha256") or "").lower(),
+                    strength_model=float(item.get("strength_model", 0.65)),
+                    trigger_word=str(item.get("trigger_word") or ""),
+                )
+                for item in raw_loras
+            )
 
     selected_shots = _resolve_scope_shots(m4_db, project, confirmed, scope_kind, scope_target_ids)
     sp_spec: M4SecondPassSpec | None = None
@@ -551,6 +584,7 @@ def _build_snapshot_payload(
                 image_count=img_count + extra_last_frame,
                 audio_count=aud_count,
                 video_count=vid_count,
+                style_loras=resolved_loras,
             )
         except M4GraphCompileError as exc:
             raise HTTPException(422, {"code": exc.code, "message": exc.message, "shot_code": sh.shot_code}) from exc
@@ -577,6 +611,8 @@ def _build_snapshot_payload(
                 )
 
         width, height = frame_size(sh.aspect_ratio, resolution_scale)
+        effective_prompt_text = apply_style_lora_triggers(latest_prompt.prompt_text, resolved_loras)
+        effective_prompt_sha = hashlib.sha256(effective_prompt_text.encode("utf-8")).hexdigest()
         items.append(
             {
                 "ordinal": idx,
@@ -590,9 +626,10 @@ def _build_snapshot_payload(
                 "height": height,
                 "continuity_mode": sh.continuity_mode,
                 "prompt_revision_id": latest_prompt.id,
-                "prompt_text": latest_prompt.prompt_text,
-                "prompt_sha256": latest_prompt.prompt_sha256,
-                "prompt_excerpt": latest_prompt.prompt_text[:120],
+                "prompt_text": effective_prompt_text,
+                "prompt_sha256": effective_prompt_sha,
+                "source_prompt_sha256": latest_prompt.prompt_sha256,
+                "prompt_excerpt": effective_prompt_text[:120],
                 "dialogue": list(sh.dialogue or []),
                 "reference_manifest": manifest,
                 "reference_manifest_sha256": latest_prompt.reference_manifest_sha256,
@@ -610,6 +647,7 @@ def _build_snapshot_payload(
                 variant_id=variant_id,
                 accelerator_id=accelerator_id,
                 second_pass=second_pass,
+                style_loras=[spec.canonical_dict() for spec in resolved_loras] if resolved_loras else None,
                 db=platform_db,
                 settings=settings,
             )
@@ -633,7 +671,7 @@ def _build_snapshot_payload(
                 },
             )
 
-    config_json = {
+    config_json: dict[str, Any] = {
         "variant_id": variant_id,
         "accelerator_id": accelerator_id,
         "resolution_scale": float(resolution_scale),
@@ -641,6 +679,8 @@ def _build_snapshot_payload(
         "seed": int(seed),
         "provider": provider,
     }
+    if resolved_loras:
+        config_json["style_loras"] = [spec.canonical_dict() for spec in resolved_loras]
     snap_sha = _canonical_sha(
         {
             "storyboard_revision_id": confirmed.id,
@@ -674,6 +714,7 @@ def preview_execution_snapshot(
     second_pass: dict[str, Any] | None = None,
     seed: int = 77,
     provider: str = "comfyui",
+    style_loras: list[dict[str, Any]] | None = None,
     platform_db: Session | None = None,
     settings: Any | None = None,
 ) -> dict[str, Any]:
@@ -688,6 +729,7 @@ def preview_execution_snapshot(
         second_pass=second_pass,
         seed=seed,
         provider=provider,
+        style_loras=style_loras,
         platform_db=platform_db,
         settings=settings,
     )
@@ -714,6 +756,7 @@ def create_production_run(
     seed: int = 77,
     provider: str = "comfyui",
     idempotency_key: str | None = None,
+    style_loras: list[dict[str, Any]] | None = None,
     previous_passed_job_id: str | None = None,
     platform_db: Session | None = None,
     settings: Any | None = None,
@@ -729,6 +772,7 @@ def create_production_run(
         second_pass=second_pass,
         seed=seed,
         provider=provider,
+        style_loras=style_loras,
         previous_passed_job_id=previous_passed_job_id,
         platform_db=platform_db,
         settings=settings,
@@ -859,6 +903,7 @@ def create_retake_job_run(
     second_pass: dict[str, Any] | None = None,
     seed: int = 99,
     provider: str = "comfyui",
+    style_loras: list[dict[str, Any]] | None = None,
     previous_passed_job_id: str | None = None,
     platform_db: Session | None = None,
     settings: Any | None = None,
@@ -889,6 +934,7 @@ def create_retake_job_run(
         seed=seed,
         provider=provider,
         idempotency_key=unique_key,
+        style_loras=style_loras,
         previous_passed_job_id=prev_passed_id,
         platform_db=platform_db,
         settings=settings,
