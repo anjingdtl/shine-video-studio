@@ -635,6 +635,7 @@ def variant_recommendations(settings: SettingsDep):
 _INSPECT_CACHE: dict[tuple[str, str], tuple[float, set[str]]] = {}
 _INSPECT_CACHE_TTL = 120.0
 _INSPECT_CACHE_LOCK = threading.Lock()
+_INSPECT_COMPUTE_LOCK = threading.Lock()
 
 #: Short-lived cache of the whole per-project availability projection. The
 #: projection resolves the managed runtime identity (which revalidates the
@@ -646,11 +647,15 @@ _INSPECT_CACHE_LOCK = threading.Lock()
 _VA_CACHE: dict[tuple[str, int], tuple[float, dict]] = {}
 _VA_CACHE_TTL = 30.0
 _VA_CACHE_LOCK = threading.Lock()
+_VA_COMPUTE_LOCK = threading.Lock()
+_VA_GENERATION = 0
 
 
 def invalidate_variant_availability_cache() -> None:
     """Drop cached availability projections after the ledger changes."""
+    global _VA_GENERATION
     with _VA_CACHE_LOCK:
+        _VA_GENERATION += 1
         _VA_CACHE.clear()
 
 
@@ -665,14 +670,20 @@ def _cached_present_components(root: str, catalog: dict) -> set[str]:
         hit = _INSPECT_CACHE.get(key)
         if hit and now - hit[0] < _INSPECT_CACHE_TTL:
             return hit[1]
-    try:
-        report = inspect_installation(root, catalog)
-        present = {row["component_id"] for row in report.get("matches") or []}
-    except Exception:  # noqa: BLE001 - an unreadable directory is a fact
-        present = set()
-    with _INSPECT_CACHE_LOCK:
-        _INSPECT_CACHE[key] = (now, present)
-    return present
+    with _INSPECT_COMPUTE_LOCK:
+        now = time.monotonic()
+        with _INSPECT_CACHE_LOCK:
+            hit = _INSPECT_CACHE.get(key)
+            if hit and now - hit[0] < _INSPECT_CACHE_TTL:
+                return hit[1]
+        try:
+            report = inspect_installation(root, catalog)
+            present = {row["component_id"] for row in report.get("matches") or []}
+        except Exception:  # noqa: BLE001 - an unreadable directory is a fact
+            present = set()
+        with _INSPECT_CACHE_LOCK:
+            _INSPECT_CACHE[key] = (time.monotonic(), present)
+        return present
 
 
 @router.get("/variant-availability")
@@ -687,9 +698,6 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
     全部组件（目录事实，扫描约 0.4 秒）；台账里已经核验过的结果优先。
     """
     from shine.comfyops import variant_readiness as _vr_module
-    from shine.comfyops.variant_binding import load_binding
-    from shine.comfyops.variant_readiness import readiness as variant_readiness
-    from shine.comfyops.variants import list_variant_manifests
     from shine.services import require_project
 
     require_project(db, project_id)
@@ -701,9 +709,25 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
         hit = _VA_CACHE.get(cache_key)
         if hit and now - hit[0] < _VA_CACHE_TTL:
             return hit[1]
-    # R5 B4/INV-07：扫描回退读的安装必须与 summary 同一份选择事实，
-    # 而不是台账里第一条收编行（多安装时会拿错 root，假报「本机没有」）。
+    with _VA_COMPUTE_LOCK:
+        now = time.monotonic()
+        with _VA_CACHE_LOCK:
+            hit = _VA_CACHE.get(cache_key)
+            if hit and now - hit[0] < _VA_CACHE_TTL:
+                return hit[1]
+            start_gen = _VA_GENERATION
+        result = _compute_variant_availability(project_id, settings, db)
+        with _VA_CACHE_LOCK:
+            if _VA_GENERATION == start_gen:
+                _VA_CACHE[cache_key] = (time.monotonic(), result)
+        return result
+
+
+def _compute_variant_availability(project_id: str, settings, db) -> dict:
     from shine.comfyops.setup_summary import resolve_installation
+    from shine.comfyops.variant_binding import load_binding
+    from shine.comfyops.variant_readiness import readiness as variant_readiness
+    from shine.comfyops.variants import list_variant_manifests
 
     _selected = resolve_installation(db, settings).get("selected") or {}
     adopted_root = str(_selected["root"]) if _selected.get("adopted") and _selected.get("root") else None
@@ -830,10 +854,7 @@ def variant_availability(project_id: str, settings: SettingsDep, db: DBSession):
                              "message": f"验收状态是 {acceptance}，不能当作正式生产"})
         entry["blocking_reasons"] = blocking
         rows.append(entry)
-    result = {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
-    with _VA_CACHE_LOCK:
-        _VA_CACHE[cache_key] = (now, result)
-    return result
+    return {"project_id": project_id, "adopted_root": adopted_root, "variants": rows}
 
 
 @router.get("/connectivity")

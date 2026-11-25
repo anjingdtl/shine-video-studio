@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import threading
 from collections import Counter
 from pathlib import Path
 
@@ -667,7 +668,8 @@ def adopt_existing_installation(
 #: the record) can go unnoticed. Downstream render still verifies weights and
 #: nodes independently, so this is a display-latency cache, not the only gate.
 _ADOPTION_BLOCKERS_CACHE: dict[tuple[str, str, str, int], tuple[float, list[str]]] = {}
-_ADOPTION_BLOCKERS_TTL = 3.0
+_ADOPTION_BLOCKERS_TTL = 30.0
+_ADOPTION_BLOCKERS_LOCK = threading.Lock()
 
 
 def _confirmed_rows_for(adoption: dict, capability: str) -> list[dict]:
@@ -725,13 +727,14 @@ def adopted_installation_blockers(instance, catalog: dict, *, capability: str = 
     live_weight_blockers = _weight_witness_blockers(instance, required, capability=capability)
     key = (str(instance.sha256), graph_hash(catalog), capability, id(_ei.inspect))
     now = time.monotonic()
-    hit = _ADOPTION_BLOCKERS_CACHE.get(key)
-    if hit is not None and now - hit[0] < _ADOPTION_BLOCKERS_TTL:
-        return sorted(set(hit[1]) | set(live_weight_blockers))
-    result = _adopted_installation_blockers_uncached(instance, catalog, capability=capability)
-    if len(_ADOPTION_BLOCKERS_CACHE) >= 64:
-        _ADOPTION_BLOCKERS_CACHE.clear()
-    _ADOPTION_BLOCKERS_CACHE[key] = (now, result)
+    with _ADOPTION_BLOCKERS_LOCK:
+        hit = _ADOPTION_BLOCKERS_CACHE.get(key)
+        if hit is not None and now - hit[0] < _ADOPTION_BLOCKERS_TTL:
+            return sorted(set(hit[1]) | set(live_weight_blockers))
+        result = _adopted_installation_blockers_uncached(instance, catalog, capability=capability)
+        if len(_ADOPTION_BLOCKERS_CACHE) >= 64:
+            _ADOPTION_BLOCKERS_CACHE.clear()
+        _ADOPTION_BLOCKERS_CACHE[key] = (time.monotonic(), result)
     return sorted(set(result) | set(live_weight_blockers))
 
 

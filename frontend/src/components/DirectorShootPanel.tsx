@@ -232,13 +232,25 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
 
   // 生产策略选项来自服务端能力矩阵；读不到时保持最保守回退，
   // 由服务端在提交时做最终裁决（前端不发明拒绝理由）。
+  // 瞬态超时或刷新时允许自动补拉一次，避免页面一直停在“本机未就绪”回退态。
   useEffect(() => {
     let cancelled = false;
-    getStrategyOptions(projectId)
-      .then((rows) => { if (!cancelled) setOptions(rows); })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [projectId]);
+    let retryTimer: number | undefined;
+    const load = (allowRetry: boolean) => {
+      getStrategyOptions(projectId)
+        .then((rows) => { if (!cancelled) setOptions(rows); })
+        .catch(() => {
+          if (!cancelled && allowRetry) {
+            retryTimer = window.setTimeout(() => load(false), 1500);
+          }
+        });
+    };
+    load(true);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [projectId, refreshEpoch]);
 
   const activeRunId = overview?.run?.run_id ?? null;
   useEffect(() => {
@@ -261,22 +273,33 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   // 模型版本状态直接来自基础配置的台账：不在这里另算一套「验收」。
   useEffect(() => {
     let cancelled = false;
-    getVariantAvailability(projectId)
-      .then((rows) => {
-        if (cancelled) return;
-        setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, row])));
-        setAvailabilityLoaded(true);
-        // 默认选第一个已就绪的方案；但用户已经选定的方案（哪怕未就绪、需要
-        // 准备资源）保持不变，不被强行切回 INT8。
-        setVariantId((current) => {
-          if (rows.some((row) => row.variant_id === current)) return current;
-          const ready = rows.find((row) => row.available);
-          return (ready ?? rows[0])?.variant_id ?? current;
+    let retryTimer: number | undefined;
+    const load = (allowRetry: boolean) => {
+      getVariantAvailability(projectId)
+        .then((rows) => {
+          if (cancelled) return;
+          setAvailability(Object.fromEntries(rows.map((row) => [row.variant_id, row])));
+          setAvailabilityLoaded(true);
+          // 默认选第一个已就绪的方案；但用户已经选定的方案（哪怕未就绪、需要
+          // 准备资源）保持不变，不被强行切回 INT8。
+          setVariantId((current) => {
+            if (rows.some((row) => row.variant_id === current)) return current;
+            const ready = rows.find((row) => row.available);
+            return (ready ?? rows[0])?.variant_id ?? current;
+          });
+        })
+        .catch(() => {
+          if (!cancelled && allowRetry) {
+            retryTimer = window.setTimeout(() => load(false), 1500);
+          }
         });
-      })
-      .catch(() => undefined);
-    return () => { cancelled = true; };
-  }, [projectId]);
+    };
+    load(true);
+    return () => {
+      cancelled = true;
+      if (retryTimer !== undefined) window.clearTimeout(retryTimer);
+    };
+  }, [projectId, refreshEpoch]);
 
   const chosen = availability[variantId];
   const chosenVariantAvailable = chosen?.available ?? false;

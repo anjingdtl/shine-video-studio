@@ -1125,6 +1125,7 @@ function App() {
                 projectId={projectId}
                 mode="package"
                 overview={overview}
+                refreshEpoch={dataEpoch + projectionEpoch}
                 demo={production?.mode === 'DEMO' || production?.render_provider === 'mock'}
                 onMessage={report}
                 onRefresh={() => refreshAll().catch(() => undefined)}
