@@ -31,11 +31,12 @@ CAPABILITY_H3 = "h3"
 CAPABILITY_IMAGE = "image"
 CAPABILITY_REVIEW = "review"
 CAPABILITY_RELAYVSR = "relayvsr"
+CAPABILITY_IMAGE_LORAS = "image_loras"
 
 #: Every capability a plan may carry.  A capability outside this set is
 #: refused by name instead of silently falling back to a default.
 CAPABILITIES = (CAPABILITY_BASE_TOOLS, CAPABILITY_H3, CAPABILITY_IMAGE, CAPABILITY_REVIEW,
-                CAPABILITY_RELAYVSR)
+                CAPABILITY_RELAYVSR, CAPABILITY_IMAGE_LORAS)
 
 #: Catalog file name -> (capability, expected catalog id).
 #:
@@ -49,6 +50,7 @@ CATALOG_CAPABILITIES: dict[str, tuple[str, str]] = {
     "h3-ref2va-nvfp4-lowend-windows-x64": (CAPABILITY_H3, "shine-h3-ref2va-nvfp4-lowend-windows-x64"),
     "qwen-image-2.1-windows-x64": (CAPABILITY_IMAGE, "shine-qwen-image-21-windows-x64"),
     "relayvsr-x2-windows-x64": (CAPABILITY_RELAYVSR, "shine-relayvsr-x2-windows-x64"),
+    "qwen-image-loras-windows-x64": (CAPABILITY_IMAGE_LORAS, "shine-qwen-image-loras-windows-x64"),
 }
 
 #: The review models live in the H3 catalog but are their own capability: a

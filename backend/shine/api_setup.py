@@ -1789,7 +1789,9 @@ class InstallationChoiceRequest(BaseModel):
 class PrepareRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     project_id: str | None = None
-    capabilities: list[Literal["h3", "image", "vlm", "asr", "relayvsr"]] = Field(min_length=1, max_length=5)
+    capabilities: list[Literal["h3", "image", "vlm", "asr", "relayvsr", "image_loras"]] = Field(
+        min_length=1, max_length=6,
+    )
     installation_path: str | None = Field(default=None, max_length=1024)
     port: int | None = Field(default=None, ge=1024, le=65535)
     variant_id: str | None = Field(default=None, max_length=80)
@@ -2016,10 +2018,11 @@ def setup_prepare_execute(body: PrepareRequest, actor: Operator, settings: Setti
     if body.project_id:
         require_project(db, body.project_id)
     resolved = resolve_installation(db, settings, path=body.installation_path)
-    if resolved["choice_required"]:
+    files_only = set(body.capabilities) == {"image_loras"}
+    if resolved["choice_required"] and not files_only:
         raise HTTPException(409, "INSTALLATION_SELECTION_REQUIRED")
     selected = resolved["selected"] or {}
-    port = resolve_setup_port(db, settings, selected, body.port)
+    port = None if files_only else resolve_setup_port(db, settings, selected, body.port)
     value = enqueue(db, project_id=body.project_id, capabilities=list(body.capabilities),
                     installation_path=selected.get("root"), port=port,
                     variant_id=body.variant_id, verify_runtime=body.verify_runtime, actor=actor,

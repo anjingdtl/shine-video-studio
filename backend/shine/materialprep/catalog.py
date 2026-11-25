@@ -30,6 +30,21 @@ RULEPACK_ID = "material-entity-catalog"
 CATALOG_KIND = "MaterialEntityCatalog"
 
 
+def latest_entity_catalog(db, project_id: str, document_id: str | None = None) -> AgentArtifact | None:
+    """Current consolidated entities from the confirmed script inputs."""
+    rows = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == CATALOG_KIND,
+        AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at.desc()))
+    for row in rows:
+        task = db.get(AgentTaskRecord, row.source_task_id) if document_id else None
+        bound_document = (task.trace or {}).get("document_id") if task else None
+        if not bound_document or bound_document == document_id:
+            return row
+    return None
+
+
 def catalog_prompt() -> str:
     return (
         "你是全项目统揽的制片实体核对员。输入是全局故事圣经与本次已确认分集的全部场次剧本。"

@@ -187,8 +187,12 @@ def build_qwen_edit_graph(
     width: int,
     height: int,
     seed: int,
-    steps: int = 25,
-    cfg: float = 1.0,
+    steps: int = qwen_workflow.DEFAULT_STEPS,
+    cfg: float = qwen_workflow.DEFAULT_CFG,
+    sampler_name: str = qwen_workflow.DEFAULT_SAMPLER,
+    scheduler: str = qwen_workflow.DEFAULT_SCHEDULER,
+    negative_prompt: str = "",
+    style_loras=(),
 ) -> dict[str, Any]:
     """Compile the published native Qwen edit subgraph to an API prompt graph.
 
@@ -225,7 +229,7 @@ def build_qwen_edit_graph(
                 "clip": ["453", 0],
                 "vae": ["454", 0],
                 "prompt": prompt,
-                "negative_prompt": "",
+                "negative_prompt": negative_prompt,
                 # The native node budgets reference pixels by area.
                 "resolution": round(math.sqrt(width * height) / 32) * 32,
                 **{f"images.image_{index + 1}": [str(700 + index), 0] for index in range(len(uploaded_names))},
@@ -241,8 +245,8 @@ def build_qwen_edit_graph(
                 "seed": seed,
                 "steps": steps,
                 "cfg": cfg,
-                "sampler_name": "euler",
-                "scheduler": "simple",
+                "sampler_name": sampler_name,
+                "scheduler": scheduler,
                 "denoise": 1.0,
             },
         },
@@ -265,7 +269,7 @@ def build_qwen_edit_graph(
     for index, uploaded in enumerate(uploaded_names):
         node_id = str(700 + index)
         graph[node_id] = {"class_type": "LoadImage", "inputs": {"image": uploaded}}
-    return graph
+    return qwen_workflow.attach_qwen_style_loras(graph, cache_node_id="469", style_loras=style_loras)
 
 
 def png_dimensions(data: bytes) -> tuple[int, int, int, int]:

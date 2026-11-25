@@ -21,11 +21,12 @@ from pydantic import Field
 from sqlalchemy import select, text
 
 from shine.api_common import DBSession, app_settings, llm_gateway
+from shine.api_loras import resolve_image_style_request
 from shine.api_operator import Operator
 from shine.config import Settings
 from shine.llm.gateway import LLMGateway
 from shine.materialprep import runtime, service
-from shine.materialprep.contracts import MaterialConfirmation, ScriptPreparation
+from shine.materialprep.contracts import ImageStyleRequest, MaterialConfirmation, ScriptPreparation
 from shine.materialprep.states import EXECUTION_MODE_REAL
 from shine.schemas import APIModel
 
@@ -50,7 +51,7 @@ class AnalyzeBody(APIModel):
     scene_preparations: list[ScriptPreparation] = Field(default_factory=list, max_length=400)
 
 
-class GenerateBody(APIModel):
+class GenerateBody(ImageStyleRequest):
     confirmation_id: str = Field(min_length=64, max_length=64)
     confirmation_hash: str = Field(min_length=64, max_length=64)
     requirement_ids: list[str] = Field(min_length=1, max_length=200)
@@ -74,7 +75,7 @@ class ReconcileBody(StateVersionBody):
     item_ids: list[str] = Field(default_factory=list, max_length=200)
 
 
-class RegenerateBody(APIModel):
+class RegenerateBody(ImageStyleRequest):
     requirement_id: str
     confirmation_id: str = Field(min_length=64, max_length=64)
     confirmation_hash: str = Field(min_length=64, max_length=64)
@@ -189,16 +190,11 @@ def material_entity_catalog(project_id: str, db: DBSession):
     canonical full name, stable identity and per-scene variants - the whole
     person, not a fragment.
     """
-    from shine.materialprep.catalog import CATALOG_KIND
-    from shine.models import AgentArtifact
+    from shine.materialprep.catalog import latest_entity_catalog
     from shine.services import require_project
 
     require_project(db, project_id)
-    row = db.scalars(select(AgentArtifact).where(
-        AgentArtifact.project_id == project_id,
-        AgentArtifact.kind == CATALOG_KIND,
-        AgentArtifact.stale.is_(False),
-    ).order_by(AgentArtifact.created_at.desc())).first()
+    row = latest_entity_catalog(db, project_id)
     return {"catalog": (row.payload_json if row is not None else None)}
 
 
@@ -594,7 +590,7 @@ def confirm_material(project_id: str, body: MaterialConfirmation, actor: Operato
 
 
 @router.post("/projects/{project_id}/material-preparation/generate", status_code=202)
-def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: DBSession):
+def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: DBSession, settings: SettingsDep):
     """Queue a real batch.  Returns immediately; the Worker renders it."""
     result = service.create_batch(
         db,
@@ -605,6 +601,7 @@ def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: 
         idempotency_key=body.idempotency_key,
         rights_id=body.rights_id,
         seeds=body.seeds,
+        image_style=resolve_image_style_request(db, settings, body),
     )
     return {"status": "accepted", **result}
 
@@ -694,7 +691,8 @@ def merge_character(project_id: str, body: MergeCharacterBody, actor: Operator, 
 
 
 @router.post("/projects/{project_id}/material-preparation/regenerate", status_code=202)
-def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operator, db: DBSession):
+def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operator,
+                           db: DBSession, settings: SettingsDep):
     """Generate another version of one requirement, keeping the old candidates.
 
     This is a new generation revision with its own brief and seed, not a cleared
@@ -703,6 +701,7 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
     from shine.comfyops.models import AssetRequirement
     from shine.materialprep.contracts import MaterialImageBrief
 
+    image_style = resolve_image_style_request(db, settings, body)
     row = db.get(AssetRequirement, body.requirement_id)
     if row is None or row.project_id != project_id:
         raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
@@ -729,11 +728,12 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
         seeds={body.requirement_id: body.seed},
         briefs={body.requirement_id: brief},
         new_revision=True,
+        image_style=image_style,
     )
     return {"status": "accepted", **result}
 
 
-class RegenerateAllBody(APIModel):
+class RegenerateAllBody(ImageStyleRequest):
     idempotency_key: str = Field(min_length=1, max_length=128)
     requirement_ids: list[str] = Field(default_factory=list, max_length=200)
 
@@ -754,6 +754,7 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
     """
     from shine.media.output_layout import output_root
 
+    image_style = resolve_image_style_request(db, settings, body)
     state = service.plan_progress(db, project_id, data_dir=output_root(db, settings))
     confirmation = state.get("confirmation") or {}
     requirements = state.get("requirements") or []
@@ -838,6 +839,7 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
         idempotency_key=body.idempotency_key,
         rights_id=None,
         new_revision=True,
+        image_style=image_style,
     )
     return {"status": "accepted", **result}
 

@@ -249,12 +249,28 @@ def base_graph(
 BASE_GRAPH_SHA256 = graph_hash(base_graph())
 
 
+def attach_qwen_style_loras(graph, *, cache_node_id: str, style_loras=(), unet_node_id: str = UNET_NODE):
+    """Chain the resolved model-only patches before the shared Qwen cache node."""
+    model_link = [unet_node_id, 0]
+    for index, spec in enumerate(style_loras, start=1):
+        node_id = f"{unet_node_id}{index}"
+        graph[node_id] = {
+            "class_type": "LoraLoaderModelOnly",
+            "inputs": {"model": model_link, "lora_name": spec.lora_name, "strength_model": spec.strength_model},
+        }
+        model_link = [node_id, 0]
+    if style_loras:
+        graph[cache_node_id]["inputs"]["model"] = model_link
+    return graph
+
+
 def runtime_fingerprint(
     *,
     graph_sha256: str,
     model_files: list[dict[str, Any]],
     instance_identity: dict[str, Any] | None = None,
     prompt_template_version: str | None = None,
+    prompt_template_sha256: str | None = None,
 ) -> str:
     """One hash over everything that would change a generated image's meaning.
 
@@ -285,6 +301,8 @@ def runtime_fingerprint(
         "instance_identity": instance_identity or {},
         "prompt_template_version": prompt_template_version or "",
     }
+    if prompt_template_sha256 is not None:
+        material["prompt_template_sha256"] = prompt_template_sha256
     blob = json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

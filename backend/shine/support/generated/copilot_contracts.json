@@ -1001,7 +1001,7 @@
       "body": {
         "fields": {
           "capabilities": {
-            "maxItems": 5,
+            "maxItems": 6,
             "minItems": 1,
             "type": "array"
           },
@@ -1040,11 +1040,12 @@
                   "image",
                   "vlm",
                   "asr",
-                  "relayvsr"
+                  "relayvsr",
+                  "image_loras"
                 ],
                 "type": "string"
               },
-              "maxItems": 5,
+              "maxItems": 6,
               "minItems": 1,
               "type": "array"
             },
@@ -1106,7 +1107,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "88a413630a445a7487d8c7f2f1e4718b5cd8ee247fa5b0d12e4161d2538f35e8"
+        "schema_digest": "0dea54b32fe39465cad019097b4cab9175a74c66b594a3a6fbb0fb37a4494896"
       },
       "operation": "POST /api/v1/setup/prepare/execute",
       "parameters": [
@@ -1817,7 +1818,7 @@
   "capabilities": [
     {
       "action_id": "setup_repair",
-      "api_contract_digest": "f730cb5d9906a421239630758bd0a22d3f4b73bb883ddec580fcaba4b4358486",
+      "api_contract_digest": "d445660d7a939862a16370e7bdc96021723d11758a2b6b132a2b4e7ec6f64b6e",
       "api_operations": [
         "POST /api/v1/setup/prepare/execute",
         "GET /api/v1/setup/verdict"
@@ -1826,9 +1827,9 @@
       "authority": "GET /api/v1/setup/verdict",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示要补的文件与安装位置，确认后由原安装器执行。",
-      "contract_digest": "bac0f87184cfa9b6bf1e74410d2af81f47a7001bada9a21e5b32d43d3e187c06",
-      "contract_revision": 3,
-      "description": "复用统一安装器的持久准备任务，不会启动第二套安装器。",
+      "contract_digest": "1f069da2b73f06564bbecb4401640a3847786659c28b09113ec482bc78b035bd",
+      "contract_revision": 4,
+      "description": "复用统一安装器的持久准备任务。生图风格 LoRA 包按用户选择单独整备。",
       "dispatch": "setup_repair",
       "examples": [
         "把 H3 需要的模型文件补齐"
@@ -1855,10 +1856,11 @@
             "image",
             "vlm",
             "asr",
-            "relayvsr"
+            "relayvsr",
+            "image_loras"
           ],
           "has_default": false,
-          "max_length": 5,
+          "max_length": 6,
           "min_length": 1,
           "name": "capabilities",
           "nullable": false,
@@ -1970,7 +1972,7 @@
     },
     {
       "action_id": "setup_reconcile",
-      "api_contract_digest": "f730cb5d9906a421239630758bd0a22d3f4b73bb883ddec580fcaba4b4358486",
+      "api_contract_digest": "d445660d7a939862a16370e7bdc96021723d11758a2b6b132a2b4e7ec6f64b6e",
       "api_operations": [
         "POST /api/v1/setup/prepare/execute",
         "GET /api/v1/setup/verdict"
@@ -3415,9 +3417,9 @@
     }
   ],
   "digests": {
-    "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
-    "api_schema": "1d7697589c1e430fc2bb25afa52845f43b80f6faf7f5750ec6d56def49279010",
-    "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
+    "api_contract": "a072ca7ccde56397f08bf41ed8722684618a4c66501b35556f385c9c8c459878",
+    "api_schema": "afdb4a9999361c9af5ffc153f6d4310822bed5208b907164d6ff9e7c9b5e484d",
+    "contracts": "0a8c0b4ca57c44396e1ba798092ed6ac54a9559cb84e9b79888b883b770467a5"
   },
   "discovered": [
     {
@@ -6425,7 +6427,7 @@
     }
   ],
   "knowledge": {
-    "content_sha256": "ac1e40c37ba72be84f6e86fd6e14dd4315a4afce1fb2daaa57ad7f0d0e83b74a",
+    "content_sha256": "96a7af1f9b4f13ed667d21bc4851c378008d39981da7f6f1bf6592abd30a9ae3",
     "entries": [
       {
         "api_contract": {
@@ -6821,46 +6823,54 @@
       {
         "api_contract": {
           "apis": [
-            "POST /api/v1/projects/{project_id}/candidate-assets/generate",
+            "POST /api/v1/asset-center/image-jobs",
+            "POST /api/v1/projects/{project_id}/material-preparation/generate",
+            "GET /api/v1/loras",
             "GET /api/v1/setup/summary"
           ]
         },
         "apis": [
-          "POST /api/v1/projects/{project_id}/candidate-assets/generate",
+          "POST /api/v1/asset-center/image-jobs",
+          "POST /api/v1/projects/{project_id}/material-preparation/generate",
+          "GET /api/v1/loras",
           "GET /api/v1/setup/summary"
         ],
         "app_version": "2.2.0",
-        "content_hash": "e7d10dac26ea40d62ebb37443663e6e89fc43c3897e55b2844cf92c90cab0b38",
-        "description": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；一种能力缺模型不会阻断其它已核验能力。",
+        "content_hash": "cf18990c22de6a03f522d37412a3de4d504d50409baf48d60b4958c28aeafbaf",
+        "description": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
         "docs": [],
         "evidence": [
           "backend/tests/test_image_managed_renderer.py",
-          "backend/tests/test_material_image_jobs.py"
+          "backend/tests/test_material_image_jobs.py",
+          "backend/tests/test_image_lora_assembly.py",
+          "backend/tests/test_image_prompt_v6_alignment.py"
         ],
         "evidence_level": "VERSIONED_PROJECT_DOCS",
         "feature_id": "qwen-image",
         "id": "qwen-image",
         "implementation_status": "IMPLEMENTED",
         "knowledge_id": "kb-qwen-image",
-        "knowledge_revision": "2.2.0-e7d10dac",
+        "knowledge_revision": "2.2.0-cf18990c",
         "knowledge_version": "shine-project-kb-2.2.0",
         "module": "image",
         "not_supported": null,
         "source_path": "backend/shine/comfyops/setup_summary.py",
         "source_paths": [
           "backend/shine/comfyops/setup_summary.py",
-          "backend/shine/comfyops/capability.py",
-          "backend/shine/materialprep"
+          "backend/shine/comfyops/loras.py",
+          "backend/shine/materialprep",
+          "config/image_lora_presets.json"
         ],
         "source_revision": "",
         "sources": [
           "backend/shine/comfyops/setup_summary.py",
-          "backend/shine/comfyops/capability.py",
-          "backend/shine/materialprep"
+          "backend/shine/comfyops/loras.py",
+          "backend/shine/materialprep",
+          "config/image_lora_presets.json"
         ],
         "status": "IMPLEMENTED",
         "status_label": "已实现",
-        "summary": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；一种能力缺模型不会阻断其它已核验能力。",
+        "summary": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
         "tags": [
           "出图",
           "Qwen",
@@ -6868,7 +6878,9 @@
           "i2i",
           "inpaint",
           "多参考",
-          "RGBA"
+          "RGBA",
+          "LoRA",
+          "剧本对齐"
         ],
         "title": "Qwen-Image 出图能力",
         "verification": "AUTOMATED",

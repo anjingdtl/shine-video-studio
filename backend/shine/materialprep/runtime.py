@@ -288,6 +288,7 @@ def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, A
     already rendered for real.
     """
     del graph_report  # kept in the signature for callers that just probed; not identity
+    prompt_template = template_evidence()
     return qwen_workflow.runtime_fingerprint(
         graph_sha256=config.graph_sha256 or qwen_workflow.BASE_GRAPH_SHA256,
         model_files=[
@@ -304,7 +305,8 @@ def current_fingerprint(config: ImageRuntimeConfig, *, graph_report: dict[str, A
             "instance_id": config.instance_id,
             "base_url": config.base_url,
         },
-        prompt_template_version=template_evidence()["template_version"],
+        prompt_template_version=prompt_template["template_version"],
+        prompt_template_sha256=qwen_workflow.graph_hash(prompt_template),
     )
 
 

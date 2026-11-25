@@ -24,6 +24,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
+from sqlalchemy import select
+
 from shine.agents.crew_prompts import material_image_brief_prompt
 from shine.h3.rulebook import digest
 from shine.llm.base import LLMError
@@ -67,7 +69,7 @@ def rulepack_digest() -> str:
     evidence = template_evidence()
     return digest({
         "template_version": evidence["template_version"],
-        "composition_rules_sha256": evidence["composition_rules_sha256"],
+        "template_sha256": digest(evidence),
         "brief_prompt_sha256": hashlib.sha256(
             material_image_brief_prompt().encode("utf-8")
         ).hexdigest(),
@@ -84,6 +86,8 @@ def build_context(
     style_version: int | None = None,
     film_style: str = "",
     story_world: str = "",
+    script_entity_dossier: dict[str, Any] | None = None,
+    active_style_lora_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The server envelope the model receives.
 
@@ -138,6 +142,8 @@ def build_context(
         "frozen_style_version": style_version,
         "film_style_instruction": film_style,
         "story_world": story_world,
+        "script_entity_dossier": script_entity_dossier or {},
+        "active_style_lora_context": active_style_lora_context or {},
         "locked_story_facts": list(locked_facts),
         "script_language": project_language,
         "output_contract": BRIEF_CONTRACT.__name__,
@@ -148,10 +154,13 @@ def build_context(
             "in English words instead. A Chinese name inside the English prose is a refused prompt, "
             "not a style choice.",
             "Add no new plot fact and change no confirmed identity.",
-            "Put a missing fact that affects the picture into questions instead of deciding it yourself.",
-            "The appearance must visibly belong to the frozen style bible: carry its colour palette, "
-            "lighting tone, lens and texture language, and the production genre, into the English prose. "
-            "The style bible is written in the script language; translate its intent, never paste it.",
+            "Translate the immutable traits in script_entity_dossier faithfully. Start appearance with "
+            "the subject and its definitive visible traits, and preserve each locked visible trait in must_keep. "
+            "Carry the exact age, sex, ancestry or region, facial features, hair and signature period garments "
+            "where supplied. Do not replace period clothing with modern clothing or borrow another scene's outfit.",
+            "Translate the frozen style into English prose. When active_style_lora_context is present, "
+            "use it for compatible lighting and texture. Do not add a generic studio lighting clause or "
+            "change any story trait or the frozen film medium to fit it.",
             "The picture's medium is fixed by film_style_instruction: apply it to every surface "
             "(cel-shaded flat fills and clean line art for animation; photorealistic physical materials "
             "and lens texture for live-action). A photoreal image for an animation film is a refused brief, "
@@ -177,59 +186,130 @@ class BriefError(RuntimeError):
 
 def _load_context(factory, item_id: str) -> dict[str, Any]:
     """Everything the brief envelope is built from, read once."""
-    from shine.comfyops.models import AssetRequirement, PreProductionPlan
-
     with factory() as db:
         item = db.get(MaterialItem, item_id)
         if item is None:
             raise BriefError("MATERIAL_ITEM_NOT_FOUND", item_id=item_id)
-        run = db.get(MaterialRun, item.run_id)
-        requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
-        plan = db.get(PreProductionPlan, run.plan_id) if run else None
-        project = db.get(Project, item.project_id)
-        requirement_payload = dict((requirement.payload or {}) if requirement else {})
-        scene_keys = set(requirement_payload.get("scene_keys") or [])
-        locked_facts: list[str] = []
-        for scene in ((plan.payload or {}).get("scene_preparations") or []) if plan else []:
-            if scene_keys and scene.get("scene_key") not in scene_keys:
-                continue
-            for fact in scene.get("locked_facts") or []:
-                if fact not in locked_facts:
-                    locked_facts.append(fact)
-        # The frozen style bible is the director's look. A material brief that
-        # never sees it can only invent a different film, which is exactly how a
-        # reference still ends up not matching the production it belongs to.
-        # One reader supplies the medium, the world and the style identity.
-        from shine.materialprep.prompt_source import film_style_for, project_visual_facts
-        facts = project_visual_facts(db, item.project_id)
-        family = str(requirement_payload.get("family") or (item.payload or {}).get("family") or "")
-        scoped_film_style = film_style_for(facts["snapshot"], family=family) or facts["film_style"]
-        brief_basis = digest({
-            "style_version_id": facts["style_version_id"],
-            "world": facts["world"],
-            "family": family,
-            "rulepack": rulepack_digest(),
-        })
-        return {
-            "style_bible": facts["snapshot"],
-            "style_version": facts["style_version"],
-            "film_style": scoped_film_style,
-            "story_world": facts["world"],
-            "brief_basis": brief_basis,
-            "existing_brief_basis": (item.payload or {}).get("brief_basis"),
-            "document_id": (plan.payload or {}).get("document_id") if plan else None,
-            "document_sha256": (plan.payload or {}).get("script_hash") if plan else None,
-            "item_id": item.id,
-            "requirement_id": item.requirement_id,
-            "project_id": item.project_id,
-            "item_status": item.status,
-            "item_payload": dict(item.payload or {}),
-            "requirement_payload": requirement_payload,
-            "visual_direction": dict((item.payload or {}).get("visual_direction") or {}),
-            "locked_facts": locked_facts,
-            "project_language": (project.language if project else "") or "",
-            "existing_brief": (item.payload or {}).get("brief"),
-        }
+        return context_for_item(db, item)
+
+
+def _dossier_match(rows, names: set[str], family: str) -> dict[str, Any]:
+    from shine.asset_identity import character_reference_matches
+
+    candidates = [row for row in rows if isinstance(row, dict)]
+    for compare in (
+        lambda a, b: a == b,
+        character_reference_matches if family == "character" else lambda a, b: a.casefold() == b.casefold(),
+    ):
+        matches = [row for row in candidates if any(
+            compare(name, str(candidate)) for name in names
+            for candidate in [row.get("entity_id"), row.get("name"), *(row.get("aliases") or [])] if candidate
+        )]
+        if matches:
+            return dict(matches[0]) if len(matches) == 1 else {}
+    return {}
+
+
+def _entity_dossier(db, project_id: str, requirement: dict, document_id: str | None, scenes: list[dict]) -> dict:
+    from shine.director.pipeline import BIBLE_KIND, current_bible
+    from shine.materialprep.catalog import latest_entity_catalog
+    from shine.materialprep.story import approved_outline_for
+
+    family = requirement.get("family")
+    entity_id = requirement.get("entity_id")
+    collection = {"character": "characters", "scene": "scenes", "prop": "props"}.get(family)
+    if not collection or not entity_id:
+        return {}
+    definition = requirement.get("character_definition") or {}
+    names = {str(name) for name in (entity_id, definition.get("canonical_name"), *(definition.get("aliases") or []))
+             if name}
+    catalog = latest_entity_catalog(db, project_id, document_id)
+    entity = _dossier_match((catalog.payload_json or {}).get(collection, []) if catalog else [], names, family)
+    if entity:
+        names.update(str(name) for name in (entity.get("name"), *(entity.get("aliases") or [])) if name)
+    bible = current_bible(db, project_id) or db.scalar(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id, AgentArtifact.kind == BIBLE_KIND,
+        AgentArtifact.approved_at.is_not(None), AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at.desc()))
+    outline = approved_outline_for(db, project_id, document_id)
+    outline_payload = (outline.payload_json or {}) if outline else {}
+    if document_id and outline_payload.get("document_id") not in (None, document_id):
+        outline_payload = {}
+    return {
+        "family": family,
+        "entity_id": entity_id,
+        "confirmed_description": requirement.get("description") or "",
+        "user_note": requirement.get("brief_note") or "",
+        "catalog": entity or definition,
+        "story_bible": _dossier_match((bible.payload_json or {}).get(collection, []) if bible else [], names, family),
+        "story_outline": _dossier_match(outline_payload.get(collection, []), names, family),
+        "related_scenes": [{key: scene[key] for key in ("scene_key", "summary", "locked_facts") if key in scene}
+                           for scene in scenes],
+    }
+
+
+def context_for_item(db, item: MaterialItem) -> dict[str, Any]:
+    from shine.comfyops.models import AssetRequirement, PreProductionPlan
+    from shine.materialprep.prompt_source import film_style_for, project_visual_facts
+
+    run = db.get(MaterialRun, item.run_id)
+    requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
+    plan = db.get(PreProductionPlan, run.plan_id) if run else None
+    project = db.get(Project, item.project_id)
+    plan_payload = (plan.payload or {}) if plan else {}
+    payload = dict(item.payload or {})
+    requirement_payload = dict((requirement.payload or {}) if requirement else {})
+    scene_keys = set(requirement_payload.get("scene_keys") or [])
+    scenes = [scene for scene in plan_payload.get("scene_preparations") or []
+              if not scene_keys or scene.get("scene_key") in scene_keys]
+    locked_facts = list(dict.fromkeys(fact for scene in scenes for fact in scene.get("locked_facts") or []))
+    document_id = plan_payload.get("document_id")
+    facts = project_visual_facts(db, item.project_id, document_id=document_id)
+    dossier = _entity_dossier(db, item.project_id, requirement_payload, document_id, scenes if scene_keys else [])
+    family = str(requirement_payload.get("family") or payload.get("family") or "")
+    direction = dict(payload.get("visual_direction") or {})
+    preset = payload.get("style_preset_snapshot") or {}
+    loras = payload.get("style_loras") or []
+    brief_basis = digest({
+        "style_version_id": facts["style_version_id"],
+        "world": facts["world"],
+        "family": family,
+        "visual_direction": direction,
+        "locked_facts": locked_facts,
+        "entity_dossier_sha256": digest(dossier),
+        "style_preset_id": payload.get("style_preset"),
+        "style_preset_snapshot": preset,
+        "style_loras": [{key: row.get(key) for key in (
+            "lora_id", "sha256", "strength_model", "trigger_word", "negative_trigger_word", "trigger_position",
+        )} for row in loras],
+        "rulepack": rulepack_digest(),
+    })
+    return {
+        "style_bible": facts["snapshot"],
+        "style_version": facts["style_version"],
+        "film_style": film_style_for(facts["snapshot"], family=family) or facts["film_style"],
+        "story_world": facts["world"],
+        "script_entity_dossier": dossier,
+        "active_style_lora_context": {
+            "preset": preset.get("display_name"), "visual_cues": preset.get("positive_prompt"),
+            "positive_triggers": [row["trigger_word"] for row in loras if row.get("trigger_word")],
+            "negative_triggers": [row["negative_trigger_word"] for row in loras if row.get("negative_trigger_word")],
+        } if loras or preset else {},
+        "brief_basis": brief_basis,
+        "existing_brief_basis": payload.get("brief_basis"),
+        "document_id": document_id,
+        "document_sha256": plan_payload.get("script_hash"),
+        "item_id": item.id,
+        "requirement_id": item.requirement_id,
+        "project_id": item.project_id,
+        "item_status": item.status,
+        "item_payload": payload,
+        "requirement_payload": requirement_payload,
+        "visual_direction": direction,
+        "locked_facts": locked_facts,
+        "project_language": (project.language if project else "") or "",
+        "existing_brief": payload.get("brief"),
+    }
 
 
 def _refuse(factory, item_id: str, version: int, code: str, *, detail: dict[str, Any] | None = None):
@@ -267,6 +347,8 @@ def ensure_brief(factory, settings, item_id: str, worker_id: str, *, version: in
         style_version=data.get("style_version"),
         film_style=data.get("film_style") or "",
         story_world=data.get("story_world") or "",
+        script_entity_dossier=data["script_entity_dossier"],
+        active_style_lora_context=data["active_style_lora_context"],
     )
     system_prompt = material_image_brief_prompt()
     schema = BRIEF_CONTRACT.model_json_schema()

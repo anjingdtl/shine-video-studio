@@ -737,8 +737,15 @@ REVIEW_COMPONENTS = {"VLM": "qwen3-vl-8b-fp8", "ASR": "qwen3-asr-0.6b"}
 RELAYVSR_COMPONENTS = ("relayvsr-x2-diffusion", "relayvsr-x2-flash-vae")
 RELAYVSR_CATALOG = "relayvsr-x2-windows-x64"
 RELAYVSR_CORE = "relayvsr-comfyui-core"
+IMAGE_LORA_CATALOG = "qwen-image-loras-windows-x64"
+IMAGE_LORA_COMPONENTS = (
+    "qwen-image-2.1-lora-fix",
+    "qwen-image-2.1-lora-natural-exposure",
+    "qwen-image-2.1-lora-anything2real",
+    "qwen-image-2.1-lora-multiple-angles",
+)
 OPTIONAL_INSTALL_COMPONENTS = frozenset({
-    *REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS, RELAYVSR_CORE,
+    *REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS, RELAYVSR_CORE, *IMAGE_LORA_COMPONENTS,
     "relayvsr-comfy-kitchen", "relayvsr-comfy-aimdo",
 })
 
@@ -755,9 +762,15 @@ def review_only_plan(payload: dict | None) -> bool:
 
 
 def optional_only_plan(payload: dict | None) -> bool:
-    """Whether an install plan carries only optional enhancement components (VLM/ASR/RelayVSR)."""
+    """Whether an install plan carries only optional enhancement components."""
     packages = [str(row.get("id") or "") for row in ((payload or {}).get("packages") or [])]
     return bool(packages) and set(packages).issubset(OPTIONAL_INSTALL_COMPONENTS)
+
+
+def image_lora_only_plan(payload: dict | None) -> bool:
+    packages = {row.get("id") for row in ((payload or {}).get("packages") or [])}
+    return bool(packages) and packages.issubset(IMAGE_LORA_COMPONENTS)
+
 
 IMAGE_CAPABILITY_CATALOG = "qwen-image-2.1-windows-x64"
 """The image capability's own catalogue: separate bytes, separate licence."""

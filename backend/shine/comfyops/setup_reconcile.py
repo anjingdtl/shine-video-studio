@@ -50,6 +50,8 @@ def _capability_catalog(capability: str) -> dict:
         return deployment.load_deployment_catalog(IMAGE_CAPABILITY_CATALOG)
     if capability == "relayvsr":
         return deployment.load_deployment_catalog(deployment.RELAYVSR_CATALOG)
+    if capability == "image_loras":
+        return deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)
     return deployment.load_default_catalog()
 
 
@@ -272,6 +274,10 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         candidate_dirs = [cache_root, *(Path(row["path"]).parent for row in candidates)]
         registered = register_verified_packages(db, verified, catalog, root=report["root"],
                                                 extra_roots=candidate_dirs)
+        if capability == "image_loras":
+            from shine.comfyops.loras import IMAGE_LORA_BASE, sync_discovered_loras
+
+            sync_discovered_loras(db, settings, base_model=IMAGE_LORA_BASE)
         verified_keys = {_verified_key(row) for row in verified}
         required = _required_keys(catalog, capability)
         complete = bool(required) and required <= verified_keys

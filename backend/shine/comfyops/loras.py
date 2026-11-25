@@ -26,8 +26,10 @@ import re
 import struct
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Literal
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -49,6 +51,10 @@ REALISM_LORA_ID = "h3-realism-people"
 REALISM_LORA_DISPLAY_NAME = "电影化写实 LoRA (H3 Realism)"
 REALISM_LORA_FILENAME = "h3-realism-people-t2v-i2v-r2v.safetensors"
 REALISM_LORA_SUBDIR = "MiniMax-H3"
+H3_LORA_BASE = "minimax_h3"
+IMAGE_LORA_BASE = "qwen_image_21"
+StyleLoraBase = Literal["minimax_h3", "qwen_image_21"]
+TriggerPosition = Literal["prefix", "suffix"]
 
 MAX_SAFETENSORS_HEADER_BYTES = 32 * 1024 * 1024  # 32 MiB anti-DoS cap
 _COPY_CHUNK_BYTES = 1024 * 1024
@@ -77,6 +83,40 @@ class StyleLoraError(ValueError):
         self.message = message
         self.http_status = http_status
         self.details = details or {}
+
+
+@dataclass(frozen=True)
+class ImageStyleLoraSpec(StyleLoraSpec):
+    """Frozen image prompt metadata, without changing the H3 contract or hashes."""
+
+    negative_trigger_word: str = ""
+    trigger_position: str = "suffix"
+
+    def canonical_dict(self) -> dict[str, Any]:
+        return {
+            **super().canonical_dict(),
+            "negative_trigger_word": self.negative_trigger_word,
+            "trigger_position": self.trigger_position,
+        }
+
+
+@lru_cache(maxsize=1)
+def image_lora_presets() -> dict[str, Any]:
+    from shine.comfyops.deployment import REPO_ROOT
+
+    return json.loads((REPO_ROOT / "config" / "image_lora_presets.json").read_text(encoding="utf-8"))
+
+
+def _image_lora_components() -> list[dict]:
+    from shine.comfyops.deployment import IMAGE_LORA_CATALOG, load_deployment_catalog
+
+    return load_deployment_catalog(IMAGE_LORA_CATALOG)["components"]
+
+
+def _image_package_lora_roots(base: Path) -> list[Path]:
+    from shine.comfyops.deployment import IMAGE_LORA_COMPONENTS
+
+    return [base / "isolated-packages" / cid for cid in IMAGE_LORA_COMPONENTS]
 
 
 def _comfyops_dir(settings: Any) -> Path | None:
@@ -127,7 +167,14 @@ def ensure_style_lora_extra_paths_config(settings: Any) -> Path | None:
 
     from shine.comfyops.installer import durable_json
 
-    durable_json(cfg_path, {"shine_style_loras": {"loras": str(loras_root)}})
+    roots = [loras_root, *_image_package_lora_roots(cfg_path.parents[1])]
+    payload = {"shine_style_loras": {"loras": "\n".join(map(str, roots))}}
+    try:
+        if json.loads(cfg_path.read_text(encoding="utf-8")) == payload:
+            return cfg_path
+    except (OSError, ValueError):
+        pass
+    durable_json(cfg_path, payload)
     return cfg_path
 
 
@@ -295,7 +342,15 @@ def _validate_strength(value: float | int) -> float:
     return round(strength, 4)
 
 
-def _validate_trigger(value: str | None) -> str:
+def _validate_trigger(value: str | None, base_model: StyleLoraBase = H3_LORA_BASE) -> str:
+    if base_model == IMAGE_LORA_BASE:
+        raw = str(value or "")
+        if len(raw) > 500 or (raw and not raw.isprintable()):
+            raise StyleLoraError(
+                "STYLE_LORA_TRIGGER_INVALID", "生图 LoRA 触发词须为 500 字符以内的可打印文本。",
+                http_status=422,
+            )
+        return raw.strip()
     try:
         return validate_style_lora_trigger_word(value)
     except GraphCompileError as exc:
@@ -307,6 +362,14 @@ def _validate_trigger(value: str | None) -> str:
         ) from exc
 
 
+def _validate_base_model(asset: StyleLoraAsset, base_model: StyleLoraBase) -> None:
+    if asset.base_model != base_model:
+        raise StyleLoraError(
+            "LORA_BASE_MODEL_MISMATCH", f"风格 LoRA「{asset.display_name}」不适用于 {base_model}。",
+            details={"lora_id": asset.id, "expected": base_model, "actual": asset.base_model},
+        )
+
+
 def _sanitize_lora_filename(filename: str) -> str:
     base = Path(str(filename or "").replace("\\", "/")).name
     stem = Path(base).stem
@@ -314,7 +377,9 @@ def _sanitize_lora_filename(filename: str) -> str:
     return f"{safe_stem[:120]}.safetensors"
 
 
-def _known_lora_roots(db: Session | None, settings: Any | None) -> list[Path]:
+def _known_lora_roots(
+    db: Session | None, settings: Any | None, base_model: StyleLoraBase = H3_LORA_BASE,
+) -> list[Path]:
     roots: list[Path] = []
     seen: set[str] = set()
 
@@ -333,7 +398,11 @@ def _known_lora_roots(db: Session | None, settings: Any | None) -> list[Path]:
     base = _comfyops_dir(settings)
     if base is not None:
         _add(base / "models" / "loras")
-        _add(base / "isolated-packages" / "minimax-h3-lora")
+        if base_model == IMAGE_LORA_BASE:
+            for path in _image_package_lora_roots(base):
+                _add(path)
+        else:
+            _add(base / "isolated-packages" / "minimax-h3-lora")
 
     if db is not None:
         try:
@@ -374,8 +443,12 @@ def _find_realism_lora_on_disk(db: Session | None, settings: Any | None) -> Path
     return None
 
 
-def sync_discovered_loras(db: Session, settings: Any | None) -> list[StyleLoraAsset]:
-    """Idempotently register the migrated realism LoRA when present on disk."""
+def sync_discovered_loras(
+    db: Session, settings: Any | None, *, base_model: StyleLoraBase = H3_LORA_BASE,
+) -> list[StyleLoraAsset]:
+    """Register built-in LoRAs idempotently using the same content-keyed ledger."""
+    if base_model == IMAGE_LORA_BASE:
+        return _sync_image_package_loras(db, settings)
     found = _find_realism_lora_on_disk(db, settings)
     if found is None:
         return []
@@ -408,6 +481,54 @@ def sync_discovered_loras(db: Session, settings: Any | None) -> list[StyleLoraAs
     return [row]
 
 
+def _sync_image_package_loras(db: Session, settings: Any | None) -> list[StyleLoraAsset]:
+    from shine.comfyops.verification_receipts import directory_files, file_digest, load_receipt
+
+    base = _comfyops_dir(settings)
+    if base is None:
+        return []
+    package_root = base / "isolated-packages"
+    user_root = managed_user_loras_dir(settings)
+    user_paths = sorted(user_root.glob("*.safetensors"))
+    rows = []
+    for component in _image_lora_components():
+        component_id = component["component_id"]
+        pinned, = component["files"]
+        sha256, size = pinned["sha256"], pinned["size"]
+        row = db.scalar(select(StyleLoraAsset).where(StyleLoraAsset.sha256 == sha256))
+        if row is not None:
+            rows.append(row)
+            if row.origin != "discovered" or Path(row.storage_path).is_file():
+                continue
+        package_path = package_root / component_id / pinned["relative_path"]
+        receipt = load_receipt(db, variant_id=None, component_id=component_id) or {}
+        recorded = ({entry["relative_path"]: entry for entry in receipt["files"]}
+                    if receipt.get("directory") == str(package_path.parent) else {})
+        for path in (package_path, *user_paths):
+            if path == package_path:
+                proof = directory_files(path.parent, component, recorded=recorded, cache_dir=package_root / ".cache")
+            else:
+                proof = file_digest(path, sha256, size, cache_dir=package_root / ".cache")
+            if not proof["verified"]:
+                continue
+            if row is None:
+                row = StyleLoraAsset(
+                    id=component_id, base_model=IMAGE_LORA_BASE, filename=path.name,
+                    storage_path=str(path.resolve()), sha256=sha256, file_size_bytes=size, origin="discovered",
+                    **image_lora_presets()["loras"][component_id],
+                )
+                db.add(row)
+                rows.append(row)
+            else:
+                row.storage_path = str(path.resolve())
+                row.filename = path.name
+            break
+    if rows:
+        ensure_style_lora_extra_paths_config(settings)
+        db.flush()
+    return rows
+
+
 def import_style_lora(
     db: Session,
     settings: Any,
@@ -418,11 +539,15 @@ def import_style_lora(
     display_name: str | None = None,
     default_strength: float = 0.65,
     trigger_word: str = "",
+    base_model: StyleLoraBase = H3_LORA_BASE,
+    negative_trigger_word: str = "",
+    trigger_position: TriggerPosition = "suffix",
     actor: str = "local-user",
 ) -> tuple[StyleLoraAsset, bool]:
     """Single import executor for both multipart file uploads and local-path imports."""
     strength = _validate_strength(default_strength)
-    trigger = _validate_trigger(trigger_word)
+    trigger = _validate_trigger(trigger_word, base_model)
+    negative = _validate_trigger(negative_trigger_word, base_model)
 
     if local_path is not None and upload_stream is not None:
         raise StyleLoraError(
@@ -488,12 +613,13 @@ def import_style_lora(
 
         existing = db.scalar(select(StyleLoraAsset).where(StyleLoraAsset.sha256 == sha256))
         if existing is not None:
+            _validate_base_model(existing, base_model)
             existing_path = Path(existing.storage_path)
             if existing_path.is_file() and _cached_file_sha256(existing_path) == sha256:
                 ensure_style_lora_extra_paths_config(settings)
                 return existing, True
             # Repopulate missing managed file atomically if previous file disappeared.
-            if existing.origin == "imported":
+            if existing.origin == "imported" or base_model == IMAGE_LORA_BASE:
                 target = existing_path if existing_path.parent.resolve() == user_dir else (
                     user_dir / _sanitize_lora_filename(existing.filename)
                 )
@@ -532,6 +658,9 @@ def import_style_lora(
             file_size_bytes=size_bytes,
             default_strength=strength,
             trigger_word=trigger,
+            base_model=base_model,
+            negative_trigger_word=negative,
+            trigger_position=trigger_position,
             origin="imported",
         )
         db.add(row)
@@ -551,6 +680,7 @@ def import_style_lora(
                 "sha256": row.sha256,
                 "file_size_bytes": row.file_size_bytes,
                 "origin": row.origin,
+                "base_model": row.base_model,
             },
         )
         return row, False
@@ -605,7 +735,9 @@ def extract_comfy_lora_names(object_info: dict[str, Any] | None) -> list[str] | 
     return None
 
 
-def probe_live_lora_object_info(db: Session | None, settings: Any | None) -> tuple[dict[str, Any] | None, bool]:
+def probe_live_lora_object_info(
+    db: Session | None, settings: Any | None, *, base_model: StyleLoraBase = H3_LORA_BASE,
+) -> tuple[dict[str, Any] | None, bool]:
     """Read-only live probe of ``/object_info/LoraLoaderModelOnly`` without starting ComfyUI."""
     if settings is None:
         return None, False
@@ -618,7 +750,11 @@ def probe_live_lora_object_info(db: Session | None, settings: Any | None) -> tup
         if cleaned and cleaned not in urls:
             urls.append(cleaned)
 
-    if db is not None:
+    if base_model == IMAGE_LORA_BASE:
+        from shine.materialprep.runtime import load_config
+
+        _add_url(load_config(settings).base_url)
+    elif db is not None:
         try:
             from shine.comfyops.runtime_configuration import ACTIVE_KEY, resolve_runtime
             from shine.models import AppSetting
@@ -629,7 +765,7 @@ def probe_live_lora_object_info(db: Session | None, settings: Any | None) -> tup
         except Exception:  # noqa: BLE001 - offline/unconfigured is not an error here
             pass
 
-    if getattr(settings, "render_provider", "mock") == "comfyui":
+    if base_model == H3_LORA_BASE and getattr(settings, "render_provider", "mock") == "comfyui":
         _add_url(getattr(settings, "comfyui_base_url", None))
 
     if not urls:
@@ -737,7 +873,10 @@ def project_style_lora_asset(
         "sha256": asset.sha256,
         "file_size_bytes": int(asset.file_size_bytes),
         "default_strength": float(asset.default_strength),
+        "base_model": asset.base_model,
         "trigger_word": asset.trigger_word or "",
+        "negative_trigger_word": asset.negative_trigger_word or "",
+        "trigger_position": asset.trigger_position,
         "origin": asset.origin,
         "comfy_lora_name": comfy_name,
         "status": status,
@@ -750,24 +889,26 @@ def list_style_loras(
     db: Session,
     settings: Any | None,
     *,
+    base_model: StyleLoraBase = H3_LORA_BASE,
     object_info: dict[str, Any] | None = None,
     probe_comfy: bool = True,
 ) -> dict[str, Any]:
-    """Idempotently discover built-in realism LoRA and project live ComfyUI visibility."""
-    sync_discovered_loras(db, settings)
-    lora_roots = _known_lora_roots(db, settings)
+    """Read one base model's ledger and project live ComfyUI visibility."""
+    sync_discovered_loras(db, settings, base_model=base_model)
+    lora_roots = _known_lora_roots(db, settings, base_model)
     if object_info is not None:
         comfy_reachable = True
         available_names = extract_comfy_lora_names(object_info)
     elif probe_comfy:
-        live_info, comfy_reachable = probe_live_lora_object_info(db, settings)
+        live_info, comfy_reachable = probe_live_lora_object_info(db, settings, base_model=base_model)
         available_names = extract_comfy_lora_names(live_info) if live_info is not None else None
     else:
         comfy_reachable = False
         available_names = None
 
     rows = db.scalars(
-        select(StyleLoraAsset).order_by(StyleLoraAsset.origin.asc(), StyleLoraAsset.created_at.asc())
+        select(StyleLoraAsset).where(StyleLoraAsset.base_model == base_model)
+        .order_by(StyleLoraAsset.origin.asc(), StyleLoraAsset.created_at.asc())
     ).all()
     items = [
         project_style_lora_asset(
@@ -778,11 +919,72 @@ def list_style_loras(
         )
         for row in rows
     ]
-    return {
+    result = {
         "items": items,
         "comfy_reachable": comfy_reachable,
         "max_style_loras": MAX_STYLE_LORAS,
     }
+    if base_model == IMAGE_LORA_BASE:
+        by_hash = {row["sha256"]: row for row in items}
+        component_assets = {
+            component["component_id"]: by_hash.get(component["files"][0]["sha256"])
+            for component in _image_lora_components()
+        }
+
+        def project_slot(slot: dict) -> dict:
+            asset = component_assets[slot["component_id"]]
+            return {**slot, "lora_id": asset["id"] if asset else None,
+                    "status": asset["status"] if asset else "MISSING_FILE"}
+
+        result["presets"] = [
+            {**preset, **{key: [project_slot(slot) for slot in preset[key]]
+                          for key in ("loras", "optional_loras")}}
+            for preset in image_lora_presets()["presets"]
+        ]
+    return result
+
+
+def freeze_image_lora_style(
+    db: Session, settings: Any, selection: Sequence[Any] | None, preset_id: str | None,
+) -> dict[str, Any]:
+    """Resolve recipe defaults and freeze exactly the style this request will execute."""
+    if not selection and not preset_id:
+        return {}
+    config = image_lora_presets()
+    preset = next((row for row in config["presets"] if row["id"] == preset_id), None)
+    if preset_id and preset is None:
+        raise StyleLoraError("IMAGE_STYLE_PRESET_UNKNOWN", "找不到所选生图风格配方。", http_status=422)
+    if preset is not None and not selection:
+        components = {row["component_id"]: row for row in _image_lora_components()}
+        selection = []
+        for slot in preset["loras"]:
+            component_id = slot["component_id"]
+            sha = components[component_id]["files"][0]["sha256"]
+            asset = db.scalar(select(StyleLoraAsset).where(StyleLoraAsset.sha256 == sha))
+            selection.append({"lora_id": asset.id if asset else component_id, "sha256": sha,
+                              "strength_model": slot["strength_model"]})
+    specs = evaluate_style_lora_selection(db, settings, selection, base_model=IMAGE_LORA_BASE)
+    return {
+        "style_loras": [spec.canonical_dict() for spec in specs],
+        "style_sampling": dict(preset["sampling"] if preset else config["custom_sampling"]),
+        **({"style_preset": preset_id, "style_preset_snapshot": {
+            key: preset[key] for key in ("id", "display_name", "positive_prompt", "negative_prompt")
+        }} if preset else {}),
+    }
+
+
+def image_style_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    return {key: payload[key] for key in ("style_loras", "style_sampling", "style_preset", "style_preset_snapshot")
+            if key in payload}
+
+
+def resolve_live_image_loras(factory, settings, payload: Mapping[str, Any], *, object_info: dict) -> tuple:
+    """Before submit, resolve live ComfyUI names from the one frozen selection."""
+    with factory() as db:
+        return evaluate_style_lora_selection(
+            db, settings, payload.get("style_loras"), base_model=IMAGE_LORA_BASE,
+            object_info=object_info, frozen_image_metadata=True,
+        )
 
 
 def _extract_entry_fields(item: Any) -> tuple[str, str, str, float, str]:
@@ -816,8 +1018,10 @@ def evaluate_style_lora_selection(
     settings: Any | None,
     selection: Sequence[Any] | None,
     *,
-    variant_id: str,
+    base_model: StyleLoraBase = H3_LORA_BASE,
+    variant_id: str = INT8_VARIANT_ID,
     object_info: dict[str, Any] | None = None,
+    frozen_image_metadata: bool = False,
 ) -> tuple[StyleLoraSpec, ...]:
     """Single authoritative adjudicator for style LoRA assembly across all gates.
 
@@ -835,7 +1039,7 @@ def evaluate_style_lora_selection(
             http_status=422,
             details={"count": len(entries), "limit": MAX_STYLE_LORAS},
         )
-    if (variant_id or INT8_VARIANT_ID) != INT8_VARIANT_ID:
+    if base_model == H3_LORA_BASE and (variant_id or INT8_VARIANT_ID) != INT8_VARIANT_ID:
         raise StyleLoraError(
             "VARIANT_LORA_UNSUPPORTED",
             f"模型变体 {variant_id} 暂不支持挂载风格 LoRA（V1 仅在 INT8 主线启用）。",
@@ -843,9 +1047,9 @@ def evaluate_style_lora_selection(
             details={"variant_id": variant_id},
         )
 
-    if db is not None:
-        sync_discovered_loras(db, settings)
-    lora_roots = _known_lora_roots(db, settings)
+    if db is not None and not (base_model == IMAGE_LORA_BASE and frozen_image_metadata):
+        sync_discovered_loras(db, settings, base_model=base_model)
+    lora_roots = _known_lora_roots(db, settings, base_model)
     available_names = extract_comfy_lora_names(object_info) if object_info is not None else None
 
     seen_ids: set[str] = set()
@@ -867,8 +1071,7 @@ def evaluate_style_lora_selection(
                 http_status=422,
                 details={"lora_id": lora_id, "sha256": req_sha},
             )
-        strength = _validate_strength(raw_strength)
-        trigger = _validate_trigger(raw_trigger)
+        strength = _validate_strength(raw_strength) if base_model == H3_LORA_BASE else None
 
         if db is None:
             raise StyleLoraError(
@@ -885,6 +1088,9 @@ def evaluate_style_lora_selection(
                 http_status=409,
                 details={"lora_id": lora_id},
             )
+        _validate_base_model(asset, base_model)
+        if strength is None:
+            strength = _validate_strength(asset.default_strength if raw_strength is None else raw_strength)
         if asset.sha256 in seen_hashes:
             raise StyleLoraError(
                 "STYLE_LORA_DUPLICATE",
@@ -942,15 +1148,23 @@ def evaluate_style_lora_selection(
 
         seen_ids.add(lora_id)
         seen_hashes.add(asset.sha256)
-        resolved_specs.append(
-            StyleLoraSpec(
-                lora_id=asset.id,
-                lora_name=comfy_lora_name,
-                sha256=asset.sha256,
-                strength_model=strength,
-                trigger_word=trigger,
-            )
-        )
+        identity = dict(lora_id=asset.id, lora_name=comfy_lora_name, sha256=asset.sha256, strength_model=strength)
+        if base_model == IMAGE_LORA_BASE:
+            metadata = item if frozen_image_metadata else asset
+            if isinstance(metadata, Mapping):
+                word = metadata.get("trigger_word", "")
+                negative = metadata.get("negative_trigger_word", "")
+                position = metadata.get("trigger_position", "suffix")
+            else:
+                word = metadata.trigger_word
+                negative = metadata.negative_trigger_word
+                position = metadata.trigger_position
+            resolved_specs.append(ImageStyleLoraSpec(
+                **identity, trigger_word=_validate_trigger(word, base_model),
+                negative_trigger_word=_validate_trigger(negative, base_model), trigger_position=position,
+            ))
+        else:
+            resolved_specs.append(StyleLoraSpec(**identity, trigger_word=_validate_trigger(raw_trigger)))
 
     return tuple(resolved_specs)
 
@@ -963,6 +1177,8 @@ def update_style_lora(
     display_name: str | None = None,
     default_strength: float | None = None,
     trigger_word: str | None = None,
+    negative_trigger_word: str | None = None,
+    trigger_position: TriggerPosition | None = None,
     actor: str = "local-user",
 ) -> dict[str, Any]:
     sync_discovered_loras(db, settings)
@@ -977,7 +1193,11 @@ def update_style_lora(
     if default_strength is not None:
         asset.default_strength = _validate_strength(default_strength)
     if trigger_word is not None:
-        asset.trigger_word = _validate_trigger(trigger_word)
+        asset.trigger_word = _validate_trigger(trigger_word, asset.base_model)
+    if negative_trigger_word is not None:
+        asset.negative_trigger_word = _validate_trigger(negative_trigger_word, asset.base_model)
+    if trigger_position is not None:
+        asset.trigger_position = trigger_position
     asset.updated_at = utcnow()
     db.flush()
 
@@ -994,16 +1214,19 @@ def update_style_lora(
             "display_name": asset.display_name,
             "default_strength": asset.default_strength,
             "trigger_word": asset.trigger_word,
+            "base_model": asset.base_model,
+            "negative_trigger_word": asset.negative_trigger_word,
+            "trigger_position": asset.trigger_position,
         },
     )
 
-    live_info, comfy_reachable = probe_live_lora_object_info(db, settings)
+    live_info, comfy_reachable = probe_live_lora_object_info(db, settings, base_model=asset.base_model)
     available_names = extract_comfy_lora_names(live_info) if live_info is not None else None
     return project_style_lora_asset(
         asset,
         available_names=available_names,
         comfy_reachable=comfy_reachable,
-        lora_roots=_known_lora_roots(db, settings),
+        lora_roots=_known_lora_roots(db, settings, asset.base_model),
     )
 
 
@@ -1027,6 +1250,26 @@ def _ensure_lora_not_in_use(
     from shine.director.models import DirectorPackageVersion
     from shine.models import Job
     from shine.production.models import ProductionRun
+
+    if asset.base_model == IMAGE_LORA_BASE:
+        from shine.asset_center.models import LibraryRenderTask
+        from shine.materialprep.models import MaterialItem, MaterialRun
+        from shine.materialprep.states import ITEM_TERMINAL, RUN_TERMINAL
+
+        tasks = db.scalars(select(LibraryRenderTask).where(
+            LibraryRenderTask.kind == "image",
+            LibraryRenderTask.status.in_(["QUEUED", "RUNNING", "UNKNOWN", "RECONCILE_REQUIRED", "RECONCILING"]),
+        ))
+        items = db.scalars(select(MaterialItem).join(MaterialRun, MaterialItem.run_id == MaterialRun.id).where(
+            MaterialItem.status.not_in(ITEM_TERMINAL), MaterialRun.status.not_in(RUN_TERMINAL),
+        ))
+        for row in (*tasks, *items):
+            if _strategy_references_lora(row.payload, asset.id, asset.sha256):
+                raise StyleLoraError(
+                    "LORA_IN_USE", f"风格 LoRA「{asset.display_name}」正被生图任务 {row.id[:8]} 引用，无法删除。",
+                    details={"lora_id": asset.id, "task_id": row.id},
+                )
+        return
 
     active_runs = db.scalars(
         select(ProductionRun).where(

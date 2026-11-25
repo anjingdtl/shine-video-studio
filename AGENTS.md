@@ -2590,3 +2590,37 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   `test_generation_segments.py`；后端 8 分片 305 文件（`shards-20261123-231702-338`，8 分片全部
   exit 0、`shards_with_failure_markers=0`）、前端 488/488 与 `tsc`/Vite build、Ruff 均通过。
   证据与未完成项见 `docs/ACCEPTANCE_20261123_H3_LOW_VRAM_ATTENTION_GUARD.md`。
+
+## 2026-11-25 统一素材生图 LoRA 与剧本对齐提示词 V1（接手 Codex 额度中断轮）
+
+- **生图 LoRA 与 H3 LoRA 同一张台账，靠 `base_model` 区分**（`minimax_h3` / `qwen_image_21`）。唯一裁决仍是
+  `evaluate_style_lora_selection()`，两条生图线提交前都走 `resolve_live_image_loras()`；唯一挂载口是
+  `attach_qwen_style_loras()`，节点 `4511 → 4512 → 4513` 串在 UNET 与 `QwenImage21Cache` 之间（T2I 缓存 `480`、
+  编辑图缓存 `469`）；唯一注词口是 `apply_image_lora_prompts()`。**不要再在 `api_asset_center.py` /
+  `api_material.py` 里写平行的 LoRA 校验或节点拼装。**
+- **零 LoRA 基线不变**：图谱原样，25 步 / cfg 1.0 / euler / simple，零额外下载、零额外门禁。选了配方按
+  35 / 30 / 30 步、cfg 3.5；手工装配 LoRA 而未选配方时 30 步、cfg 3.5。
+- **`material-image-v6-qwen21` 的运行时指纹含模板合同摘要。** 模板升级让旧 `RENDER_VERIFIED` 凭证失效，升级后
+  重跑一次 `POST /api/v1/setup/image-runtime/validate`。幂等键绑定着已结束的运行，重试要换新键。
+- **被单独暂停的安装记录要用 attempt 级 `resume` 恢复。** 对同一请求再次「确认整备」时，任务仍在
+  `QUEUED/RUNNING` 就原样返回，不会恢复它；此时整备摘要显示「正在下载并安装」，因为 `_DOWNLOAD_ACTIVE`
+  含 `PAUSED`（既有行为，未改）。
+- **ComfyUI 提示线程死亡而 HTTP 存活时，工作台识别不了。** `/history` 永远为空、`/system_stats` 返回 500，
+  要等满 `POLL_LIMIT=1800`（约 31 分钟）才进 `NEEDS_REVIEW`，期间 `image-runtime/stop` 被在途保护拒绝。
+  既有出口依次是：取消运行（停掉未开始的项）→ 等轮询上限 → `managed-processes/release` → 租约由对账释放
+  → `image-runtime/stop` 把启动记录改写为 `STOPPED`。
+- **真机显存事实（RTX 5080 16GB）**：Qwen-Image-2.1 int8 ConvRot 出图峰值约 15.5 GB，基线 0.9 GB 时余
+  830 MiB，挂 LoRA 不增加峰值。`materialprep/execution.py` 的 `IMAGE_BUDGET_MB = 12000` 低于实测需求，
+  空闲 12 GB 就放行，随后在 ComfyUI 内 OOM。未改，待裁决。
+- **MULTIREF 上不要叠配方。** 配方的正向核心词是为 T2I 写的场景描述，追加到编辑提示词后主体消失或缩没
+  （只加词、不挂 LoRA 即可复现），多视角 `<mva>` 进一步恶化；零 LoRA 的 MULTIREF 正常。未改，待裁决。
+- **GPU 任务进行中关掉 NVIDIA App 的驱动自动更新。** 本轮 21:39 驱动被后台从 621.24 热升到 621.40，
+  正在加载模型的渲染器随即 CUDA OOM。
+- **长轮询的验收脚本给 `httpx.Client` 加 `Connection: close`**：5 秒轮询会撞 uvicorn 默认 5 秒 keep-alive，
+  偶发 `RemoteProtocolError: Server disconnected`。
+- **跑分片回归前先确认保留数。** 本轮终检用了默认的保留 1 次，清掉了 `F:\ShineTest` 下 28 个更早的归档
+  日志。需要留历史时显式传 `-KeepRuns`。
+- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。回归：最终树后端 8 分片
+  315 文件（`shards-20261125-224438-993`，8 分片全部 exit 0、`shards_with_failure_markers=0`）、前端 497/497
+  与 `tsc` / Vite build、Ruff 均通过。证据、出图对比与遗留问题见
+  `docs/ACCEPTANCE_20261125_IMAGE_LORA_AND_PROMPT_V1.md`。

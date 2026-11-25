@@ -71,7 +71,8 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
         steps.append("SCAN")
     # 补工具是整备链的一环（与下载/实例/核验同一个后台任务），不再是页面直连
     # 的独立长请求；工具已达标时这一步如实跳过。
-    steps.append("TOOL_REPAIR")
+    if capabilities != ["image_loras"]:
+        steps.append("TOOL_REPAIR")
     steps.extend(["RECONCILE", "DOWNLOAD"])
     if "h3" in capabilities or "image" in capabilities:
         steps.extend(["INSTANCE", "TARGET", "RECIPE"])
@@ -108,7 +109,9 @@ def enqueue(db, *, project_id: str | None, capabilities: list[str], installation
     from shine.services import add_audit
 
     reconcile_mode = bool(reconcile_only or not adopt)
-    capabilities = sorted({row for row in capabilities if row in {"h3", "image", "vlm", "asr", "relayvsr"}})
+    from shine.comfyops.setup_summary import CAPABILITIES
+
+    capabilities = sorted(set(capabilities).intersection(CAPABILITIES))
     if "h3" in capabilities:
         from shine.comfyops.variants import default_variant_id
 
@@ -650,7 +653,8 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
     from shine.comfyops.setup_summary import resolve_installation
 
     request = task.get("request") or {}
-    capabilities = [row for row in request.get("capabilities") or [] if row in {"h3", "image", "relayvsr"}]
+    capabilities = [row for row in request.get("capabilities") or []
+                    if row in {"h3", "image", "relayvsr", "image_loras"}]
     if not capabilities:
         from shine.comfyops.local import reconcile_stopped_isolated_attempts
 
@@ -666,7 +670,7 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
         request.get("adopt", True)
         and not (selected.get("managed") and not selected.get("adopted"))
     )
-    if resolved.get("choice_required"):
+    if resolved.get("choice_required") and capabilities != ["image_loras"]:
         return {"status": "FAILED", "code": "INSTALLATION_SELECTION_REQUIRED",
                 "detail": "检索发现多套 ComfyUI，请选择本次使用的安装。"}
     notes: list[str] = []
@@ -881,9 +885,11 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
 
     request = task.get("request") or {}
     capabilities = request.get("capabilities") or []
-    # 审片（画面审片 / 语音核对）是可选增强：它沿用自己的安装记录在后台推进，
-    # 下载中或失败都不卡住 H3 / 出图的生产链。生产链只按自己的实际依赖推进。
-    review_caps = {key.lower() for key in REVIEW_COMPONENTS}
+    # Combined preparation can advance the base image/H3 capability while the
+    # optional image LoRA pack keeps its own progress in the installer ledger.
+    background_caps = {key.lower() for key in REVIEW_COMPONENTS}
+    if {"h3", "image"}.intersection(capabilities):
+        background_caps.add("image_loras")
     downloads = task.setdefault("downloads", {})
 
     pending: list[str] = []
@@ -893,7 +899,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         with factory() as db:
             attempt = db.get(InstallationAttempt, info.get("attempt_id"))
         if attempt is None:
-            if capability in review_caps:
+            if capability in background_caps:
                 info.pop("attempt_id", None)
                 continue
             return {"status": "FAILED", "code": "DOWNLOAD_ATTEMPT_MISSING",
@@ -901,7 +907,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         stage = attempt.stage or attempt.status
         if attempt.status in {"FAILED", "FAILED_RECONCILE_REQUIRED"} or stage in {
                 "NEEDS_REVIEW", "CANCELLED", "FAILED_RETRYABLE"}:
-            if capability in review_caps:
+            if capability in background_caps:
                 info["review_state"] = "failed"
                 continue
             return {"status": "FAILED", "code": attempt.error_code or "DOWNLOAD_FAILED",
@@ -911,12 +917,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
             info["done"] = True
             continue
         if stage in _DOWNLOAD_ACTIVE or attempt.status in _DOWNLOAD_ACTIVE:
-            if capability in review_caps:
+            if capability in background_caps:
                 info["review_state"] = "running"
                 continue
             pending.append(capability)
         else:
-            if capability in review_caps:
+            if capability in background_caps:
                 info["review_state"] = "unknown"
                 continue
             return {"status": "FAILED", "code": "DOWNLOAD_STATE_UNKNOWN",
@@ -940,7 +946,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         capability = plan_row["capability"]
         if downloads.get(capability, {}).get("done"):
             continue  # this authorization already fetched and verified the bytes
-        if capability in review_caps and downloads.get(capability, {}).get("attempt_id"):
+        if capability in background_caps and downloads.get(capability, {}).get("attempt_id"):
             continue
         catalog_file = plan_row["_catalog_file"]
         if capability == "h3":
@@ -976,7 +982,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.services import add_audit
 
     guard = _claim_guard_for(task)
-    for capability, components, catalog_file in plans_needed:
+    for capability, components, catalog_file in sorted(plans_needed, key=lambda row: row[0] == "image_loras"):
         # create_install_plan 自己提交建计划；批准与审计必须显式提交，
         # 否则会话关闭即回滚，queue_install_attempt 读到的仍是 AWAITING_APPROVAL。
         with factory() as db:
@@ -995,7 +1001,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 raise
             except Exception as exc:  # noqa: BLE001 - admission refusal is the answer
                 db.rollback()
-                if capability in review_caps:
+                if capability in background_caps:
                     # 可选审片的下载被拒绝（如硬件门槛）只记录，不卡生产链。
                     downloads[capability] = {"review_state": "failed",
                                              "error_code": _code_of(exc)}
@@ -1018,12 +1024,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         attempt_id, _reused = queue_install_attempt(
             factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED", **q_extra)
         downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id}
-    production_queued = [row[0] for row in plans_needed if row[0] not in review_caps]
+    production_queued = [row[0] for row in plans_needed if row[0] not in background_caps]
     if production_queued:
         return {"status": "PENDING",
                 "detail": f"已排队下载：{'、'.join(production_queued)}（关闭页面也会继续）。"}
     return {"status": "DONE",
-            "detail": "生产所需文件已就绪；可选审片权重在后台沿用自己的安装记录继续。"}
+            "detail": "生产所需文件已就绪；所选可选权重沿用安装记录在后台继续。"}
 
 
 def _step_image_samples(factory, settings, task) -> dict[str, Any]:

@@ -17,6 +17,7 @@ import {
 } from './api';
 import type { CapabilityReport, ImageGraphReport, LibraryAsset, LibraryTask, LibraryVersion } from './api';
 import { MaterialGenerationProgress } from '../components/MaterialGenerationProgress';
+import { imageStyleInput, StyleLoraAssemblyPanel, type StyleLoraConfig } from '../shared/StyleLoraAssemblyPanel';
 import './assets.css';
 
 export type AssetCenterPage = 'home' | 'images' | 'voices' | 'library' | 'assignments';
@@ -308,6 +309,8 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
   const [mode, setMode] = useState(typeof restoredDraft.mode === 'string' ? restoredDraft.mode : 'T2I');
   const [title, setTitle] = useState(typeof restoredDraft.title === 'string' ? restoredDraft.title : '');
   const [prompt, setPrompt] = useState(typeof restoredDraft.prompt === 'string' ? restoredDraft.prompt : '');
+  const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>(Array.isArray(restoredDraft.styleLoras) ? restoredDraft.styleLoras : []);
+  const [stylePreset, setStylePreset] = useState<string | null>(typeof restoredDraft.stylePreset === 'string' ? restoredDraft.stylePreset : null);
   const [category, setCategory] = useState(typeof restoredDraft.category === 'string' ? restoredDraft.category : 'character');
   const [width, setWidth] = useState(Number(restoredDraft.width) || 1024);
   const [height, setHeight] = useState(Number(restoredDraft.height) || 1024);
@@ -385,8 +388,10 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
   useEffect(() => {
     window.localStorage.setItem(draftStorageKey, JSON.stringify({
       mode, title, prompt, category, width, height, candidateCount, transparent, references, maskMedia, targetAssetId,
+      styleLoras, stylePreset,
     }));
-  }, [mode, title, prompt, category, width, height, candidateCount, transparent, references, maskMedia, targetAssetId]);
+  }, [mode, title, prompt, category, width, height, candidateCount, transparent, references, maskMedia, targetAssetId,
+    styleLoras, stylePreset]);
   useEffect(() => {
     const pendingCanvas = (mode === 'INPAINT' || mode === 'RGBA') && references.length > 0 && !maskMedia;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -483,6 +488,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
         mask_media_id: mode === 'INPAINT' || manualCutout ? maskMedia?.id : null,
         output: { width, height }, seed: null, candidate_count: validationOnly ? 1 : candidateCount, validation_only: validationOnly,
         transparent: transparent || mode === 'RGBA',
+        ...(manualCutout ? {} : imageStyleInput(styleLoras, stylePreset)),
         target_asset_id: targetAssetId || null,
         parent_version_id: reusableAssets.find((asset) => asset.id === targetAssetId)?.current_version?.id ?? null,
         expected_asset_state_version: reusableAssets.find((asset) => asset.id === targetAssetId)?.state_version ?? null,
@@ -542,6 +548,12 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       <label className="asset-field"><span>{mode === 'T2I' ? '画面描述' : '修改指令'}</span>
         <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder={mode === 'T2I' ? '例如：雨后的老街，暖黄色窗光，电影静帧构图……' : '说明要改变的内容，以及希望保持不变的部分……'} />
       </label>
+      <details className="advanced-fold">
+        <summary>生图风格 LoRA{styleLoras.length && !manualCutoutReady ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
+        {manualCutoutReady && <p className="strategy-note">手动画布抠图直接处理像素，本次无需 LoRA。</p>}
+        <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}
+          loraSupported disabled={manualCutoutReady || busy} stylePreset={stylePreset} onPresetChange={setStylePreset} />
+      </details>
       {inheritsProject && visualFacts && <div className="asset-capability-notice ready" role="status">
         <span><i />继承当前作品《{visualFacts.project_title}》的导演风格与类型</span>
         <p>{visualFacts.film_type === 'animation' ? '动画' : visualFacts.film_type === 'live_action' ? '实拍' : '影片类型未冻结'}

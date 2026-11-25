@@ -43,11 +43,9 @@ from shine.materialprep.contracts import (
 PROMPT_TEMPLATE_VERSION = "material-image-v6-qwen21"
 """Bump when a composition rule changes; readiness evidence is bound to it.
 
-v6 purges human-performer and plot-summary leakage from non-character plates:
-scene and prop stills use family-scoped film-medium prose (never "real human
-performers"), scene/prop negative prompts explicitly exclude people/hands, and
-producer-composed scene/prop prompts never inject raw CJK plot summaries as
-``world_note``.
+V6 places the subject and immutable script traits before composition and
+medium. Producer prose carries translated era details. Scene and prop
+plates keep their family-scoped medium and no people/hands rules.
 
 v5 carries the frozen film type as a server-owned English sentence (the same
 clause the H3 compiler uses): an animation project's reference stills must not
@@ -70,30 +68,31 @@ _CJK = re.compile(r"[\u4e00-\u9fff]")
 MAX_COMPOSED_PROMPT_CHARS = 4000
 MAX_COMPOSED_NEGATIVE_CHARS = 1200
 
-FRAMING_SENTENCES: dict[MaterialFamily, str] = {
+COMPOSITION_RULES: dict[MaterialFamily, str] = {
     "character": (
-        "The subject is framed from the waist up, the whole head inside the frame, the face unobstructed and "
-        "turned towards the camera with a calm neutral expression, and no other people appear."
+        "One person framed from the waist up with the complete head in frame, a clear unobstructed face "
+        "turned towards the camera, a calm expression and a plain neutral grey-white background."
     ),
     "scene": (
-        "The framing is a wide establishing view of the whole space with a consistent perspective and horizon, "
-        "and no people, figures or silhouettes appear anywhere in it."
+        "A wide establishing view of the whole space with a consistent perspective and horizon, "
+        "with no people, figures or silhouettes anywhere in it."
     ),
     "prop": (
-        "The object is shown whole, its entire outline inside the frame, with nothing holding or wearing it and "
-        "no second copy of it in the picture."
+        "One complete object against a plain neutral grey-white background, with its entire outline in frame, "
+        "nothing holding or wearing it and no hands, body parts or second copy."
     ),
 }
 """The family's fixed composition, written as the sentence the standard asks for."""
 
-CARRIER_FRAMING: dict[MaterialCarrier, str] = {
+PROP_CARRIER_RULES: dict[MaterialCarrier, str] = {
+    "object": COMPOSITION_RULES["prop"],
     "paper": (
-        "The carrier is shown complete and face-on, its written or printed content legible as the brief "
-        "describes it, with no person, hands or body parts in the frame and no second copy."
+        "One flat paper carrier shown complete and face-on, its written or printed content legible as the brief "
+        "describes it, against a plain neutral grey-white background with no person, hands or second copy."
     ),
     "screen": (
         "The display is shown complete and face-on, its on-screen content legible as the brief describes it, "
-        "with no person, hands or body parts in the frame and no second copy."
+        "against a plain neutral grey-white background with no person, hands or second copy."
     ),
 }
 
@@ -121,41 +120,6 @@ _NO_HOLDER_SHORT = "person, human, hands, fingers, holding, wearing, portrait"
 
 _TEXT_EXCLUSION_SENTENCES = (_NO_TEXT_SENTENCE, _NO_COLLAGE_SENTENCE)
 """Composition rules that must survive even after the studio sentences are joined."""
-
-COMPOSITION_RULES: dict[MaterialFamily, str] = {
-    "character": (
-        "Single-person half-body portrait study of exactly one character, complete head fully inside the frame, "
-        "face clearly visible and unobstructed, calm neutral expression, shoulders and upper body squared to the "
-        "camera, plain neutral grey-white seamless studio background, even soft diffused lighting, sharp focus on "
-        "the face, no other people, no cropped head, no back view, no profile-only view, no costume reference sheet"
-    ),
-    "scene": (
-        "Empty environment plate of one location, absolutely no people and no characters present, no silhouettes and "
-        "no figures in the background, wide establishing framing that shows the whole space clearly, consistent "
-        "perspective and horizon, no held or worn costume on display"
-    ),
-    "prop": (
-        "Single complete object shown as one whole item, entirely inside the frame with its full outline visible, "
-        "no person holding it, no person wearing it, no hands, no body parts, plain neutral grey-white seamless "
-        "studio background, even soft diffused lighting, product-study framing, no second copy of the object"
-    ),
-}
-
-PROP_CARRIER_RULES: dict[MaterialCarrier, str] = {
-    "object": COMPOSITION_RULES["prop"],
-    "paper": (
-        "Single flat paper content carrier (a letter, a notice, a sign, a plaque, a map or a book page) shown "
-        "complete and face-on, entirely inside the frame, its written or printed content visible and legible as "
-        "the brief describes it, text on the carrier is legitimate content, no person, no hands, no body parts, "
-        "plain neutral grey-white seamless studio background, even soft diffused lighting, no second copy"
-    ),
-    "screen": (
-        "Single screen display carrier (a monitor, a phone, a television or a projection surface) shown complete "
-        "and face-on, entirely inside the frame, its on-screen content visible and legible as the brief describes "
-        "it, on-screen text and imagery is legitimate content, no person, no hands, no body parts, plain neutral "
-        "grey-white seamless studio background, even soft diffused lighting, no second copy"
-    ),
-}
 
 
 class ImagePromptError(ValueError):
@@ -220,11 +184,12 @@ def compose(
     film_style: str = "",
     user_text: bool = False,
     world_note: str = "",
+    styled: bool = False,
 ) -> ImagePrompt:
     """Build the deterministic prompt pair for one confirmed requirement.
 
-    Order is fixed: composition rule, subject, producer appearance, must-keep
-    facts, then the confirmed visual direction.  The negative prompt is the
+    Order is fixed: subject, immutable facts, composition, medium and era,
+    visual treatment, then exclusions. The negative prompt is the
     producer's ``avoid`` list followed by the fixed exclusions, because the
     audited graph exposes a real ``negative_prompt`` input on
     ``TextEncodeQwenImage21``.
@@ -238,20 +203,16 @@ def compose(
     ``user_text`` marks the appearance as the user's own boundary input (asset
     centre): it is carried verbatim in the script language instead of being
     refused for CJK, while the server layers (film medium, world note, framing,
-    negatives) still apply.  ``world_note`` is the confirmed story world / era
-    fact, appended verbatim so a period script cannot render as modern people.
+    negatives) still apply. Producer prose carries translated story facts.
     """
     if family not in COMPOSITION_RULES:
         raise ImagePromptError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
 
-    framing = FRAMING_SENTENCES[family]
+    framing = COMPOSITION_RULES[family]
     text_sentences = list(_TEXT_EXCLUSION_SENTENCES)
-    if family == "prop" and carrier in CARRIER_FRAMING:
-        framing = CARRIER_FRAMING[carrier]
-        if carrier in ("paper", "screen"):
-            # For these carriers the written or on-screen content IS the
-            # material, so only the watermark and collage bans still apply.
-            text_sentences = [_NO_COLLAGE_SENTENCE]
+    if family == "prop" and carrier in ("paper", "screen"):
+        framing = PROP_CARRIER_RULES[carrier]
+        text_sentences = [f"No {_NO_WATERMARK_TERMS}", _NO_COLLAGE_SENTENCE]
 
     # Producer-authored prose is a server contract and must be English; a
     # user's own prompt (asset centre) is boundary input in the script language
@@ -291,16 +252,14 @@ def compose(
         else:
             subject = requirement_name.strip()
 
-    # The standard's order: anchor, subject, environment, lighting, material,
-    # framing, then a closing line.  A must-keep fact already carried by the
-    # appearance prose is not repeated - repetition pushed the script
-    # description out of the model's attention instead of reinforcing it.
+    # Keep every distinct hard trait next to the appearance.
     lowered = appearance.casefold()
-    extra = [item for item in must_keep if item and item.casefold()[:40] not in lowered]
-    if extra:
-        extra_sentence = "Fixed details that must not drift: " + "; ".join(extra)
-    else:
-        extra_sentence = ""
+    extra: dict[str, str] = {}
+    for item in must_keep:
+        key = item.rstrip(".").casefold()
+        if key and not re.search(r"(?<!\w)" + re.escape(key) + r"(?!\w)", lowered):
+            extra.setdefault(key, item.rstrip("."))
+    extra_sentence = "Fixed identity and design details include " + ", ".join(extra.values()) if extra else ""
 
     # Enforce family-safe film medium prose even if a caller passes the video
     # shot sentence ("real human performers...") for an empty scene or prop.
@@ -319,21 +278,19 @@ def compose(
     # into English ``appearance`` prose; injecting a raw CJK plot summary here
     # caused image models to paint characters and plot actions into empty sets.
     effective_world_note = world_note.strip()
-    if family in ("scene", "prop") and effective_world_note and not user_text and _CJK.search(effective_world_note):
+    if not user_text and not standard.is_prompt_language(effective_world_note):
         effective_world_note = ""
 
     layers = [
-        standard.anchor_sentence(family, carrier, direction),
+        f"{subject + ', ' if subject else ''}{appearance}",
+        extra_sentence,
+        framing,
         effective_film_style,
         effective_world_note,
-        f"{subject + ', ' if subject else ''}{appearance}",
         standard.environment_sentence(family, direction),
-        standard.lighting_sentence(direction),
+        standard.lighting_sentence(family, direction, styled=styled),
         standard.material_sentence(direction),
-        framing,
-        extra_sentence,
         *text_sentences,
-        standard.closing_sentence(family),
     ]
     positive = standard.join_layers(layers)
     # A paper or screen carrier IS its legible content, so the text ban must not

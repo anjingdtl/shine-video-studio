@@ -561,6 +561,7 @@ def create_batch(
     new_revision: bool = False,
     trust_current_list: bool = False,
     commit: bool = True,
+    image_style: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
 
@@ -588,6 +589,7 @@ def create_batch(
         # first batch's image.
         "briefs": {key: briefs[key] for key in sorted(briefs or {})},
         "new_revision": new_revision,
+        **(image_style or {}),
     }
     request_hash = graph_hash(request_payload)
 
@@ -633,7 +635,7 @@ def create_batch(
         mode=EXECUTION_MODE_REAL,
         status=RUN_QUEUED,
         payload={"kind": kind, "rights_id": rights_id, "requirement_ids": generate_ids,
-                 "confirmation_snapshot": confirmation_hash},
+                 "confirmation_snapshot": confirmation_hash, **(image_style or {})},
         sha256=graph_hash(request_payload),
     )
     db.add(run)
@@ -671,17 +673,25 @@ def create_batch(
                 "visual_direction": plan.payload.get("visual_direction") or {},
                 "seed": seed,
                 "kind": kind,
+                **(image_style or {}),
                 # A batch without a brief is queued but cannot render yet: the
                 # producer owns the appearance text, and the server refuses to
                 # invent one rather than rendering an unconfirmed look.
                 **({"brief": brief} if brief else {}),
             },
-            sha256=graph_hash({"requirement_id": requirement_id, "revision": revision, "seed": seed}),
+            sha256=graph_hash({"requirement_id": requirement_id, "revision": revision, "seed": seed,
+                               **(image_style or {})}),
         )
         try:
             with db.begin_nested():
                 db.add(item)
                 db.flush()
+                if brief:
+                    # A caller-supplied brief is an explicit authoring choice. Bind it to
+                    # the current facts just like a producer's answer.
+                    from shine.materialprep.brief import context_for_item
+
+                    item.payload = {**item.payload, "brief_basis": context_for_item(db, item)["brief_basis"]}
         except IntegrityError:
             # Another tab already queued this exact requirement revision.
             refused.append({"requirement_id": requirement_id, "code": "MATERIAL_ITEM_ALREADY_QUEUED"})
@@ -694,7 +704,8 @@ def create_batch(
     run.payload = {**run.payload, "item_ids": created, "refused": refused}
     run.sha256 = graph_hash(run.payload)
     add_audit(db, "local-user", "MATERIAL_BATCH_CREATED", "material_run", run.id,
-              {"items": len(created), "refused": len(refused), "kind": kind, "mode": EXECUTION_MODE_REAL},
+              {"items": len(created), "refused": len(refused), "kind": kind, "mode": EXECUTION_MODE_REAL,
+               **(image_style or {})},
               project_id=project_id)
     if commit:
         db.commit()
@@ -743,6 +754,7 @@ def create_validation_batch(
     require_project(db, project_id)
     if rights_id:
         require_rights(db, project_id, rights_id)
+    prompt_template = image_prompts.template_evidence()
     request_payload = {
         "kind": "validation",
         "families": sorted(families),
@@ -751,7 +763,8 @@ def create_validation_batch(
         # Readiness evidence is bound to the prompt template; a template bump
         # must never replay an older validation batch as if it proved the new
         # composition rules.
-        "prompt_template_version": image_prompts.template_evidence()["template_version"],
+        "prompt_template_version": prompt_template["template_version"],
+        "prompt_template_sha256": graph_hash(prompt_template),
     }
     request_hash = graph_hash(request_payload)
     existing = db.scalar(
@@ -1073,6 +1086,8 @@ def _require_run(db, run_id: str) -> MaterialRun:
 
 
 def public_item(db, item: MaterialItem) -> dict[str, Any]:
+    from shine.comfyops.loras import image_style_payload
+
     requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
     attempts = db.scalars(
         select(MaterialImageAttempt).where(MaterialImageAttempt.item_id == item.id)
@@ -1109,6 +1124,7 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "brief": (item.payload or {}).get("brief"),
+        **image_style_payload(item.payload or {}),
         "allowed_actions": (["resume"] if item.status == ITEM_FAILED else
                             ["reconcile"] if item.status == ITEM_NEEDS_REVIEW else []) +
                            (["regenerate"] if item.status in {ITEM_CANDIDATE_READY, ITEM_FAILED, "CANCELLED"}
@@ -1131,6 +1147,7 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
             "reconciliation_state": a.reconciliation_state,
             "resubmitted": a.resubmitted,
             "submit_intent_at": a.submit_intent_at.isoformat() if a.submit_intent_at else None,
+            **image_style_payload(a.payload or {}),
         } for a in attempts],
     }
 

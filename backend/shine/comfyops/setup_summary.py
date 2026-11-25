@@ -42,7 +42,9 @@ RELAYVSR_CATALOG = deployment.RELAYVSR_CATALOG
 RELAYVSR_COMPONENTS = deployment.RELAYVSR_COMPONENTS
 #: capability -> catalog file stem (the name load_deployment_catalog accepts).
 #: The catalog's own ``catalog_id`` (shine-…) is an identity, not a file name.
-CATALOG_FILE_BY_CAPABILITY = {"image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG}
+CATALOG_FILE_BY_CAPABILITY = {
+    "image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG, "image_loras": deployment.IMAGE_LORA_CATALOG,
+}
 H3_CATALOG = "h3-ref2va-windows-x64"
 
 CAPABILITY_LABELS = {
@@ -51,9 +53,11 @@ CAPABILITY_LABELS = {
     "vlm": "画面审片",
     "asr": "语音核对",
     "relayvsr": "RelayVSR 2X 精修",
+    "image_loras": "生图风格 LoRA 包",
 }
 
-CAPABILITIES = ("h3", "image", "vlm", "asr", "relayvsr")
+CAPABILITIES = tuple(CAPABILITY_LABELS)
+OPTIONAL_CAPABILITIES = frozenset({"vlm", "asr", "relayvsr", "image_loras"})
 
 
 # --- installation selection -------------------------------------------------
@@ -441,6 +445,8 @@ def _component_ids_for(capability: str, catalog: dict) -> set[str]:
         return set(IMAGE_COMPONENTS)
     if capability == "relayvsr":
         return set(RELAYVSR_COMPONENTS)
+    if capability == "image_loras":
+        return set(_catalog_components(catalog)).intersection(deployment.IMAGE_LORA_COMPONENTS)
     if capability in REVIEW_COMPONENTS:
         return {REVIEW_COMPONENTS[capability]}
     from shine.comfyops.variant_readiness import required_h3_components
@@ -586,17 +592,18 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     if catalog is None:
         return {
             "key": capability, "label": CAPABILITY_LABELS[capability], "state": "UNKNOWN",
-            "optional": capability in ("vlm", "asr", "relayvsr"),
+            "optional": capability in OPTIONAL_CAPABILITIES,
             "facts": {}, "summary": "这个能力的资源清单读不出来。",
             "next_step": {"code": "CATALOG_UNAVAILABLE", "label": "检查安装清单",
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
             "missing_files": [], "advisories": [],
         }
-    served_root = _effective_models_root(settings, capability, installation)
+    served_root = None if capability == "image_loras" else _effective_models_root(settings, capability, installation)
     # 审片模型的消费根是隔离包目录（与 advisory_review_readiness 同一根），
     # 不是 ComfyUI 的 models 目录；presence 与 in_place 都跟着它走。
     package_root = (Path(settings.comfyops_dir) / "isolated-packages"
-                    if settings is not None and capability in REVIEW_COMPONENTS else None)
+                    if settings is not None and (capability in REVIEW_COMPONENTS or capability == "image_loras")
+                    else None)
     from shine.comfyops.adoption import runtime_root
     from shine.comfyops.existing_installation import declared_model_family_roots
 
@@ -630,6 +637,13 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             }
     unplaced = [item for item in presence["missing"]
                 if item["component_id"] not in evidence["in_place"]]
+    if capability == "image_loras":
+        # Sizes alone do not clear the optional pack. A stale or corrupt placed file
+        # remains a candidate for the installer to restore from verified bytes.
+        catalog_components = _catalog_components(catalog)
+        for cid in component_ids - evidence["in_place"]:
+            if not any(row["component_id"] == cid for row in unplaced):
+                unplaced.extend({**item, "component_id": cid} for item in catalog_components[cid]["files"])
     raw_missing = [item for item in unplaced
                    if item["component_id"] not in verified_now]
     missing = [item for item in raw_missing
@@ -656,6 +670,8 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "RENDER_VERIFIED": False,
         "PRODUCTION_READY": False,
     }
+    if capability == "image_loras":
+        facts["RESOURCE_REGISTERED"] = files_verified and component_ids <= evidence["in_place"]
     advisories: list[dict[str, Any]] = []
     try:
         if capability == "h3":
@@ -723,7 +739,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             facts["WORKFLOW_VALIDATED"] = available
             facts["PRODUCTION_READY"] = bool(facts["FILES_VERIFIED"] and available)
             advisories.extend(report.get("blockers") or [])
-        else:
+        elif capability in REVIEW_COMPONENTS:
             from shine.comfyops.deployment import advisory_review_readiness
 
             role = advisory_review_readiness(settings).get(capability.upper()) or {}
@@ -761,7 +777,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "state": state,
         # 审片是可选增强：没有它照样能真实出片，只是语义验收留给人工。
         # 机器级「下一步」不得把可选能力报成必做。
-        "optional": capability in ("vlm", "asr", "relayvsr"),
+        "optional": capability in OPTIONAL_CAPABILITIES,
         "facts": facts,
         "summary": summary,
         "next_step": next_step,
@@ -814,7 +830,9 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
         }
     reason = next((str(a.get("message") or a.get("detail")) for a in advisories
                    if a.get("message") or a.get("detail")), None)
-    if facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY") or facts.get("RUNTIME_SERVICES_VERIFIED"):
+    if capability == "image_loras" and facts.get("RESOURCE_REGISTERED"):
+        run = {"state": "READY", "label": "权重已核验，由素材生图加载"}
+    elif facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY") or facts.get("RUNTIME_SERVICES_VERIFIED"):
         run = {"state": "READY", "label": "已验证可运行"}
     elif facts.get("WORKFLOW_VALIDATED"):
         run = {"state": "UNVERIFIED", "label": "运行合同已核对，待真实试镜"}
@@ -870,6 +888,13 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
         return "FOUND", "已找到资源，尚未核验并登记。", {
             "code": "FILES_NOT_VERIFIED", "label": "核验已有文件",
             "reason": "文件已在本机，还没有逐字节核验。", "action": "RECONCILE",
+        }
+    if capability == "image_loras":
+        if facts.get("RESOURCE_REGISTERED"):
+            return "READY", "风格 LoRA 已核验，可在素材生图中选择。", None
+        return "VERIFIED", "风格 LoRA 已核验，待放入受管目录。", {
+            "code": "FILES_PENDING_PLACEMENT", "label": "整备风格 LoRA",
+            "reason": "复用已核验字节完成落位。", "action": "PREPARE_ENVIRONMENT",
         }
     if not (facts.get("INSTANCE_BOUND") or facts.get("RUNTIME_SERVICES_VERIFIED")):
         if capability == "image":
@@ -1118,8 +1143,7 @@ def _next_action(installation: dict, capabilities: dict[str, dict], *,
             "action": "CHOOSE_INSTALLATION",
             "options": installation.get("candidates") or [],
         }
-    ordered = [capabilities[key] for key in ("h3", "image", "vlm", "asr", "relayvsr")
-               if key in capabilities]
+    ordered = [capabilities[key] for key in CAPABILITIES if key in capabilities]
     trial = None
     for row in ordered:
         # 可选增强（审片）各有自己的卡片与下一步，但不占机器级「唯一下一步」：
@@ -1233,7 +1257,7 @@ def missing_files(db, settings, *, capabilities: list[str] | None = None) -> dic
     """Exactly the files that are absent, with the fixed source for each."""
     manual_root = Path(settings.comfyops_dir) / "manual-downloads"
     groups = []
-    for capability in capabilities or ["h3", "image", "vlm", "asr", "relayvsr"]:
+    for capability in capabilities or CAPABILITIES:
         catalog = _catalog_for(capability)
         if catalog is None:
             continue

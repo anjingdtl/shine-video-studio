@@ -1,8 +1,8 @@
 /**
  * ③ 镜头拆解与 ④ 素材准备里的三个「二级页面」。
  *
- * 编辑的都是**最终提交的内容**：镜头提示词会原样交给 H3，素材提示词会原样
- * 交给 Qwen-Image。MiniMax-H3 与 Qwen-Image-2.1 的官方规范在这里只做软检查，
+ * 镜头提示词原样交给 H3。素材提示词会在提交前加上本次所选的 LoRA 触发词。
+ * MiniMax-H3 与 Qwen-Image-2.1 的官方规范在这里只做软检查，
  * 列出建议而不阻止保存或冻结。
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -15,6 +15,7 @@ import {
   unfreezeShotPrompt, type MaterialPromptView, type RequestedAssetInput,
   type ShotPromptView, type ShotSubtitleLine, type SpecWarning,
 } from '../api';
+import type { ImageStyleInput } from '../shared/StyleLoraAssemblyPanel';
 
 function describeError(error: unknown): string {
   if (error instanceof ApiError) return error.message;
@@ -377,11 +378,12 @@ export function ShotSubtitleModal({ projectId, shot, initialLines, onClose, onCh
 
 /* ============================ ④ 素材提示词 ============================ */
 
-export function MaterialPromptModal({ projectId, requirement, onClose, onChanged }: {
+export function MaterialPromptModal({ projectId, requirement, imageStyle, onClose, onChanged }: {
   projectId: string;
   requirement: { requirement_id: string; name: string; family: string; description: string };
   onClose: () => void;
   onChanged?: (message: string) => void;
+  imageStyle?: ImageStyleInput;
 }) {
   const [view, setView] = useState<MaterialPromptView | null>(null);
   const [prompt, setPrompt] = useState('');
@@ -393,15 +395,15 @@ export function MaterialPromptModal({ projectId, requirement, onClose, onChanged
 
   const load = useCallback(async () => {
     try {
-      const body = await fetchMaterialPrompt(projectId, requirement.requirement_id);
+      const body = await fetchMaterialPrompt(projectId, requirement.requirement_id, imageStyle);
       setView(body);
-      setPrompt(body.prompt);
-      setNegative(body.negative_prompt);
+      setPrompt(body.editor_prompt ?? body.prompt);
+      setNegative(body.editor_negative_prompt ?? body.negative_prompt);
       setWarnings(body.warnings);
     } catch (error) {
       setProblem(describeError(error));
     }
-  }, [projectId, requirement.requirement_id]);
+  }, [projectId, requirement.requirement_id, imageStyle]);
 
   useEffect(() => { void load(); }, [load]);
 
@@ -464,8 +466,14 @@ export function MaterialPromptModal({ projectId, requirement, onClose, onChanged
       <AlertTriangle size={14} />
       <span>这一项还没有模型生成的外观描述。你可以直接写一条英文自然句提示词并冻结，下一次出图就会使用它。</span>
     </div>}
+    {view?.preview_uses_saved_brief && <p className="run-hint">当前按已存外观描述预览。重新制作时，出品人会根据最新剧本和风格重写描述。</p>}
+    {Boolean(view?.style_loras?.length) && <details className="editor-section" open>
+      <summary>所选 LoRA 的出图提示词预览</summary>
+      <pre className="image-prompt-preview">{view?.prompt}</pre>
+      {view?.negative_prompt && <><b>负向提示词</b><pre className="image-prompt-preview">{view.negative_prompt}</pre></>}
+    </details>}
     <label className="editor-field">
-      <span>正向提示词（Qwen-Image-2.1；建议英文自然句，按主体→环境→光线→材质→构图→风格）</span>
+      <span>正向提示词（先写主体和固定特征，再写构图、媒介和时代）</span>
       <textarea rows={12} value={prompt} spellCheck={false}
         onChange={(event) => setPrompt(event.target.value)}
         placeholder="A character reference photograph for a cinematic narrative production: ..." />

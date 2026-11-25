@@ -2760,6 +2760,8 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .style-lora-title{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-caption)}
 .style-lora-count{font-size:11px;color:var(--muted)}
 .style-lora-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.style-lora-actions [aria-pressed="true"]{border-color:var(--accent);color:var(--accent)}
+.image-prompt-preview { white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--fs-caption); }
 .style-lora-warn{padding:6px 9px;border-radius:6px;background:var(--warn-bg-3,#f6ead3);color:var(--warn-2,#8a6a2f);font-size:var(--fs-caption)}
 .style-lora-error{padding:6px 9px;border-radius:6px;background:var(--danger-bg,rgba(180,45,45,.12));color:var(--danger-deep,#a62b2b);font-size:var(--fs-caption);margin:0}
 .style-lora-notice{padding:6px 9px;border-radius:6px;background:var(--ok-bg-2,rgba(47,106,63,.12));color:var(--ok-ink,#2f6a3f);font-size:var(--fs-caption)}

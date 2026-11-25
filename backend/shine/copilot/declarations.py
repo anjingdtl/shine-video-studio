@@ -46,9 +46,9 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         feature_id="setup-verdict",
         module="comfyops",
         label="补齐真实制作环境",
-        description="复用统一安装器的持久准备任务，不会启动第二套安装器。",
+        description="复用统一安装器的持久准备任务。生图风格 LoRA 包按用户选择单独整备。",
         params=_sorted_params(
-            _P("capabilities", type="string_list", max_length=5),
+            _P("capabilities", type="string_list", max_length=6),
             _P("deep_scan", type="boolean", required=False),
             _P("installation_path", max_length=1024, required=False),
             _P("port", type="integer", required=False, max_length=65535),
@@ -75,7 +75,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         page="基础配置",
         examples=("把 H3 需要的模型文件补齐",),
         note="只补齐缺失文件；不改别人的 ComfyUI 配置。",
-        contract_revision=3,
+        contract_revision=4,
     ),
     CapabilityDeclaration(
         action_id="setup_reconcile",
@@ -930,11 +930,16 @@ FEATURES: tuple[FeatureDeclaration, ...] = (
     FeatureDeclaration(
         "qwen-image", "image", "Qwen-Image 出图能力", "IMPLEMENTED",
         "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；"
-        "一种能力缺模型不会阻断其它已核验能力。",
-        sources=("backend/shine/comfyops/setup_summary.py", "backend/shine/comfyops/capability.py", "backend/shine/materialprep"),
-        apis=("POST /api/v1/projects/{project_id}/candidate-assets/generate", "GET /api/v1/setup/summary"),
-        evidence=("backend/tests/test_image_managed_renderer.py", "backend/tests/test_material_image_jobs.py"),
-        tags=("出图", "Qwen", "t2i", "i2i", "inpaint", "多参考", "RGBA"),
+        "素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。"
+        "生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。"
+        "手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
+        sources=("backend/shine/comfyops/setup_summary.py", "backend/shine/comfyops/loras.py",
+                 "backend/shine/materialprep", "config/image_lora_presets.json"),
+        apis=("POST /api/v1/asset-center/image-jobs", "POST /api/v1/projects/{project_id}/material-preparation/generate",
+              "GET /api/v1/loras", "GET /api/v1/setup/summary"),
+        evidence=("backend/tests/test_image_managed_renderer.py", "backend/tests/test_material_image_jobs.py",
+                  "backend/tests/test_image_lora_assembly.py", "backend/tests/test_image_prompt_v6_alignment.py"),
+        tags=("出图", "Qwen", "t2i", "i2i", "inpaint", "多参考", "RGBA", "LoRA", "剧本对齐"),
     ),
     FeatureDeclaration(
         "minimax-h3", "h3", "MiniMax-H3 视频生成（Ref2VA）", "PARTIAL",

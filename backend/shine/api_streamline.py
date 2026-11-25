@@ -8,20 +8,24 @@ entrances unchanged.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import Field
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import Field, TypeAdapter, ValidationError
 from sqlalchemy import select
 
-from shine.api_common import DBSession
+from shine.api_common import DBSession, app_settings
+from shine.api_loras import resolve_image_style_request
 from shine.api_operator import Operator
+from shine.config import Settings
 from shine.director import streamline
+from shine.materialprep.contracts import ImageLoraSelection, ImageStyleRequest
 from shine.models import AgentArtifact, utcnow
 from shine.schemas import DEFAULT_MAX_SHOT_SECONDS, APIModel
 from shine.services import add_audit, require_project
 
 router = APIRouter(prefix="/api/v1", tags=["director streamline"])
+SettingsDep = Annotated[Settings, Depends(app_settings)]
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +587,7 @@ class MaterialDecisionBody(APIModel):
     asset_id: str | None = Field(default=None, max_length=36)
 
 
-class MaterialCommitBody(APIModel):
+class MaterialCommitBody(ImageStyleRequest):
     plan_revision_id: str = Field(min_length=1, max_length=36)
     expected_snapshot: str = Field(min_length=64, max_length=64)
     decisions: list[MaterialDecisionBody] = Field(min_length=1, max_length=200)
@@ -593,7 +597,7 @@ class MaterialCommitBody(APIModel):
 
 @router.post("/projects/{project_id}/director/materials/commit", status_code=201)
 def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: Operator,
-                              db: DBSession) -> dict:
+                              db: DBSession, settings: SettingsDep) -> dict:
     """Record the decisions and queue exactly the selected candidates, once.
 
     The request identity is derived from what the person confirmed (plan
@@ -610,6 +614,8 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
     from shine.materialprep.models import MaterialItem
     from shine.services import add_audit
 
+    image_style = (resolve_image_style_request(db, settings, body)
+                   if body.queue_generation and any(row.strategy == "generate" for row in body.decisions) else {})
     require_project(db, project_id)
     decision_rows = sorted(
         ({"requirement_id": row.requirement_id, "strategy": row.strategy,
@@ -621,6 +627,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         "plan_revision_id": body.plan_revision_id,
         "expected_snapshot": body.expected_snapshot,
         "decisions": decision_rows,
+        **image_style,
     })
     receipt = _material_receipt(db, project_id, request_key)
     if receipt is not None:
@@ -664,6 +671,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                 idempotency_key=request_key + ":" + graph_hash(sorted(pending_generate_ids)),
                 rights_id=None,
                 commit=False,
+                image_style=image_style,
             )
         result = {
             "confirmation": confirmation,
@@ -783,17 +791,20 @@ def _requirement_or_404(db, project_id: str, requirement_id: str):
     return row
 
 
-def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]:
+def _composed_requirement_prompt(db, requirement, *, image_style: dict | None = None) -> dict:
     """The prompt the renderer would use now, plus the reason it is unavailable.
 
     The preview and the render share one composer, so what the person edits is
     what the renderer sends.
     """
+    from shine.comfyops.loras import image_style_payload
     from shine.comfyops.models import PreProductionPlan
+    from shine.materialprep.brief import context_for_item
     from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
     from shine.materialprep.models import MaterialItem
     from shine.materialprep.prompt_source import (
         PromptSourceError,
+        apply_image_style,
         compose_requirement_prompt,
         frozen_prompt,
         project_visual_facts,
@@ -804,13 +815,17 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
         MaterialItem.project_id == requirement.project_id,
         MaterialItem.requirement_id == requirement.id,
     ).order_by(MaterialItem.created_at.desc())).first()
+    frozen = frozen_prompt(payload)
     brief_raw = ((item.payload or {}).get("brief") if item is not None else None) or payload.get("brief")
     plan = db.get(PreProductionPlan, requirement.plan_id) if requirement.plan_id else None
     direction = MaterialVisualDirection.model_validate(
         (plan.payload or {}).get("visual_direction") or {} if plan is not None else {})
-    facts = project_visual_facts(db, requirement.project_id)
+    facts = project_visual_facts(db, requirement.project_id,
+                                 document_id=(plan.payload or {}).get("document_id") if plan else None)
+    recorded_style = image_style_payload(item.payload or {}) if item else {}
+    style = image_style or {}
     try:
-        composed = compose_requirement_prompt(
+        args = dict(
             family=str(payload.get("family") or ""),
             brief=MaterialImageBrief.model_validate(brief_raw) if brief_raw else None,
             visual_direction=direction,
@@ -818,31 +833,54 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
             carrier=payload.get("carrier"),
             film_style=facts["film_style"],
             description=str(payload.get("description") or ""),
-            manual=frozen_prompt(payload),
+            manual=frozen,
             world_note=facts["world"],
             world_source=str(facts.get("world_source") or ""),
             style_snapshot=facts.get("snapshot"),
         )
+        base = compose_requirement_prompt(**args, image_style=style, include_triggers=False)
+        composed = apply_image_style(base, style)
     except PromptSourceError as exc:
         code = "MATERIAL_BRIEF_NOT_GENERATED" if exc.code == "MATERIAL_BRIEF_MISSING" else exc.code
-        return "", "", code
+        return {"prompt": "", "negative_prompt": "", "blocked": code}
     except ValueError:
-        return "", "", "MATERIAL_BRIEF_INVALID"
-    return composed.prompt, composed.negative_prompt, None
+        return {"prompt": "", "negative_prompt": "", "blocked": "MATERIAL_BRIEF_INVALID"}
+    # The next automatic producer answer can change when the active style or
+    # script basis changes. A frozen manual prompt has no such dependency.
+    draft = not frozen and bool(item and (
+        style != recorded_style or item.payload.get("brief_basis") != context_for_item(db, item)["brief_basis"]
+    ))
+    return {"prompt": composed.prompt, "negative_prompt": composed.negative_prompt, "blocked": None,
+            "prompt_sha256": composed.sha256, "preview_uses_saved_brief": draft,
+            **({"editor_prompt": base.prompt, "editor_negative_prompt": base.negative_prompt,
+                "style_preset": style.get("style_preset"),
+                "style_loras": style.get("style_loras", [])} if style else {})}
 
 
 @router.get("/projects/{project_id}/director/materials/requirements/{requirement_id}/prompt")
-def material_requirement_prompt(project_id: str, requirement_id: str, db: DBSession) -> dict:
+def material_requirement_prompt(project_id: str, requirement_id: str, db: DBSession, settings: SettingsDep,
+                                style_preset: Annotated[str | None, Query(max_length=64)] = None,
+                                style_loras: Annotated[str | None, Query(max_length=3000)] = None) -> dict:
     """The frozen prompt, or the prompt the current brief would compose."""
     from shine.materialprep import qwen_image_standard as standard
 
+    image_style = None
+    if style_preset is not None or style_loras is not None:
+        try:
+            selection = TypeAdapter(list[ImageLoraSelection]).validate_json(style_loras or "[]")
+            body = ImageStyleRequest(style_preset=style_preset, style_loras=selection)
+        except ValidationError as exc:
+            raise HTTPException(422, {
+                "code": "IMAGE_LORA_SELECTION_INVALID", "message": "生图 LoRA 选择格式不合法。",
+            }) from exc
+        image_style = resolve_image_style_request(db, settings, body)
     require_project(db, project_id)
     requirement = _requirement_or_404(db, project_id, requirement_id)
     payload = dict(requirement.payload or {})
     frozen = dict(payload.get("manual_prompt") or {})
-    prompt, negative, blocked = _composed_requirement_prompt(db, requirement)
+    preview = _composed_requirement_prompt(db, requirement, image_style=image_style)
+    prompt, negative = preview["prompt"], preview["negative_prompt"]
     if frozen.get("prompt"):
-        prompt, negative = frozen["prompt"], frozen.get("negative_prompt") or ""
         source = "frozen"
     elif prompt:
         source = "composed"
@@ -853,17 +891,16 @@ def material_requirement_prompt(project_id: str, requirement_id: str, db: DBSess
         "family": payload.get("family"),
         "entity_id": payload.get("entity_id"),
         "description": payload.get("description") or "",
-        "prompt": prompt,
-        "negative_prompt": negative,
+        **preview,
         "source": source,
-        "blocked": blocked,
         "frozen": ({
             "sha256": frozen.get("sha256"),
             "frozen_at": frozen.get("frozen_at"),
             "frozen_by": frozen.get("frozen_by"),
             "chars": len(frozen.get("prompt") or ""),
         } if frozen.get("prompt") else None),
-        "warnings": _qwen_prompt_warnings(prompt, negative) if prompt else [],
+        "warnings": _qwen_prompt_warnings(preview.get("editor_prompt", prompt),
+                                         preview.get("editor_negative_prompt", negative)) if prompt else [],
         "standard": {
             "standard_id": standard.STANDARD_ID,
             "standard_version": standard.STANDARD_VERSION,

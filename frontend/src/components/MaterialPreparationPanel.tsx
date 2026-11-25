@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CircleCheck, Loader2, Sparkles } from 'lucide-react';
 import { ImagePreview } from './ImagePreview';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
@@ -10,6 +10,8 @@ import { reportCopilotFault } from '../copilotContext';
 import { useStageRail, useRailPresent } from './StageRail';
 import type { RailAction } from './ActionRail';
 import type { LibraryAsset, LibraryVersion } from '../asset-center/api';
+import { imageStyleInput, StyleLoraAssemblyPanel, type StyleLoraConfig } from '../shared/StyleLoraAssemblyPanel';
+import { MaterialPromptModal } from './ShotEditors';
 
 /** Plan and batch states in the words of the page, not the words of the ledger. */
 const PLAN_STATUS_LABELS: Record<string, string> = {
@@ -231,6 +233,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [adoptionReport, setAdoptionReport] = useState('');
   const [evaluation, setEvaluation] = useState<MaterialEvaluation | null>(null);
   const [stepReport, setStepReport] = useState<{ confirm?: string; generate?: string }>({});
+  const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>([]);
+  const [stylePreset, setStylePreset] = useState<string | null>(null);
+  const imageStyle = useMemo(() => imageStyleInput(styleLoras, stylePreset), [styleLoras, stylePreset]);
+  const [promptTarget, setPromptTarget] = useState<MaterialRequirement | null>(null);
   /** The stage the person has open; null means "follow the server". */
   // Which stage fold the page opens with. A person's own toggles are native and
   // never written back here, so this only tracks "the server moved the journey".
@@ -612,6 +618,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       confirmation_hash: confirmed.confirmation_hash,
       requirement_ids: generatable,
       idempotency_key: `material-generate-${confirmed.confirmation_id.slice(0, 12)}`,
+      ...imageStyle,
       mode: 'real',
     });
     setStepReport((current) => ({
@@ -717,7 +724,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const regenerateRequirements = (requirementIds: string[]) => run(async () => {
     const row = await jsonPost<{ items?: string[]; run_id?: string }>(
       `/projects/${projectId}/material-preparation/regenerate-all`,
-      { idempotency_key: `material-regen-${Date.now()}`, requirement_ids: requirementIds },
+      { idempotency_key: `material-regen-${Date.now()}`, requirement_ids: requirementIds, ...imageStyle },
     );
     setOperationReport(`已为 ${row.items?.length ?? 0} 项需求排队重新出图；旧候选保留，可对比后再选用。`);
     setSelected({});
@@ -739,7 +746,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (action === 'regenerate') {
       if (!state?.confirmation || !item.requirement_id || !item.brief) throw new Error('尚无可修改的外观描述，请先恢复出品人步骤。');
       const appearance = briefEdits[item.item_id] ?? item.brief.appearance;
-      const requestBytes = new TextEncoder().encode(`${item.item_id}:${item.generation_revision}:${appearance}`);
+      const requestBytes = new TextEncoder().encode(JSON.stringify([item.item_id, item.generation_revision, appearance, imageStyle]));
       const requestHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', requestBytes)))
         .map((byte) => byte.toString(16).padStart(2, '0')).join('');
       await jsonPost(`/projects/${projectId}/material-preparation/regenerate`, {
@@ -748,6 +755,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         // The edited description IS the answer to the producer's questions;
         // re-sending them would only re-trigger the clarification refusal.
         brief: { ...item.brief, appearance, questions: [] }, seed: item.generation_revision + 1,
+        ...imageStyle,
       });
       setOperationReport('已创建新的生成版本；你对澄清问题的回答已并入描述，历史图片保留，需要重新选用。');
     } else {
@@ -1088,6 +1096,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               {requirements.map((requirement) => (
                 <li key={requirement.requirement_id}>
                   <b>{FAMILY_LABELS[requirement.family] ?? requirement.family} · {requirement.entity_id}</b>
+                  <button type="button" className="btn-text" onClick={() => setPromptTarget(requirement)}>查看出图提示词</button>
                   {requirement.family === 'character' && requirement.character_definition && (
                     <div className="material-character-definition">
                       <small className="material-canonical-name">
@@ -1225,6 +1234,11 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </label>
             ))}
           </fieldset>
+          <details className="advanced-fold">
+            <summary>生图风格 LoRA{styleLoras.length ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
+            <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}
+              loraSupported disabled={busy} stylePreset={stylePreset} onPresetChange={setStylePreset} />
+          </details>
           {stepReport.confirm && <p className="material-step-report">{stepReport.confirm}</p>}
           {stepReport.generate && <p className="material-step-report">{stepReport.generate}</p>}
           {hasContracts && <button type="button" className="btn-text" disabled={busy || !storyboardReady} onClick={deriveFromAnalysis}>
@@ -1400,6 +1414,10 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         onPick={(item) => { const req = centerPickerReq; setCenterPickerReq(null); void assignGlobalMaterial(req, item); }}
         onClose={() => setCenterPickerReq(null)}
       />}
+      {promptTarget && <MaterialPromptModal projectId={projectId} imageStyle={imageStyle}
+        requirement={{ requirement_id: promptTarget.requirement_id, name: promptTarget.entity_id,
+          family: promptTarget.family, description: promptTarget.description }}
+        onClose={() => setPromptTarget(null)} onChanged={(message) => { onMessage?.(message); void load(); }} />}
     </section>
   );
 }

@@ -59,6 +59,7 @@ def _catalogues() -> list[dict]:
         deployment.load_default_catalog,
         lambda: deployment.load_deployment_catalog(IMAGE_CATALOG_ID),
         lambda: deployment.load_deployment_catalog(RELAYVSR_CATALOG_ID),
+        lambda: deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG),
     ):
         try:
             catalog = loader()
@@ -475,6 +476,9 @@ def report(db) -> dict:
             required_h3_ids: set[str] | None = None
         elif catalog_id in _RELAYVSR_CATALOG_IDS:
             default_cap = "relayvsr"
+            required_h3_ids = None
+        elif catalog_id == f"shine-{deployment.IMAGE_LORA_CATALOG}":
+            default_cap = "image_loras"
             required_h3_ids = None
         else:
             default_cap = "h3"

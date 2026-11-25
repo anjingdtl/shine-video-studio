@@ -9,6 +9,20 @@ export type StyleLoraConfig = {
   trigger_word: string;
 };
 
+export type ImageStyleInput = {
+  style_preset?: string;
+  style_loras?: Array<Pick<StyleLoraConfig, 'lora_id' | 'sha256' | 'strength_model'>>;
+};
+
+export function imageStyleInput(value: StyleLoraConfig[], preset: string | null): ImageStyleInput {
+  return {
+    ...(preset ? { style_preset: preset } : {}),
+    ...(value.length ? { style_loras: value.map(({ lora_id, sha256, strength_model }) => ({
+      lora_id, sha256, strength_model,
+    })) } : {}),
+  };
+}
+
 export type StyleLoraAssetItem = {
   id: string;
   display_name: string;
@@ -18,6 +32,8 @@ export type StyleLoraAssetItem = {
   file_size_bytes: number;
   default_strength: number;
   trigger_word: string;
+  negative_trigger_word?: string;
+  trigger_position?: 'prefix' | 'suffix';
   origin: 'discovered' | 'imported' | string;
   comfy_lora_name: string | null;
   status: 'READY' | 'COMFY_UNREACHABLE' | 'NEEDS_COMFY_REFRESH' | 'MISSING_FILE' | 'HASH_MISMATCH' | string;
@@ -25,12 +41,18 @@ export type StyleLoraAssetItem = {
   updated_at: string;
 };
 
+type PresetSlot = { component_id: string; lora_id: string | null; strength_model: number; status: string };
+type ImagePreset = { id: string; display_name: string; loras: PresetSlot[]; optional_loras: PresetSlot[] };
+
 type Props = {
   value: StyleLoraConfig[];
   onChange: (next: StyleLoraConfig[]) => void;
   loraSupported: boolean;
   disabled?: boolean;
   onMessage?: (msg: string) => void;
+  baseModel?: 'minimax_h3' | 'qwen_image_21';
+  stylePreset?: string | null;
+  onPresetChange?: (id: string | null) => void;
 };
 
 const MAX_STYLE_LORAS = 3;
@@ -90,8 +112,13 @@ export function StyleLoraAssemblyPanel({
   loraSupported,
   disabled = false,
   onMessage,
+  baseModel = 'minimax_h3',
+  stylePreset,
+  onPresetChange,
 }: Props) {
+  const isImage = baseModel === 'qwen_image_21';
   const [items, setItems] = useState<StyleLoraAssetItem[]>([]);
+  const [presets, setPresets] = useState<ImagePreset[]>([]);
   const [comfyReachable, setComfyReachable] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
   const [busy, setBusy] = useState<boolean>(false);
@@ -103,6 +130,9 @@ export function StyleLoraAssemblyPanel({
   const [displayName, setDisplayName] = useState<string>('');
   const [defaultStrength, setDefaultStrength] = useState<string>('0.65');
   const [triggerWord, setTriggerWord] = useState<string>('');
+  const [negativeTrigger, setNegativeTrigger] = useState('');
+  const [triggerPosition, setTriggerPosition] = useState<'prefix' | 'suffix'>('suffix');
+  const [editingId, setEditingId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const reportMessage = useCallback(
@@ -117,7 +147,7 @@ export function StyleLoraAssemblyPanel({
     setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/v1/loras', {
+      const res = await fetch(isImage ? `/api/v1/loras?base_model=${baseModel}` : '/api/v1/loras', {
         headers: { 'x-shine-local-action': '1' },
       });
       const payload = await res.json().catch(() => ({}));
@@ -126,13 +156,14 @@ export function StyleLoraAssemblyPanel({
         return;
       }
       setItems(Array.isArray(payload.items) ? payload.items : []);
+      setPresets(Array.isArray(payload.presets) ? payload.presets : []);
       setComfyReachable(Boolean(payload.comfy_reachable));
     } catch (e) {
       setError(e instanceof Error ? e.message : '读取 LoRA 台账失败');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [baseModel, isImage]);
 
   useEffect(() => {
     void loadRegistry();
@@ -146,21 +177,25 @@ export function StyleLoraAssemblyPanel({
 
   const mountedIds = useMemo(() => new Set(value.map((entry) => entry.lora_id)), [value]);
   const controlsDisabled = disabled || !loraSupported;
+  const activePreset = presets.find((row) => row.id === stylePreset);
 
-  function mountItem(item: StyleLoraAssetItem) {
+  function slotFor(item: StyleLoraAssetItem, strength = item.default_strength): StyleLoraConfig {
+    return { lora_id: item.id, lora_name: item.comfy_lora_name || item.filename, sha256: item.sha256,
+      strength_model: clampStrength(strength), trigger_word: item.trigger_word || '' };
+  }
+
+  function selectPreset(preset: ImagePreset) {
+    if (controlsDisabled) return;
+    const slots = preset.loras.map((row) => ({ row, item: byId.get(row.lora_id ?? '') }));
+    if (slots.some(({ item }) => !item || item.status === 'HASH_MISMATCH' || item.status === 'MISSING_FILE')) return;
+    onChange(slots.map(({ row, item }) => slotFor(item!, row.strength_model)));
+    onPresetChange?.(preset.id);
+  }
+
+  function mountItem(item: StyleLoraAssetItem, strength = item.default_strength) {
     if (controlsDisabled) return;
     if (mountedIds.has(item.id) || value.length >= MAX_STYLE_LORAS) return;
-    const loraName = item.comfy_lora_name || item.filename;
-    onChange([
-      ...value,
-      {
-        lora_id: item.id,
-        lora_name: loraName,
-        sha256: item.sha256,
-        strength_model: clampStrength(item.default_strength),
-        trigger_word: item.trigger_word || '',
-      },
-    ]);
+    onChange([...value, slotFor(item, strength)]);
   }
 
   function updateEntry(index: number, patch: Partial<StyleLoraConfig>) {
@@ -173,6 +208,7 @@ export function StyleLoraAssemblyPanel({
   function removeEntry(index: number) {
     if (disabled) return;
     onChange(value.filter((_, i) => i !== index));
+    if (value.length === 1) onPresetChange?.(null);
   }
 
   function moveEntry(index: number, delta: -1 | 1) {
@@ -191,7 +227,7 @@ export function StyleLoraAssemblyPanel({
       setError('请先填写本机 .safetensors 文件路径或选择文件上传。');
       return;
     }
-    const triggerErr = validateTriggerClient(triggerWord);
+    const triggerErr = isImage ? null : validateTriggerClient(triggerWord);
     if (triggerErr) {
       setError(triggerErr);
       return;
@@ -211,6 +247,8 @@ export function StyleLoraAssemblyPanel({
           display_name: displayName.trim() || undefined,
           default_strength: clampStrength(Number(defaultStrength)),
           trigger_word: triggerWord.trim(),
+          ...(isImage ? { base_model: baseModel, negative_trigger_word: negativeTrigger,
+            trigger_position: triggerPosition } : {}),
         }),
       });
       const payload = await res.json().catch(() => ({}));
@@ -220,7 +258,7 @@ export function StyleLoraAssemblyPanel({
       }
       setLocalPath('');
       setDisplayName('');
-      setTriggerWord('');
+      setTriggerWord(''); setNegativeTrigger(''); setTriggerPosition('suffix');
       setDefaultStrength('0.65');
       setShowImport(false);
       reportMessage(payload.deduplicated ? '已命中同哈希 LoRA，直接复用现有资产。' : '风格 LoRA 已导入受管目录。');
@@ -233,7 +271,7 @@ export function StyleLoraAssemblyPanel({
   }
 
   async function handleUploadFile(file: File) {
-    const triggerErr = validateTriggerClient(triggerWord);
+    const triggerErr = isImage ? null : validateTriggerClient(triggerWord);
     if (triggerErr) {
       setError(triggerErr);
       return;
@@ -247,6 +285,11 @@ export function StyleLoraAssemblyPanel({
       if (displayName.trim()) form.append('display_name', displayName.trim());
       form.append('default_strength', String(clampStrength(Number(defaultStrength))));
       if (triggerWord.trim()) form.append('trigger_word', triggerWord.trim());
+      if (isImage) {
+        form.append('base_model', baseModel);
+        form.append('negative_trigger_word', negativeTrigger);
+        form.append('trigger_position', triggerPosition);
+      }
       const res = await fetch('/api/v1/loras/import', {
         method: 'POST',
         headers: { 'x-shine-local-action': '1' },
@@ -258,7 +301,7 @@ export function StyleLoraAssemblyPanel({
         return;
       }
       setDisplayName('');
-      setTriggerWord('');
+      setTriggerWord(''); setNegativeTrigger(''); setTriggerPosition('suffix');
       setDefaultStrength('0.65');
       setShowImport(false);
       reportMessage(payload.deduplicated ? '已命中同哈希 LoRA，直接复用现有资产。' : '风格 LoRA 已上传并纳入台账。');
@@ -287,11 +330,37 @@ export function StyleLoraAssemblyPanel({
       }
       if (mountedIds.has(item.id)) {
         onChange(value.filter((entry) => entry.lora_id !== item.id));
+        if (value.length === 1) onPresetChange?.(null);
       }
       reportMessage(`已删除 LoRA「${item.display_name}」。`);
       await loadRegistry();
     } catch (e) {
       setError(e instanceof Error ? e.message : '删除 LoRA 失败');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveImageMetadata() {
+    if (!editingId) return;
+    setBusy(true); setError('');
+    try {
+      const res = await fetch(`/api/v1/loras/${encodeURIComponent(editingId)}`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json', 'x-shine-local-action': '1' },
+        body: JSON.stringify({ trigger_word: triggerWord, negative_trigger_word: negativeTrigger,
+          trigger_position: triggerPosition }),
+      });
+      if (!res.ok) {
+        setError(parseApiError(await res.json().catch(() => ({})), '保存触发词失败'));
+        return;
+      }
+      setEditingId(null); setTriggerWord(''); setNegativeTrigger(''); setTriggerPosition('suffix');
+      if (mountedIds.has(editingId)) onChange(value.map((entry) => entry.lora_id === editingId
+        ? { ...entry, trigger_word: triggerWord } : entry));
+      reportMessage('已更新触发词，新任务会使用这份设置。');
+      await loadRegistry();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '保存触发词失败');
     } finally {
       setBusy(false);
     }
@@ -321,7 +390,7 @@ export function StyleLoraAssemblyPanel({
             type="button"
             className="strategy-option"
             disabled={disabled || busy}
-            onClick={() => setShowImport((prev) => !prev)}
+            onClick={() => { setEditingId(null); setShowImport((prev) => !prev); }}
           >
             <Upload size={12} aria-hidden="true" />
             {showImport ? '收起导入' : '导入 LoRA'}
@@ -331,7 +400,7 @@ export function StyleLoraAssemblyPanel({
               type="button"
               className="strategy-option"
               disabled={disabled}
-              onClick={() => onChange([])}
+              onClick={() => { onChange([]); onPresetChange?.(null); }}
             >
               清空已选
             </button>
@@ -339,12 +408,30 @@ export function StyleLoraAssemblyPanel({
         </div>
       </div>
 
+      {isImage && presets.length > 0 && <div className="style-lora-actions" role="group" aria-label="内置生图风格配方">
+        {presets.map((preset) => {
+          const missing = preset.loras.some((row) => !row.lora_id || ['MISSING_FILE', 'HASH_MISMATCH'].includes(row.status));
+          return <button key={preset.id} type="button" className="strategy-option" aria-pressed={preset.id === stylePreset}
+            disabled={controlsDisabled || missing} title={missing ? '在制作环境整备生图风格 LoRA 包' : undefined}
+            onClick={() => selectPreset(preset)}>{preset.display_name}</button>;
+        })}
+        {activePreset?.optional_loras.map((row) => {
+          const item = byId.get(row.lora_id ?? '');
+          return <button key={row.component_id} type="button" className="strategy-option"
+            disabled={controlsDisabled || !item || value.length >= MAX_STYLE_LORAS || mountedIds.has(item.id)
+              || ['MISSING_FILE', 'HASH_MISMATCH'].includes(item.status)}
+            onClick={() => { if (item) mountItem(item, row.strength_model); }}>
+            <Plus size={12} />{item?.display_name ?? '多视角 LoRA 待整备'}
+          </button>;
+        })}
+      </div>}
+
       <p className="strategy-note">
         可选挂载 0–{MAX_STYLE_LORAS} 个风格 LoRA；未选择时不修改工作流且不引入额外检查。
         {comfyReachable ? ' ComfyUI 实时列表已连接。' : ' 当前按本地受管路径登记。'}
       </p>
 
-      {!loraSupported && (
+      {!isImage && !loraSupported && (
         <div className="style-lora-warn" role="status">
           当前所选量化变体暂不支持风格 LoRA（V1 仅 INT8 主线可挂载）。
           {value.length > 0 && ' 请切换到 INT8 变体，或点击「清空已选」。'}
@@ -368,7 +455,7 @@ export function StyleLoraAssemblyPanel({
             const live = byId.get(entry.lora_id);
             const statusKey = live?.status ?? 'COMFY_UNREACHABLE';
             const statusMeta = STATUS_LABELS[statusKey] ?? { label: statusKey, tone: 'neutral' };
-            const triggerErr = validateTriggerClient(entry.trigger_word);
+            const triggerErr = isImage ? null : validateTriggerClient(entry.trigger_word);
             return (
               <div key={`${entry.lora_id}-${idx}`} className="style-lora-slot">
                 <div className="style-lora-slot-head">
@@ -436,7 +523,10 @@ export function StyleLoraAssemblyPanel({
                       }
                     />
                   </label>
-                  <label className="style-lora-field style-lora-trigger-field">
+                  {isImage ? <span className="style-lora-field">
+                    {live?.trigger_word ? `自动${live.trigger_position === 'prefix' ? '前置' : '注入'} ${live.trigger_word}` : '无专用触发词'}
+                    {live?.negative_trigger_word ? ` · 负向 ${live.negative_trigger_word}` : ''}
+                  </span> : <label className="style-lora-field style-lora-trigger-field">
                     <span>触发词（可选 ASCII）</span>
                     <input
                       type="text"
@@ -446,7 +536,7 @@ export function StyleLoraAssemblyPanel({
                       value={entry.trigger_word}
                       onChange={(e) => updateEntry(idx, { trigger_word: e.target.value })}
                     />
-                  </label>
+                  </label>}
                 </div>
                 {triggerErr && (
                   <p className="style-lora-error">
@@ -459,9 +549,9 @@ export function StyleLoraAssemblyPanel({
         </div>
       )}
 
-      {showImport && (
+      {!disabled && (showImport || editingId) && (
         <div className="style-lora-import">
-          <div className="style-lora-import-row">
+          {!editingId && <div className="style-lora-import-row">
             <input
               type="text"
               placeholder="输入本机 .safetensors 绝对路径（复制并哈希去重入库）"
@@ -492,9 +582,9 @@ export function StyleLoraAssemblyPanel({
                 }}
               />
             </label>
-          </div>
+          </div>}
           <div className="style-lora-import-row">
-            <input
+            {!editingId && <><input
               type="text"
               placeholder="显示名称（留空则用文件名）"
               disabled={busy}
@@ -510,15 +600,27 @@ export function StyleLoraAssemblyPanel({
               disabled={busy}
               value={defaultStrength}
               onChange={(e) => setDefaultStrength(e.target.value)}
-            />
+            /></>}
             <input
               type="text"
-              maxLength={TRIGGER_MAX_LEN}
-              placeholder="默认触发词（可选 ASCII）"
+              maxLength={isImage ? 500 : TRIGGER_MAX_LEN}
+              placeholder={isImage ? '默认正向触发词（可选）' : '默认触发词（可选 ASCII）'}
               disabled={busy}
               value={triggerWord}
               onChange={(e) => setTriggerWord(e.target.value)}
             />
+            {isImage && <>
+              <input aria-label="负向过滤词" maxLength={500} placeholder="默认负向过滤词（可选）" value={negativeTrigger}
+                disabled={busy} onChange={(event) => setNegativeTrigger(event.target.value)} />
+              <select aria-label="触发词位置" value={triggerPosition} disabled={busy}
+                onChange={(event) => setTriggerPosition(event.target.value === 'prefix' ? 'prefix' : 'suffix')}>
+                <option value="suffix">后置触发词</option><option value="prefix">前置触发词</option>
+              </select>
+              {editingId && <button type="button" className="strategy-option" disabled={busy}
+                onClick={() => void saveImageMetadata()}>保存触发词</button>}
+              {editingId && <button type="button" className="strategy-option" disabled={busy}
+                onClick={() => { setEditingId(null); setTriggerWord(''); setNegativeTrigger(''); setTriggerPosition('suffix'); }}>取消</button>}
+            </>}
           </div>
         </div>
       )}
@@ -555,6 +657,11 @@ export function StyleLoraAssemblyPanel({
                   </span>
                 </div>
                 <div className="style-lora-lib-actions">
+                  {isImage && <button type="button" className="strategy-option" disabled={busy || disabled}
+                    aria-label={`编辑 ${item.display_name} 触发词`} onClick={() => {
+                      setShowImport(false); setEditingId(item.id); setTriggerWord(item.trigger_word);
+                      setNegativeTrigger(item.negative_trigger_word ?? ''); setTriggerPosition(item.trigger_position ?? 'suffix');
+                    }}>编辑触发词</button>}
                   <button
                     type="button"
                     className="strategy-option"

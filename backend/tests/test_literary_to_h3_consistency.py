@@ -163,7 +163,8 @@ def test_scene_and_prop_prompts_never_carry_human_performers_or_outline_plot():
         style_snapshot={"film_type": "live_action"},
     )
     assert "real human performers" in char_prompt.prompt.lower()
-    assert outline_summary in char_prompt.prompt
+    assert char_prompt.prompt.startswith(char_brief.appearance)
+    assert outline_summary not in char_prompt.prompt
 
 
 @pytest.mark.unit

@@ -543,3 +543,12 @@ prompt、UI 或素材；许可证与使用领域约束未因此变化。
   最后的启动路径调整通过了 49 项定向用例，音轨调整通过了 `test_relay_upscale_stage.py`
   的 8 项用例。前端 `npx vitest run --no-file-parallelism` 通过 473 项，
   `npm.cmd run build` 和涉及 Python 文件的 Ruff 检查通过。
+## 2026-11-25 生图风格 LoRA V1
+
+Shine 复用 ComfyUI 的 `LoraLoaderModelOnly` 节点和 `extra_model_paths` 配置，使用项目现有安装器落位。4 个 Hugging Face LFS 文件的公开 revision、字节数和 SHA-256 已逐项核对，固定值维护在 `config/deployment/qwen-image-loras-windows-x64.json`。
+
+- Fix v2.0 的钉定模型卡未声明许可，清单记录为 `upstream-unspecified`，只用于本机研究验证。[Fix 作者模型卡](https://huggingface.co/e-n-v-y/Qwen-Image-2.1-Fix-v2.0/blob/045f682888e1f32977d1d7358e5022228fbac4f8/README.md)
+- Natural Exposure 声明 `qwen-research`，模型卡给出自然曝光触发词。[Natural Exposure 作者模型卡](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA/blob/382d066d079854a86c9513f3c5a4026ada21ddbe/README.md)
+- Anything2Real 和 Multiple-Angles 的钉定模型卡声明 Apache 2.0。Multiple-Angles 使用 `<mva>` 开头的相机指令。[Anything2Real 作者模型库](https://huggingface.co/WarmBloodAban/Qwen-Image-2.1-LoRAs/tree/c4ab5473bfdf585fc19cfd1e280f79d2b0c79947)、[Multiple-Angles 作者模型卡](https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/blob/175b29b6eb41307473eebc363fca8fc198216b60/README.md)
+
+图谱复用既有 Qwen-Image-2.1 适配器和 ComfyUI 公开节点合同。本机 ComfyUI revision 为 `b0b743566f65daafc423b4fea8a2fbda94b3384a`。包含 LoRA 的图谱在 `QwenImage21Cache` 前串联模型补丁。Shine 仓库交付部署清单和配方。RTX 5080 的节点、推理和视觉结果见本轮验收记录。[ComfyUI 节点实现](https://github.com/Comfy-Org/ComfyUI/blob/b0b743566f65daafc423b4fea8a2fbda94b3384a/nodes.py)

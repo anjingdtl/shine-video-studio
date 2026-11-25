@@ -7,8 +7,8 @@ import { api, json, type SetupVerdict } from '../api';
 import type { VariantAvailability } from '../api';
 import { GuideTip } from './GuideTip';
 import { ResourceScanCard } from './ResourceScanCard';
-import { SetupEnvironmentStatus } from './SetupEnvironmentStatus';
-import type { CapabilityKey as EnvironmentKey, SetupSummary } from './SetupEnvironmentStatus';
+import { CAPABILITY_ORDER, SetupEnvironmentStatus } from './SetupEnvironmentStatus';
+import type { CapabilityKey, SetupSummary } from './SetupEnvironmentStatus';
 
 /**
  * 「制作环境」的唯一入口：一次检测，一处确认，一条自动链。
@@ -107,11 +107,10 @@ const TIER_LABELS: Record<string, string> = {
   standard: '标准档', lowend_12gb: '12GB 级档位', below_lowend: '低于 12GB 级档位', unknown: '显卡档位未知',
 };
 
-const CAP_LABELS: Record<'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr', string> = {
+const CAP_LABELS: Record<CapabilityKey, string> = {
   h3: 'H3 视频生成', image: '素材出图', vlm: '画面审片', asr: '语音核对', relayvsr: 'RelayVSR 2X 精修',
+  image_loras: '生图风格 LoRA 包',
 };
-
-type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr';
 
 /**
  * What one capability ended up as.
@@ -148,11 +147,11 @@ type DetectionSnapshot = {
   scan: ExistingScan | null;
   variants: VariantRecommendation; image: ImageReadiness | null;
   adoptedRoot: string | null;
-  variantId: string; caps: { h3: boolean; image: boolean; vlm: boolean; asr: boolean; relayvsr: boolean };
+  variantId: string; caps: Record<CapabilityKey, boolean>;
   variantChosenByUser?: boolean;
 };
 
-const EMPTY_CAPS = { h3: false, image: false, vlm: false, asr: false, relayvsr: false };
+const EMPTY_CAPS = { h3: false, image: false, vlm: false, asr: false, relayvsr: false, image_loras: false };
 
 function readSnapshot(): DetectionSnapshot | null {
   try {
@@ -222,7 +221,7 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const [caps, setCaps] = useState(EMPTY_CAPS);
   const [detectedAt, setDetectedAt] = useState(restored?.detectedAt ?? '');
   /** 用户确认「重复下载」的能力：已有权重也重新下载。 */
-  const [force, setForce] = useState({ h3: false, image: false, vlm: false, asr: false, relayvsr: false });
+  const [force, setForce] = useState(EMPTY_CAPS);
   const [redownloadPrompt, setRedownloadPrompt] = useState<null | CapabilityKey>(null);
   const [running, setRunning] = useState<{ label: string; note: string } | null>(null);
   /** 提交整备后只刷新整备投影，不重跑整页检测。 */
@@ -363,6 +362,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   const asrWant = caps.asr && (!asrReady || force.asr);
   const relayvsrPresent = !!summary?.capabilities?.relayvsr?.facts?.FILES_FOUND;
   const relayvsrWant = caps.relayvsr && (!relayvsrPresent || force.relayvsr);
+  const imageLoraPack = summary?.capabilities?.image_loras;
+  const imageLorasWant = caps.image_loras && !imageLoraPack?.facts?.RESOURCE_REGISTERED;
+  const imageLoraBytes = imageLoraPack?.missing_bytes ?? null;
 
   const h3Bytes = selectedVariant?.total_bytes ?? 0;
   // 下载量读后端同一结论里的「实际缺项」字节；只有用户明确重复下载时才按整档
@@ -377,7 +379,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     + (imageWant ? capDownloadBytes('image', imageBytes) ?? 0 : 0)
     + (vlmWant ? capDownloadBytes('vlm', REVIEW_BYTES.vlm) ?? 0 : 0)
     + (asrWant ? capDownloadBytes('asr', REVIEW_BYTES.asr) ?? 0 : 0)
-    + (relayvsrWant ? capDownloadBytes('relayvsr', RELAYVSR_BYTES) ?? 0 : 0);
+    + (relayvsrWant ? capDownloadBytes('relayvsr', RELAYVSR_BYTES) ?? 0 : 0)
+    + (imageLorasWant ? imageLoraBytes ?? 0 : 0);
 
   /** 这次真正要准备的能力，按各自的分项体积列出（未知体积为 null，显示 —）。 */
   const capabilityRows = useMemo(() => {
@@ -387,8 +390,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     if (vlmWant) rows.push({ key: 'vlm', label: '画面审片权重', bytes: capDownloadBytes('vlm', REVIEW_BYTES.vlm) });
     if (asrWant) rows.push({ key: 'asr', label: '语音核对权重', bytes: capDownloadBytes('asr', REVIEW_BYTES.asr) });
     if (relayvsrWant) rows.push({ key: 'relayvsr', label: 'RelayVSR 2X 精修权重', bytes: capDownloadBytes('relayvsr', RELAYVSR_BYTES) });
+    if (imageLorasWant) rows.push({ key: 'image_loras', label: CAP_LABELS.image_loras, bytes: imageLoraBytes });
     return rows;
-  }, [h3Want, imageWant, vlmWant, asrWant, relayvsrWant, h3Bytes, imageBytes, selectedVariant, summary, force]);
+  }, [h3Want, imageWant, vlmWant, asrWant, relayvsrWant, imageLorasWant, imageLoraBytes, h3Bytes, imageBytes, selectedVariant, summary, force]);
 
   /**
    * The button says what will actually happen.
@@ -398,14 +402,16 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
    * had never asked for.  The label now names the capabilities that are
    * really selected.
    */
-  const anyCapSelected = caps.h3 || caps.image || caps.vlm || caps.asr || caps.relayvsr;
+  const selectedCaps = CAPABILITY_ORDER.filter((key) => caps[key]);
+  const anyCapSelected = selectedCaps.length > 0;
+  const onlyImageLoras = selectedCaps.length === 1 && caps.image_loras;
 
   const actionLabel = useMemo(() => {
     if (!anyCapSelected) {
       return pendingRepair ? '自动补装缺失基础工具' : '勾选上方能力后开始准备';
     }
     if (!capabilityRows.length) {
-      if (caps.relayvsr) return '确认整备所选能力';
+      if (caps.relayvsr || caps.image_loras) return '确认整备所选能力';
       return pendingRepair ? '自动补装缺失基础工具' : '确认并完成配置（不下载）';
     }
     if (capabilityRows.length > 1) return '确认整备所选能力';
@@ -414,9 +420,10 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
     if (row.key === 'vlm') return `确认下载画面审片权重（约 ${gib(row.bytes)}）`;
     if (row.key === 'asr') return `确认下载语音核对权重（约 ${gib(row.bytes)}）`;
     if (row.key === 'relayvsr') return `确认准备 RelayVSR 精修权重（约 ${gib(row.bytes)}）`;
+    if (row.key === 'image_loras') return '确认整备所选能力';
     if (selectedVariant && !selectedVariant.auto_download_allowed) return '确认准备 H3 候选模型';
     return `确认准备 H3 权重（约 ${gib(row.bytes)}）`;
-  }, [anyCapSelected, capabilityRows, caps.relayvsr, pendingRepair, selectedVariant]);
+  }, [anyCapSelected, capabilityRows, caps.relayvsr, caps.image_loras, pendingRepair, selectedVariant]);
 
   // The H3 scheme is a condition of the H3 capability alone: preparing only
   // image or review weights must not wait for an H3 variant that was never
@@ -425,9 +432,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
   // R5 B6：summary 未到达时不做任何「缺件/下载」断言，也不开放提交——
   // 资格与缺件事实都来自服务端同一份投影，读不到就是未知；能力默认全空，
   // 至少由用户勾选一项（或存在可自动补装的基础工具）才开放提交。
-  const canPrepare = !envBlocked && !running && !!storage && !storage.requires_selection
+  const canPrepare = (!envBlocked || onlyImageLoras) && !running && !!storage && !storage.requires_selection
     && !!summary && (anyCapSelected || pendingRepair)
-    && (!caps.h3 || !!selectedVariant) && !summary?.installation?.choice_required;
+    && (!caps.h3 || !!selectedVariant) && (onlyImageLoras || !summary?.installation?.choice_required);
 
   /**
    * 一次授权 → 后台持续推进。
@@ -437,9 +444,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
    * 串行驱动任何一步,所以关掉页面、切走、Worker 重启都不会中断;重复
    * 点击同一意图返回同一个任务。
    */
-  async function prepare(requested?: EnvironmentKey[]) {
+  async function prepare(requested?: CapabilityKey[]) {
     const wants = (key: CapabilityKey) => (requested ? requested.includes(key) : caps[key]);
-    const capabilities = (['h3', 'image', 'vlm', 'asr', 'relayvsr'] as CapabilityKey[]).filter(wants);
+    const capabilities = CAPABILITY_ORDER.filter(wants);
     if (capabilities.length === 0) {
       setProblem('请至少勾选一项要准备的能力。');
       return;
@@ -459,7 +466,8 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
           port: installation?.port ?? env?.port?.selected ?? env?.port?.port ?? undefined,
           variant_id: capabilities.includes('h3') ? selectedVariant?.variant_id : undefined,
           verify_runtime: true,
-          deep_scan: capabilities.length !== 1 || capabilities[0] !== 'relayvsr' || !relayvsrPresent,
+          deep_scan: capabilities.length !== 1
+            || (capabilities[0] !== 'image_loras' && (capabilities[0] !== 'relayvsr' || !relayvsrPresent)),
         }));
       setResult(capabilities.length === 1 && capabilities[0] === 'relayvsr'
         ? '已交给后台整备 RelayVSR。系统会复用已下载的权重、补齐缺少的核心组件并核对节点。'
@@ -638,6 +646,12 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
                     ? '扫描未完成，待核验'
                     : summary ? `需要下载 ${gib(RELAYVSR_BYTES)}` : '正在读取本机文件状态'}</em></span>
         </label>
+        <label className="setup-cap">
+          <input type="checkbox" checked={caps.image_loras} disabled={!!running}
+            onChange={(event) => toggleCap('image_loras', false, event.target.checked)} />
+          <Sparkles size={14} /><span><b>生图风格 LoRA 包（写实 / 奇幻 / 赛博，约 740 MiB）</b>
+            <em>{imageLoraPack?.summary ?? '正在读取本机文件状态'}</em></span>
+        </label>
       </div>
 
       {redownloadPrompt && <div className="setup-confirm" role="group" aria-label="重复下载确认">
@@ -688,7 +702,9 @@ export function SetupCenter({ projectId, refreshEpoch = 0, onPrepSubmitted }: Pr
             {capabilityRows.map((row) => `${row.label} ${gib(row.bytes)}`).join(' · ')}
           </span>}
           <span>目录 {storage?.root} · 不会改动你原有的 ComfyUI，也不会删除已核验的模型</span>
-          <span>{caps.relayvsr
+          <span>{onlyImageLoras
+            ? '复用或下载所缺权重，核验后加入素材生图的 LoRA 列表。'
+            : caps.relayvsr
             ? '复用已核验的权重，按需补齐 RelayVSR 核心组件并核对运行合同。'
             : '核验已有资源或补齐缺件 → 生成受管配置 → 核对 Ref2VA 运行合同 → 激活'}</span>
           {selectedVariant && !selectedVariant.auto_download_allowed && selectedVariant.acceptance_status !== 'BLOCKED' && (

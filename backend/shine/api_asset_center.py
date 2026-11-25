@@ -13,6 +13,7 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from shine.api_common import DBSession, app_settings
+from shine.api_loras import resolve_image_style_request
 from shine.api_operator import Operator
 from shine.asset_center import service
 from shine.asset_center.contracts import (
@@ -44,6 +45,7 @@ from shine.comfyops.assets import require_rights as require_project_rights
 from shine.comfyops.models import RightsRecord
 from shine.config import Settings
 from shine.materialprep import runtime as image_runtime
+from shine.materialprep.contracts import ImageStyleRequest
 from shine.media.artifacts import safe_asset_path
 from shine.models import Asset, Project, new_id, utcnow
 from shine.platform_projects import WORKFLOW_MANUAL4, get_workflow_kind_if_known
@@ -210,11 +212,12 @@ class ImageReference(Strict):
     role: str = Field(min_length=1, max_length=32)
 
 
-class ImageJobRequest(Strict):
+class ImageJobRequest(ImageStyleRequest):
     idempotency_key: str = Field(min_length=8, max_length=80)
     title: str = Field(default="", max_length=200)
     mode: Literal["T2I", "I2I", "INPAINT", "MULTIREF", "WARDROBE", "RGBA"]
     prompt: str = Field(default="", max_length=8000)
+    negative_prompt: str = Field(default="", max_length=1200)
     references: list[ImageReference] = Field(default_factory=list, max_length=10)
     mask_media_id: str | None = None
     output: dict[str, Any] = Field(default_factory=lambda: {"width": 1024, "height": 1024})
@@ -998,15 +1001,29 @@ def asset_visual_facts(project_id: Annotated[str, Query()], db: DBSession):
 
 @router.post("/asset-center/image-jobs", status_code=202)
 def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSession):
-    payload = body.model_dump(mode="json")
+    return _queue_image_jobs(body, settings, db)
+
+
+def _queue_image_jobs(body: ImageJobRequest, settings, db, *, prior_payload: dict | None = None):
+    payload = body.model_dump(mode="json", exclude={"style_preset", "style_loras", "negative_prompt"})
     if body.category not in service.ASSET_CATEGORIES:
         raise HTTPException(422, {"code": "LIBRARY_CATEGORY_INVALID", "message": "素材分类无效"})
+    if body.mode == "RGBA" and body.mask_media_id and body.has_image_style:
+        raise HTTPException(422, {"code": "IMAGE_LORA_UNSUPPORTED_FOR_LOCAL_OPERATION",
+                                  "message": "手动画布抠图直接处理像素，不能挂载生图 LoRA。"})
+    image_style = resolve_image_style_request(db, settings, body, prior_payload=prior_payload)
+    payload.update(image_style)
     # A project-scoped generation inherits the frozen film medium and the story
     # world / era through the one composer, so the asset centre cannot render a
     # different film (photoreal / modern) than the project the user selected.
     facts_project = body.project_id or (body.requirement_context or {}).get("project_id")
     _require_director7_project_if_present(db, facts_project)
-    if facts_project and body.prompt.strip() and (
+    if prior_payload is not None:
+        payload.update({key: prior_payload[key] for key in (
+            "user_prompt", "prompt", "negative_prompt", "prompt_template_version", "prompt_evidence",
+            "project_visual_facts",
+        ) if key in prior_payload})
+    elif facts_project and body.prompt.strip() and (
         body.mode == "T2I" or (body.mode == "RGBA" and not body.references)
     ):
         from shine.materialprep.prompt_source import (
@@ -1019,7 +1036,8 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
         family = "scene" if body.category == "scene" else "prop" if body.category == "prop" else "character"
         try:
             composed = compose_user_image_prompt(
-                user_prompt=body.prompt, family=family, facts=facts)
+                user_prompt=body.prompt, family=family, facts=facts, image_style=image_style,
+                negative_prompt=body.negative_prompt)
         except PromptSourceError as exc:
             raise HTTPException(
                 422, {"code": exc.code, "message": "素材提示词无法合成", **exc.details}) from exc
@@ -1032,6 +1050,14 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
             "film_style": facts["film_style"], "film_type": facts["film_type"],
             "world": facts["world"], "style_version_id": facts["style_version_id"],
         }
+    elif image_style or body.negative_prompt:
+        from shine.materialprep.prompt_source import apply_image_lora_prompts
+
+        payload["user_prompt"] = body.prompt
+        payload["prompt"], payload["negative_prompt"] = apply_image_lora_prompts(
+            body.prompt, body.negative_prompt, image_style.get("style_loras") or [],
+            style_preset=image_style.get("style_preset_snapshot"),
+        )
     if body.requirement_context:
         from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
 
@@ -1091,7 +1117,7 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
         }
     elif body.parent_version_id or body.expected_asset_state_version is not None:
         raise HTTPException(422, {"code": "IMAGE_TARGET_ASSET_REQUIRED", "message": "选择来源版本时需要同时选择素材"})
-    refs = validate_image_request(payload)
+    refs = validate_image_request({**payload, "prompt": body.prompt})
     payload["output"] = {
         "width": (body.output or {}).get("width", 1024),
         "height": (body.output or {}).get("height", 1024),
@@ -1283,6 +1309,10 @@ def create_image_jobs(body: ImageJobRequest, settings: SettingsDep, db: DBSessio
             external_outcome="NOT_SENT",
         )
         db.add(task)
+        if image_style:
+            db.flush()
+            add_audit(db, "local-user", "LIBRARY_IMAGE_STYLE_SELECTED", "library_render_task", task.id,
+                      image_style, project_id=facts_project)
         created.append(task)
     try:
         db.commit()
@@ -1336,6 +1366,8 @@ def task_data(db, row: LibraryRenderTask):
         "result_version_id": row.result_version_id,
         "capability": (row.payload or {}).get("capability"),
         "candidate_index": (row.payload or {}).get("candidate_index"),
+        **({"style_preset": row.payload.get("style_preset"), "style_loras": row.payload["style_loras"]}
+           if (row.payload or {}).get("style_loras") else {}),
         "can_new_attempt": bool(
             row.kind == "image"
             and row.status == "FAILED"
@@ -1505,7 +1537,7 @@ def new_image_attempt(task_id: str, body: NewImageAttempt, settings: SettingsDep
         idempotency_key=new_key,
         title=str(prior_payload.get("title") or ""),
         mode=previous.mode,
-        prompt=str(prior_payload.get("prompt") or ""),
+        prompt=str(prior_payload.get("user_prompt") or prior_payload.get("prompt") or ""),
         references=ref_rows,
         mask_media_id=(prior_payload.get("mask") or {}).get("media_id"),
         output=prior_payload.get("output") or {"width": 1024, "height": 1024},
@@ -1517,8 +1549,9 @@ def new_image_attempt(task_id: str, body: NewImageAttempt, settings: SettingsDep
         parent_version_id=prior_payload.get("parent_version_id"),
         expected_asset_state_version=prior_payload.get("expected_asset_state_version"),
         validation_only=bool(prior_payload.get("validation_only")),
+        project_id=prior_payload.get("project_id"),
     )
-    result = create_image_jobs(request, settings, db)
+    result = _queue_image_jobs(request, settings, db, prior_payload=prior_payload)
     created = result["items"][0]
     add_audit(
         db,

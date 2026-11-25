@@ -37,6 +37,8 @@ from shine.services import add_audit
 
 logger = logging.getLogger(__name__)
 HEARTBEAT_INTERVAL_SECONDS = 30.0
+IMAGE_LORA_SEGMENT_BYTES = 16 * 1024**2
+_image_lora_install: threading.Thread | None = None
 
 
 def _read_control(factory, attempt_id: str) -> dict:
@@ -91,6 +93,13 @@ def run_pending_installation(factory, worker_id: str, *, settings,
     can tell a production-critical install from an advisory review model that
     must not hold the tick.
     """
+    global _image_lora_install
+    from shine.comfyops.deployment import image_lora_only_plan, review_only_plan
+
+    # The resident Worker owns one installation at a time. An optional
+    # transfer leaves its render and preparation ticks free meanwhile.
+    if _image_lora_install and _image_lora_install.is_alive():
+        return None
     recover_expired_attempts(factory, worker_id)
     attempt_id = claim_next_attempt(factory, worker_id)
     if attempt_id is None:
@@ -99,12 +108,11 @@ def run_pending_installation(factory, worker_id: str, *, settings,
         attempt = db.get(InstallationAttempt, attempt_id)
         executor = (attempt.payload or {}).get("executor") if attempt else None
         plan = db.get(InstallationPlan, attempt.plan_id) if attempt is not None else None
+        plan_payload = plan.payload if plan else None
         if detail is not None:
-            from shine.comfyops.deployment import review_only_plan
-
             detail.update({"attempt_id": attempt_id,
                            "plan_id": attempt.plan_id if attempt is not None else None,
-                           "review_only": review_only_plan(plan.payload if plan else None)})
+                           "review_only": review_only_plan(plan_payload)})
     if executor == "LOCAL_ISOLATED" and settings.offline_simulation:
         # An offline simulation never downloads real bytes.  The attempt stays
         # queued and keeps its confirmed bytes.
@@ -114,6 +122,17 @@ def run_pending_installation(factory, worker_id: str, *, settings,
         )
         return None
     logger.info("installation_attempt_claimed attempt_id=%s worker_id=%s", attempt_id, worker_id)
+    if executor == "LOCAL_ISOLATED" and image_lora_only_plan(plan_payload):
+        def install_image_loras():
+            try:
+                run_attempt(factory, worker_id, attempt_id, settings=settings)
+            except Exception:  # noqa: BLE001 - keep the existing lease for reconciliation
+                logger.exception("image_lora_installation_failed attempt_id=%s", attempt_id)
+
+        # A standalone `worker --once` must also keep its claimed attempt alive.
+        _image_lora_install = threading.Thread(target=install_image_loras, name="image-lora-install", daemon=False)
+        _image_lora_install.start()
+        return None
     return run_attempt(factory, worker_id, attempt_id, settings=settings)
 
 
@@ -320,6 +339,7 @@ def _resource_transfer_authorizer(context: dict):
 def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: InstallationPlan, *, settings,
                        installer=None, ownership_lost: threading.Event | None = None) -> str:
     """Install every pinned package of the plan behind the pinned digests."""
+    from shine.comfyops.deployment import image_lora_only_plan
     from shine.comfyops.installer import InstallationInterrupted
 
     packages = list(plan.payload.get("packages", []))
@@ -348,6 +368,8 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
 
     if installer is None:
         installer = _build_installer(settings, progress=progress, should_stop=should_stop)
+        if image_lora_only_plan(plan.payload):
+            installer.downloader.segment_bytes = IMAGE_LORA_SEGMENT_BYTES
         context = plan.payload.get("resource_context")
         if context:
             installer.downloader.source_preference = context["source_preference"]
@@ -504,6 +526,12 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
                 root=install_root,
                 directory=install_root / spec["name"],
             )
+        from shine.comfyops.deployment import IMAGE_LORA_COMPONENTS
+
+        if any(package["spec"]["name"] in IMAGE_LORA_COMPONENTS for package in packages):
+            from shine.comfyops.loras import IMAGE_LORA_BASE, sync_discovered_loras
+
+            sync_discovered_loras(db, settings, base_model=IMAGE_LORA_BASE)
         plan_row = db.get(InstallationPlan, plan.id)
         plan_row.status = "FILES_VERIFIED_PENDING_RUNTIME"
         attempt = db.get(InstallationAttempt, attempt_id)

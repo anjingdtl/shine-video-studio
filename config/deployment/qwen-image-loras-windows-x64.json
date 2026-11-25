@@ -1,0 +1,120 @@
+{
+  "catalog_id": "shine-qwen-image-loras-windows-x64",
+  "catalog_version": "1.0",
+  "schema_version": 1,
+  "generated": "2026-11-25",
+  "platform": {
+    "os": "windows-x64"
+  },
+  "components": [
+    {
+      "component_id": "qwen-image-2.1-lora-fix",
+      "kind": "model",
+      "revision": "045f682888e1",
+      "license_id": "upstream-unspecified",
+      "license_url": "https://huggingface.co/e-n-v-y/Qwen-Image-2.1-Fix-v2.0/blob/045f682888e1f32977d1d7358e5022228fbac4f8/README.md",
+      "usage": "research",
+      "origin_repo": "e-n-v-y/Qwen-Image-2.1-Fix-v2.0",
+      "origin_revision": "045f682888e1f32977d1d7358e5022228fbac4f8",
+      "origin_kind": "huggingface-lfs",
+      "destination_family": "loras",
+      "dependencies": [],
+      "role": "style_lora",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "qwen2.1-detail-fix-2.0.safetensors",
+          "sha256": "3f00361145703a64c7b9812d7797079820a1f7b0dbb5768b9d3df1f3c7750dfa",
+          "size": 54800124,
+          "url": "https://huggingface.co/e-n-v-y/Qwen-Image-2.1-Fix-v2.0/resolve/045f682888e1f32977d1d7358e5022228fbac4f8/qwen2.1-detail-fix-2.0.safetensors",
+          "redirect_hosts": [
+            "huggingface.co",
+            "us.aws.cdn.hf.co"
+          ]
+        }
+      ]
+    },
+    {
+      "component_id": "qwen-image-2.1-lora-natural-exposure",
+      "kind": "model",
+      "revision": "382d066d0798",
+      "license_id": "qwen-research",
+      "license_url": "https://huggingface.co/prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA/blob/382d066d079854a86c9513f3c5a4026ada21ddbe/README.md",
+      "usage": "research",
+      "origin_repo": "prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA",
+      "origin_revision": "382d066d079854a86c9513f3c5a4026ada21ddbe",
+      "origin_kind": "huggingface-lfs",
+      "destination_family": "loras",
+      "dependencies": [],
+      "role": "style_lora",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "Qwen-Image-2.1-Natural-Exposure-LoRA-4000.safetensors",
+          "sha256": "a8edea397ce55ae6e1a442f3ba963eb78beeb515d4fe7d217d496542317292b1",
+          "size": 83943952,
+          "url": "https://huggingface.co/prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA/resolve/382d066d079854a86c9513f3c5a4026ada21ddbe/Qwen-Image-2.1-Natural-Exposure-LoRA-4000.safetensors",
+          "redirect_hosts": [
+            "huggingface.co",
+            "us.aws.cdn.hf.co"
+          ]
+        }
+      ]
+    },
+    {
+      "component_id": "qwen-image-2.1-lora-anything2real",
+      "kind": "model",
+      "revision": "c4ab5473bfdf",
+      "license_id": "apache-2.0",
+      "license_url": "https://huggingface.co/WarmBloodAban/Qwen-Image-2.1-LoRAs/blob/c4ab5473bfdf585fc19cfd1e280f79d2b0c79947/README.md",
+      "usage": "commercial",
+      "origin_repo": "WarmBloodAban/Qwen-Image-2.1-LoRAs",
+      "origin_revision": "c4ab5473bfdf585fc19cfd1e280f79d2b0c79947",
+      "origin_kind": "huggingface-lfs",
+      "destination_family": "loras",
+      "dependencies": [],
+      "role": "style_lora",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "Qwen2.1_Anything2RealCharacters.safetensors",
+          "sha256": "5db4dd2376e6017812bf1189b2fc46e52aaa2c0b7e688faac75e83e1c4dce849",
+          "size": 318820200,
+          "url": "https://huggingface.co/WarmBloodAban/Qwen-Image-2.1-LoRAs/resolve/c4ab5473bfdf585fc19cfd1e280f79d2b0c79947/Qwen2.1_Anything2RealCharacters.safetensors",
+          "redirect_hosts": [
+            "huggingface.co",
+            "us.aws.cdn.hf.co"
+          ]
+        }
+      ]
+    },
+    {
+      "component_id": "qwen-image-2.1-lora-multiple-angles",
+      "kind": "model",
+      "revision": "175b29b6eb41",
+      "license_id": "apache-2.0",
+      "license_url": "https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/blob/175b29b6eb41307473eebc363fca8fc198216b60/README.md",
+      "usage": "commercial",
+      "origin_repo": "akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA",
+      "origin_revision": "175b29b6eb41307473eebc363fca8fc198216b60",
+      "origin_kind": "huggingface-lfs",
+      "destination_family": "loras",
+      "dependencies": [],
+      "role": "style_lora",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+          "sha256": "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6",
+          "size": 318819792,
+          "url": "https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/resolve/175b29b6eb41307473eebc363fca8fc198216b60/checkpoints_v2/angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+          "redirect_hosts": [
+            "huggingface.co",
+            "us.aws.cdn.hf.co"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_bytes": 776384068
+}

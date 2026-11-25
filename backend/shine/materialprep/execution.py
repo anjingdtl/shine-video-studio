@@ -45,6 +45,7 @@ from shine.comfy.client import (
 )
 from shine.comfy.workflow import apply_parameters, graph_hash, validate_graph
 from shine.comfyops import assets as candidate_assets
+from shine.comfyops.loras import StyleLoraError, image_style_payload, resolve_live_image_loras
 from shine.comfyops.models import PLAN_PURPOSE_ASSET_PREPARATION, AssetRequirement, PreProductionPlan
 from shine.comfyops.scheduler import resource_slot
 from shine.materialprep import brief, image_prompts, qwen_workflow, runtime
@@ -224,7 +225,8 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         requirement = db.get(AssetRequirement, item.requirement_id) if item.requirement_id else None
         plan = db.get(PreProductionPlan, run.plan_id) if run else None
         project = db.get(Project, item.project_id)
-        facts = project_visual_facts(db, item.project_id)
+        document_id = (plan.payload or {}).get("document_id") if plan else None
+        facts = project_visual_facts(db, item.project_id, document_id=document_id)
         return {
             "item_id": item.id,
             "item_status": item.status,
@@ -303,13 +305,15 @@ def resolve_runtime(
                 family=family,
                 remediation="Run the three small-sample validation tasks for this family first.",
             )
-    return {"config": config, "base_url": base_url, "fingerprint": fingerprint, "graph_report": graph_report}
+    return {"config": config, "base_url": base_url, "fingerprint": fingerprint, "graph_report": graph_report,
+            "object_info": object_info}
 
 
 # --- submission ------------------------------------------------------------
 
 
-def _build_graph(config, prompt: image_prompts.ImagePrompt, *, seed: int, width: int, height: int) -> dict[str, Any]:
+def _build_graph(config, prompt: image_prompts.ImagePrompt, *, seed: int, width: int, height: int,
+                 style_loras=(), style_sampling: dict | None = None) -> dict[str, Any]:
     graph = qwen_workflow.base_graph()
     values = {
         "prompt": prompt.prompt,
@@ -324,9 +328,12 @@ def _build_graph(config, prompt: image_prompts.ImagePrompt, *, seed: int, width:
         "denoise": qwen_workflow.DEFAULT_DENOISE,
         "resolution": qwen_workflow.DEFAULT_RESOLUTION,
         "filename_prefix": qwen_workflow.FILENAME_PREFIX,
+        **(style_sampling or {}),
     }
     final = apply_parameters(graph, qwen_workflow.PARAMETER_MAP, values)
-    validate_graph(final, required_nodes=qwen_workflow.REQUIRED_NODES)
+    qwen_workflow.attach_qwen_style_loras(final, cache_node_id=qwen_workflow.CACHE_NODE, style_loras=style_loras)
+    nodes = [*qwen_workflow.REQUIRED_NODES, "LoraLoaderModelOnly"] if style_loras else qwen_workflow.REQUIRED_NODES
+    validate_graph(final, required_nodes=nodes)
     return final
 
 
@@ -438,6 +445,7 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
             world_note=str(context.get("world") or ""),
             world_source=str(context.get("world_source") or ""),
             style_snapshot=context.get("style_snapshot"),
+            image_style=image_style_payload(payload),
         )
     except PromptSourceError as exc:
         raise ImageExecutionError(
@@ -524,6 +532,7 @@ def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: 
             "generation_revision": context["generation_revision"],
             "usage_scope": "LOCAL_RESEARCH_AND_EVALUATION_ONLY",
             "license": "Qwen RESEARCH LICENSE AGREEMENT (2026-09-20), non-commercial",
+            **image_style_payload(context["item_payload"]),
         }
         row = candidate_assets.create_candidate(
             db,
@@ -667,10 +676,17 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             fingerprint = resolved["fingerprint"]
             width = int(context["item_payload"].get("width") or config.width)
             height = int(context["item_payload"].get("height") or config.height)
-            graph = _build_graph(config, prompt, seed=seed, width=width, height=height)
-            graph_sha = graph_hash(graph)
             client = ComfyUIClient(resolved["base_url"], max_retries=0)
             clients["client"] = client
+            payload = context["item_payload"]
+            style_loras = resolve_live_image_loras(
+                factory, settings, payload, object_info=resolved["object_info"],
+            ) if payload.get("style_loras") else ()
+            if style_loras:
+                context["item_payload"] = {**payload, "style_loras": [row.canonical_dict() for row in style_loras]}
+            graph = _build_graph(config, prompt, seed=seed, width=width, height=height,
+                                 style_loras=style_loras, style_sampling=payload.get("style_sampling"))
+            graph_sha = graph_hash(graph)
             return _render_inside_lease(
                 factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint, family, prompt,
                 renderer,
@@ -689,6 +705,10 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             return {"item_id": item_id, "status": ITEM_QUEUED, "waiting": waiting}
         touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=code)
         return {"item_id": item_id, "status": ITEM_FAILED, "code": code}
+    except StyleLoraError as exc:
+        touch_item(factory, item_id, version, status=ITEM_FAILED, error_code=exc.code)
+        _audit(factory, context, "MATERIAL_IMAGE_BLOCKED", {"code": exc.code, **exc.details})
+        return {"item_id": item_id, "status": ITEM_FAILED, "code": exc.code, "details": exc.details}
     except ImageExecutionError as exc:
         detail_code = str((exc.details or {}).get("code_detail") or "")
         if detail_code in RENDERER_BUSY_CODES:
@@ -706,8 +726,8 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     """Everything that happens while the exclusive lease is held."""
     item_id = context["item_id"]
     seed = int(context["item_payload"].get("seed") or 0)
-    width = int(context["item_payload"].get("width") or 0)
-    height = int(context["item_payload"].get("height") or 0)
+    latent = graph[qwen_workflow.EMPTY_LATENT_NODE]["inputs"]
+    width, height = int(latent["width"]), int(latent["height"])
 
     attempt_id = _open_attempt(
         factory,
@@ -837,6 +857,9 @@ def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width,
         attempt_no = len(existing) + 1
     payload = {
         "prompt_evidence": prompt.as_evidence(),
+        "prompt": prompt.prompt,
+        "negative_prompt": prompt.negative_prompt,
+        **image_style_payload(context["item_payload"]),
         "graph_sha256": graph_sha,
         "output_node_id": qwen_workflow.OUTPUT_NODE,
         "output_class_type": qwen_workflow.OUTPUT_CLASS_TYPE,

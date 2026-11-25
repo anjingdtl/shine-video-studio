@@ -25,9 +25,25 @@ from typing import Annotated, Any, Literal
 
 from pydantic import Field, StringConstraints, ValidationInfo, field_validator, model_serializer
 
+from shine.comfy.graph_compiler import MAX_STYLE_LORAS, STYLE_LORA_STRENGTH_MAX, STYLE_LORA_STRENGTH_MIN
 from shine.schemas import APIModel
 
 SCHEMA_VERSION = "1.0"
+
+
+class ImageLoraSelection(APIModel):
+    lora_id: str = Field(min_length=1, max_length=64)
+    sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    strength_model: float | None = Field(default=None, ge=STYLE_LORA_STRENGTH_MIN, le=STYLE_LORA_STRENGTH_MAX)
+
+
+class ImageStyleRequest(APIModel):
+    style_preset: str | None = Field(default=None, min_length=1, max_length=64)
+    style_loras: list[ImageLoraSelection] = Field(default_factory=list, max_length=MAX_STYLE_LORAS)
+
+    @property
+    def has_image_style(self) -> bool:
+        return bool(self.style_preset or self.style_loras)
 
 MaterialFamily = Literal["character", "scene", "prop"]
 """The only three families the first version generates.

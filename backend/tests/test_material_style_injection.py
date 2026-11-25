@@ -163,8 +163,9 @@ def test_requirement_prompt_composes_world_note(api):
         family="character", brief=brief, visual_direction=None,
         film_style=film_style_for({"film_type": "animation"}),
         world_note="中世纪欧洲奇幻，女巫与教会并存。")
+    assert composed.prompt.startswith("A young man with short black hair")
     assert "cel-shaded" in composed.prompt
-    assert "中世纪欧洲奇幻" in composed.prompt
+    assert "中世纪欧洲奇幻" not in composed.prompt
     assert "photorealistic" in composed.negative_prompt
 
 

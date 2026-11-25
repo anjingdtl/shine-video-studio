@@ -6,13 +6,21 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from sqlalchemy import text
 
 from shine.api_common import DBSession
 from shine.api_operator import Operator
 from shine.comfyops.loras import (
+    H3_LORA_BASE,
+    IMAGE_LORA_BASE,
+    StyleLoraBase,
     StyleLoraError,
+    TriggerPosition,
     delete_style_lora,
+    evaluate_style_lora_selection,
     extract_comfy_lora_names,
+    freeze_image_lora_style,
+    image_style_payload,
     import_style_lora,
     list_style_loras,
     probe_live_lora_object_info,
@@ -23,13 +31,19 @@ from shine.comfyops.loras import (
 router = APIRouter(prefix="/api/v1/loras", tags=["loras"])
 
 
-class LoraImportJsonBody(BaseModel):
+class LoraImportFields(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    local_path: str = Field(min_length=1, max_length=1024)
     display_name: str | None = Field(default=None, max_length=160)
     default_strength: float = 0.65
     trigger_word: str = ""
+    base_model: StyleLoraBase = H3_LORA_BASE
+    negative_trigger_word: str = ""
+    trigger_position: TriggerPosition = "suffix"
+
+
+class LoraImportJsonBody(LoraImportFields):
+    local_path: str = Field(min_length=1, max_length=1024)
 
 
 class LoraPatchBody(BaseModel):
@@ -38,6 +52,8 @@ class LoraPatchBody(BaseModel):
     display_name: str | None = Field(default=None, max_length=160)
     default_strength: float | None = None
     trigger_word: str | None = None
+    negative_trigger_word: str | None = None
+    trigger_position: TriggerPosition | None = None
 
 
 def _raise_lora_http(exc: StyleLoraError) -> None:
@@ -47,11 +63,33 @@ def _raise_lora_http(exc: StyleLoraError) -> None:
     ) from exc
 
 
+def resolve_image_style_request(db, settings, body, *, prior_payload: dict | None = None, lock: bool = True) -> dict:
+    """Use the same admission and frozen fields for both image request entry points."""
+    prior_style = image_style_payload(prior_payload or {})
+    if not body.has_image_style and not prior_style:
+        return {}
+    if lock:
+        db.execute(text("BEGIN IMMEDIATE"))
+    try:
+        if prior_style:
+            evaluate_style_lora_selection(db, settings, prior_style.get("style_loras"),
+                                          base_model=IMAGE_LORA_BASE, frozen_image_metadata=True)
+            return prior_style
+        return freeze_image_lora_style(db, settings, body.style_loras, body.style_preset)
+    except StyleLoraError as exc:
+        _raise_lora_http(exc)
+
+
 @router.get("")
-def get_loras(request: Request, db: DBSession) -> dict[str, Any]:
+def get_loras(request: Request, db: DBSession, base_model: StyleLoraBase = H3_LORA_BASE) -> dict[str, Any]:
     """Discover built-in realism LoRA and project live ComfyUI visibility."""
     settings = request.app.state.settings
-    result = list_style_loras(db, settings)
+    if base_model == IMAGE_LORA_BASE:
+        live_info, _ = probe_live_lora_object_info(db, settings, base_model=base_model)
+        db.execute(text("BEGIN IMMEDIATE"))
+        result = list_style_loras(db, settings, base_model=base_model, object_info=live_info, probe_comfy=False)
+    else:
+        result = list_style_loras(db, settings)
     db.commit()
     return result
 
@@ -69,9 +107,6 @@ async def post_import_lora(
     local_path: str | None = None
     upload_filename: str | None = None
     upload_file: UploadFile | None = None
-    display_name: str | None = None
-    default_strength: float = 0.65
-    trigger_word: str = ""
 
     if "multipart/form-data" in content_type:
         form = await request.form()
@@ -83,21 +118,18 @@ async def post_import_lora(
             )
         upload_file = raw_file  # type: ignore[assignment]
         upload_filename = str(getattr(upload_file, "filename", None) or "style_lora.safetensors")
-        if form.get("display_name") is not None:
-            display_name = str(form.get("display_name"))
-        if form.get("default_strength") is not None and str(form.get("default_strength")).strip():
-            try:
-                default_strength = float(str(form.get("default_strength")))
-            except ValueError as exc:
-                raise HTTPException(
-                    422,
-                    detail={
-                        "code": "STYLE_LORA_STRENGTH_OUT_OF_RANGE",
-                        "message": "默认权重必须是数字。",
-                    },
-                ) from exc
-        if form.get("trigger_word") is not None:
-            trigger_word = str(form.get("trigger_word"))
+        fields = {key: form[key] for key in LoraImportFields.model_fields if key in form}
+        if not str(fields.get("default_strength", "")).strip():
+            fields.pop("default_strength", None)
+        try:
+            parsed = LoraImportFields.model_validate(fields)
+        except ValidationError as exc:
+            await upload_file.close()
+            if any(row["loc"] == ("default_strength",) for row in exc.errors()):
+                raise HTTPException(422, detail={"code": "STYLE_LORA_STRENGTH_OUT_OF_RANGE",
+                                                "message": "默认权重必须是数字。"}) from exc
+            raise HTTPException(422, detail={"code": "LORA_IMPORT_INPUT_REQUIRED",
+                                            "message": "LoRA 导入字段不合法。"}) from exc
     else:
         try:
             raw_json = await request.json()
@@ -111,9 +143,6 @@ async def post_import_lora(
                 },
             ) from exc
         local_path = parsed.local_path
-        display_name = parsed.display_name
-        default_strength = parsed.default_strength
-        trigger_word = parsed.trigger_word
 
     try:
         try:
@@ -123,9 +152,7 @@ async def post_import_lora(
                 local_path=local_path,
                 upload_filename=upload_filename,
                 upload_stream=upload_file.file if upload_file is not None else None,
-                display_name=display_name,
-                default_strength=default_strength,
-                trigger_word=trigger_word,
+                **parsed.model_dump(exclude={"local_path"}),
                 actor=actor,
             )
         finally:
@@ -135,7 +162,7 @@ async def post_import_lora(
         _raise_lora_http(exc)
 
     db.commit()
-    live_info, comfy_reachable = probe_live_lora_object_info(db, settings)
+    live_info, comfy_reachable = probe_live_lora_object_info(db, settings, base_model=row.base_model)
     available_names = extract_comfy_lora_names(live_info) if live_info is not None else None
     from shine.comfyops.loras import _known_lora_roots
 
@@ -143,7 +170,7 @@ async def post_import_lora(
         row,
         available_names=available_names,
         comfy_reachable=comfy_reachable,
-        lora_roots=_known_lora_roots(db, settings),
+        lora_roots=_known_lora_roots(db, settings, row.base_model),
     )
     return {
         "item": item,
@@ -167,9 +194,7 @@ def patch_lora(
             db,
             settings,
             lora_id,
-            display_name=body.display_name,
-            default_strength=body.default_strength,
-            trigger_word=body.trigger_word,
+            **body.model_dump(),
             actor=actor,
         )
     except StyleLoraError as exc:
@@ -189,6 +214,7 @@ def remove_lora(
     settings = request.app.state.settings
     m4_factory = getattr(request.app.state, "m4_session_factory", None)
     try:
+        db.execute(text("BEGIN IMMEDIATE"))
         result = delete_style_lora(
             db,
             settings,

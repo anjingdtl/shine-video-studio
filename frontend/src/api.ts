@@ -1,3 +1,5 @@
+import type { ImageStyleInput } from './shared/StyleLoraAssemblyPanel';
+
 export const API = '/api/v1';
 
 /** 中文标签：校验错误里常见的分镜/风格字段，定位到用户能看懂的名字。 */
@@ -1949,6 +1951,9 @@ export type MaterialPromptView = {
   requirement_id: string; family: string; entity_id: string | null; description: string;
   prompt: string; negative_prompt: string;
   source: 'frozen' | 'composed' | 'empty';
+  editor_prompt?: string; editor_negative_prompt?: string;
+  preview_uses_saved_brief?: boolean;
+  style_loras?: Array<{ lora_id: string; sha256: string }>;
   blocked: string | null;
   frozen: { sha256: string; frozen_at: string; frozen_by: string; chars: number } | null;
   warnings: string[];
@@ -1956,9 +1961,13 @@ export type MaterialPromptView = {
     quality_slogans: string[] };
 };
 
-export const fetchMaterialPrompt = (projectId: string, requirementId: string) =>
-  api<MaterialPromptView>(
-    `/projects/${projectId}/director/materials/requirements/${requirementId}/prompt`);
+export function fetchMaterialPrompt(projectId: string, requirementId: string, imageStyle?: ImageStyleInput) {
+  const path = `/projects/${projectId}/director/materials/requirements/${requirementId}/prompt`;
+  if (!imageStyle?.style_loras?.length && !imageStyle?.style_preset) return api<MaterialPromptView>(path);
+  const query = new URLSearchParams({ style_loras: JSON.stringify(imageStyle.style_loras ?? []) });
+  if (imageStyle.style_preset) query.set('style_preset', imageStyle.style_preset);
+  return api<MaterialPromptView>(`${path}?${query}`);
+}
 
 export const saveMaterialPrompt = (projectId: string, requirementId: string,
   body: { prompt: string; negative_prompt: string }) =>
@@ -2241,7 +2250,7 @@ export type DirectorMaterialCommitResult = {
 
 export const commitDirectorMaterials = (
   projectId: string,
-  body: {
+  body: ImageStyleInput & {
     plan_revision_id: string;
     expected_snapshot: string;
     decisions: Array<{ requirement_id: string; strategy: string; entity_id?: string | null;

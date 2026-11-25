@@ -25,13 +25,13 @@ from __future__ import annotations
 
 import re
 
-from shine.materialprep.contracts import MaterialCarrier, MaterialFamily, MaterialVisualDirection
+from shine.materialprep.contracts import MaterialFamily, MaterialVisualDirection
 
 STANDARD_ID = "qwen-image-2.1-prompt-standard"
-STANDARD_VERSION = "1.0"
+STANDARD_VERSION = "1.1"
 
 LAYER_ORDER: tuple[str, ...] = (
-    "anchor", "subject", "environment", "lighting", "material", "framing", "closing",
+    "subject", "must_keep", "composition", "medium", "era", "lighting", "materials", "exclusions",
 )
 """The layer order the standard prescribes, kept as data so evidence can name it."""
 
@@ -49,34 +49,7 @@ _QUALITY_PATTERN = re.compile(
 
 _CJK = re.compile(r"[\u4e00-\u9fff]")
 
-ANCHORS: dict[MaterialFamily, str] = {
-    "character": (
-        "A character reference photograph for a {genre} production: one person, framed from the waist up, "
-        "standing against a plain neutral grey-white studio background."
-    ),
-    "scene": (
-        "An establishing environment photograph for a {genre} production: one location seen wide, with no "
-        "people anywhere in the frame."
-    ),
-    "prop": (
-        "A prop reference photograph for a {genre} production: one complete object photographed on its own "
-        "against a plain neutral grey-white studio background."
-    ),
-}
-
-CARRIER_ANCHORS: dict[MaterialCarrier, str] = {
-    "paper": (
-        "A prop reference photograph for a {genre} production: one flat paper carrier shown face-on, its "
-        "written or printed content legible, on a plain neutral grey-white studio background."
-    ),
-    "screen": (
-        "A prop reference photograph for a {genre} production: one display shown face-on, its on-screen "
-        "content legible, on a plain neutral grey-white studio background."
-    ),
-}
-
-DEFAULT_GENRE = "cinematic narrative"
-"""Used only when the confirmed visual direction names no genre."""
+NEUTRAL_STUDIO_LIGHTING = "Even soft diffused lighting."
 
 
 def strip_quality_slogans(text: str) -> str:
@@ -94,30 +67,6 @@ def is_prompt_language(text: str) -> bool:
     return bool(text) and not _CJK.search(text)
 
 
-def genre_of(direction: MaterialVisualDirection | None) -> str:
-    """A short genre phrase taken from the confirmed visual direction.
-
-    The era field is the operator's own description of the world ("late medieval
-    low-fantasy kingdom"). It anchors the picture far better than a generic word,
-    so it is used verbatim when present.
-    """
-    if direction is None:
-        return DEFAULT_GENRE
-    era = strip_quality_slogans(direction.era or "").strip(" .")
-    if not era:
-        return DEFAULT_GENRE
-    return era[0].lower() + era[1:] if len(era) > 1 else era.lower()
-
-
-def anchor_sentence(family: MaterialFamily, carrier: MaterialCarrier | None,
-                    direction: MaterialVisualDirection | None) -> str:
-    """The first sentence: what kind of picture this is."""
-    template = ANCHORS[family]
-    if family == "prop" and carrier in CARRIER_ANCHORS:
-        template = CARRIER_ANCHORS[carrier]
-    return template.format(genre=genre_of(direction))
-
-
 def environment_sentence(family: MaterialFamily, direction: MaterialVisualDirection | None) -> str:
     """Where the subject sits. A scene carries the world; a studio study does not.
 
@@ -128,22 +77,18 @@ def environment_sentence(family: MaterialFamily, direction: MaterialVisualDirect
     """
     if direction is None:
         return ""
-    if family == "scene":
-        parts = [strip_quality_slogans(direction.era), strip_quality_slogans(direction.notes)]
-        text = " ".join(part.strip() for part in parts if part and part.strip())
-        if not text:
-            return ""
-        return f"The location is set in {text}."
-    return ""
+    era = strip_quality_slogans(direction.era).strip(" .")
+    notes = strip_quality_slogans(direction.notes) if family == "scene" else ""
+    return join_layers([f"The setting belongs to {era}" if era else "", notes])
 
 
-def lighting_sentence(direction: MaterialVisualDirection | None) -> str:
-    """Lighting gets its own sentence, as the standard requires."""
-    if direction is None:
+def lighting_sentence(family: MaterialFamily, direction: MaterialVisualDirection | None, *, styled: bool) -> str:
+    """Use the brief and LoRA for light when the request has a style selection."""
+    if styled:
         return ""
-    lighting = strip_quality_slogans(direction.lighting)
+    lighting = strip_quality_slogans(direction.lighting) if direction else ""
     if not lighting:
-        return ""
+        return NEUTRAL_STUDIO_LIGHTING if family in {"character", "prop"} else ""
     return f"The lighting is {lighting[0].lower() + lighting[1:]}."
 
 
@@ -161,15 +106,6 @@ def material_sentence(direction: MaterialVisualDirection | None) -> str:
     if not parts:
         return ""
     return f"Materials and colour read as {' , '.join(parts)}."
-
-
-def closing_sentence(family: MaterialFamily) -> str:
-    """One closing line on composition and mood."""
-    return {
-        "character": "The overall composition is calm and symmetrical, holding the face as the single focus.",
-        "scene": "The overall composition reads as a wide, uncluttered establishing view of the whole space.",
-        "prop": "The overall composition is a clean centred still life, with the whole outline readable at a glance.",
-    }[family]
 
 
 def join_layers(parts: list[str]) -> str:
@@ -194,6 +130,5 @@ def standard_evidence() -> dict:
         "standard_version": STANDARD_VERSION,
         "layer_order": list(LAYER_ORDER),
         "quality_slogans": list(QUALITY_SLOGANS),
-        "anchors": sorted(ANCHORS),
-        "carrier_anchors": sorted(CARRIER_ANCHORS),
+        "neutral_studio_lighting": NEUTRAL_STUDIO_LIGHTING,
     }

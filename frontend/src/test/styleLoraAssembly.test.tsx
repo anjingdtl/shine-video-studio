@@ -1,10 +1,11 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
 import { ScheduleProduceStagePage } from '../manual4/pages/ScheduleProduceStagePage';
-import { StyleLoraAssemblyPanel, type StyleLoraConfig } from '../shared/StyleLoraAssemblyPanel';
+import { imageStyleInput, StyleLoraAssemblyPanel, type StyleLoraConfig } from '../shared/StyleLoraAssemblyPanel';
 import { PRODUCTION_MODE_READY, StudioStub, SYSTEM_STATUS, baseProject, baseRoutes, gotoDirectorPage, jsonResponse } from './studioStub';
 
 afterEach(() => {
@@ -34,6 +35,39 @@ function makeLoraItem(overrides: Record<string, unknown> = {}) {
 }
 
 describe('StyleLoraAssemblyPanel（共享 LoRA 装配组件）', () => {
+  it('读取 Qwen 配方，通过同一界面挂载可选多视角权重并自动展示触发词', async () => {
+    const fix = makeLoraItem({ id: 'fix', display_name: '画质修复' });
+    const angle = makeLoraItem({ id: 'angle', display_name: '多视角', trigger_word: '<mva>', trigger_position: 'prefix',
+      negative_trigger_word: 'overexposed', sha256: 'b'.repeat(64) });
+    const slot = (it: typeof fix) => ({ component_id: it.id, lora_id: it.id, strength_model: 0.8, status: 'READY' });
+    const stub = new StudioStub([{ method: 'GET', pattern: /\/api\/v1\/loras\?base_model=qwen_image_21$/, respond: () => jsonResponse({
+      items: [fix, angle], comfy_reachable: true, presets: [{ id: 'cyberpunk_neo_noir', display_name: '赛博朋克',
+        loras: [slot(fix)], optional_loras: [slot(angle)] }],
+    }) }]);
+    function Example() {
+      const [value, setValue] = useState<StyleLoraConfig[]>([]);
+      const [preset, setPreset] = useState<string | null>(null);
+      return <><StyleLoraAssemblyPanel baseModel="qwen_image_21" value={value} onChange={setValue}
+        loraSupported stylePreset={preset} onPresetChange={setPreset} />
+        <output>{JSON.stringify(imageStyleInput(value, preset))}</output></>;
+    }
+    const user = userEvent.setup();
+    render(<Example />);
+    const presetButton = await screen.findByRole('button', { name: '赛博朋克' });
+    await user.click(presetButton);
+    expect(presetButton).toHaveAttribute('aria-pressed', 'true');
+    await user.click(screen.getByRole('button', { name: '多视角' }));
+    expect(screen.getByText(/自动前置 <mva>/)).toHaveTextContent('负向 overexposed');
+    expect(JSON.parse(screen.getAllByRole('status').find((row) => row.tagName === 'OUTPUT')!.textContent!)).toEqual({
+      style_preset: 'cyberpunk_neo_noir', style_loras: [fix, angle].map((item) => ({
+        lora_id: item.id, sha256: item.sha256, strength_model: 0.8,
+      })),
+    });
+    await user.click(screen.getByRole('button', { name: '清空已选' }));
+    expect(presetButton).toHaveAttribute('aria-pressed', 'false');
+    stub.restore();
+  });
+
   it('展示实时状态、限制最多 3 个并支持排序、改权重、触发词校验、导入与删阻断提示', async () => {
     const items = [
       makeLoraItem({ id: 'h3-realism-people', display_name: '写实基准', status: 'READY' }),

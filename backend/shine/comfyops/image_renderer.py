@@ -594,6 +594,15 @@ def start_image_renderer(factory, settings, *, instance_id: str, actor: str,
     process = None
     launch: dict[str, Any] = {}
     try:
+        from shine.comfyops.loras import ensure_style_lora_extra_paths_config
+
+        # Declare the fixed optional paths before the first image starts. New
+        # files will be picked up by ComfyUI even while the renderer is warm.
+        try:
+            ensure_style_lora_extra_paths_config(settings)
+        except OSError:
+            # The base renderer can still run if this optional config is unavailable.
+            pass
         argv, cwd, env, pins, token, port = build_renderer_launch(renderer)
         launch = _launch_evidence(argv, cwd, env, port, recipe_sha256, renderer)
         group = OwnedProcessGroup.launch(

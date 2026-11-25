@@ -11,7 +11,7 @@ from alembic.config import Config
 
 pytestmark = pytest.mark.integration
 
-HEAD_REVISION = "f180f0010009"
+HEAD_REVISION = "f180f0010010"
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -23,6 +23,33 @@ def alembic_config(db_path: Path) -> Config:
     config = Config(str(REPO / "backend" / "alembic.ini"))
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path.as_posix()}")
     return config
+
+
+def test_image_lora_migration_round_trip_preserves_legacy_identity(tmp_path, monkeypatch):
+    path = tmp_path / "lora.db"
+    monkeypatch.setenv("SHINE_DATABASE_URL", f"sqlite:///{path.as_posix()}")
+    monkeypatch.setenv("SHINE_DATA_DIR", str(tmp_path))
+    config = alembic_config(path)
+    command.upgrade(config, "f180f0010009")
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "INSERT INTO style_lora_assets (id,display_name,filename,storage_path,sha256,file_size_bytes,"
+            "trigger_word,created_at,updated_at) VALUES ('lora-1','Film','film.safetensors','lora/film',?,"
+            "200,'r34l1sm',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)", ("a" * 64,),
+        )
+    command.upgrade(config, "head")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT base_model,negative_trigger_word,trigger_position,trigger_word FROM style_lora_assets"
+        ).fetchone() == ("minimax_h3", "", "suffix", "r34l1sm")
+        assert "ix_style_lora_assets_base_model" in {
+            row[1] for row in connection.execute("PRAGMA index_list(style_lora_assets)")
+        }
+    command.downgrade(config, "f180f0010009")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT id,sha256,trigger_word FROM style_lora_assets").fetchone() == (
+            "lora-1", "a" * 64, "r34l1sm",
+        )
 
 
 def test_fresh_database_upgrades_to_the_latest_schema(tmp_path, monkeypatch):

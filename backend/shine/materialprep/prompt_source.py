@@ -18,12 +18,70 @@ The rules it applies are the same in both places:
 from __future__ import annotations
 
 import hashlib
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 
 from shine.materialprep import image_prompts
 from shine.materialprep.contracts import MaterialImageBrief, MaterialVisualDirection
 
 MANUAL_TEMPLATE_VERSION = "manual-frozen-v1"
+
+
+def _unique_fragments(parts) -> list[str]:
+    seen: set[str] = set()
+    output: list[str] = []
+    for fragment in parts:
+        value = fragment.strip().strip(",")
+        key = value.rstrip(".").casefold()
+        if key and key not in seen:
+            seen.add(key)
+            output.append(value)
+    return output
+
+
+def apply_image_lora_prompts(
+    prompt: str, negative_prompt: str, style_loras: Sequence[Mapping[str, Any]], *,
+    style_preset: Mapping[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Apply the frozen recipe and registry triggers after composing the base prompt."""
+    if not style_loras and not style_preset:
+        return prompt, negative_prompt
+    preset = style_preset or {}
+    prefix = _unique_fragments(row.get("trigger_word", "") for row in style_loras
+                               if row.get("trigger_position") == "prefix")
+    body = prompt.strip()
+    for trigger in prefix:
+        body = re.sub(r"(?<!\w)" + re.escape(trigger) + r"(?!\w)\s*", "", body, flags=re.IGNORECASE).strip()
+    suffix = _unique_fragments([
+        *str(preset.get("positive_prompt") or "").split(","),
+        *(row.get("trigger_word", "") for row in style_loras if row.get("trigger_position") != "prefix"),
+    ])
+    appended = [word for word in suffix if word.casefold() not in {item.casefold() for item in prefix}
+                and not re.search(r"(?<!\w)" + re.escape(word.rstrip(".")) + r"(?!\w)", body, re.IGNORECASE)]
+    positive = " ".join([*prefix, body, ", ".join(appended)]).strip()
+    negative = ", ".join(_unique_fragments([
+        *negative_prompt.split(","),
+        *str(preset.get("negative_prompt") or "").split(","),
+        *(part for row in style_loras for part in row.get("negative_trigger_word", "").split(",")),
+    ]))
+    return positive, negative
+
+
+def apply_image_style(
+    base: image_prompts.ImagePrompt, image_style: Mapping[str, Any] | None,
+) -> image_prompts.ImagePrompt:
+    if not image_style:
+        return base
+    positive, negative = apply_image_lora_prompts(
+        base.prompt, base.negative_prompt, image_style.get("style_loras") or (),
+        style_preset=image_style.get("style_preset_snapshot"),
+    )
+    if (positive, negative) == (base.prompt, base.negative_prompt):
+        return base
+    return replace(base, prompt=positive, negative_prompt=negative, sha256=hashlib.sha256(
+        "\n".join((base.sha256, positive, negative)).encode("utf-8")).hexdigest())
 
 
 class PromptSourceError(ValueError):
@@ -86,6 +144,8 @@ def compose_requirement_prompt(
     world_note: str = "",
     world_source: str = "",
     style_snapshot: dict[str, Any] | None = None,
+    image_style: Mapping[str, Any] | None = None,
+    include_triggers: bool = True,
 ) -> image_prompts.ImagePrompt:
     """The prompt pair for one requirement.
 
@@ -94,13 +154,13 @@ def compose_requirement_prompt(
     """
     if manual is not None:
         prompt = str(manual["prompt"]).strip()
-        return image_prompts.ImagePrompt(
+        return apply_image_style(image_prompts.ImagePrompt(
             prompt=prompt,
             negative_prompt=str(manual.get("negative_prompt") or "").strip(),
             template_version=MANUAL_TEMPLATE_VERSION,
             sha256=str(manual.get("sha256") or hashlib.sha256(
                 prompt.encode("utf-8")).hexdigest()),
-        )
+        ), image_style if include_triggers else None)
     if brief is None:
         raise PromptSourceError("MATERIAL_BRIEF_MISSING")
     if not (brief.appearance or "").strip():
@@ -121,7 +181,7 @@ def compose_requirement_prompt(
         family, world_note, world_source=world_source, user_text=False
     )
     try:
-        return image_prompts.compose(
+        return apply_image_style(image_prompts.compose(
             family,
             brief,
             visual_direction=visual_direction or MaterialVisualDirection(),
@@ -129,7 +189,8 @@ def compose_requirement_prompt(
             carrier=carrier,
             film_style=resolved_film_style,
             world_note=resolved_world,
-        )
+            styled=bool(image_style),
+        ), image_style if include_triggers else None)
     except image_prompts.ImagePromptError as exc:
         raise PromptSourceError(exc.code, **exc.details) from exc
 
@@ -147,7 +208,7 @@ def film_style_for(snapshot: dict[str, Any] | None, *, family: str | None = None
         return ""
 
 
-def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
+def project_visual_facts(db: Any, project_id: str, *, document_id: str | None = None) -> dict[str, Any]:
     """The single read of the facts that govern every material image.
 
     The frozen Style Bible supplies the film medium; the confirmed global story
@@ -158,6 +219,8 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
     """
     from sqlalchemy import select
 
+    from shine.director.pipeline import current_bible
+    from shine.materialprep.story import approved_outline_for
     from shine.models import AgentArtifact, StyleVersion
 
     style = db.scalar(
@@ -166,10 +229,10 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
         .order_by(StyleVersion.version.desc())
     )
     snapshot = dict((style.snapshot or {}) if style else {})
-    bible = db.scalar(
+    bible = current_bible(db, project_id) or db.scalar(
         select(AgentArtifact)
         .where(AgentArtifact.project_id == project_id,
-               AgentArtifact.kind == "FourStageGlobalStoryBible")
+               AgentArtifact.kind == "FourStageGlobalStoryBible", AgentArtifact.stale.is_(False))
         .order_by(AgentArtifact.created_at.desc())
     )
     world_raw = (bible.payload_json or {}).get("world") if bible else None
@@ -179,14 +242,7 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
         world = str(world_raw or "").strip()
     world_source = "story_bible" if world else ""
     if not world:
-        outline = db.scalar(
-            select(AgentArtifact)
-            .where(AgentArtifact.project_id == project_id,
-                   AgentArtifact.kind == "StoryOutline",
-                   AgentArtifact.stale.is_(False),
-                   AgentArtifact.approved_at.is_not(None))
-            .order_by(AgentArtifact.created_at.desc())
-        )
+        outline = approved_outline_for(db, project_id, document_id)
         if outline is not None:
             world = str((outline.payload_json or {}).get("summary") or "").strip()
             if world:
@@ -209,6 +265,8 @@ def compose_user_image_prompt(
     family: str,
     facts: dict[str, Any],
     carrier: str | None = None,
+    image_style: Mapping[str, Any] | None = None,
+    negative_prompt: str = "",
 ) -> image_prompts.ImagePrompt:
     """Compose an asset-centre prompt from the user's own text plus project facts.
 
@@ -217,7 +275,7 @@ def compose_user_image_prompt(
     framing and the medium negatives through the one composer.
     """
     brief = MaterialImageBrief.model_construct(
-        appearance=user_prompt, must_keep=[], avoid=[], questions=[])
+        appearance=user_prompt, must_keep=[], avoid=_unique_fragments(negative_prompt.split(",")), questions=[])
     snapshot = facts.get("snapshot") if isinstance(facts.get("snapshot"), dict) else None
     resolved_film_style = (
         film_style_for(snapshot, family=family)
@@ -231,7 +289,7 @@ def compose_user_image_prompt(
         user_text=True,
     )
     try:
-        return image_prompts.compose(
+        return apply_image_style(image_prompts.compose(
             family,
             brief,
             visual_direction=None,
@@ -240,7 +298,8 @@ def compose_user_image_prompt(
             film_style=resolved_film_style,
             user_text=True,
             world_note=resolved_world,
-        )
+            styled=bool(image_style),
+        ), image_style)
     except image_prompts.ImagePromptError as exc:
         raise PromptSourceError(exc.code, **exc.details) from exc
 

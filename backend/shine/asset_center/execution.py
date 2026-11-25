@@ -36,6 +36,7 @@ from shine.asset_center.models import (
 )
 from shine.comfy.client import ComfyUIClient
 from shine.comfy.workflow import graph_hash
+from shine.comfyops.loras import StyleLoraError, image_style_payload, resolve_live_image_loras
 from shine.comfyops.scheduler import resource_slot
 from shine.materialprep import execution as image_execution
 from shine.materialprep import qwen_workflow
@@ -119,6 +120,7 @@ def _open_attempt(
     height: int,
     seed: int,
     renderer: dict[str, Any],
+    prompt_inputs: dict[str, Any] | None = None,
 ) -> tuple[str, int]:
     with factory() as db:
         task_row = db.get(LibraryRenderTask, task_id)
@@ -173,6 +175,8 @@ def _open_attempt(
                 "height": height,
                 "renderer_owned": bool(renderer.get("renderer_owned")),
                 "renderer_instance_id": str(renderer.get("renderer_instance_id") or ""),
+                **image_style_payload(payload),
+                **({key: prompt_inputs[key] for key in ("prompt", "negative_prompt")} if prompt_inputs else {}),
             },
         )
         db.add(attempt)
@@ -458,6 +462,7 @@ def _save_candidate(
                     "target_asset_state_version": payload.get("expected_asset_state_version"),
                     "transparent": bool(payload.get("transparent")),
                     "validation_only": bool(payload.get("validation_only")),
+                    **image_style_payload(payload),
                 },
             )
             version.qc = {
@@ -636,6 +641,9 @@ def _edit_graph(
     height: int,
     seed: int,
     reference_contents: list[tuple[bytes, str]],
+    *,
+    object_info: dict | None = None,
+    style_loras=(),
 ) -> dict[str, Any]:
     references = sorted(
         payload.get("graph_references") or payload.get("references") or [], key=lambda row: row["order"]
@@ -660,12 +668,16 @@ def _edit_graph(
     mode = str(payload.get("mode") or "I2I")
     graph = build_qwen_edit_graph(
         prompt=_reference_prompt(str(payload.get("prompt") or ""), references),
+        negative_prompt=str(payload.get("negative_prompt") or ""),
         uploaded_names=uploaded_names,
         width=width,
         height=height,
         seed=seed,
+        style_loras=style_loras,
+        **(payload.get("style_sampling") or {}),
     )
-    object_info = client.object_info()
+    if object_info is None:
+        object_info = client.object_info()
     from shine.comfy.workflow import validate_against_object_info, validate_graph
 
     validate_graph(graph, required_nodes=[str(node["class_type"]) for node in graph.values()])
@@ -785,6 +797,13 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
             config = resolved["config"]
             client = ComfyUIClient(resolved["base_url"], max_retries=0)
             clients["client"] = client
+            object_info = resolved.get("object_info")
+            style_loras = resolve_live_image_loras(
+                factory, settings, payload,
+                object_info=object_info if object_info is not None else client.object_info(),
+            ) if payload.get("style_loras") else ()
+            if style_loras:
+                payload = {**payload, "style_loras": [row.canonical_dict() for row in style_loras]}
             reference_rows = sorted(payload.get("references") or [], key=lambda row: row["order"])
             reference_contents = [_read_reference(factory, settings, reference) for reference in reference_rows]
             mask_content = _read_mask(factory, settings, payload["mask"]) if mode == "INPAINT" else None
@@ -799,13 +818,17 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                     template_version=str(payload.get("prompt_template_version") or "shine-assets-user-prompt-v1"),
                     sha256=hashlib.sha256(str(payload.get("prompt") or "").encode()).hexdigest(),
                 )
-                graph = image_execution._build_graph(config, prompt, seed=int(seed), width=width, height=height)
+                graph = image_execution._build_graph(
+                    config, prompt, seed=int(seed), width=width, height=height,
+                    style_loras=style_loras, style_sampling=payload.get("style_sampling"),
+                )
             else:
                 if mode == "INPAINT":
                     if mask_content is None:
                         raise RuntimeError("LIBRARY_MASK_MISSING")
                     reference_contents.append((mask_content, "image/png"))
-                graph = _edit_graph(client, payload, width, height, int(seed), reference_contents)
+                graph = _edit_graph(client, payload, width, height, int(seed), reference_contents,
+                                    object_info=object_info, style_loras=style_loras)
                 # Recheck all rights and content hashes after uploads and live node
                 # validation, immediately before writing the submission intent.
                 for reference in reference_rows:
@@ -825,6 +848,7 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                 height,
                 int(seed),
                 renderer,
+                prompt_inputs=graph["474" if "474" in graph else qwen_workflow.TEXT_ENCODE_NODE]["inputs"],
             )
             with factory.begin() as db:
                 task = db.get(LibraryRenderTask, task_id)
@@ -972,6 +996,8 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                 task.status = "QUEUED" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else "FAILED"
                 if isinstance(exc, image_execution.ImageExecutionError):
                     task.error_code = exc.details.get("code_detail") or exc.code
+                elif isinstance(exc, StyleLoraError):
+                    task.error_code = exc.code
                 else:
                     task.error_code = (
                         "GPU_BUSY_RETRY_OR_QUEUE" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else type(exc).__name__

@@ -219,7 +219,7 @@ def test_an_over_long_prompt_is_refused_and_never_truncated():
     """A brief that is legal on its own can still compose past the limit."""
     maxed = _brief(
         appearance="a" * 1200,
-        must_keep=["m" * 160] * 12,
+        must_keep=[f"{index:02d}" + "m" * 158 for index in range(12)],
         avoid=["v" * 160] * 12,
     )
     direction = MaterialVisualDirection(era="e" * 200, palette="p" * 300, lighting="l" * 300,

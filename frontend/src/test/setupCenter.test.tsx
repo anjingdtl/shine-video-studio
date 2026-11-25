@@ -40,6 +40,23 @@ async function detect() {
 }
 
 describe('制作环境：检测快照与候选下载', () => {
+  it('只在明确勾选后通过同一整备入口提交生图风格 LoRA 包', async () => {
+    stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
+      status: 'QUEUED', task_id: 'image-loras-pack', steps: ['RECONCILE', 'DOWNLOAD'],
+    }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" />);
+    await detect();
+    const checkbox = screen.getByRole('checkbox', { name: /生图风格 LoRA 包/ });
+    expect(checkbox).not.toBeChecked();
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(0);
+    await user.click(checkbox);
+    await user.click(screen.getByRole('button', { name: '确认整备所选能力' }));
+    await user.click(screen.getByRole('button', { name: '开始准备' }));
+    await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)[0].body).toMatchObject({ capabilities: ['image_loras'] });
+  });
+
   it('硬件推荐候选时仍默认使用服务端指定的已验收基线', async () => {
     stub.add({ method: 'GET', pattern: /setup\/variant-recommendations$/, respond: () => jsonResponse({
       tier: 'lowend_12gb', host: { gpu: 'RTX 4070', vram_mb: 12282 },
