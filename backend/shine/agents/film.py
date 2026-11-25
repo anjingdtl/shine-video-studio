@@ -686,6 +686,7 @@ def validate_output(role: str, proposal, body: FilmRunRequest, inputs: list[Agen
                 "continuity_predecessor": bool(production.get("continuity_predecessor")),
                 "previous_blocking": production.get("previous_shot_blocking"),
                 "registered_locations": production.get("registered_locations") or [],
+                "character_tokens": production.get("character_tokens") or [],
             },
         )
         if verdict.refusals:
@@ -1678,6 +1679,7 @@ class FilmAgentDispatcher:
                         "continuity_predecessor": bool(production.get("continuity_predecessor")),
                         "previous_blocking": production.get("previous_shot_blocking"),
                         "registered_locations": production.get("registered_locations") or [],
+                        "character_tokens": production.get("character_tokens") or [],
                     },
                 )
                 payload.update(scene_director.board_server_fields(payload, scene_artifact, context, verdict))

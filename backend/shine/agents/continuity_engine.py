@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from shine.asset_identity import split_character_names
+from shine.h3.narrator import is_narrator_speaker
 from shine.literary.drama import spoken_seconds
 
 #: Each sub-shot of a segment gets at least this long: a cut that leaves less
@@ -80,6 +81,20 @@ _SIDE = {"left": -1, "center": 0, "right": 1}
 #: on their other side.
 _FACING_LEFT = frozenset({"facing_left", "three_quarter_left"})
 _FACING_RIGHT = frozenset({"facing_right", "three_quarter_right"})
+
+_CHAR_TOKEN_RE = re.compile(r"\{\{C\d+\}\}")
+_MULTI_PERSON_PHRASE_RE = re.compile(
+    r"\b(?:two[- ]shot|both figures|the pair|between them|opposite each other)\b",
+    flags=re.IGNORECASE,
+)
+_EXPLICIT_MAN_RE = re.compile(
+    r"\b(?:the|a)\s+(?:seated\s+|standing\s+|entering\s+|incoming\s+|lone\s+|young\s+|older\s+)?man\b",
+    flags=re.IGNORECASE,
+)
+_EXPLICIT_WOMAN_RE = re.compile(
+    r"\b(?:the|a)\s+(?:seated\s+|standing\s+|entering\s+|incoming\s+|lone\s+|young\s+|older\s+)?woman\b",
+    flags=re.IGNORECASE,
+)
 
 
 def normalised_dialogue(text: str) -> str:
@@ -166,6 +181,7 @@ class ShotView:
     lines: list[dict[str, Any]]
     mode: str = "cut"
     motivation: str = ""
+    beat_cast: list[str] = field(default_factory=list)
 
     @property
     def beat_ids(self) -> list[str]:
@@ -176,9 +192,14 @@ def read_board(board: dict[str, Any], scene: dict[str, Any]) -> tuple[list[ShotV
     """Normalise a board against its scene, or say why it cannot be read.
 
     Reading never judges timing or staging; it only pairs each beat id with the
-    scene's beat and each shot with the people those beats show.  An id the
-    scene does not have makes the board unreadable, because nothing after it
-    can be checked.
+    scene's beat and distinguishes two cast facts:
+    * ``beat_cast``: everyone present in the scene beats covered by this shot
+      (the legal whitelist for placements and dialogue);
+    * ``cast``: who actually appears in THIS shot's frame (``blocking.placements``)
+      or speaks a non-narrator line in it, ordered canonically by ``beat_cast``.
+      A single-character close-up in a two-person dialogue scene must carry only
+      that one framed performer so downstream Subject bindings never pull an
+      off-camera character into the frame.
     """
     beats = {beat["id"]: beat for beat in scene_beats(scene)}
     views: list[ShotView] = []
@@ -208,12 +229,29 @@ def read_board(board: dict[str, Any], scene: dict[str, Any]) -> tuple[list[ShotV
         if unknown:
             refusals.append({"code": "UNKNOWN_BEAT", "shot_id": shot_id, "beat_ids": sorted(set(unknown))})
         covered = [beat for sub in sub_shots for beat in sub.beat_ids if beat in beats]
-        cast = list(dict.fromkeys(
+        beat_cast = list(dict.fromkeys(
             [name for beat in covered for name in beats[beat]["characters"]]
             + [line["speaker"] for beat in covered for line in beats[beat]["lines"] if line["speaker"]]))
         lines = sorted(({**line, "shot_id": shot_id} for line in shot.get("dialogue") or [] if isinstance(line, dict)),
                        key=lambda line: float(line.get("start_s") or 0))
-        views.append(ShotView(index, shot_id, duration, sub_shots, cast, lines))
+        placed = list(dict.fromkeys(
+            str(placement.get("character") or "").strip()
+            for placement in (shot.get("blocking") or {}).get("placements") or []
+            if isinstance(placement, dict) and str(placement.get("character") or "").strip()
+        ))
+        shot_speakers = list(dict.fromkeys(
+            name for line in lines for name in split_character_names(str(line.get("speaker_id") or ""))
+            if name and not is_narrator_speaker(name)
+        ))
+        framed_set = set(placed) | set(shot_speakers)
+        if framed_set:
+            cast = [name for name in beat_cast if name in framed_set]
+            for name in placed + shot_speakers:
+                if name not in cast:
+                    cast.append(name)
+        else:
+            cast = []
+        views.append(ShotView(index, shot_id, duration, sub_shots, cast, lines, beat_cast=beat_cast))
     return views, refusals
 
 
@@ -275,12 +313,14 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
     shots = board["shots"]
     beats = {beat["id"]: beat for beat in scene_beats(scene)}
     registered_locations = _location_names(context.get("registered_locations"))
+    token_map = _character_token_map(context.get("character_tokens"), board.get("character_tokens"))
     for view in views:
         verdict.cast[view.id] = list(view.cast)
         _judge_segment(verdict, view, shots[view.index], context.get("max_shot_seconds"),
                        str(scene.get("location") or "").strip(),
                        registered_locations=registered_locations)
         _judge_cast(verdict, view, shots[view.index])
+        _judge_prose_cast(verdict, view, shots[view.index], token_map)
         _judge_camera(verdict, view, shots[view.index])
     _judge_coverage(verdict, views, beats)
     _judge_dialogue(verdict, views, beats)
@@ -328,12 +368,94 @@ def _judge_segment(verdict: BoardVerdict, view: ShotView, shot: dict[str, Any],
                                      "min_sub_shot_seconds": MIN_SUB_SHOT_SECONDS})
 
 
+def _character_token_map(context_tokens: Any, board_tokens: Any) -> dict[str, str]:
+    """Normalise character placeholder mappings (``{{C1}} -> 角色名``) from context or board."""
+    mapping: dict[str, str] = {}
+    for source in (board_tokens, context_tokens):
+        if isinstance(source, dict):
+            for token, name in source.items():
+                t, n = str(token or "").strip(), str(name or "").strip()
+                if t and n:
+                    mapping[t] = n
+        elif isinstance(source, list):
+            for entry in source:
+                if isinstance(entry, dict):
+                    t = str(entry.get("token") or "").strip()
+                    n = str(entry.get("character") or "").strip()
+                    if t and n:
+                        mapping[t] = n
+    return mapping
+
+
+def _shot_visual_prose(shot: dict[str, Any]) -> str:
+    camera = shot.get("camera") or {}
+    chunks = [
+        str(shot.get("visual_description") or ""),
+        str(camera.get("composition") or ""),
+        str(shot.get("entry_state") or ""),
+        str(shot.get("exit_state") or ""),
+    ]
+    for cut in shot.get("internal_cuts") or []:
+        if isinstance(cut, dict):
+            chunks.append(str(cut.get("visual_description") or ""))
+    for beat in shot.get("timeline") or []:
+        if isinstance(beat, dict):
+            chunks.append(str(beat.get("action") or ""))
+            chunks.append(str(beat.get("expression") or ""))
+    return " ".join(part for part in chunks if part.strip())
+
+
 def _judge_cast(verdict: BoardVerdict, view: ShotView, shot: dict[str, Any]) -> None:
+    allowed = view.beat_cast or view.cast
     for placement in (shot.get("blocking") or {}).get("placements") or []:
         name = str(placement.get("character") or "").strip()
-        if name and name not in view.cast:
+        if name and name not in allowed:
             # Somebody stands in the picture whom none of the shot's beats show.
             verdict.refusals.append({"code": "PLACEMENT_NOT_IN_CAST", "shot_id": view.id, "character": name})
+
+
+def _judge_prose_cast(
+    verdict: BoardVerdict,
+    view: ShotView,
+    shot: dict[str, Any],
+    token_map: dict[str, str],
+) -> None:
+    """Verify that shot visual prose never depicts off-cast characters.
+
+    One verdict for both tokenised prose (``{{C1}}``) and untokenised fallback:
+    a single-cast shot whose prose stages two people (e.g. an entering man and a
+    seated woman when only one subject is bound) is refused before landing.
+    """
+    prose = _shot_visual_prose(shot)
+    if not prose:
+        return
+    used_tokens = list(dict.fromkeys(_CHAR_TOKEN_RE.findall(prose)))
+    for token in used_tokens:
+        character = token_map.get(token)
+        if not character or character not in view.cast:
+            verdict.refusals.append({
+                "code": "PROSE_CHARACTER_NOT_IN_CAST",
+                "shot_id": view.id,
+                "token": token,
+                "character": character or token,
+            })
+    visible_cast = [name for name in view.cast if not is_narrator_speaker(name)]
+    if len(visible_cast) == 1:
+        multi_phrase = _MULTI_PERSON_PHRASE_RE.search(prose)
+        has_both_genders = bool(_EXPLICIT_MAN_RE.search(prose) and _EXPLICIT_WOMAN_RE.search(prose))
+        if multi_phrase or has_both_genders:
+            verdict.refusals.append({
+                "code": "SINGLE_CAST_MULTI_PERSON_PROSE",
+                "shot_id": view.id,
+                "cast": visible_cast,
+                "cue": multi_phrase.group(0) if multi_phrase else "man+woman",
+            })
+    if re.search(r"\binward\b", prose, flags=re.IGNORECASE) and re.search(r"\boutward\b", prose, flags=re.IGNORECASE):
+        verdict.warnings.append({
+            "code": "SHOT_DIRECTION_CONTRADICTION",
+            "shot_id": view.id,
+            "detail": "inward_and_outward",
+        })
 
 
 def _judge_camera(verdict: BoardVerdict, view: ShotView, shot: dict[str, Any]) -> None:
@@ -558,6 +680,8 @@ REFUSAL_LABELS = {
     "DIALOGUE_OVERLAP": "两句台词在时间上重叠",
     "DIALOGUE_TOO_FAST_TO_SPEAK": "台词分到的时间按正常语速说不完",
     "PLACEMENT_NOT_IN_CAST": "镜头里站了这场戏里没有的人",
+    "PROSE_CHARACTER_NOT_IN_CAST": "画面正文描写了不在本镜出场人物列表中的角色",
+    "SINGLE_CAST_MULTI_PERSON_PROSE": "单人镜头的画面正文描写了多名角色同框，会导致角色乱入",
     "SHOT_LOCATION_CONFLICT": "镜头拍的不是已登记的场景地点",
     "INTERNAL_CUT_COUNT": "一个渲染段里有不止一次镜内切",
     "INTERNAL_CUT_WINDOW": "镜内切离镜头开头或结尾太近，两边都看不清",
@@ -617,6 +741,14 @@ _REPAIRS = {
                                   "long plus a little air, and lengthen the shot if it must.",
     "PLACEMENT_NOT_IN_CAST": "The previous answer placed someone the shot's beats do not show ({where}): "
                              "{character}. blocking places only the people its beats name.",
+    "PROSE_CHARACTER_NOT_IN_CAST": "The previous answer referenced an off-cast character token in visual prose "
+                                   "({where}): {token} ({character}). Only depict characters placed in "
+                                   "blocking.placements (and listed in that shot's beats[].characters); if this shot "
+                                   "frames only one character, describe off-screen gaze as 'looks off-frame across the "
+                                   "counter' instead of naming the unseen character.",
+    "SINGLE_CAST_MULTI_PERSON_PROSE": "The previous answer staged multiple people inside a single-character shot "
+                                      "({where}, cue={cue}). A shot with only one cast member must depict ONLY "
+                                      "that one character; omit any second person or include the beat that shows both.",
     "SHOT_LOCATION_CONFLICT": "The previous answer staged a shot at an unregistered location ({where}): "
                               "{location}. Keep each shot at the scene's own location, or another exact name "
                               "from production_context.registered_locations when stepping across spaces.",

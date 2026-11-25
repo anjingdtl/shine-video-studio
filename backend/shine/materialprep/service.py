@@ -1225,6 +1225,8 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
     from shine.models import Asset, Job, Shot, ShotAssetBinding
     from shine.schemas import ReferenceUse, ShotBindingInput
     from shine.services import (
+        MAX_REFERENCE_COUNTS,
+        MAX_TOTAL_REFERENCES,
         _binding_rows,
         bindings_unchanged,
         protected_shot_ids,
@@ -1259,7 +1261,7 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
     for requirement in sorted(rows, key=lambda row: row.id):
         payload = dict(requirement.payload or {})
         family = payload.get("family")
-        if family not in {"character", "scene"}:
+        if family not in {"character", "scene", "prop"}:
             continue
         entity = str(payload.get("entity_id") or "")
         if not entity:
@@ -1395,16 +1397,31 @@ def bind_adopted_masters_to_shots(db, project_id: str, plan_id: str, actor: str)
             for index, link in enumerate(keep)
         ]
         bound_ids = {row.asset_id for row in target}
-        for (family, entity), asset_id in wanted.items():
+        # 优先采用人物主体与场景底图，剩余图像槽位再采纳本镜用到的核心道具，
+        # 严守 H3 9 图 / 12 总参考上限，绝不让道具挤掉人物主体或场景底图。
+        family_priority = {"character": 0, "scene": 1, "prop": 2}
+        ordered_wanted = sorted(
+            wanted.items(),
+            key=lambda item: (family_priority.get(item[0][0], 9), item[0][1]),
+        )
+        image_count = sum(1 for row in target if row.use_as in {ReferenceUse.SUBJECT, ReferenceUse.PICTURE})
+        for (family, entity), asset_id in ordered_wanted:
             if asset_id in bound_ids:
                 continue
+            if len(target) >= MAX_TOTAL_REFERENCES or image_count >= MAX_REFERENCE_COUNTS["image"]:
+                if family == "prop":
+                    continue
             if family == "character":
                 target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.SUBJECT,
+                                               role=entity, ordinal=len(target)))
+            elif family == "prop":
+                target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.PICTURE,
                                                role=entity, ordinal=len(target)))
             else:
                 target.append(ShotBindingInput(asset_id=asset_id, use_as=ReferenceUse.PICTURE,
                                                ordinal=len(target)))
             bound_ids.add(asset_id)
+            image_count += 1
         # 每镜至多一张场景底图：历史「全塞」或多份采纳只留最新一张，其余解绑，
         # 保证人物主体+单场景不撞 H3 九图上限。
         scene_entries = [t for t in target

@@ -43,6 +43,36 @@ def frozen_prompt(requirement_payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def world_note_for_family(
+    family: str,
+    world: str,
+    *,
+    world_source: str = "",
+    user_text: bool = False,
+) -> str:
+    """Single verdict on whether a project world note may enter an image prompt.
+
+    An outline synopsis (``outline_summary``) describes characters and their
+    actions.  Pasting it into a scene or prop positive prompt made image models
+    paint the whole cast into an empty location plate.  Scene and prop prompts
+    therefore never receive an outline summary; producer-composed scene/prop
+    briefs already translate era and architecture into English ``appearance``
+    prose, so only character stills (and user-written stills backed by a
+    confirmed global story bible) inherit the raw world note.
+    """
+    text = str(world or "").strip()
+    if not text:
+        return ""
+    if family == "character":
+        return text
+    if family in {"scene", "prop"}:
+        if world_source == "outline_summary":
+            return ""
+        if not user_text:
+            return ""
+    return text
+
+
 def compose_requirement_prompt(
     *,
     family: str,
@@ -54,6 +84,8 @@ def compose_requirement_prompt(
     description: str = "",
     manual: dict[str, Any] | None = None,
     world_note: str = "",
+    world_source: str = "",
+    style_snapshot: dict[str, Any] | None = None,
 ) -> image_prompts.ImagePrompt:
     """The prompt pair for one requirement.
 
@@ -84,6 +116,10 @@ def compose_requirement_prompt(
         brief = brief.model_copy(update={"appearance": fallback})
     if family not in image_prompts.COMPOSITION_RULES:
         raise PromptSourceError("UNKNOWN_MATERIAL_FAMILY", family=str(family))
+    resolved_film_style = film_style_for(style_snapshot, family=family) if style_snapshot else film_style
+    resolved_world = world_note_for_family(
+        family, world_note, world_source=world_source, user_text=False
+    )
     try:
         return image_prompts.compose(
             family,
@@ -91,22 +127,22 @@ def compose_requirement_prompt(
             visual_direction=visual_direction or MaterialVisualDirection(),
             requirement_name=requirement_name,
             carrier=carrier,
-            film_style=film_style,
-            world_note=world_note,
+            film_style=resolved_film_style,
+            world_note=resolved_world,
         )
     except image_prompts.ImagePromptError as exc:
         raise PromptSourceError(exc.code, **exc.details) from exc
 
 
-def film_style_for(snapshot: dict[str, Any] | None) -> str:
-    """The frozen film medium sentence every material prompt carries."""
-    from shine.h3.film_type import film_type_sentence
+def film_style_for(snapshot: dict[str, Any] | None, *, family: str | None = None) -> str:
+    """The frozen film medium sentence every material prompt carries, scoped by family."""
+    from shine.h3.film_type import material_film_type_sentence
     from shine.schemas import FilmType
 
     if not snapshot:
         return ""
     try:
-        return film_type_sentence(FilmType(snapshot.get("film_type")))
+        return material_film_type_sentence(FilmType(snapshot.get("film_type")), family=family)
     except ValueError:
         return ""
 
@@ -141,6 +177,7 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
         world = " ".join(str(item).strip() for item in world_raw if str(item).strip())
     else:
         world = str(world_raw or "").strip()
+    world_source = "story_bible" if world else ""
     if not world:
         outline = db.scalar(
             select(AgentArtifact)
@@ -152,6 +189,8 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
         )
         if outline is not None:
             world = str((outline.payload_json or {}).get("summary") or "").strip()
+            if world:
+                world_source = "outline_summary"
     return {
         "project_id": project_id,
         "film_style": film_style_for(snapshot),
@@ -160,6 +199,7 @@ def project_visual_facts(db: Any, project_id: str) -> dict[str, Any]:
         "style_version": style.version if style else None,
         "snapshot": snapshot,
         "world": world,
+        "world_source": world_source,
     }
 
 
@@ -178,6 +218,18 @@ def compose_user_image_prompt(
     """
     brief = MaterialImageBrief.model_construct(
         appearance=user_prompt, must_keep=[], avoid=[], questions=[])
+    snapshot = facts.get("snapshot") if isinstance(facts.get("snapshot"), dict) else None
+    resolved_film_style = (
+        film_style_for(snapshot, family=family)
+        if snapshot
+        else str(facts.get("film_style") or "")
+    )
+    resolved_world = world_note_for_family(
+        family,
+        str(facts.get("world") or ""),
+        world_source=str(facts.get("world_source") or ""),
+        user_text=True,
+    )
     try:
         return image_prompts.compose(
             family,
@@ -185,9 +237,9 @@ def compose_user_image_prompt(
             visual_direction=None,
             requirement_name="",
             carrier=carrier,
-            film_style=str(facts.get("film_style") or ""),
+            film_style=resolved_film_style,
             user_text=True,
-            world_note=str(facts.get("world") or ""),
+            world_note=resolved_world,
         )
     except image_prompts.ImagePromptError as exc:
         raise PromptSourceError(exc.code, **exc.details) from exc
@@ -201,4 +253,5 @@ __all__ = [
     "film_style_for",
     "frozen_prompt",
     "project_visual_facts",
+    "world_note_for_family",
 ]

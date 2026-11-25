@@ -820,6 +820,8 @@ def _composed_requirement_prompt(db, requirement) -> tuple[str, str, str | None]
             description=str(payload.get("description") or ""),
             manual=frozen_prompt(payload),
             world_note=facts["world"],
+            world_source=str(facts.get("world_source") or ""),
+            style_snapshot=facts.get("snapshot"),
         )
     except PromptSourceError as exc:
         code = "MATERIAL_BRIEF_NOT_GENERATED" if exc.code == "MATERIAL_BRIEF_MISSING" else exc.code

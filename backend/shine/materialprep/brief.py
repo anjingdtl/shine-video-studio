@@ -90,6 +90,40 @@ def build_context(
     The identity is fixed here and is never read back from the answer: the
     model describes an appearance, it does not decide who the item is.
     """
+    family = str(requirement_payload.get("family") or "").strip().lower()
+    if family == "scene":
+        family_rules = [
+            "This is an EMPTY environment plate: describe ONLY the architecture, spatial layout, "
+            "furniture, weather, practical lighting and surface materials. NEVER mention, imply or "
+            "depict any person, human figure, silhouette, character, costume, posture or character action.",
+            "Read story_world and locked_story_facts strictly to infer the era, architecture, weather "
+            "and lighting atmosphere; strip out every character name, dialogue and plot action.",
+            "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
+            "space and architecture first, then layout and set dressing, then lighting, weather and surface "
+            "materials. Use concrete nouns ('weathered dark timber', 'rain-beaded lattice glass'), not bare "
+            "colours or bare materials.",
+        ]
+    elif family == "prop":
+        family_rules = [
+            "This is a standalone prop still-life study: describe ONLY the single complete object, its "
+            "shape, surface materials, patina and legible carrier content (for paper/screen). NEVER include "
+            "any person, hands, fingers, holder, wearer or room background.",
+            "Read story_world and locked_story_facts strictly to infer the era and physical craftsmanship "
+            "of the object; never depict characters or plot actions.",
+            "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
+            "object first, then its structure and visible details, then its surface materials and textures. "
+            "Use concrete nouns ('brushed brass', 'foxed rag paper'), not bare colours or bare materials.",
+        ]
+    else:
+        family_rules = [
+            "The subject belongs to the era and setting in story_world (and the locked story facts). "
+            "Carry the period costume, hair, architecture and materials into the English prose; a "
+            "period or fantasy script must not render as modern people in modern dress. Translate the "
+            "world's intent into English, never paste the Chinese.",
+            "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
+            "subject first, then its dress and build, then the surface materials and their textures. Use "
+            "concrete nouns ('brushed brass', 'deep navy wool'), not bare colours or bare materials.",
+        ]
     return {
         "task": "Write one appearance brief for one confirmed material requirement.",
         "requirement": {
@@ -119,15 +153,10 @@ def build_context(
             "lighting tone, lens and texture language, and the production genre, into the English prose. "
             "The style bible is written in the script language; translate its intent, never paste it.",
             "The picture's medium is fixed by film_style_instruction: apply it to every surface "
-            "(cel-shaded flat fills and clean line art for animation; real skin and lens texture for "
-            "live-action). A photoreal portrait for an animation film is a refused brief, not a style choice.",
-            "The subject belongs to the era and setting in story_world (and the locked story facts). "
-            "Carry the period costume, hair, architecture and materials into the English prose; a "
-            "period or fantasy script must not render as modern people in modern dress. Translate the "
-            "world's intent into English, never paste the Chinese.",
-            "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
-            "subject first, then its dress and build, then the surface materials and their textures. Use "
-            "concrete nouns ('brushed brass', 'deep navy wool'), not bare colours or bare materials.",
+            "(cel-shaded flat fills and clean line art for animation; photorealistic physical materials "
+            "and lens texture for live-action). A photoreal image for an animation film is a refused brief, "
+            "not a style choice.",
+            *family_rules,
             "Never write quality slogans such as masterpiece, best quality, 8k, 4k, highly detailed, "
             "award winning or trending on artstation: the provider guidance rules them out and they add "
             "no picture information.",
@@ -171,17 +200,20 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
         # never sees it can only invent a different film, which is exactly how a
         # reference still ends up not matching the production it belongs to.
         # One reader supplies the medium, the world and the style identity.
-        from shine.materialprep.prompt_source import project_visual_facts
+        from shine.materialprep.prompt_source import film_style_for, project_visual_facts
         facts = project_visual_facts(db, item.project_id)
+        family = str(requirement_payload.get("family") or (item.payload or {}).get("family") or "")
+        scoped_film_style = film_style_for(facts["snapshot"], family=family) or facts["film_style"]
         brief_basis = digest({
             "style_version_id": facts["style_version_id"],
             "world": facts["world"],
+            "family": family,
             "rulepack": rulepack_digest(),
         })
         return {
             "style_bible": facts["snapshot"],
             "style_version": facts["style_version"],
-            "film_style": facts["film_style"],
+            "film_style": scoped_film_style,
             "story_world": facts["world"],
             "brief_basis": brief_basis,
             "existing_brief_basis": (item.payload or {}).get("brief_basis"),

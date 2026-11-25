@@ -172,10 +172,28 @@ def check_drama_scene(
             verdict.warnings.append({
                 "code": "DRAMA_INNER_STATE_REPORTED", "beat": beat_index, "word": inner.group(0),
             })
+        beat_chars = {
+            name.strip()
+            for name in beat.get("characters") or []
+            if isinstance(name, str) and name.strip()
+        }
         for name in beat.get("characters") or []:
             if isinstance(name, str) and name.strip() and known and name.strip() not in known:
                 verdict.warnings.append({"code": "DRAMA_CHARACTER_UNESTABLISHED", "beat": beat_index,
                                          "character": name.strip()})
+        # A known cast member explicitly named in visible_action must be listed
+        # in beat.characters; omitting an on-screen bystander caused downstream
+        # shots to render a two-person description with only one bound subject.
+        action_text = str(beat.get("visible_action") or "")
+        for member in known:
+            if len(member) < 2 or member in beat_chars:
+                continue
+            if member in action_text:
+                verdict.refusals.append({
+                    "code": "DRAMA_VISIBLE_CHARACTER_OMITTED",
+                    "beat": beat_index,
+                    "character": member,
+                })
     return verdict
 
 

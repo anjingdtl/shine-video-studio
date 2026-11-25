@@ -1418,12 +1418,22 @@ def verified_production_context(db, project_id, source_text, supplied, *, requir
         # User free text remains an explicitly unverified carry-over: it may
         # guide the crew but is never evidence that a prior render happened.
         previous_render_status, continuity_evidence = "NOT_CLAIMED", {"basis": "user_supplied_unverified"}
+    outline_characters = outline.payload_json.get("characters", [])
+    character_tokens = [
+        {
+            "token": f"{{{{C{idx}}}}}",
+            "character": str(ch.get("entity_id") or ch.get("name") or "").strip(),
+        }
+        for idx, ch in enumerate(outline_characters, start=1)
+        if isinstance(ch, dict) and str(ch.get("entity_id") or ch.get("name") or "").strip()
+    ]
     context = {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                "document_id": document.id, "document_sha256": document.sha256,
                "production_section_id": section_id, "source_offsets": span,
                "story_line": outline.payload_json.get("story_line", []),
                "timeline": outline.payload_json.get("timeline", []),
-               "characters": outline.payload_json.get("characters", []),
+               "characters": outline_characters,
+               "character_tokens": character_tokens,
                "locations": outline.payload_json.get("locations", []),
                "continuity_facts": supplied.get("continuity_facts", []),
                "continuity": continuity_evidence,

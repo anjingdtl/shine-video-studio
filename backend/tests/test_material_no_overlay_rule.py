@@ -75,7 +75,7 @@ def test_the_overlay_code_set_covers_the_prompt_terms():
 
 def test_the_template_version_moved_with_the_rule():
     """Readiness evidence is bound to the template version, so it must change."""
-    assert image_prompts.PROMPT_TEMPLATE_VERSION == "material-image-v5-qwen21"
+    assert image_prompts.PROMPT_TEMPLATE_VERSION == "material-image-v6-qwen21"
 
 
 def test_the_frozen_film_type_travels_into_the_image_prompt():

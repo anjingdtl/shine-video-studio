@@ -334,11 +334,11 @@ def test_ref2va_emits_all_six_official_sections_and_stable_labels():
         "non_diegetic_music",
     ]
     assert compiled.prompt.index("subject_definitions:") < compiled.prompt.index("summary:")
-    # 2.0.0 binds the label to its presentation slot in one sentence and spends
-    # no words re-describing the appearance the reference image already fixes.
+    # 2.1.0 binds the label to its presentation slot in one sentence and
+    # explicitly anchors face, hairstyle and outfit to the reference image.
     assert (
         "<Subject 1> is the first listed performer (character), shown in <Picture 1>; "
-        "keep that exact reference appearance throughout."
+        "keep that exact reference appearance, face, hairstyle and outfit throughout."
     ) in compiled.sections["subject_definitions"]
     assert "approved, locked" not in compiled.sections["subject_definitions"]
     assert "this exact face, hairstyle" not in compiled.sections["subject_definitions"]
@@ -347,7 +347,19 @@ def test_ref2va_emits_all_six_official_sections_and_stable_labels():
     assert compiled.sections["summary"].startswith(
         "[reference generation + keyframe completion + audio reference]"
     )
-    assert "<Subject 1>: fully_preserved - the same person in every frame." in compiled.sections["retention_analysis"]
+    assert (
+        "<Subject 1>: fully_preserved - the same person in the same outfit in every frame."
+        in compiled.sections["retention_analysis"]
+    )
+    # Released 2.0.0 replays its exact wording unchanged.
+    from shine.h3.compiler import LEGACY_THIN_SHELL_COMPILER_VERSION
+    legacy_200 = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
+                                            compiler_version=LEGACY_THIN_SHELL_COMPILER_VERSION)
+    assert (
+        "<Subject 1> is the first listed performer (character), shown in <Picture 1>; "
+        "keep that exact reference appearance throughout."
+    ) in legacy_200.sections["subject_definitions"]
+    assert "<Subject 1>: fully_preserved - the same person in every frame." in legacy_200.sections["retention_analysis"]
     assert "<Picture 1> ([Shot 1] first_frame frame): fully_preserved" in compiled.sections["retention_analysis"]
     # The released 1.4.0 retention line replays unchanged.
     legacy = H3PromptCompiler().compile(spec=shot, style=STYLE, manifest=manifest,
@@ -1080,7 +1092,7 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     from shine.h3.compiler import COMPILER_VERSION
 
     compiler = H3PromptCompiler()
-    assert COMPILER_VERSION == "shine-h3-compiler/2.0.0"
+    assert COMPILER_VERSION == "shine-h3-compiler/2.1.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1222,7 +1234,10 @@ def test_the_thin_shell_keeps_the_contract_and_drops_the_meta_instructions():
     assert compiled.sections["summary"].startswith("[reference generation + audio reference]")
     assert ("Reference labels used: <Subject 1>, <Subject 2>, <Subject 3>, <Picture 4>, <Audio 1>."
             in compiled.sections["summary"])
-    assert "<Subject 1>: fully_preserved - the same person in every frame." in compiled.sections["retention_analysis"]
+    assert (
+        "<Subject 1>: fully_preserved - the same person in the same outfit in every frame."
+        in compiled.sections["retention_analysis"]
+    )
     assert "([Shot 1] composition reference): partially_preserved" in compiled.sections["retention_analysis"]
     assert "the approved timbre voices only the scripted dialogue lines" in compiled.sections["retention_analysis"]
     assert "shown in <Picture 1>" in compiled.sections["subject_definitions"].splitlines()[0]

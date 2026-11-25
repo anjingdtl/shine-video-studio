@@ -40,8 +40,14 @@ from shine.materialprep.contracts import (
     MaterialVisualDirection,
 )
 
-PROMPT_TEMPLATE_VERSION = "material-image-v5-qwen21"
+PROMPT_TEMPLATE_VERSION = "material-image-v6-qwen21"
 """Bump when a composition rule changes; readiness evidence is bound to it.
+
+v6 purges human-performer and plot-summary leakage from non-character plates:
+scene and prop stills use family-scoped film-medium prose (never "real human
+performers"), scene/prop negative prompts explicitly exclude people/hands, and
+producer-composed scene/prop prompts never inject raw CJK plot summaries as
+``world_note``.
 
 v5 carries the frozen film type as a server-owned English sentence (the same
 clause the H3 compiler uses): an animation project's reference stills must not
@@ -108,6 +114,10 @@ _NO_COLLAGE_SENTENCE = "The picture is a single view, never a collage, split pan
 _NO_WATERMARK_SHORT = f"no {_NO_WATERMARK_TERMS}"
 _NO_TEXT_SHORT = f"no text, no lettering, no captions, no {_NO_WATERMARK_TERMS}"
 _NO_COLLAGE_SHORT = "no collage, no split panel, no character sheet, no border overlay"
+_NO_PEOPLE_SHORT = (
+    "people, person, human, man, woman, character, human figure, silhouette, crowd, portrait, face, hands"
+)
+_NO_HOLDER_SHORT = "person, human, hands, fingers, holding, wearing, portrait"
 
 _TEXT_EXCLUSION_SENTENCES = (_NO_TEXT_SENTENCE, _NO_COLLAGE_SENTENCE)
 """Composition rules that must survive even after the studio sentences are joined."""
@@ -292,10 +302,30 @@ def compose(
     else:
         extra_sentence = ""
 
+    # Enforce family-safe film medium prose even if a caller passes the video
+    # shot sentence ("real human performers...") for an empty scene or prop.
+    effective_film_style = film_style.strip()
+    if family in ("scene", "prop") and effective_film_style:
+        from shine.h3.film_type import material_film_type_sentence
+        from shine.schemas import FilmType
+
+        lowered_style = effective_film_style.casefold()
+        if "real human performers" in lowered_style or "live-action footage" in lowered_style:
+            effective_film_style = material_film_type_sentence(FilmType.LIVE_ACTION, family)
+        elif "2d cel-shaded animation" in lowered_style and "photorealistic skin" in lowered_style:
+            effective_film_style = material_film_type_sentence(FilmType.ANIMATION, family)
+
+    # Producer-composed scene/prop stills already translate era and architecture
+    # into English ``appearance`` prose; injecting a raw CJK plot summary here
+    # caused image models to paint characters and plot actions into empty sets.
+    effective_world_note = world_note.strip()
+    if family in ("scene", "prop") and effective_world_note and not user_text and _CJK.search(effective_world_note):
+        effective_world_note = ""
+
     layers = [
         standard.anchor_sentence(family, carrier, direction),
-        film_style.strip(),
-        world_note.strip(),
+        effective_film_style,
+        effective_world_note,
         f"{subject + ', ' if subject else ''}{appearance}",
         standard.environment_sentence(family, direction),
         standard.lighting_sentence(direction),
@@ -311,9 +341,13 @@ def compose(
     negative_exclusions = [_NO_WATERMARK_SHORT, _NO_COLLAGE_SHORT]
     if not (family == "prop" and carrier in ("paper", "screen")):
         negative_exclusions.insert(0, _NO_TEXT_SHORT)
-    if "cel-shaded" in film_style:
+    if family == "scene":
+        negative_exclusions.append(_NO_PEOPLE_SHORT)
+    elif family == "prop":
+        negative_exclusions.append(_NO_HOLDER_SHORT)
+    if "cel-shaded" in effective_film_style:
         negative_exclusions.append("photorealistic, live-action footage, 3D CGI rendering")
-    elif "live-action" in film_style:
+    elif "live-action" in effective_film_style:
         negative_exclusions.append("illustration, cel shading, cartoon, anime rendering")
     negative = _join([*avoid, *negative_exclusions])
 

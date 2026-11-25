@@ -3416,7 +3416,7 @@
   ],
   "digests": {
     "api_contract": "98dc82f81a4d960ca2c921673f39dc21e594dbe6fdb9d9d47eb3c7c71ca96bc6",
-    "api_schema": "d76122d5940cada88b881ac6915b96415109bebafc0c71ce27dc897178709b25",
+    "api_schema": "1d7697589c1e430fc2bb25afa52845f43b80f6faf7f5750ec6d56def49279010",
     "contracts": "993591e4fb24228800ccf7852055f1c1859d0129f213ffd39d91e61786e72c30"
   },
   "discovered": [

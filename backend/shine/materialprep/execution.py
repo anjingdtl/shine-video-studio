@@ -241,7 +241,9 @@ def _load_context(factory, item_id: str) -> dict[str, Any]:
             "project_id": project.id if project else None,
             "project_title": project.title if project else "",
             "film_style": facts["film_style"],
+            "style_snapshot": facts["snapshot"],
             "world": facts["world"],
+            "world_source": facts.get("world_source") or "",
         }
 
 
@@ -434,6 +436,8 @@ def _compose_prompt(context: dict[str, Any]) -> image_prompts.ImagePrompt:
             description=str(requirement.get("description") or ""),
             manual=_manual_prompt(context),
             world_note=str(context.get("world") or ""),
+            world_source=str(context.get("world_source") or ""),
+            style_snapshot=context.get("style_snapshot"),
         )
     except PromptSourceError as exc:
         raise ImageExecutionError(

@@ -727,6 +727,7 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "max_shot_seconds": cap,
                     "continuity_predecessor": bool(predecessor),
                     "registered_locations": reg_locs,
+                    "character_tokens": board.get("character_tokens") or {},
                     **({"previous_blocking": (earlier.spec or {}).get("blocking")} if earlier is not None else {}),
                 },
             )
@@ -838,6 +839,11 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                         "timeline": row["timeline"],
                         "entry_state": row["entry_state"],
                         "exit_state": row["exit_state"],
+                        **(
+                            {"character_tokens": dict(board["character_tokens"])}
+                            if isinstance(board.get("character_tokens"), dict) and board.get("character_tokens")
+                            else {}
+                        ),
                     },
                     material_notices=material_notices,
                     style_warnings=style_warnings,

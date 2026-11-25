@@ -919,6 +919,7 @@ def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str,
                 ordinal=binding.ordinal,
                 duration_s=asset.duration_s,
                 entity_id=asset.entity_id,
+                asset_role=getattr(asset, "role", None),
             )
         )
     return manifest

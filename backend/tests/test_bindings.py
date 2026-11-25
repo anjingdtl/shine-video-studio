@@ -80,14 +80,15 @@ def test_mixed_image_bindings_share_presentation_picture_numbering(studio):
     labels = [entry["label"] for entry in job["request"]["reference_manifest"]]
     assert labels == ["<Subject 1>", "<Subject 2>", "<Picture 3>"]
     prompt = client.post(f"/api/v1/shots/{shot['id']}/compile").json()["compiled_prompt"]
-    # 2.0.0 binds each subject to its shared presentation slot in one sentence.
+    # 2.1.0 binds each subject to its shared presentation slot in one sentence
+    # and explicitly locks face, hairstyle and outfit to the reference image.
     assert (
         "<Subject 1> is the first listed performer (CHAR_A), shown in <Picture 1>; "
-        "keep that exact reference appearance throughout."
+        "keep that exact reference appearance, face, hairstyle and outfit throughout."
     ) in prompt
     assert (
         "<Subject 2> is the second listed performer (CHAR_B), shown in <Picture 2>; "
-        "keep that exact reference appearance throughout."
+        "keep that exact reference appearance, face, hairstyle and outfit throughout."
     ) in prompt
     assert "<Picture 3> is the keyframe reference for [Shot 1]." in prompt
 

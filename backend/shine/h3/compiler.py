@@ -68,7 +68,13 @@ LEGACY_PRE_SANITIZE_COMPILER_VERSION = "shine-h3-compiler/1.4.0-original"
 # each label in one sentence, the frozen-style header and the other meta
 # instructions are gone, the second-by-second performance is prose, and every
 # spoken line sits inside the [Shot N] block that performs it.
-COMPILER_VERSION = "shine-h3-compiler/2.0.0"
+LEGACY_THIN_SHELL_COMPILER_VERSION = "shine-h3-compiler/2.0.0"
+# 2.1.0 anchors every character reference token (``{{Ck}}``) inside shot prose
+# directly to its request-local ``<Subject n>`` label, strengthens explicit
+# outfit/hairstyle preservation, and distinguishes scene, prop and continuity
+# ``<Picture k>`` roles so H3 never confuses an environment plate with a prop or
+# preceding final frame.
+COMPILER_VERSION = "shine-h3-compiler/2.1.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -77,6 +83,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
     LEGACY_TIMELINE_COMPILER_VERSION,
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    LEGACY_THIN_SHELL_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -93,6 +100,11 @@ LEGACY_SHELL_VERSIONS = (
     *LEGACY_SEMANTIC_VERSIONS,
     LEGACY_TIMELINE_COMPILER_VERSION,
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+)
+#: Versions that keep the pre-2.1.0 prose/picture-role behaviour.
+LEGACY_200_VERSIONS = (
+    *LEGACY_SHELL_VERSIONS,
+    LEGACY_THIN_SHELL_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -115,6 +127,7 @@ REF_SECTION_ORDER = (
     "non_diegetic_music",
 )
 LABEL_PATTERN = re.compile(r"<(Subject|Picture|Video|Audio) (\d+)>")
+CHARACTER_TOKEN_PATTERN = re.compile(r"\{\{C\d+\}\}")
 
 
 class PromptCompilationError(ValueError):
@@ -152,9 +165,12 @@ class _Context:
     #: Replay-only: the pre-sanitizing 1.4.0 bytes (dialogue text, the silent
     #: shot's style dimensions and its environment are emitted unsanitized).
     pre_sanitize: bool = False
-    #: 2.0.0: thin reference shell, performance timeline, dialogue inside the
+    #: 2.0.0+: thin reference shell, performance timeline, dialogue inside the
     #: [Shot N] block that speaks it.
     thin_shell: bool = False
+    #: 2.1.0+: resolve ``{{Ck}}`` tokens into ``<Subject n>``, state explicit
+    #: outfit/hairstyle retention, and distinguish scene/prop/continuity pictures.
+    anchored_v21: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -727,8 +743,33 @@ def _environment_sentences(ctx: _Context) -> list[str]:
     return sentences
 
 
+def _resolve_character_tokens(text: str, ctx: _Context) -> str:
+    """Resolve stable ``{{Ck}}`` character placeholders into request-local ``<Subject n>`` labels.
+
+    Only active from 2.1.0 onward so 2.0.0 requests replay byte-identically.
+    Never leaks raw ``{{Ck}}`` syntax into the compiled H3 prompt.
+    """
+    if not text or not ctx.anchored_v21 or "{{" not in text:
+        return text
+    tokens = ctx.spec.character_tokens or {}
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group(0)
+        character = tokens.get(token)
+        if character:
+            label = _label_for_character(character, ctx)
+            if label:
+                return label
+        note = f"Character placeholder {token} had no matching bound reference and fell back to generic wording."
+        if note not in ctx.warnings:
+            ctx.warnings.append(note)
+        return "the performer"
+
+    return CHARACTER_TOKEN_PATTERN.sub(replace, text)
+
+
 def _shot_text_thin(ctx: _Context) -> str:
-    """The 2.0.0 shot text: one shell, a rich timeline, every line in its own block.
+    """The 2.0.0+ shot text: one shell, a rich timeline, every line in its own block.
 
     A shot with internal cuts is one ``[Shot N]`` block per sub-shot.  A spoken
     line belongs to the sub-shot that performs it, so each block carries the
@@ -740,7 +781,8 @@ def _shot_text_thin(ctx: _Context) -> str:
     blocks: list[list[str]] = [[] for _ in range(len(cuts) + 1)]
     for index, cut in enumerate(cuts, start=1):
         blocks[index].append(
-            f"[Shot {index + 1}] At {_format_timestamp(cut.start_s)}, {cut.visual_description.strip()}"
+            f"[Shot {index + 1}] At {_format_timestamp(cut.start_s)}, "
+            f"{_resolve_character_tokens(cut.visual_description.strip(), ctx)}"
         )
 
     def block_of(seconds: float) -> int:
@@ -758,20 +800,20 @@ def _shot_text_thin(ctx: _Context) -> str:
     blocks[0].append(_performance_sentence(ctx))
     for sentence in (
         _placement_sentence(ctx),
-        f"It opens on {_clause(spec.entry_state)}" if spec.entry_state.strip() else "",
-        spec.story_beat.strip(),
-        _camera_narrative(spec),
+        f"It opens on {_clause(_resolve_character_tokens(spec.entry_state, ctx))}" if spec.entry_state.strip() else "",
+        _resolve_character_tokens(spec.story_beat.strip(), ctx),
+        _resolve_character_tokens(_camera_narrative(spec), ctx),
     ):
         if sentence:
             blocks[0].append(sentence)
     for beat in sorted(spec.timeline, key=lambda item: item.start_s):
-        blocks[block_of(beat.start_s)].append(_timeline_sentence([beat]))
+        blocks[block_of(beat.start_s)].append(_resolve_character_tokens(_timeline_sentence([beat]), ctx))
     environment = spec.sound.get("environment")
     if environment and not spec.dialogue:
         environment = non_vocal_ambience_text(environment)
     if environment:
         blocks[0].append(f"The scene is set in {environment}.")
-    blocks[0].extend(_environment_sentences(ctx))
+    blocks[0].extend(_resolve_character_tokens(line, ctx) for line in _environment_sentences(ctx))
     facts = spec.locked_story_facts
     if any(re.search(r"[\u3400-\u9fff]", fact) for fact in facts):
         translated = spec.prompt_story_facts
@@ -791,7 +833,7 @@ def _shot_text_thin(ctx: _Context) -> str:
         blocks[block_of(line.start_s)].append(_dialogue_sentence(ctx, line))
     blocks[0].extend(_continuity_sentences(ctx))
     if spec.exit_state.strip():
-        blocks[-1].append(f"The shot settles on {_clause(spec.exit_state)}")
+        blocks[-1].append(f"The shot settles on {_clause(_resolve_character_tokens(spec.exit_state, ctx))}")
     return "\n".join(" ".join(part.strip() for part in block if part.strip()) for block in blocks)
 
 
@@ -1000,10 +1042,16 @@ def _subject_definitions(ctx: _Context) -> str:
                 # One binding sentence.  The reference image already fixes the
                 # face and the costume, so the prompt spends no words
                 # re-describing appearance that could compete with it.
-                lines.append(
-                    f"{item.label} is {identity}, shown in <Picture {positions[id(item)]}>; "
-                    "keep that exact reference appearance throughout."
-                )
+                if ctx.anchored_v21:
+                    lines.append(
+                        f"{item.label} is {identity}, shown in <Picture {positions[id(item)]}>; "
+                        "keep that exact reference appearance, face, hairstyle and outfit throughout."
+                    )
+                else:
+                    lines.append(
+                        f"{item.label} is {identity}, shown in <Picture {positions[id(item)]}>; "
+                        "keep that exact reference appearance throughout."
+                    )
                 subject_index += 1
                 continue
             appearance_note = (
@@ -1018,8 +1066,22 @@ def _subject_definitions(ctx: _Context) -> str:
             )
             subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
-            frame = item.frame_role.value if item.frame_role else "composition"
-            lines.append(f"{item.label} is the {frame} reference for [Shot 1].")
+            if item.frame_role:
+                lines.append(f"{item.label} is the {item.frame_role.value} reference for [Shot 1].")
+            elif ctx.anchored_v21 and item.role == "continuity_derivative":
+                lines.append(f"{item.label} is the preceding-shot final-frame continuity reference for [Shot 1].")
+            elif ctx.anchored_v21 and item.asset_role == "prop":
+                lines.append(
+                    f"{item.label} is a prop appearance reference for [Shot 1]; "
+                    "keep this object's design and details consistent when shown."
+                )
+            elif ctx.anchored_v21 and item.asset_role == "scene":
+                lines.append(
+                    f"{item.label} is the empty environment and lighting reference for [Shot 1]; "
+                    "use it for the setting, architecture and atmosphere only."
+                )
+            else:
+                lines.append(f"{item.label} is the composition reference for [Shot 1].")
         elif item.use_as == ReferenceUse.VIDEO:
             if ctx.thin_shell:
                 lines.append(f"{item.label} is a reference for motion, framing or continuation.")
@@ -1131,7 +1193,10 @@ def _retention(ctx: _Context) -> str:
         marker = "reference" if item.use_as == ReferenceUse.AUDIO else "fully_preserved"
         if item.use_as == ReferenceUse.SUBJECT:
             if ctx.thin_shell:
-                lines.append(f"{item.label}: {marker} - the same person in every frame.")
+                if ctx.anchored_v21:
+                    lines.append(f"{item.label}: {marker} - the same person in the same outfit in every frame.")
+                else:
+                    lines.append(f"{item.label}: {marker} - the same person in every frame.")
                 subject_index += 1
                 continue
             lines.append(
@@ -1147,6 +1212,21 @@ def _retention(ctx: _Context) -> str:
                 lines.append(
                     f"{item.label} ([Shot 1] {item.frame_role.value} frame): fully_preserved - "
                     "the approved frame composition is retained."
+                )
+            elif ctx.anchored_v21 and item.role == "continuity_derivative":
+                lines.append(
+                    f"{item.label} ([Shot 1] continuity reference): partially_preserved - "
+                    "guides the opening framing and lighting from the preceding shot's final frame."
+                )
+            elif ctx.anchored_v21 and item.asset_role == "prop":
+                lines.append(
+                    f"{item.label} ([Shot 1] prop reference): fully_preserved - "
+                    "the prop keeps its reference appearance whenever visible."
+                )
+            elif ctx.anchored_v21 and item.asset_role == "scene":
+                lines.append(
+                    f"{item.label} ([Shot 1] environment reference): partially_preserved - "
+                    "guides the setting, architecture and lighting while the action proceeds."
                 )
             else:
                 if ctx.thin_shell:
@@ -1226,6 +1306,7 @@ class H3PromptCompiler:
         legacy_semantics = compiler_version in LEGACY_SEMANTIC_VERSIONS
         pre_sanitize = compiler_version == LEGACY_PRE_SANITIZE_COMPILER_VERSION
         thin_shell = compiler_version not in LEGACY_SHELL_VERSIONS
+        anchored_v21 = compiler_version not in LEGACY_200_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1253,6 +1334,7 @@ class H3PromptCompiler:
             legacy_semantics=legacy_semantics,
             pre_sanitize=pre_sanitize,
             thin_shell=thin_shell,
+            anchored_v21=anchored_v21,
         )
         if language_fallback:
             ctx.warnings.append(

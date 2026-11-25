@@ -225,10 +225,14 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "The server decides cut or last_frame from that reason; you never set a mode. "
         f"handoff_cue says in one phrase how the boundary joins. {opening} "
         "Blocking and the 180-degree axis: blocking.placements MUST include ONLY characters whose name is "
-        "explicitly listed in inputs' beats[].characters for the beats in THAT shot, and NOBODY ELSE (never "
-        "add an off-beat listener unless their name appears in one of that shot's own beats[].characters), "
+        "explicitly listed in inputs' beats[].characters for the beats in THAT shot AND who actually appear "
+        "in THIS shot's frame, and NOBODY ELSE (never "
+        "add an off-frame listener to blocking.placements, and never add a character unless their name appears in "
+        "one of that shot's own beats[].characters), "
         "copying each character name verbatim into blocking.placements[].character (with zone, facing, "
-        "English posture and any props they hold). blocking.placements[].facing MUST be one of "
+        "English posture and handheld/tabletop props only — NEVER list worn garments, coats, shirts, or worn "
+        "glasses in props, because the compiler renders props as 'holding ...'). "
+        "blocking.placements[].facing MUST be one of "
         "{facing_camera, facing_left, facing_right, three_quarter_left, three_quarter_right, back_to_camera}. "
         "Whoever stands on the left keeps standing "
         "on the left in every shot of the scene and faces right; whoever stands on the right faces left; a "
@@ -256,8 +260,20 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "Language: every prose field is English. Copy location, blocking.placements[].character, "
         "dialogue[].speaker_id and dialogue[].text verbatim from the scene (even when they contain Chinese). "
         "Never put Chinese names, titles, stage directions or lyrics inside visual, camera, environment, timeline, "
-        "blocking.placements[].posture/props, or entry/exit_state fields: refer to "
-        "a person there by an English role label such as 'the lead performer' or 'the woman in the grey cloak'. "
+        "blocking.placements[].posture/props, or entry/exit_state fields. "
+        "Subject anchoring and costume consistency: when production_context.character_tokens lists tokens such as "
+        "{{C1}}, {{C2}}, ALWAYS refer to those characters by their exact {{Ck}} token across visual_description, "
+        "camera.composition, timeline, internal_cuts, entry_state and exit_state (the compiler binds each {{Ck}} "
+        "to that character's <Subject n> reference); never replace them with vague nouns like 'a man', 'the woman' "
+        "or 'the figure'. Two mutually exclusive framing choices per shot: (A) single-character shot: "
+        "blocking.placements has ONLY that 1 character, and EVERY prose field (visual_description, "
+        "camera.composition, timeline, internal_cuts, entry_state, exit_state) depicts ONLY that 1 {{Ck}} — "
+        "write 'looks off-frame' instead of naming the unseen {{Ck}}; (B) two-shot / OTS: put BOTH characters "
+        "in blocking.placements so both {{C1}} and {{C2}} are legal in prose. Never invent, alter or vary a "
+        "character's clothing, coat, cloak, hairstyle or accessories in shot prose (the locked character master "
+        "image is the single source of costume truth unless the scene script or locked_story_facts explicitly "
+        "states a costume change). Keep physical directions such as door opening inward vs outward consistent "
+        "across visual_description, camera.composition and timeline. "
         "Spoken lines exist only in dialogue, never inside prose. ambience is the non-vocal sound of the place; "
         "never describe a voice, speech, singing or humming in it, and on a shot without dialogue the "
         "soundtrack stays entirely non-vocal. "
@@ -342,6 +358,11 @@ def board_server_fields(board: dict[str, Any], scene_artifact, context: dict[str
     """
     production = context.get("production_context") or {}
     facts = context.get("locked_story_facts") or []
+    token_map = {
+        str(entry["token"]): str(entry["character"])
+        for entry in (production.get("character_tokens") or [])
+        if isinstance(entry, dict) and entry.get("token") and entry.get("character")
+    }
     return {
         "drama_scene_artifact_id": scene_artifact.id,
         "drama_scene_sha256": scene_artifact.sha256,
@@ -350,6 +371,7 @@ def board_server_fields(board: dict[str, Any], scene_artifact, context: dict[str
         "cast": verdict.cast,
         "boundaries": verdict.boundaries,
         "warnings": verdict.warnings,
+        **({"character_tokens": token_map} if token_map else {}),
         # What the English rendering in this board was written for, so a later
         # scene under the same frozen style and facts reuses it instead of
         # translating the same words again, slightly differently.

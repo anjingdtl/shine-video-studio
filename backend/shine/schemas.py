@@ -332,6 +332,9 @@ class ShotSpec(APIModel):
     #: The picture the shot opens on and settles on, as English prose.
     entry_state: str = Field(default="", max_length=600)
     exit_state: str = Field(default="", max_length=600)
+    #: Stable character placeholder map (e.g. {"{{C1}}": "林晚"}) resolved into
+    #: request-local <Subject n> labels by H3PromptCompiler.
+    character_tokens: dict[str, str] = Field(default_factory=dict)
 
     @model_serializer(mode="wrap")
     def _omit_empty_optional_lists(self, handler):
@@ -352,6 +355,8 @@ class ShotSpec(APIModel):
             for prose in ("entry_state", "exit_state"):
                 if not (data.get(prose) or "").strip():
                     data.pop(prose, None)
+            if not data.get("character_tokens"):
+                data.pop("character_tokens", None)
         return data
 
     @model_validator(mode="after")
@@ -685,6 +690,14 @@ class ReferenceManifestItem(APIModel):
     ordinal: int = 0
     duration_s: float | None = None
     entity_id: str | None = None
+    asset_role: str | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_asset_role(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("asset_role") is None:
+            data.pop("asset_role", None)
+        return data
 
 
 class CompiledPrompt(APIModel):

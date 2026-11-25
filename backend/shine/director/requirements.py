@@ -59,14 +59,16 @@ def _catalog(db: Session, project_id: str) -> dict[str, Any]:
 def _preparation_catalog(
     db: Session, project_id: str, section_ids: list[str],
     section_keys: dict[str, list[str]],
+    section_span_ids: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """The entity source for projects without a four-stage catalogue.
 
     The streamline path already established the core cast / locations / props in
     per-scene ``ScriptPreparation`` artifacts (the same ledger the expert material
-    page reads).  Each artifact carries its own ``scene_key``, so an entity is
-    cited only by the sections whose document scene matches that key — a scene
-    plate belongs to its own scene's shots, never to every shot of the film.
+    page reads).  Each artifact carries its own ``scene_key`` and per-item
+    ``source_span_ids``, so an entity is cited only by the sections whose
+    document slice overlaps those spans — a prop from scene 2 never leaks into
+    scene 1 just because both share the same document chunk key.
     """
     rows = db.scalars(select(AgentArtifact).where(
         AgentArtifact.project_id == project_id,
@@ -84,11 +86,22 @@ def _preparation_catalog(
             if row_key in seen_scene_keys:
                 continue
             seen_scene_keys.add(row_key)
-        matched = [sid for sid in section_ids if row_key and row_key in section_keys.get(sid, [])]
+        key_matched = [sid for sid in section_ids if row_key and row_key in section_keys.get(sid, [])]
         for req in payload.get("requirements") or []:
             family = str(req.get("family") or "")
             name = str(req.get("name") or req.get("entity_id") or "").strip()
             if family not in {"character", "scene", "prop"} or not name:
+                continue
+            req_spans = {str(s).strip() for s in (req.get("source_span_ids") or []) if str(s).strip()}
+            matched: list[str] = []
+            for sid in key_matched:
+                sec_spans = (section_span_ids or {}).get(sid) or set()
+                if req_spans and sec_spans:
+                    if req_spans & sec_spans:
+                        matched.append(sid)
+                else:
+                    matched.append(sid)
+            if not matched:
                 continue
             entry = merged.setdefault((family, name), {
                 "name": name,
@@ -268,6 +281,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
 
     scoped_sections = [str(sid) for ep in episodes for sid in ep.section_ids]
     section_keys: dict[str, list[str]] = {}
+    section_span_ids: dict[str, set[str]] = {}
     for sid in scoped_sections:
         section = sections_by_id.get(sid)
         if section is None:
@@ -277,18 +291,60 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
         section_keys[sid] = [row.key for row in document_scenes
                              if row.spans and row.spans[0].start_offset < end
                              and row.spans[-1].end_offset > start]
+        section_span_ids[sid] = {
+            span.id for row in document_scenes for span in row.spans
+            if span.start_offset < end and span.end_offset > start
+        }
     catalog = _catalog(db, project_id)
     if not catalog:
-        catalog = _preparation_catalog(db, project_id, scoped_sections, section_keys)
+        catalog = _preparation_catalog(db, project_id, scoped_sections, section_keys, section_span_ids)
     aliases = _alias_index(catalog)
     capacity = reference_capacity(bound_profile(db, project_id))
     masters = list(db.scalars(select(Asset).where(
         Asset.project_id == project_id, Asset.approved.is_(True), Asset.locked.is_(True))).all())
     master_by_id = {row.id: row for row in masters}
     identity_by_name = {
-        str(row.get("name")): str(row.get("identity") or row.get("description") or "")
+        str(row.get("name")): str(
+            row.get("identity") or row.get("introduction") or row.get("description") or ""
+        )
         for row in outline_payload.get("characters") or []
     }
+    # Load architecture location descriptions once so fallback scene plates use
+    # pure environment copy rather than raw script prose full of characters.
+    arch_locations: dict[str, str] = {}
+    arch_row = db.scalars(select(AgentArtifact).where(
+        AgentArtifact.project_id == project_id,
+        AgentArtifact.kind == "SeriesArchitecture",
+        AgentArtifact.stale.is_(False),
+    ).order_by(AgentArtifact.created_at.desc())).first()
+    if arch_row is not None:
+        for loc in (arch_row.payload_json or {}).get("locations") or []:
+            if isinstance(loc, dict) and str(loc.get("name") or "").strip():
+                arch_locations[character_reference_key(str(loc["name"]))] = str(
+                    loc.get("description") or ""
+                ).strip()
+
+    def _scene_base_key(raw: str) -> str:
+        stripped = re.sub(r"[（(][^）)]*[）)]", "", str(raw or "")).strip()
+        return character_reference_key(stripped or str(raw or ""))
+
+    def _same_scene_place(left: str, right: str) -> bool:
+        ka, kb = _scene_base_key(left), _scene_base_key(right)
+        return bool(ka and kb and (ka == kb or (min(len(ka), len(kb)) >= 3 and (ka in kb or kb in ka))))
+
+    def _scene_description_for(name: str, fallback: str = "") -> str:
+        key = character_reference_key(name)
+        if arch_locations.get(key):
+            return arch_locations[key]
+        for arch_name, arch_desc in arch_locations.items():
+            if arch_desc and _same_scene_place(name, arch_name):
+                return arch_desc
+        for cat_loc in (catalog.get("scenes") or []):
+            cat_name = str(cat_loc.get("name") or "").strip()
+            cat_desc = str(cat_loc.get("description") or "").strip()
+            if cat_name and cat_desc and _same_scene_place(name, cat_name):
+                return cat_desc
+        return fallback
 
     # (family, entity) -> evidence, merged across the whole scope.
     usage: dict[tuple[str, str], dict[str, Any]] = {}
@@ -367,8 +423,11 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                     _note_local(local, family, canonical, cited=True)
                     if family in {"character", "scene"}:
                         referenced.add(shot.id)
+                    req_desc = str(requested.get("description") or "").strip()
+                    if family == "scene" and not req_desc:
+                        req_desc = _scene_description_for(canonical)
                     note(family, canonical, shot_id=shot.id, episode_id=episode.episode_id,
-                         description=str(requested.get("description") or "")[:600],
+                         description=req_desc[:600],
                          cited_by_shot=True, user_specified=True)
                 # A reference the shot promised by id is a real need whatever
                 # the family: the shot already names it.
@@ -418,9 +477,15 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 name = str(loc.get("name") or "").strip()
                 if not name:
                     continue
-                _note_local(local, "scene", name, cited=False)
-                note("scene", name, shot_id="", episode_id=episode.episode_id,
-                     description=str(loc.get("description") or "")[:300], cited_by_shot=False)
+                clean_scene_desc = _scene_description_for(name, str(loc.get("description") or ""))
+                existing_scene = next(
+                    (ename for (efam, ename) in local if efam == "scene" and _same_scene_place(name, ename)),
+                    None,
+                )
+                target_name = existing_scene or name
+                _note_local(local, "scene", target_name, cited=False)
+                note("scene", target_name, shot_id="", episode_id=episode.episode_id,
+                     description=clean_scene_desc[:300], cited_by_shot=False)
             # Ref2VA 每镜至少一个参考，但「这一场有没有素材」不是判据：同一场里
             # 一镜有人物、另一镜只有旁白时，整场判定会把旁白镜漏掉（这正是 23 镜
             # 项目 1d14b472 报 SHOT_REFERENCE_MISSING 却不在清单里的原因）。这里
@@ -430,12 +495,77 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                        if "SHOT_REFERENCE_MISSING" in shot_problems.get(shot_id, [])
                        and shot_id not in referenced]
             if lacking:
-                prose = " ".join(sp.text for sp in scene.spans)[:300] if scene is not None else ""
+                # Never copy raw character-action script prose into a scene
+                # requirement's description: that leaked character names and
+                # dialogue directly into empty-set image prompts.
+                scene_desc = arch_locations.get(character_reference_key(scene_name), "")
+                if not scene_desc:
+                    for loc in (catalog.get("scenes") or []):
+                        if str(section_id) in [str(item) for item in loc.get("section_ids") or []]:
+                            scene_desc = str(loc.get("description") or "").strip()
+                            if scene_desc:
+                                break
                 _note_local(local, "scene", scene_name)
                 for shot_id in lacking:
                     note("scene", scene_name, shot_id=shot_id, episode_id=episode.episode_id,
-                         description=prose or scene_name)
-            # Core props the catalogue already established for this section.
+                         description=scene_desc[:300] or scene_name)
+            # Core props the catalogue already established for this section:
+            # match per-shot usage from landed board/drama beats whenever
+            # available instead of blindly attaching every prop to every shot.
+            drama_beats_by_id: dict[str, str] = {}
+            board_beats_by_shot_name: dict[str, list[str]] = {}
+            board_row = db.scalars(select(AgentArtifact).where(
+                AgentArtifact.project_id == project_id,
+                AgentArtifact.kind == "SceneShotBoard",
+                AgentArtifact.stale.is_(False),
+            ).order_by(AgentArtifact.created_at.desc())).all()
+            sec_board = next(
+                (r for r in board_row
+                 if str((r.payload_json or {}).get("production_section_id") or "") == str(section_id)),
+                None,
+            )
+            if sec_board is not None:
+                bpayload = dict(sec_board.payload_json or {})
+                drama_id = bpayload.get("drama_scene_artifact_id")
+                drama_art = db.get(AgentArtifact, drama_id) if drama_id else None
+                if drama_art is not None:
+                    for b_idx, beat_obj in enumerate((drama_art.payload_json or {}).get("beats") or [], start=1):
+                        if not isinstance(beat_obj, dict):
+                            continue
+                        pieces = [str(beat_obj.get("visible_action") or "")]
+                        pieces.extend(
+                            str(ln.get("text") or "")
+                            for ln in (beat_obj.get("spoken_lines") or [])
+                            if isinstance(ln, dict)
+                        )
+                        drama_beats_by_id[f"B{b_idx}"] = " ".join(pieces)
+                for s_entry in bpayload.get("shots") or []:
+                    if not isinstance(s_entry, dict) or not s_entry.get("id"):
+                        continue
+                    b_ids = [str(b) for b in s_entry.get("beat_ids") or []]
+                    for c_entry in s_entry.get("internal_cuts") or []:
+                        if isinstance(c_entry, dict):
+                            b_ids.extend(str(b) for b in c_entry.get("beat_ids") or [])
+                    board_beats_by_shot_name[str(s_entry["id"])] = b_ids
+
+            section_shots = [
+                shot_obj for sid in shot_ids
+                if (shot_obj := db.get(Shot, str(sid))) is not None and shot_obj.project_id == project_id
+            ]
+            def _prop_matches_shot(prop_name: str, beat_blob: str, spec_text: str) -> bool:
+                if prop_name in beat_blob or prop_name in spec_text:
+                    return True
+                if len(prop_name) >= 4 and re.search(r"[\u4e00-\u9fff]", prop_name):
+                    prefix = prop_name[:2]
+                    tail = prop_name[-2:]
+                    if prefix in beat_blob and tail in beat_blob:
+                        return True
+                    if len(prop_name) >= 5 and prefix in beat_blob:
+                        return True
+                    if len(prop_name) >= 6 and prop_name[2:4] in beat_blob:
+                        return True
+                return False
+
             for prop in (catalog.get("props") or []):
                 if str(section_id) not in [str(item) for item in prop.get("section_ids") or []]:
                     continue
@@ -443,8 +573,40 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 if not name:
                     continue
                 core_prop = bool(prop.get("carrier") or prop.get("core_prop_reason"))
+                matched_shot_ids: list[str] = []
+                if drama_beats_by_id:
+                    # Prefer exact per-shot beat evidence when a DramaSceneScript
+                    # + SceneShotBoard exists for this section.
+                    for shot_obj in section_shots:
+                        spec = dict(shot_obj.spec or {})
+                        shot_key = next(
+                            (k for k in board_beats_by_shot_name
+                             if shot_obj.name.endswith(f"-{k}") or shot_obj.name == k),
+                            None,
+                        )
+                        beat_blob = " ".join(
+                            drama_beats_by_id.get(bid, "")
+                            for bid in (board_beats_by_shot_name.get(shot_key, []) if shot_key else [])
+                        )
+                        spec_props = " ".join(
+                            str(p)
+                            for pl in ((spec.get("blocking") or {}).get("placements") or [])
+                            if isinstance(pl, dict)
+                            for p in (pl.get("props") or [])
+                        )
+                        spec_text = " ".join([
+                            str(spec.get("story_beat") or ""),
+                            str(spec.get("entry_state") or ""),
+                            str(spec.get("exit_state") or ""),
+                            spec_props,
+                        ])
+                        if (_prop_matches_shot(name, beat_blob, spec_text)
+                                or any(str(r.get("name") or "") == name
+                                       for r in (spec.get("requested_assets") or []) if isinstance(r, dict))):
+                            matched_shot_ids.append(shot_obj.id)
+                target_shots = matched_shot_ids or [str(sid) for sid in shot_ids]
                 _note_local(local, "prop", name, cited=core_prop)
-                for shot_id in shot_ids:
+                for shot_id in target_shots:
                     note("prop", name, shot_id=str(shot_id), episode_id=episode.episode_id,
                          description=str(prop.get("description") or "")[:300],
                          cited_by_shot=core_prop)
