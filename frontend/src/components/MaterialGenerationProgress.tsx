@@ -20,6 +20,13 @@ type CandidateInfo = {
   attempt_no: number;
 };
 
+type CharacterSheetProgressInfo = {
+  current_step?: string | null;
+  current_step_label?: string | null;
+  completed_steps?: Array<Record<string, unknown>>;
+  total_steps?: number;
+};
+
 type ProgressItem = {
   item_id: string;
   requirement_id?: string | null;
@@ -27,6 +34,8 @@ type ProgressItem = {
   family: string | null;
   status: string;
   error_code: string | null;
+  character_sheet_mode?: boolean;
+  character_sheet_progress?: CharacterSheetProgressInfo | null;
   candidates?: CandidateInfo[];
 };
 
@@ -252,8 +261,13 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
           <i style={{ width: `${pct}%` }} className={working ? 'is-working' : ''} />
         </div>
         {inflightItems.length > 0 && <p className="mgp-now">
-          正在处理：{inflightItems.slice(0, 4).map((item) =>
-            `${item.entity_id ?? '素材'}（${ITEM_LABEL[item.status] ?? item.status}）`).join('、')}
+          正在处理：{inflightItems.slice(0, 4).map((item) => {
+            const cs = item.character_sheet_progress;
+            const csText = item.character_sheet_mode && cs?.current_step_label
+              ? ` · 定妆照 ${Math.min((cs.completed_steps?.length ?? 0) + 1, cs.total_steps ?? 6)}/${cs.total_steps ?? 6} ${cs.current_step_label}`
+              : '';
+            return `${item.entity_id ?? '素材'}（${ITEM_LABEL[item.status] ?? item.status}${csText}）`;
+          }).join('、')}
         </p>}
 
         {run.counts.candidate_ready > 0 && !working && onPromoted && <p className="mgp-done">
@@ -273,7 +287,10 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
           <ul>{run.items.map((item) => <li key={item.item_id}>
             <span>{FAMILY_LABEL[item.family ?? ''] ?? item.family} · {item.entity_id ?? '素材'}</span>
             <em className={item.status === 'FAILED' || item.status === 'NEEDS_REVIEW' ? 'warn' : ''}>
-              {ITEM_LABEL[item.status] ?? item.status}{item.error_code ? `（${item.error_code}）` : ''}</em>
+              {ITEM_LABEL[item.status] ?? item.status}
+              {item.error_code === 'CHARACTER_SHEET_LORA_REQUIRED'
+                ? '（缺少「Qwen 多视角镜头」LoRA，请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载）'
+                : item.error_code ? `（${item.error_code}）` : ''}</em>
           </li>)}</ul>
         </details>
       </div>;

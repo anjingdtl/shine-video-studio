@@ -562,6 +562,7 @@ def create_batch(
     trust_current_list: bool = False,
     commit: bool = True,
     image_style: dict[str, Any] | None = None,
+    settings: Any | None = None,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
 
@@ -657,6 +658,18 @@ def create_batch(
     for requirement_id in generate_ids:
         revision = _next_generation_revision(db, project_id, requirement_id) if new_revision else 1
         requirement = db.get(AssetRequirement, requirement_id)
+        item_family = str((requirement.payload or {}).get("family") or "")
+        extra_character_sheet: dict[str, Any] = {}
+        if kind == "production" and item_family == "character":
+            from shine.asset_center.character_sheet import freeze_character_sheet_lora
+            from shine.comfyops.loras import StyleLoraError
+
+            extra_character_sheet["character_sheet_mode"] = True
+            if settings is not None:
+                try:
+                    extra_character_sheet["character_sheet_lora"] = freeze_character_sheet_lora(db, settings)
+                except StyleLoraError:
+                    pass
         seed = int((seeds or {}).get(requirement_id, 0))
         brief = (briefs or {}).get(requirement_id)
         item = MaterialItem(
@@ -666,7 +679,7 @@ def create_batch(
             generation_revision=revision,
             status=ITEM_QUEUED,
             payload={
-                "family": (requirement.payload or {}).get("family"),
+                "family": item_family,
                 "entity_id": (requirement.payload or {}).get("entity_id"),
                 "carrier": (requirement.payload or {}).get("carrier"),
                 "brief_note": (requirement.payload or {}).get("brief_note") or "",
@@ -674,6 +687,7 @@ def create_batch(
                 "seed": seed,
                 "kind": kind,
                 **(image_style or {}),
+                **extra_character_sheet,
                 # A batch without a brief is queued but cannot render yet: the
                 # producer owns the appearance text, and the server refuses to
                 # invent one rather than rendering an unconfirmed look.
@@ -1124,6 +1138,8 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
         "created_at": item.created_at.isoformat() if item.created_at else None,
         "updated_at": item.updated_at.isoformat() if item.updated_at else None,
         "brief": (item.payload or {}).get("brief"),
+        "character_sheet_mode": bool((item.payload or {}).get("character_sheet_mode")),
+        "character_sheet_progress": (item.payload or {}).get("character_sheet_progress"),
         **image_style_payload(item.payload or {}),
         "allowed_actions": (["resume"] if item.status == ITEM_FAILED else
                             ["reconcile"] if item.status == ITEM_NEEDS_REVIEW else []) +

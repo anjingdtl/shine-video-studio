@@ -17,6 +17,17 @@ from typing import Any
 from sqlalchemy import select, update
 
 from shine.asset_center import service
+from shine.asset_center.character_sheet import (
+    CHARACTER_SHEET_BASE_SAMPLING,
+    CHARACTER_SHEET_LAYOUT_VERSION,
+    CHARACTER_SHEET_LORA_SAMPLING,
+    CHARACTER_SHEET_OPERATION,
+    CHARACTER_SHEET_SOURCE_MODE,
+    STEP_SPECS,
+    build_step_prompts,
+    compose_character_sheet,
+    step_dimensions,
+)
 from shine.asset_center.contracts import (
     QWEN_EDIT_COMMIT,
     build_qwen_edit_graph,
@@ -756,6 +767,9 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
     if mode == "RGBA" and payload.get("alpha_operation") == "MASK_CUTOUT_V1":
         _execute_mask_cutout(factory, settings, task_id, worker_id, payload, expected_state)
         return
+    if mode == "I2I" and payload.get("i2i_operation") == CHARACTER_SHEET_OPERATION:
+        _execute_character_sheet(factory, settings, task_id, worker_id, payload, expected_state)
+        return
     if mode == "T2I" and category not in {"character", "costume", "scene", "prop"}:
         _finish_without_submit(factory, task_id, "BLOCKED_CAPABILITY", "IMAGE_FAMILY_NOT_VERIFIED")
         return
@@ -1008,6 +1022,766 @@ def _execute_one(factory, settings, task_id: str, worker_id: str) -> None:
                 task.updated_at = utcnow()
 
 
+def _open_character_sheet_step_attempt(
+    factory,
+    task_id: str,
+    worker_id: str,
+    payload: dict[str, Any],
+    *,
+    step_index: int,
+    step_key: str,
+    step_label: str,
+    completed_steps: list[dict[str, Any]],
+    graph_sha: str,
+    fingerprint: str,
+    width: int,
+    height: int,
+    seed: int,
+    renderer: dict[str, Any],
+    lease_id: str,
+    prompt_inputs: dict[str, Any],
+    step_loras: tuple,
+    expected_state: int,
+) -> tuple[str, int]:
+    with factory() as db:
+        task_row = db.get(LibraryRenderTask, task_id)
+        request_hash = task_row.request_hash if task_row else ""
+    attempt_no = step_index + 1
+    snapshot = canonical_hash(
+        {
+            "task_id": task_id,
+            "request_hash": request_hash,
+            "operation": CHARACTER_SHEET_OPERATION,
+            "step_key": step_key,
+            "attempt_no": attempt_no,
+            "graph_sha256": graph_sha,
+            "runtime_fingerprint": fingerprint,
+            "output_node_id": qwen_workflow.OUTPUT_NODE,
+            "seed": seed,
+            "width": width,
+            "height": height,
+        }
+    )
+    with factory.begin() as db:
+        task = db.get(LibraryRenderTask, task_id)
+        if (
+            task is None
+            or task.status != "RUNNING"
+            or task.worker_id != worker_id
+            or task.state_version != expected_state
+        ):
+            raise RuntimeError("LIBRARY_TASK_CLAIM_LOST")
+        existing = db.scalar(
+            select(LibraryTaskAttempt).where(
+                LibraryTaskAttempt.task_id == task_id,
+                LibraryTaskAttempt.attempt_no == attempt_no,
+            )
+        )
+        if existing is not None:
+            raise RuntimeError("CHARACTER_SHEET_STEP_ALREADY_SUBMITTED")
+        if step_index == 0 and (task.external_outcome != "NOT_SENT" or task.submit_intent_at is not None):
+            raise RuntimeError("LIBRARY_TASK_ALREADY_SUBMITTED")
+        attempt = LibraryTaskAttempt(
+            task_id=task_id,
+            attempt_no=attempt_no,
+            snapshot_hash=snapshot,
+            submit_stage="SUBMIT_INTENT",
+            status="SUBMIT_INTENT",
+            external_outcome="NOT_SENT",
+            payload={
+                "operation": CHARACTER_SHEET_OPERATION,
+                "step_key": step_key,
+                "step_label": step_label,
+                "step_index": step_index,
+                "graph_sha256": graph_sha,
+                "runtime_fingerprint": fingerprint,
+                "output_node_id": qwen_workflow.OUTPUT_NODE,
+                "output_class_type": qwen_workflow.OUTPUT_CLASS_TYPE,
+                "model_revision": qwen_workflow.MODEL_REVISION,
+                "template_commit": QWEN_EDIT_COMMIT,
+                "adapter_hash": qwen_edit_adapter_hash("I2I"),
+                "seed": seed,
+                "width": width,
+                "height": height,
+                "renderer_owned": bool(renderer.get("renderer_owned")),
+                "renderer_instance_id": str(renderer.get("renderer_instance_id") or ""),
+                **({"style_loras": [spec.canonical_dict() for spec in step_loras]} if step_loras else {}),
+                "prompt": prompt_inputs["prompt"],
+                "negative_prompt": prompt_inputs["negative_prompt"],
+            },
+        )
+        db.add(attempt)
+        task.submit_intent_at = task.submit_intent_at or utcnow()
+        task.external_outcome = "NOT_SENT"
+        task.lease_owner = lease_id
+        task.workflow_revision_hash = graph_sha
+        task.runtime_fingerprint = fingerprint
+        task.payload = {
+            **(task.payload or {}),
+            "character_sheet_progress": {
+                "current_step": step_key,
+                "current_step_label": step_label,
+                "completed_steps": completed_steps,
+                "total_steps": len(STEP_SPECS),
+            },
+        }
+        task.state_version += 1
+        task.heartbeat_at = utcnow()
+        task.updated_at = utcnow()
+        db.flush()
+        return attempt.id, task.state_version
+
+
+def _save_character_sheet_candidates(
+    factory,
+    settings,
+    task_id: str,
+    payload: dict[str, Any],
+    *,
+    closeup_front_bytes: bytes,
+    closeup_front_prompt: str,
+    closeup_front_graph_sha: str,
+    closeup_3_4_bytes: bytes,
+    closeup_3_4_prompt: str,
+    closeup_3_4_graph_sha: str,
+    triview_bytes: bytes,
+    triview_prompt: str,
+    triview_graph_sha: str,
+    composite_bytes: bytes,
+    composite_layout: dict[str, Any],
+    step_records: list[dict[str, Any]],
+    fingerprint: str,
+    renderer: dict[str, Any],
+    lease_id: str,
+    expected_state: int,
+) -> tuple[str, str, str]:
+    for reference in payload.get("references") or []:
+        _read_reference(factory, settings, reference)
+    _verify_parent_snapshot(factory, settings, payload)
+
+    from shine.media.artifacts import safe_asset_path
+    from shine.media.output_layout import ensure_storage_writable, output_root, store_library_asset
+    from shine.quality.technical import _full_decode_check
+
+    with factory() as db:
+        ensure_storage_writable(db)
+        root = output_root(db, settings)
+
+    base_title = str(payload.get("title") or "角色定妆照").strip() or "角色定妆照"
+    artifact_specs = [
+        (
+            "closeup_front",
+            "肩上正面照",
+            f"{base_title} · 肩上正面照",
+            closeup_front_bytes,
+            closeup_front_prompt,
+            closeup_front_graph_sha,
+        ),
+        (
+            "closeup_3_4",
+            "3/4 侧面肩上照",
+            f"{base_title} · 3/4 侧面肩上照",
+            closeup_3_4_bytes,
+            closeup_3_4_prompt,
+            closeup_3_4_graph_sha,
+        ),
+        (
+            "fullbody_triview",
+            "全身三视图（正面/侧面/背面）",
+            f"{base_title} · 全身三视图",
+            triview_bytes,
+            triview_prompt,
+            triview_graph_sha,
+        ),
+        (
+            "composite_sheet",
+            "16:9 整体角色定妆照（正面/3/4 侧面肩上 + 全身三视图）",
+            base_title,
+            composite_bytes,
+            payload.get("character_sheet_note") or "",
+            canonical_hash([step["graph_sha256"] for step in step_records]),
+        ),
+    ]
+
+    prepared: list[dict[str, Any]] = []
+    for role_key, role_label, storage_base, content, ver_prompt, ver_graph_sha in artifact_specs:
+        filename = f"shine-assets-{task_id[:8]}-{role_key}.png"
+        content_type = verify_upload("image", filename, content, settings.max_upload_bytes)
+        media_info = probe_upload("image", content, content_type)
+        digest = hashlib.sha256(content).hexdigest()
+        storage_path, stored_name = store_library_asset(
+            None,
+            settings,
+            content,
+            digest,
+            kind="image",
+            base=storage_base,
+            extension=".png",
+            root=root,
+        )
+        prepared.append(
+            {
+                "role_key": role_key,
+                "role_label": role_label,
+                "content_type": content_type,
+                "width": media_info.width,
+                "height": media_info.height,
+                "byte_size": len(content),
+                "sha256": digest,
+                "storage_path": storage_path,
+                "filename": stored_name,
+                "prompt": ver_prompt,
+                "graph_sha256": ver_graph_sha,
+            }
+        )
+
+    source_ref_sha = str(((payload.get("references") or [{}])[0]).get("sha256") or "")
+    lora_meta = dict((payload.get("style_loras") or [{}])[0])
+    last_prompt_id = str(step_records[-1]["prompt_id"])
+
+    with factory.begin() as db:
+        task = db.get(LibraryRenderTask, task_id)
+        if task is None or task.state_version != expected_state:
+            raise RuntimeError("LIBRARY_TASK_CLAIM_LOST")
+        category = str(payload.get("category") or "character")
+        parent_version_id = payload.get("parent_version_id")
+        if payload.get("target_asset_id"):
+            asset = db.get(LibraryAsset, payload["target_asset_id"])
+            parent = db.get(LibraryVersion, parent_version_id) if parent_version_id else None
+            if asset is None or parent is None or parent.library_asset_id != asset.id:
+                raise RuntimeError("LIBRARY_IMAGE_PARENT_CHANGED")
+        else:
+            asset = LibraryAsset(
+                title=base_title[:200],
+                kind="image",
+                category=category,
+                tags=[],
+                created_by="shine-worker",
+            )
+            db.add(asset)
+            db.flush()
+
+        manifest = list(payload.get("references") or [])
+        if parent_version_id:
+            manifest.append(
+                {
+                    "order": len(manifest),
+                    "role": "asset_parent",
+                    "version_id": parent_version_id,
+                    "rights_snapshot": (payload.get("parent_version_snapshot") or {}).get("rights_snapshot"),
+                }
+            )
+
+        created_versions: list[tuple[dict[str, Any], LibraryVersion]] = []
+        for item in prepared:
+            rights = _new_image_output_rights(db, payload)
+            db.add(rights)
+            db.flush()
+            media = LibraryMedia(
+                kind="image",
+                purpose="generated",
+                filename=item["filename"],
+                content_type=item["content_type"],
+                sha256=item["sha256"],
+                storage_path=item["storage_path"],
+                byte_size=item["byte_size"],
+                width=item["width"],
+                height=item["height"],
+                duration_s=None,
+                rights_id=rights.id,
+                created_by="shine-worker",
+            )
+            db.add(media)
+            db.flush()
+            version = service.create_version_from_media(
+                db,
+                settings,
+                asset=asset,
+                media=media,
+                actor="shine-worker",
+                source_mode=CHARACTER_SHEET_SOURCE_MODE,
+                prompt=item["prompt"],
+                parent_version_id=parent_version_id,
+                workflow_revision_hash=item["graph_sha256"],
+                references_manifest=manifest,
+                provenance={
+                    "source": "shine_assets_image_worker",
+                    "task_id": task_id,
+                    "external_prompt_id": last_prompt_id,
+                    "output_node_id": qwen_workflow.OUTPUT_NODE,
+                    "runtime_fingerprint": fingerprint,
+                    "model_revision": qwen_workflow.MODEL_REVISION,
+                    "template_commit": QWEN_EDIT_COMMIT,
+                    "usage_scope": "RESEARCH_AND_EVALUATION_ONLY",
+                    "renderer_owned": bool(renderer.get("renderer_owned")),
+                    "candidate_index": payload.get("candidate_index", 0),
+                    "target_asset_id": payload.get("target_asset_id"),
+                    "parent_version_id": parent_version_id,
+                    "target_asset_state_version": payload.get("expected_asset_state_version"),
+                    "transparent": False,
+                    "validation_only": False,
+                    **image_style_payload(payload),
+                },
+            )
+            version.qc = {
+                "technical": "PENDING",
+                "semantic": "PENDING_HUMAN_REVIEW",
+                "dimensions_match_request": True,
+                "sha256": item["sha256"],
+            }
+            created_versions.append((item, version))
+
+        derived_versions = {
+            item["role_key"]: {
+                "version_id": ver.id,
+                "asset_id": asset.id,
+                "ordinal": ver.ordinal,
+                "label": item["role_label"],
+                "sha256": item["sha256"],
+                "width": item["width"],
+                "height": item["height"],
+                "media_url": f"/api/v1/asset-center/versions/{ver.id}/media",
+            }
+            for item, ver in created_versions
+        }
+        for item, ver in created_versions:
+            ver.provenance = {
+                **(ver.provenance or {}),
+                "character_sheet": {
+                    "operation": CHARACTER_SHEET_OPERATION,
+                    "artifact_role": item["role_key"],
+                    "artifact_label": item["role_label"],
+                    "layout_version": CHARACTER_SHEET_LAYOUT_VERSION,
+                    "layout": composite_layout,
+                    "source_reference_sha256": source_ref_sha,
+                    "note": payload.get("character_sheet_note") or "",
+                    "lora": lora_meta,
+                    "steps": step_records,
+                    "derived_versions": derived_versions,
+                },
+            }
+            add_audit(
+                db,
+                "shine-worker",
+                "LIBRARY_IMAGE_CANDIDATE_STORED",
+                "library_version",
+                ver.id,
+                {
+                    "task_id": task_id,
+                    "sha256": item["sha256"],
+                    "prompt_id": last_prompt_id,
+                    "graph_sha256": item["graph_sha256"],
+                    "artifact_role": item["role_key"],
+                },
+            )
+
+        composite_ver = created_versions[-1][1]
+        task.result_version_id = composite_ver.id
+        task.payload = {
+            **(task.payload or {}),
+            "character_sheet_outputs": derived_versions,
+        }
+        task.state_version += 1
+        task.updated_at = utcnow()
+        task.heartbeat_at = utcnow()
+        next_state = task.state_version
+        version_ids = [(item["role_key"], item["storage_path"], item["width"], item["height"], item["sha256"], ver.id)
+                       for item, ver in created_versions]
+
+    qc_results: list[tuple[str, str, dict[str, Any], bool]] = []
+    all_passed = True
+    for role_key, storage_path, width, height, digest, ver_id in version_ids:
+        path = safe_asset_path(root, storage_path)
+        decoded = _full_decode_check(path, settings.ffmpeg_path)
+        qc = {
+            "technical": decoded.status,
+            "decode": decoded.model_dump(),
+            "dimensions": {"width": width, "height": height},
+            "dimensions_match_request": True,
+            "sha256": digest,
+            "semantic": "PENDING_HUMAN_REVIEW",
+            "is_mock": False,
+            "character_sheet_role": role_key,
+        }
+        passed = decoded.status == "pass"
+        all_passed = all_passed and passed
+        qc_results.append((ver_id, role_key, qc, passed))
+
+    final_status = "CANDIDATE_READY" if all_passed else "QC_FAILED"
+    with factory.begin() as db:
+        task = db.get(LibraryRenderTask, task_id)
+        if task is None or task.state_version != next_state:
+            raise RuntimeError("LIBRARY_CANDIDATE_ADOPTION_CONFLICT")
+        for ver_id, _role_key, qc, passed in qc_results:
+            ver = db.get(LibraryVersion, ver_id)
+            if ver is None:
+                raise RuntimeError("LIBRARY_CANDIDATE_ADOPTION_CONFLICT")
+            ver.qc = qc
+            ver.status = "READY_FOR_REVIEW" if passed else "QC_FAILED"
+            add_audit(db, "shine-worker", "LIBRARY_IMAGE_CANDIDATE_QC", "library_version", ver.id, qc)
+        composite_entry = derived_versions["composite_sheet"]
+        task.result_version_id = composite_entry["version_id"]
+        task.status = final_status
+        task.external_outcome = "SUCCEEDED"
+        task.error_code = None if all_passed else "IMAGE_TECHNICAL_QC_FAILED"
+        task.worker_id = None
+        task.lease_owner = None
+        task.payload = {
+            **(task.payload or {}),
+            "character_sheet_progress": {
+                "current_step": None,
+                "current_step_label": None,
+                "completed_steps": step_records,
+                "total_steps": len(STEP_SPECS),
+            },
+        }
+        task.state_version += 1
+        task.heartbeat_at = utcnow()
+        task.updated_at = utcnow()
+        add_audit(
+            db,
+            "shine-worker",
+            "LIBRARY_IMAGE_TASK_FINISHED",
+            "library_render_task",
+            task_id,
+            {
+                "status": final_status,
+                "prompt_id": last_prompt_id,
+                "version_id": composite_entry["version_id"],
+                "sha256": composite_entry["sha256"],
+                "lease_id": lease_id,
+                "operation": CHARACTER_SHEET_OPERATION,
+            },
+        )
+    return composite_entry["version_id"], composite_entry["sha256"], final_status
+
+
+def _execute_character_sheet(
+    factory, settings, task_id: str, worker_id: str, payload: dict[str, Any], expected_state: int
+) -> None:
+    base_seed = payload.get("seed")
+    if base_seed is None:
+        base_seed = int.from_bytes(hashlib.sha256(task_id.encode()).digest()[:8], "big")
+    base_seed = int(base_seed)
+    note = str(payload.get("character_sheet_note") or "")
+    clients: dict[str, Any] = {}
+
+    def release_models() -> None:
+        client = clients.get("client")
+        if client is None:
+            return
+        try:
+            client.free_models()
+        except Exception:
+            if image_execution._renderer_answers(client.base_url):
+                raise
+
+    try:
+        with resource_slot(
+            factory, "IMAGE", _IMAGE_BUDGET_MB, release_models=release_models, wait_seconds=0
+        ) as lease_id:
+            renderer = image_execution._ensure_renderer(factory, settings, "character")
+            resolved = image_execution.resolve_runtime(factory, settings, "character", kind="production")
+            client = ComfyUIClient(resolved["base_url"], max_retries=0)
+            clients["client"] = client
+            object_info = resolved.get("object_info")
+            live_object_info = object_info if object_info is not None else client.object_info()
+            style_loras = resolve_live_image_loras(
+                factory, settings, payload, object_info=live_object_info,
+            )
+            if not style_loras:
+                raise RuntimeError("CHARACTER_SHEET_LORA_REQUIRED")
+            payload = {**payload, "style_loras": [row.canonical_dict() for row in style_loras]}
+
+            reference_rows = sorted(payload.get("references") or [], key=lambda row: row["order"])
+            if len(reference_rows) != 1:
+                raise RuntimeError("CHARACTER_SHEET_SINGLE_SOURCE_REQUIRED")
+            ref_bytes, ref_content_type = _read_reference(factory, settings, reference_rows[0])
+            ref_info = probe_upload("image", ref_bytes, ref_content_type)
+            _verify_parent_snapshot(factory, settings, payload)
+
+            step_outputs: dict[str, bytes] = {}
+            step_records: list[dict[str, Any]] = []
+            step_prompts: dict[str, str] = {}
+            step_graph_hashes: dict[str, str] = {}
+            front_dims: tuple[int, int] | None = None
+
+            for step_index, spec in enumerate(STEP_SPECS):
+                step_seed = (base_seed + step_index) & qwen_workflow.MAX_SEED
+                step_loras = style_loras if spec.uses_lora else ()
+                step_sampling = dict(CHARACTER_SHEET_LORA_SAMPLING if spec.uses_lora else CHARACTER_SHEET_BASE_SAMPLING)
+
+                if spec.reference_source == "input":
+                    if spec.key.startswith("closeup_"):
+                        step_w, step_h = spec.target_width, spec.target_height
+                    else:
+                        step_w, step_h = step_dimensions(
+                            ref_info.width,
+                            ref_info.height,
+                            target_width=spec.target_width,
+                            target_height=spec.target_height,
+                        )
+                    step_ref_bytes, step_ref_type = ref_bytes, ref_content_type
+                    step_ref_sha = str(reference_rows[0]["sha256"])
+                else:
+                    front_bytes = step_outputs["fullbody_front"]
+                    step_w, step_h = front_dims or (spec.target_width, spec.target_height)
+                    step_ref_bytes, step_ref_type = front_bytes, "image/png"
+                    step_ref_sha = hashlib.sha256(front_bytes).hexdigest()
+
+                step_pos, step_neg = build_step_prompts(
+                    spec.key,
+                    note=note,
+                    style_loras=payload["style_loras"] if spec.uses_lora else (),
+                )
+                step_payload = {
+                    **payload,
+                    "prompt": step_pos,
+                    "negative_prompt": step_neg,
+                    "style_sampling": step_sampling,
+                    "graph_references": [{"order": 0, "role": "subject", "sha256": step_ref_sha}],
+                }
+                graph = _edit_graph(
+                    client,
+                    step_payload,
+                    step_w,
+                    step_h,
+                    step_seed,
+                    [(step_ref_bytes, step_ref_type)],
+                    object_info=live_object_info,
+                    style_loras=step_loras,
+                )
+                # Recheck authoritative source rights & digest immediately before SUBMIT_INTENT.
+                _read_reference(factory, settings, reference_rows[0])
+                _verify_parent_snapshot(factory, settings, payload)
+
+                graph_sha = graph_hash(graph)
+                attempt_id, expected_state = _open_character_sheet_step_attempt(
+                    factory,
+                    task_id,
+                    worker_id,
+                    payload,
+                    step_index=step_index,
+                    step_key=spec.key,
+                    step_label=spec.label,
+                    completed_steps=list(step_records),
+                    graph_sha=graph_sha,
+                    fingerprint=resolved["fingerprint"],
+                    width=step_w,
+                    height=step_h,
+                    seed=step_seed,
+                    renderer=renderer,
+                    lease_id=lease_id,
+                    prompt_inputs=graph["474"]["inputs"],
+                    step_loras=step_loras,
+                    expected_state=expected_state,
+                )
+                try:
+                    response = client.queue_prompt(
+                        graph,
+                        extra_data={
+                            "shine_kind": "asset_center_image",
+                            "shine_task": task_id,
+                            "shine_attempt": attempt_id,
+                            "shine_step": spec.key,
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 - submission outcomes are not all knowable
+                    attempt_status, outcome, error_code = image_execution._submit_outcome(exc)
+                    task_status = "UNKNOWN" if outcome == "UNKNOWN" else "FAILED"
+                    _set_attempt_and_task(
+                        factory,
+                        task_id,
+                        attempt_id,
+                        task_status=task_status,
+                        attempt_status=attempt_status,
+                        outcome=outcome,
+                        error_code=error_code,
+                        expected_state=expected_state,
+                        details={"step_key": spec.key},
+                    )
+                    return
+
+                prompt_id = str(response.get("prompt_id") or "")
+                if not prompt_id:
+                    _set_attempt_and_task(
+                        factory,
+                        task_id,
+                        attempt_id,
+                        task_status="UNKNOWN",
+                        attempt_status="UNKNOWN",
+                        outcome="UNKNOWN",
+                        error_code="IMAGE_SUBMISSION_ACK_MISSING_PROMPT_ID",
+                        expected_state=expected_state,
+                        details={"step_key": spec.key},
+                    )
+                    return
+
+                next_state = _set_attempt_and_task(
+                    factory,
+                    task_id,
+                    attempt_id,
+                    task_status="RUNNING",
+                    attempt_status="SUBMITTED",
+                    outcome="ACKNOWLEDGED",
+                    prompt_id=prompt_id,
+                    expected_state=expected_state,
+                )
+                if next_state is None:
+                    return
+
+                try:
+                    history_entry = _poll_with_heartbeat(client, factory, task_id, worker_id, next_state, prompt_id)
+                    content, source = image_execution._harvest(client, history_entry)
+                    harvested_type = verify_upload("image", f"{spec.key}.png", content, settings.max_upload_bytes)
+                    harvested_info = probe_upload("image", content, harvested_type)
+                    if harvested_info.width != step_w or harvested_info.height != step_h:
+                        raise image_execution.ImageExecutionError("IMAGE_STEP_DIMENSIONS_MISMATCH", prompt_id=prompt_id)
+                    step_sha = hashlib.sha256(content).hexdigest()
+                    record = {
+                        "step_key": spec.key,
+                        "label": spec.label,
+                        "prompt_id": prompt_id,
+                        "graph_sha256": graph_sha,
+                        "sha256": step_sha,
+                        "seed": step_seed,
+                        "width": harvested_info.width,
+                        "height": harvested_info.height,
+                        "uses_lora": spec.uses_lora,
+                        "sampling": step_sampling,
+                    }
+                    step_records.append(record)
+                    step_outputs[spec.key] = content
+                    step_prompts[spec.key] = step_pos
+                    step_graph_hashes[spec.key] = graph_sha
+                    if spec.key == "fullbody_front":
+                        front_dims = (harvested_info.width, harvested_info.height)
+                    with factory.begin() as db:
+                        attempt = db.get(LibraryTaskAttempt, attempt_id)
+                        task = db.get(LibraryRenderTask, task_id)
+                        if attempt is None or task is None or task.state_version != next_state:
+                            raise RuntimeError("LIBRARY_TASK_CLAIM_LOST")
+                        attempt.status = "SUCCEEDED"
+                        attempt.external_outcome = "SUCCEEDED"
+                        attempt.output_sha256 = step_sha
+                        attempt.submit_stage = "STEP_HARVESTED"
+                        attempt.payload = {**(attempt.payload or {}), "harvest": source, "step_record": record}
+                        task.external_outcome = "SUCCEEDED"
+                        task.payload = {
+                            **(task.payload or {}),
+                            "character_sheet_progress": {
+                                "current_step": spec.key,
+                                "current_step_label": spec.label,
+                                "completed_steps": list(step_records),
+                                "total_steps": len(STEP_SPECS),
+                            },
+                        }
+                        task.state_version += 1
+                        task.heartbeat_at = utcnow()
+                        task.updated_at = utcnow()
+                        expected_state = task.state_version
+                except image_execution.ImageExecutionError as exc:
+                    unknown = exc.code == "IMAGE_OUTCOME_RECONCILIATION_REQUIRED"
+                    _set_attempt_and_task(
+                        factory,
+                        task_id,
+                        attempt_id,
+                        task_status="UNKNOWN" if unknown else "FAILED",
+                        attempt_status="UNKNOWN" if unknown else "FAILED",
+                        outcome="UNKNOWN" if unknown else "FAILED",
+                        error_code=exc.code,
+                        prompt_id=prompt_id,
+                        expected_state=next_state,
+                        details={"step_key": spec.key},
+                    )
+                    return
+                except Exception as exc:  # noqa: BLE001 - post-submit unknown fault must not auto-retry
+                    gone = image_execution._renderer_gone(factory, settings, renderer)
+                    _set_attempt_and_task(
+                        factory,
+                        task_id,
+                        attempt_id,
+                        task_status="UNKNOWN",
+                        attempt_status="UNKNOWN",
+                        outcome="UNKNOWN",
+                        error_code=("IMAGE_RENDERER_GONE" if gone else f"IMAGE_POST_SUBMIT_{type(exc).__name__}"),
+                        prompt_id=prompt_id,
+                        expected_state=next_state,
+                        details={"step_key": spec.key, "error_type": type(exc).__name__, "renderer_gone": gone},
+                    )
+                    return
+
+            try:
+                composed = compose_character_sheet(
+                    closeup_front_bytes=step_outputs["closeup_front"],
+                    closeup_3_4_bytes=step_outputs["closeup_3_4"],
+                    front_bytes=step_outputs["fullbody_front"],
+                    side_bytes=step_outputs["fullbody_side"],
+                    back_bytes=step_outputs["fullbody_back"],
+                )
+                _save_character_sheet_candidates(
+                    factory,
+                    settings,
+                    task_id,
+                    payload,
+                    closeup_front_bytes=step_outputs["closeup_front"],
+                    closeup_front_prompt=step_prompts["closeup_front"],
+                    closeup_front_graph_sha=step_graph_hashes["closeup_front"],
+                    closeup_3_4_bytes=step_outputs["closeup_3_4"],
+                    closeup_3_4_prompt=step_prompts["closeup_3_4"],
+                    closeup_3_4_graph_sha=step_graph_hashes["closeup_3_4"],
+                    triview_bytes=composed["fullbody_triview_bytes"],
+                    triview_prompt=step_prompts["fullbody_front"],
+                    triview_graph_sha=canonical_hash(
+                        [
+                            step_graph_hashes["fullbody_front"],
+                            step_graph_hashes["fullbody_side"],
+                            step_graph_hashes["fullbody_back"],
+                        ]
+                    ),
+                    composite_bytes=composed["composite_sheet_bytes"],
+                    composite_layout=composed["layout"],
+                    step_records=step_records,
+                    fingerprint=resolved["fingerprint"],
+                    renderer=renderer,
+                    lease_id=lease_id,
+                    expected_state=expected_state,
+                )
+            except Exception as exc:  # noqa: BLE001 - composition/save failure after 4 steps must release lease & avoid stuck RUNNING
+                with factory.begin() as db:
+                    task = db.get(LibraryRenderTask, task_id)
+                    if task and task.status == "RUNNING":
+                        task.status = "FAILED"
+                        task.error_code = f"CHARACTER_SHEET_{type(exc).__name__}"
+                        task.worker_id = None
+                        task.lease_owner = None
+                        task.state_version += 1
+                        task.updated_at = utcnow()
+                        task.heartbeat_at = utcnow()
+    except Exception as exc:  # noqa: BLE001 - pre-submit failure only when step 1 has not opened intent
+        with factory.begin() as db:
+            task = db.get(LibraryRenderTask, task_id)
+            if (
+                task
+                and task.status == "RUNNING"
+                and task.external_outcome == "NOT_SENT"
+                and task.submit_intent_at is None
+            ):
+                task.status = "QUEUED" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else "FAILED"
+                if isinstance(exc, image_execution.ImageExecutionError):
+                    task.error_code = exc.details.get("code_detail") or exc.code
+                elif isinstance(exc, StyleLoraError):
+                    task.error_code = exc.code
+                else:
+                    task.error_code = (
+                        "GPU_BUSY_RETRY_OR_QUEUE" if "GPU_BUSY_RETRY_OR_QUEUE" in str(exc) else type(exc).__name__
+                    )
+                task.worker_id = None
+                task.lease_owner = None
+                task.state_version += 1
+                task.updated_at = utcnow()
+
+
 def _execute_mask_cutout(
     factory, settings, task_id: str, worker_id: str, payload: dict[str, Any], expected_state: int
 ) -> None:
@@ -1216,6 +1990,48 @@ def reconcile_completed_history(
                     {"prompt_id": prompt_id, "history_status": history_status or "pending"},
                 )
         return {"status": prior_status, "reconciliation": "HISTORY_PENDING"}
+
+    if payload.get("i2i_operation") == CHARACTER_SHEET_OPERATION:
+        with factory.begin() as db:
+            task = db.get(LibraryRenderTask, task_id)
+            if task is None or task.state_version != expected_state or task.external_prompt_id != prompt_id:
+                raise RuntimeError("LIBRARY_RECONCILIATION_RACE")
+            task.status = "UNKNOWN"
+            task.error_code = "CHARACTER_SHEET_PARTIAL_RECONCILED"
+            task.worker_id = None
+            task.lease_owner = None
+            task.state_version = expected_state + 1
+            task.updated_at = utcnow()
+            task.heartbeat_at = utcnow()
+            task.payload = {
+                **(task.payload or {}),
+                "reconciliation": {
+                    "history_status": history_status or "completed",
+                    "prompt_id": prompt_id,
+                    "step_key": attempt_payload.get("step_key"),
+                    "output_nodes": sorted(outputs),
+                    "evidence": evidence,
+                },
+            }
+            add_audit(
+                db,
+                "local-user",
+                "LIBRARY_CHARACTER_SHEET_STEP_RECONCILED",
+                "library_render_task",
+                task_id,
+                {
+                    "prompt_id": prompt_id,
+                    "step_key": attempt_payload.get("step_key"),
+                    "output_nodes": sorted(outputs),
+                    "evidence": evidence,
+                },
+            )
+        return {
+            "status": "UNKNOWN",
+            "reconciliation": "CHARACTER_SHEET_STEP_RECONCILED_INCOMPLETE",
+            "step_key": attempt_payload.get("step_key"),
+            "prompt_id": prompt_id,
+        }
 
     token = f"reconcile:{uuid.uuid4()}"
     claim = update(LibraryRenderTask).where(

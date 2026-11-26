@@ -929,17 +929,21 @@ FEATURES: tuple[FeatureDeclaration, ...] = (
     ),
     FeatureDeclaration(
         "qwen-image", "image", "Qwen-Image 出图能力", "IMPLEMENTED",
-        "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；"
+        "文生图、图生图、局部修订、多参考图、换装、透明底与角色定妆照生成按项目资源独立核验；"
         "素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。"
         "生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。"
+        "角色定妆照从图生图入口启动，依赖多视角 LoRA 权重在单次租约内串行生成肩上正面照、3/4 侧面肩上照与全身正/侧/背三视图，"
+        "并由服务端确定性拼合为 16:9 横版定妆照（不叠加 T2I 风格配方）；项目素材准备中的人物素材同样复用该流水线执行文生图到 16:9 定妆照的转换。"
         "手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
         sources=("backend/shine/comfyops/setup_summary.py", "backend/shine/comfyops/loras.py",
-                 "backend/shine/materialprep", "config/image_lora_presets.json"),
+                 "backend/shine/materialprep", "backend/shine/asset_center/character_sheet.py",
+                 "config/image_lora_presets.json"),
         apis=("POST /api/v1/asset-center/image-jobs", "POST /api/v1/projects/{project_id}/material-preparation/generate",
-              "GET /api/v1/loras", "GET /api/v1/setup/summary"),
+              "GET /api/v1/loras", "GET /api/v1/setup/summary", "GET /api/v1/asset-center/capabilities"),
         evidence=("backend/tests/test_image_managed_renderer.py", "backend/tests/test_material_image_jobs.py",
-                  "backend/tests/test_image_lora_assembly.py", "backend/tests/test_image_prompt_v6_alignment.py"),
-        tags=("出图", "Qwen", "t2i", "i2i", "inpaint", "多参考", "RGBA", "LoRA", "剧本对齐"),
+                  "backend/tests/test_image_lora_assembly.py", "backend/tests/test_image_prompt_v6_alignment.py",
+                  "backend/tests/test_character_sheet.py"),
+        tags=("出图", "Qwen", "t2i", "i2i", "inpaint", "多参考", "RGBA", "LoRA", "剧本对齐", "定妆照", "三视图"),
     ),
     FeatureDeclaration(
         "minimax-h3", "h3", "MiniMax-H3 视频生成（Ref2VA）", "PARTIAL",

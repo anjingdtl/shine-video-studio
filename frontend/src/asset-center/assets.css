@@ -245,4 +245,23 @@
   .asset-reference-row select { max-width: 100px; }
 }
 .asset-validation-note { margin: 10px 0; padding: 9px 12px; border-left: 3px solid var(--asset-warn); background: var(--asset-warn-bg); color: var(--asset-warn-ink); font-size:var(--fs-body); line-height:var(--lh-body); }
+.asset-character-sheet-card { margin: 0 0 15px; padding: 13px 14px; border: 1px solid var(--asset-line-2); border-radius: 11px; background: var(--asset-surface-2); }
+.asset-character-sheet-card.active { border-color: var(--asset-green-line); background: var(--asset-green-bg-3); }
+.asset-cs-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.asset-cs-title-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.asset-cs-title-row b { font-size: var(--fs-body); color: var(--asset-ink); }
+.asset-cs-badge, .asset-cs-role-badge { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 999px; font-size: var(--fs-caption); font-weight: 600; color: var(--asset-green-deep); background: var(--asset-green-bg); }
+.asset-cs-head p { margin: 6px 0 0; color: var(--asset-muted); font-size: var(--fs-caption); line-height: var(--lh-body); }
+.asset-cs-toggle { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; font-size: var(--fs-caption); font-weight: 600; color: var(--asset-ink-2); cursor: pointer; white-space: nowrap; }
+.asset-cs-toggle input { accent-color: var(--asset-green); }
+.asset-cs-lora-warn { margin-top: 10px; padding: 9px 11px; border: 1px solid var(--asset-warn-line); border-radius: 8px; background: var(--asset-warn-bg); }
+.asset-cs-lora-warn b { display: block; color: var(--asset-warn-ink); font-size: var(--fs-caption); }
+.asset-cs-lora-warn p { margin: 4px 0 8px; color: var(--muted); font-size: var(--fs-caption); line-height: var(--lh-body); }
+.asset-task-card-wrap { display: grid; gap: 8px; }
+.asset-cs-task-outputs { display: grid; gap: 8px; padding: 8px 10px; border: 1px solid var(--asset-line-2); border-radius: 8px; background: var(--asset-surface-2); }
+.asset-cs-task-preview { width: 100%; max-height: 150px; object-fit: contain; border-radius: 6px; background: #e8eaed; }
+.asset-cs-output-links { display: flex; flex-wrap: wrap; gap: 8px; }
+.asset-cs-output-links a { font-size: var(--fs-caption); color: var(--asset-green-deep); text-decoration: underline; }
+.asset-cs-version-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.asset-cs-version-meta small { color: var(--asset-muted-2); font-size: var(--fs-caption); }
 

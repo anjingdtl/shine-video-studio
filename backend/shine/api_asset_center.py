@@ -13,9 +13,19 @@ from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 
 from shine.api_common import DBSession, app_settings
-from shine.api_loras import resolve_image_style_request
+from shine.api_loras import _raise_lora_http, resolve_image_style_request
 from shine.api_operator import Operator
 from shine.asset_center import service
+from shine.asset_center.character_sheet import (
+    CHARACTER_SHEET_LAYOUT_VERSION,
+    CHARACTER_SHEET_NEGATIVE_PROMPT,
+    CHARACTER_SHEET_OPERATION,
+    CLOSEUP_TARGET_WIDTH,
+    STEP_SPECS,
+    STEP_TARGET_HEIGHT,
+    freeze_character_sheet_lora,
+    project_character_sheet_lora,
+)
 from shine.asset_center.contracts import (
     MAX_QWEN_EDIT_IMAGES,
     QWEN_EDIT_COMMIT,
@@ -231,6 +241,8 @@ class ImageJobRequest(ImageStyleRequest):
     parent_version_id: str | None = None
     expected_asset_state_version: int | None = Field(default=None, ge=1)
     validation_only: bool = False
+    character_sheet: bool = False
+    character_sheet_note: str = Field(default="", max_length=600)
 
 
 class VoiceJobRequest(Strict):
@@ -332,6 +344,17 @@ def _capabilities(db, settings) -> dict[str, Any]:
         "can_validate": edit_can_validate,
         "graph_report": edit_report,
     }
+    i2i_ready = bool(_validated_library_task(db, "I2I", fingerprint))
+    cs_lora = project_character_sheet_lora(db, settings, object_info=object_info, probe_comfy=False)
+    cs_ready = bool(i2i_ready and cs_lora["lora_ready"])
+    if not i2i_ready:
+        cs_reason = f"角色定妆照复用图生图（I2I）能力；{edit_reason}"
+    elif not cs_lora["lora_ready"]:
+        cs_reason = f"未检测到「{cs_lora['display_name']}」LoRA（{cs_lora['lora_status']}）。{cs_lora['setup_hint']}"
+    else:
+        cs_reason = (
+            "I2I 与「Qwen 多视角镜头」LoRA 已就绪，可生成 16:9 整体角色定妆照（正面+3/4 侧面肩上照与全身三视图）。"
+        )
     from shine.asset_center.voice_execution import can_queue_voice
 
     voices = {
@@ -372,8 +395,22 @@ def _capabilities(db, settings) -> dict[str, Any]:
             },
             "QWEN_IMAGE_I2I": {
                 **edit,
-                "state": "READY" if _validated_library_task(db, "I2I", fingerprint) else edit["state"],
-                "can_generate": bool(_validated_library_task(db, "I2I", fingerprint)),
+                "state": "READY" if i2i_ready else edit["state"],
+                "can_generate": i2i_ready,
+            },
+            "QWEN_IMAGE_CHARACTER_SHEET": {
+                **edit,
+                "state": "READY" if cs_ready else "PENDING_LOCAL_VALIDATION",
+                "can_generate": cs_ready,
+                "can_validate": False,
+                "inherits": "QWEN_IMAGE_I2I",
+                "reason": cs_reason,
+                "lora_id": cs_lora["lora_id"],
+                "lora_sha256": cs_lora["lora_sha256"],
+                "lora_status": cs_lora["lora_status"],
+                "lora_ready": cs_lora["lora_ready"],
+                "setup_hint": cs_lora["setup_hint"],
+                "layout_version": CHARACTER_SHEET_LAYOUT_VERSION,
             },
             "QWEN_IMAGE_INPAINT": {
                 **edit,
@@ -439,7 +476,9 @@ def _media_public(row: LibraryMedia, rights: LibraryRights | None = None) -> dic
 
 @router.get("/asset-center/capabilities")
 def capabilities(settings: SettingsDep, db: DBSession):
-    return _capabilities(db, settings)
+    result = _capabilities(db, settings)
+    db.commit()
+    return result
 
 
 @router.post("/asset-center/uploads", status_code=201)
@@ -1008,17 +1047,72 @@ def _queue_image_jobs(body: ImageJobRequest, settings, db, *, prior_payload: dic
     payload = body.model_dump(mode="json", exclude={"style_preset", "style_loras", "negative_prompt"})
     if body.category not in service.ASSET_CATEGORIES:
         raise HTTPException(422, {"code": "LIBRARY_CATEGORY_INVALID", "message": "素材分类无效"})
+    if not body.character_sheet and body.character_sheet_note.strip():
+        raise HTTPException(
+            422, {"code": "CHARACTER_SHEET_NOTE_REQUIRES_MODE", "message": "补充描述仅用于角色定妆照生成模式"}
+        )
     if body.mode == "RGBA" and body.mask_media_id and body.has_image_style:
         raise HTTPException(422, {"code": "IMAGE_LORA_UNSUPPORTED_FOR_LOCAL_OPERATION",
                                   "message": "手动画布抠图直接处理像素，不能挂载生图 LoRA。"})
-    image_style = resolve_image_style_request(db, settings, body, prior_payload=prior_payload)
+    if body.character_sheet:
+        if body.mode != "I2I":
+            raise HTTPException(
+                422, {"code": "CHARACTER_SHEET_REQUIRES_I2I", "message": "角色定妆照仅支持从图生图（I2I）入口启动"}
+            )
+        if body.has_image_style:
+            raise HTTPException(
+                422,
+                {
+                    "code": "CHARACTER_SHEET_STYLE_CONFLICT",
+                    "message": "角色定妆照模式自动挂载「Qwen 多视角镜头」LoRA，禁止叠加其他风格配方或 LoRA",
+                },
+            )
+        if body.category not in {"character", "costume"}:
+            raise HTTPException(
+                422, {"code": "CHARACTER_SHEET_CATEGORY_INVALID", "message": "角色定妆照仅支持人物或服装分类"}
+            )
+        from sqlalchemy import text
+
+        from shine.comfyops.loras import (
+            IMAGE_LORA_BASE,
+            StyleLoraError,
+            evaluate_style_lora_selection,
+            image_style_payload,
+        )
+
+        try:
+            db.execute(text("BEGIN IMMEDIATE"))
+            if prior_payload is not None:
+                image_style = image_style_payload(prior_payload)
+                evaluate_style_lora_selection(
+                    db,
+                    settings,
+                    image_style.get("style_loras"),
+                    base_model=IMAGE_LORA_BASE,
+                    frozen_image_metadata=True,
+                )
+            else:
+                image_style = freeze_character_sheet_lora(db, settings)
+        except StyleLoraError as exc:
+            _raise_lora_http(exc)
+    else:
+        image_style = resolve_image_style_request(db, settings, body, prior_payload=prior_payload)
     payload.update(image_style)
     # A project-scoped generation inherits the frozen film medium and the story
     # world / era through the one composer, so the asset centre cannot render a
     # different film (photoreal / modern) than the project the user selected.
     facts_project = body.project_id or (body.requirement_context or {}).get("project_id")
     _require_director7_project_if_present(db, facts_project)
-    if prior_payload is not None:
+    if body.character_sheet:
+        note = body.character_sheet_note.strip()
+        payload["i2i_operation"] = CHARACTER_SHEET_OPERATION
+        payload["character_sheet"] = True
+        payload["character_sheet_note"] = note
+        payload["character_sheet_layout_version"] = CHARACTER_SHEET_LAYOUT_VERSION
+        payload["user_prompt"] = note
+        payload["prompt"] = note
+        payload["negative_prompt"] = CHARACTER_SHEET_NEGATIVE_PROMPT
+    elif prior_payload is not None:
         payload.update({key: prior_payload[key] for key in (
             "user_prompt", "prompt", "negative_prompt", "prompt_template_version", "prompt_evidence",
             "project_visual_facts",
@@ -1118,10 +1212,14 @@ def _queue_image_jobs(body: ImageJobRequest, settings, db, *, prior_payload: dic
     elif body.parent_version_id or body.expected_asset_state_version is not None:
         raise HTTPException(422, {"code": "IMAGE_TARGET_ASSET_REQUIRED", "message": "选择来源版本时需要同时选择素材"})
     refs = validate_image_request({**payload, "prompt": body.prompt})
-    payload["output"] = {
-        "width": (body.output or {}).get("width", 1024),
-        "height": (body.output or {}).get("height", 1024),
-    }
+    payload["output"] = (
+        {"width": CLOSEUP_TARGET_WIDTH, "height": STEP_TARGET_HEIGHT}
+        if body.character_sheet
+        else {
+            "width": (body.output or {}).get("width", 1024),
+            "height": (body.output or {}).get("height", 1024),
+        }
+    )
     reference_rows = []
     for ref in refs:
         if ref.get("media_id"):
@@ -1243,7 +1341,9 @@ def _queue_image_jobs(body: ImageJobRequest, settings, db, *, prior_payload: dic
         "WARDROBE": "QWEN_IMAGE_WARDROBE",
         "RGBA": "QWEN_IMAGE_RGBA",
     }[body.mode]
-    if body.transparent:
+    if body.character_sheet:
+        cap_key = "QWEN_IMAGE_CHARACTER_SHEET"
+    elif body.transparent:
         cap_key = "QWEN_IMAGE_RGBA"
     capability = _capabilities(db, settings)["image_capabilities"][cap_key]
     can_queue = capability.get("can_generate", False)
@@ -1269,7 +1369,9 @@ def _queue_image_jobs(body: ImageJobRequest, settings, db, *, prior_payload: dic
         elif not body.validation_only and not body.transparent:
             family = "scene" if body.category == "scene" else "prop" if body.category == "prop" else "character"
             can_queue = can_queue and family in capability.get("verified_families", [])
-    if not manual_cutout and (payload["output"]["width"] > 1024 or payload["output"]["height"] > 1024):
+    if not manual_cutout and not body.character_sheet and (
+        payload["output"]["width"] > 1024 or payload["output"]["height"] > 1024
+    ):
         capability_2k = _capabilities(db, settings)["image_capabilities"]["QWEN_IMAGE_2K"]
         supports_2k = body.mode in {"T2I", "RGBA"} and not reference_rows
         can_queue = supports_2k and (
@@ -1354,6 +1456,39 @@ def task_data(db, row: LibraryRenderTask):
     attempts = db.scalars(
         select(LibraryTaskAttempt).where(LibraryTaskAttempt.task_id == row.id).order_by(LibraryTaskAttempt.attempt_no)
     ).all()
+    payload = row.payload or {}
+    character_sheet_data = None
+    if payload.get("i2i_operation") == CHARACTER_SHEET_OPERATION:
+        outputs_map: dict[str, Any] = {}
+        raw_outputs = payload.get("character_sheet_outputs") or {}
+        for role_key in ("composite_sheet", "closeup_front", "closeup_3_4", "fullbody_triview"):
+            entry = raw_outputs.get(role_key)
+            if isinstance(entry, dict) and entry.get("version_id"):
+                ver = db.get(LibraryVersion, entry["version_id"])
+                if ver is not None:
+                    outputs_map[role_key] = {
+                        "version_id": ver.id,
+                        "asset_id": ver.library_asset_id,
+                        "ordinal": ver.ordinal,
+                        "status": ver.status,
+                        "width": ver.width,
+                        "height": ver.height,
+                        "sha256": ver.content_sha256,
+                        "media_url": f"/api/v1/asset-center/versions/{ver.id}/media",
+                    }
+        character_sheet_data = {
+            "enabled": True,
+            "layout_version": payload.get("character_sheet_layout_version") or CHARACTER_SHEET_LAYOUT_VERSION,
+            "note": payload.get("character_sheet_note") or "",
+            "progress": payload.get("character_sheet_progress")
+            or {
+                "current_step": None,
+                "current_step_label": None,
+                "completed_steps": [],
+                "total_steps": len(STEP_SPECS),
+            },
+            "outputs": outputs_map,
+        }
     return {
         "id": row.id,
         "kind": row.kind,
@@ -1364,10 +1499,11 @@ def task_data(db, row: LibraryRenderTask):
         "external_outcome": row.external_outcome,
         "external_prompt_id": row.external_prompt_id,
         "result_version_id": row.result_version_id,
-        "capability": (row.payload or {}).get("capability"),
-        "candidate_index": (row.payload or {}).get("candidate_index"),
-        **({"style_preset": row.payload.get("style_preset"), "style_loras": row.payload["style_loras"]}
-           if (row.payload or {}).get("style_loras") else {}),
+        "capability": payload.get("capability"),
+        "candidate_index": payload.get("candidate_index"),
+        **({"style_preset": payload.get("style_preset"), "style_loras": payload["style_loras"]}
+           if payload.get("style_loras") else {}),
+        **({"character_sheet": character_sheet_data} if character_sheet_data is not None else {}),
         "can_new_attempt": bool(
             row.kind == "image"
             and row.status == "FAILED"
@@ -1549,6 +1685,8 @@ def new_image_attempt(task_id: str, body: NewImageAttempt, settings: SettingsDep
         parent_version_id=prior_payload.get("parent_version_id"),
         expected_asset_state_version=prior_payload.get("expected_asset_state_version"),
         validation_only=bool(prior_payload.get("validation_only")),
+        character_sheet=bool(prior_payload.get("character_sheet")),
+        character_sheet_note=str(prior_payload.get("character_sheet_note") or ""),
         project_id=prior_payload.get("project_id"),
     )
     result = _queue_image_jobs(request, settings, db, prior_payload=prior_payload)

@@ -76,13 +76,51 @@ def validate_image_request(payload: dict[str, Any]) -> list[dict[str, Any]]:
     mode = payload.get("mode")
     if mode not in IMAGE_MODES:
         raise HTTPException(422, {"code": "IMAGE_MODE_UNSUPPORTED", "message": "不支持的图片创作方式"})
-    if mode != "RGBA" and not str(payload.get("prompt") or "").strip():
+    character_sheet = bool(payload.get("character_sheet"))
+    if character_sheet and mode != "I2I":
+        raise HTTPException(
+            422, {"code": "CHARACTER_SHEET_REQUIRES_I2I", "message": "角色定妆照仅支持从图生图（I2I）入口启动"}
+        )
+    if not character_sheet and mode != "RGBA" and not str(payload.get("prompt") or "").strip():
         raise HTTPException(422, {"code": "IMAGE_PROMPT_REQUIRED", "message": "请说明希望生成或修改什么内容"})
     references = payload.get("references") or []
     if mode == "T2I" and references:
         raise HTTPException(422, {"code": "T2I_REFERENCES_NOT_ALLOWED", "message": "文生图不能夹带未使用的参考图"})
     if mode == "I2I" and not references:
         raise HTTPException(422, {"code": "I2I_SOURCE_REQUIRED", "message": "图生图需要一张真实原图"})
+    if character_sheet:
+        if len(references) != 1:
+            raise HTTPException(
+                422,
+                {
+                    "code": "CHARACTER_SHEET_SINGLE_SOURCE_REQUIRED",
+                    "message": "角色定妆照需要且只需要一张角色参考图",
+                },
+            )
+        if payload.get("mask_media_id"):
+            raise HTTPException(
+                422, {"code": "CHARACTER_SHEET_MASK_NOT_ALLOWED", "message": "角色定妆照不支持遮罩输入"}
+            )
+        if payload.get("transparent"):
+            raise HTTPException(
+                422,
+                {
+                    "code": "CHARACTER_SHEET_TRANSPARENT_NOT_ALLOWED",
+                    "message": "角色定妆照固定使用中性浅灰背景，不支持透明背景",
+                },
+            )
+        if payload.get("validation_only"):
+            raise HTTPException(
+                422, {"code": "CHARACTER_SHEET_VALIDATION_NOT_ALLOWED", "message": "角色定妆照不能作为本机能力验证样例"}
+            )
+        if payload.get("candidate_count", 1) != 1:
+            raise HTTPException(
+                422,
+                {
+                    "code": "CHARACTER_SHEET_CANDIDATE_COUNT_INVALID",
+                    "message": "角色定妆照每次只生成一套组合定妆照",
+                },
+            )
     if mode in {"MULTIREF", "WARDROBE"} and not 2 <= len(references) <= MAX_QWEN_EDIT_IMAGES:
         raise HTTPException(
             422,
@@ -135,7 +173,9 @@ def validate_image_request(payload: dict[str, Any]) -> list[dict[str, Any]]:
     normalized.sort(key=lambda item: item["order"])
     if normalized and [item["order"] for item in normalized] != list(range(len(normalized))):
         raise HTTPException(422, {"code": "REFERENCE_ORDER_GAP", "message": "参考图序号需从 0 开始连续排列"})
-    if mode in {"I2I", "INPAINT"} and normalized and normalized[0]["role"] not in {"canvas", "subject"}:
+    if character_sheet and normalized:
+        normalized[0]["role"] = "subject"
+    elif mode in {"I2I", "INPAINT"} and normalized and normalized[0]["role"] not in {"canvas", "subject"}:
         normalized[0]["role"] = "canvas"
     if mode == "MULTIREF" and normalized and normalized[0]["role"] not in {"canvas", "subject"}:
         raise HTTPException(

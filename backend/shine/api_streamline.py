@@ -672,6 +672,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                 rights_id=None,
                 commit=False,
                 image_style=image_style,
+                settings=settings,
             )
         result = {
             "confirmation": confirmation,

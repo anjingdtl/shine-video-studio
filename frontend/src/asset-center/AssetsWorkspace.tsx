@@ -316,6 +316,10 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
   const [height, setHeight] = useState(Number(restoredDraft.height) || 1024);
   const [candidateCount, setCandidateCount] = useState(Number(restoredDraft.candidateCount) || 1);
   const [transparent, setTransparent] = useState(Boolean(restoredDraft.transparent));
+  const [characterSheet, setCharacterSheet] = useState(Boolean(restoredDraft.characterSheet));
+  const [characterSheetNote, setCharacterSheetNote] = useState(
+    typeof restoredDraft.characterSheetNote === 'string' ? restoredDraft.characterSheetNote : '',
+  );
   const [references, setReferences] = useState<ReferenceMedia[]>(Array.isArray(restoredDraft.references) ? restoredDraft.references : []);
   const [maskMedia, setMaskMedia] = useState<ReferenceMedia | null>(restoredDraft.maskMedia ?? null);
   const [targetAssetId, setTargetAssetId] = useState<string>(restoredDraft.targetAssetId ?? '');
@@ -336,7 +340,8 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     return () => { alive = false; };
   }, []);
   const [visualFacts, setVisualFacts] = useState<null | { film_type: string | null; world: string; project_title: string }>(null);
-  const inheritsProject = Boolean(projectId) && (mode === 'T2I' || (mode === 'RGBA' && references.length === 0));
+  const isCharacterSheet = mode === 'I2I' && characterSheet;
+  const inheritsProject = Boolean(projectId) && !isCharacterSheet && (mode === 'T2I' || (mode === 'RGBA' && references.length === 0));
   useEffect(() => {
     if (!projectId || !inheritsProject) { setVisualFacts(null); return; }
     let alive = true;
@@ -344,9 +349,12 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     return () => { alive = false; };
   }, [projectId, inheritsProject]);
   const t2iCapability = capabilities?.image_capabilities.QWEN_IMAGE_T2I;
-  const selectedCapability = mode === 'T2I'
-    ? (transparent ? capabilities?.image_capabilities.QWEN_IMAGE_RGBA : t2iCapability)
-    : capabilities?.image_capabilities[`QWEN_IMAGE_${mode}`];
+  const characterSheetCapability = capabilities?.image_capabilities.QWEN_IMAGE_CHARACTER_SHEET;
+  const selectedCapability = isCharacterSheet
+    ? characterSheetCapability
+    : mode === 'T2I'
+      ? (transparent ? capabilities?.image_capabilities.QWEN_IMAGE_RGBA : t2iCapability)
+      : capabilities?.image_capabilities[`QWEN_IMAGE_${mode}`];
   const readyTaskIds = tasks.filter((task) => task.status === 'CANDIDATE_READY').map((task) => task.id).join('|');
   useEffect(() => {
     if (readyTaskIds) onValidated();
@@ -371,6 +379,15 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     }
   }
 
+  function toggleCharacterSheet(enabled: boolean) {
+    setCharacterSheet(enabled);
+    if (enabled) {
+      if (category !== 'character' && category !== 'costume') setCategory('character');
+      setTransparent(false);
+      setCandidateCount(1);
+    }
+  }
+
   useEffect(() => {
     try {
       const ids = JSON.parse(window.localStorage.getItem(taskStorageKey) ?? '[]') as Array<{ id: string; kind: 'image' | 'voice' }>;
@@ -388,10 +405,10 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
   useEffect(() => {
     window.localStorage.setItem(draftStorageKey, JSON.stringify({
       mode, title, prompt, category, width, height, candidateCount, transparent, references, maskMedia, targetAssetId,
-      styleLoras, stylePreset,
+      styleLoras, stylePreset, characterSheet, characterSheetNote,
     }));
   }, [mode, title, prompt, category, width, height, candidateCount, transparent, references, maskMedia, targetAssetId,
-    styleLoras, stylePreset]);
+    styleLoras, stylePreset, characterSheet, characterSheetNote]);
   useEffect(() => {
     const pendingCanvas = (mode === 'INPAINT' || mode === 'RGBA') && references.length > 0 && !maskMedia;
     const onBeforeUnload = (event: BeforeUnloadEvent) => {
@@ -473,6 +490,12 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
     setBusy(true); setError(''); setNotice('');
     let intent: PendingIntent | null = null;
     try {
+      if (isCharacterSheet) {
+        if (references.length !== 1) throw new Error('角色定妆照需要且只需要一张角色参考图。');
+        if (characterSheetCapability && !characterSheetCapability.lora_ready) {
+          throw new Error(characterSheetCapability.setup_hint || '缺少「Qwen 多视角镜头」LoRA，请前往「设置 → 制作环境」下载。');
+        }
+      }
       const countNeedsCanvas = ['I2I', 'INPAINT', 'MULTIREF', 'WARDROBE'].includes(mode);
       if (mode === 'T2I' && references.length) throw new Error('文生图不会使用参考图；请移除参考图，或切换到图生图。');
       if (countNeedsCanvas && !references.length) throw new Error('请先导入底图或参考图片。');
@@ -481,7 +504,29 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       if (mode === 'RGBA' && maskMedia && references.length !== 1) throw new Error('手动画布去背景需要且只需要一张 PNG 底图。');
       if (mode === 'RGBA' && manualCutout && !references[0].filename.toLowerCase().endsWith('.png')) throw new Error('手动画布去背景需要 PNG 底图；请导入 PNG 或移除当前遮罩。');
       if (mode === 'RGBA' && !manualCutout && !prompt.trim()) throw new Error('请输入透明图片生成或编辑指令，或导入一张 PNG 并绘制去背景遮罩。');
-      const body = {
+      const targetParentVersionId = reusableAssets.find((asset) => asset.id === targetAssetId)?.current_version?.id ?? null;
+      const targetStateVersion = reusableAssets.find((asset) => asset.id === targetAssetId)?.state_version ?? null;
+      const body = isCharacterSheet ? {
+        title: title.trim(),
+        mode: 'I2I',
+        prompt: '',
+        category: category === 'costume' ? 'costume' : 'character',
+        project_id: null,
+        references: references.slice(0, 1).map(({ id, media_id, version_id, order }) => ({
+          media_id: media_id ?? (version_id ? undefined : id), version_id, order, role: 'subject',
+        })),
+        mask_media_id: null,
+        output: { width: 768, height: 1024 },
+        seed: null,
+        candidate_count: 1,
+        validation_only: false,
+        transparent: false,
+        character_sheet: true,
+        character_sheet_note: characterSheetNote.trim(),
+        target_asset_id: targetAssetId || null,
+        parent_version_id: targetParentVersionId,
+        expected_asset_state_version: targetStateVersion,
+      } : {
         title: title.trim(), mode, prompt, category,
         project_id: inheritsProject ? projectId : null,
         references: references.map(({ id, media_id, version_id, order, role }) => ({ media_id: media_id ?? (version_id ? undefined : id), version_id, order, role })),
@@ -490,8 +535,8 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
         transparent: transparent || mode === 'RGBA',
         ...(manualCutout ? {} : imageStyleInput(styleLoras, stylePreset)),
         target_asset_id: targetAssetId || null,
-        parent_version_id: reusableAssets.find((asset) => asset.id === targetAssetId)?.current_version?.id ?? null,
-        expected_asset_state_version: reusableAssets.find((asset) => asset.id === targetAssetId)?.state_version ?? null,
+        parent_version_id: targetParentVersionId,
+        expected_asset_state_version: targetStateVersion,
       };
       intent = preparePendingIntent(pendingIntentStorageKey, body);
       setPendingIntent(intent);
@@ -526,14 +571,17 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
   }
 
   const requiresReferences = ['I2I', 'INPAINT', 'MULTIREF', 'WARDROBE'].includes(mode);
-  const maxReferenceCount = mode === 'INPAINT' ? 9 : 10;
+  const maxReferenceCount = isCharacterSheet ? 1 : mode === 'INPAINT' ? 9 : 10;
   const manualCutoutReady = mode === 'RGBA' && references.length === 1 && Boolean(maskMedia)
     && references[0].filename.toLowerCase().endsWith('.png')
     && references[0].width === width && references[0].height === height;
-  const canGenerate = Boolean(selectedCapability?.can_generate || manualCutoutReady);
-  const canValidate = Boolean(selectedCapability?.can_validate);
+  const canGenerate = isCharacterSheet
+    ? Boolean(characterSheetCapability?.can_generate && characterSheetCapability?.lora_ready)
+    : Boolean(selectedCapability?.can_generate || manualCutoutReady);
+  const canValidate = isCharacterSheet ? false : Boolean(selectedCapability?.can_validate);
   const blockerRows = selectedCapability && !selectedCapability.can_generate && !manualCutoutReady
     ? imageBlockerRows(capabilities, mode, selectedCapability) : [];
+  const csLoraMissing = Boolean(characterSheetCapability && !characterSheetCapability.lora_ready);
   return <div className="asset-workshop-layout">
     <section className="asset-card asset-workshop-form">
       <div className="asset-card-heading"><div><div className="asset-eyebrow">图片工坊</div><h2>创作一组可审核的图片候选</h2><p>原图和参考图会保留来源，生成任务刷新后仍可查看。</p></div><span className="asset-model-chip">Qwen-Image-2.1</span></div>
@@ -545,22 +593,69 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
           {label}{value === 'INPAINT' && !capabilities?.image_capabilities?.QWEN_IMAGE_INPAINT?.can_generate && <span className="pending-dot">待本机验证</span>}
         </button>)}
       </div>
-      <label className="asset-field"><span>{mode === 'T2I' ? '画面描述' : '修改指令'}</span>
-        <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder={mode === 'T2I' ? '例如：雨后的老街，暖黄色窗光，电影静帧构图……' : '说明要改变的内容，以及希望保持不变的部分……'} />
-      </label>
-      <details className="advanced-fold">
-        <summary>生图风格 LoRA{styleLoras.length && !manualCutoutReady ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
-        {manualCutoutReady && <p className="strategy-note">手动画布抠图直接处理像素，本次无需 LoRA。</p>}
-        <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}
-          loraSupported disabled={manualCutoutReady || busy} stylePreset={stylePreset} onPresetChange={setStylePreset} />
-      </details>
+      {mode === 'I2I' && (
+        <div className={`asset-character-sheet-card ${isCharacterSheet ? 'active' : ''}`} data-testid="character-sheet-card">
+          <div className="asset-cs-head">
+            <div>
+              <div className="asset-cs-title-row">
+                <b>角色定妆照生成</b>
+                <span className="asset-cs-badge">左特写 + 右三视图</span>
+              </div>
+              <p>基于单张角色参考图在单次租约内生成肩上正面照、3/4 侧面肩上照与全身正面/侧面/背面三视图，并确定性拼合为 16:9 横版角色定妆照（中性浅灰底色，不叠加风格配方）。</p>
+            </div>
+            <label className="asset-cs-toggle">
+              <input
+                type="checkbox"
+                role="switch"
+                aria-label="启用角色定妆照生成"
+                checked={characterSheet}
+                disabled={busy}
+                onChange={(event) => toggleCharacterSheet(event.target.checked)}
+              />
+              <span>{characterSheet ? '已启用定妆照' : '启用'}</span>
+            </label>
+          </div>
+          {csLoraMissing && (
+            <div className="asset-cs-lora-warn" role="status">
+              <b>缺少「Qwen 多视角镜头」LoRA（{characterSheetCapability?.lora_status ?? 'NOT_INSTALLED'}）</b>
+              <p>{characterSheetCapability?.setup_hint || '请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载并完成纳管；角色定妆照不会静默降级为无 LoRA 生图。'}</p>
+              {onOpenImageSetup && (
+                <button type="button" className="btn-secondary" onClick={onOpenImageSetup}>前往设置 → 制作环境</button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {isCharacterSheet ? (
+        <label className="asset-field"><span>补充描述（可选）</span>
+          <textarea
+            value={characterSheetNote}
+            onChange={(event) => setCharacterSheetNote(event.target.value)}
+            rows={3}
+            maxLength={600}
+            placeholder="可选：补充下半身服装、鞋履或材质说明（例如：深色长裤与黑色长靴），防止半身原图补全全身时自由发挥过度。"
+          />
+        </label>
+      ) : (
+        <>
+          <label className="asset-field"><span>{mode === 'T2I' ? '画面描述' : '修改指令'}</span>
+            <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={4} placeholder={mode === 'T2I' ? '例如：雨后的老街，暖黄色窗光，电影静帧构图……' : '说明要改变的内容，以及希望保持不变的部分……'} />
+          </label>
+          <details className="advanced-fold">
+            <summary>生图风格 LoRA{styleLoras.length && !manualCutoutReady ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
+            {manualCutoutReady && <p className="strategy-note">手动画布抠图直接处理像素，本次无需 LoRA。</p>}
+            <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}
+              loraSupported disabled={manualCutoutReady || busy} stylePreset={stylePreset} onPresetChange={setStylePreset} />
+          </details>
+        </>
+      )}
       {inheritsProject && visualFacts && <div className="asset-capability-notice ready" role="status">
         <span><i />继承当前作品《{visualFacts.project_title}》的导演风格与类型</span>
         <p>{visualFacts.film_type === 'animation' ? '动画' : visualFacts.film_type === 'live_action' ? '实拍' : '影片类型未冻结'}
           {visualFacts.world ? ` · 世界设定/时代已注入：${visualFacts.world.slice(0, 60)}${visualFacts.world.length > 60 ? '…' : ''}` : ' · 尚无全局故事圣经，时代以你的描述为准'}
           。生成时服务端会把影片媒介与时代事实写入提示词，不会另拍一部片。</p>
       </div>}
-      <label className="asset-field"><span>素材名称（可选）</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="留空时按分类命名" /></label>
+      <label className="asset-field"><span>素材名称（可选）</span><input value={title} onChange={(event) => setTitle(event.target.value)} placeholder={isCharacterSheet ? '例如：许知微定妆照' : '留空时按分类命名'} /></label>
       <label className="asset-field"><span>从已有素材继续并保留版本历史（可选）</span>
         <select value={targetAssetId} onChange={(event) => selectTargetAsset(event.target.value)}>
           <option value="">新建一项全局素材</option>
@@ -569,23 +664,28 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
         {targetAssetId && <small>新候选会关联到所选版本；人工晋升前不会替换正式版本。</small>}
       </label>
       <div className="asset-field-row">
-        <label className="asset-field"><span>素材分类</span><select value={category} onChange={(event) => setCategory(event.target.value)}>
-          <option value="character">人物</option><option value="scene">场景</option><option value="prop">道具</option><option value="costume">服装</option><option value="other">其他</option>
+        <label className="asset-field"><span>素材分类</span><select value={isCharacterSheet && category !== 'costume' ? 'character' : category} onChange={(event) => setCategory(event.target.value)}>
+          <option value="character">人物</option>
+          {!isCharacterSheet && <option value="scene">场景</option>}
+          {!isCharacterSheet && <option value="prop">道具</option>}
+          <option value="costume">服装</option>
+          {!isCharacterSheet && <option value="other">其他</option>}
         </select></label>
-        <label className="asset-field"><span>候选数量</span><select value={candidateCount} onChange={(event) => setCandidateCount(Number(event.target.value))}>
+        {!isCharacterSheet && <label className="asset-field"><span>候选数量</span><select value={candidateCount} onChange={(event) => setCandidateCount(Number(event.target.value))}>
           {[1, 2, 3, 4].map((n) => <option key={n} value={n}>{n} 张，依次排队</option>)}
-        </select></label>
+        </select></label>}
       </div>
-      <div className="asset-field-row asset-size-row">
+      {!isCharacterSheet && <div className="asset-field-row asset-size-row">
         <label className="asset-field"><span>宽度（像素）</span><input type="number" min={256} max={2048} step={32} value={width} onChange={(event) => setWidth(Number(event.target.value))} /></label>
         <label className="asset-field"><span>高度（像素）</span><input type="number" min={256} max={2048} step={32} value={height} onChange={(event) => setHeight(Number(event.target.value))} /></label>
         <label className="asset-checkbox"><input type="checkbox" checked={transparent} onChange={(event) => setTransparent(event.target.checked)} /><span>需要透明背景</span></label>
-      </div>
+      </div>}
       {(requiresReferences || mode === 'RGBA' || references.length > 0) && <div className="asset-reference-block">
-        <div className="asset-reference-heading"><div><b>底图和参考图</b><span>{mode === 'INPAINT' ? '局部修订还会把遮罩作为一张输入图；底图与参考图最多 9 张。' : '最多 10 张；第 1 张是编辑底图。'}</span></div>
+        <div className="asset-reference-heading"><div><b>{isCharacterSheet ? '角色参考图' : '底图和参考图'}</b><span>{isCharacterSheet ? '仅需 1 张已晋升或新导入的角色参考图。' : mode === 'INPAINT' ? '局部修订还会把遮罩作为一张输入图；底图与参考图最多 9 张。' : '最多 10 张；第 1 张是编辑底图。'}</span></div>
           <button type="button" className="btn-secondary" disabled={busy || references.length >= maxReferenceCount} onClick={() => { fileInput.current?.click(); }}><Upload size={15} />导入图片</button>
           <input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadFile(file, 'reference'); event.target.value = ''; }} />
         </div>
+        {isCharacterSheet && references.length > 1 && <div className="asset-inline-error" role="alert">角色定妆照仅支持 1 张角色参考图，请先移除多余参考图。</div>}
         {references.length > 0 && <div className="asset-reference-list">{references.map((row, index) => <div key={row.id} className="asset-reference-row">
           <img src={row.media_url} alt="" /><div className="asset-reference-name"><b>第 {index + 1} 张 · {row.filename}</b><small>{row.width} × {row.height} px · {row.sha256.slice(0, 10)}</small></div>
           <select aria-label={`第 ${index + 1} 张图片用途`} value={row.role} onChange={(event) => setReferences((rows) => rows.map((item) => item.id === row.id ? { ...item, role: event.target.value } : item))}>
@@ -619,8 +719,8 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
       {canValidate && !canGenerate && <div className="asset-validation-note">本机验证会真实提交一张样例到当前 ComfyUI，并生成待审核候选；不会自动晋升或开放正式生成。</div>}
       {error && <div className="asset-inline-error" role="alert">{error}</div>}
       {notice && <div className="asset-success-note" role="status"><Check size={15} />{notice}</div>}
-      <button className="btn-primary btn-wide" disabled={busy || (mode === 'T2I' && references.length > 0) || (!canGenerate && !canValidate) || (mode !== 'RGBA' && !prompt.trim()) || (mode === 'RGBA' && !manualCutoutReady && !prompt.trim())} onClick={() => void submit(!manualCutoutReady && !canGenerate && canValidate)}>
-        {busy ? <><LoaderCircle className="asset-spin" size={16} />正在保存请求…</> : manualCutoutReady ? <><Eraser size={16} />生成透明 PNG 候选</> : canGenerate ? <><WandSparkles size={16} />生成图片候选</> : canValidate ? <><ShieldCheck size={16} />运行一次本机验证样例</> : <><ShieldCheck size={16} />等待本机能力验证</>}
+      <button className="btn-primary btn-wide" disabled={busy || (isCharacterSheet ? (!canGenerate || references.length !== 1) : ((mode === 'T2I' && references.length > 0) || (!canGenerate && !canValidate) || (mode !== 'RGBA' && !prompt.trim()) || (mode === 'RGBA' && !manualCutoutReady && !prompt.trim())))} onClick={() => void submit(!isCharacterSheet && !manualCutoutReady && !canGenerate && canValidate)}>
+        {busy ? <><LoaderCircle className="asset-spin" size={16} />正在保存请求…</> : isCharacterSheet ? (canGenerate ? <><WandSparkles size={16} />生成 16:9 角色定妆照（双肩上 + 三视图）</> : <><ShieldCheck size={16} />等待多视角 LoRA / I2I 就绪</>) : manualCutoutReady ? <><Eraser size={16} />生成透明 PNG 候选</> : canGenerate ? <><WandSparkles size={16} />生成图片候选</> : canValidate ? <><ShieldCheck size={16} />运行一次本机验证样例</> : <><ShieldCheck size={16} />等待本机能力验证</>}
       </button>
       {capabilities && !canGenerate && !canValidate && !manualCutoutReady && onOpenImageSetup && (
         <button type="button" className="btn-secondary" onClick={onOpenImageSetup}>打开本机出图配置</button>
@@ -1091,6 +1191,12 @@ function LibraryPage() {
         {selected.versions?.map((version) => <div className="asset-version-card" key={version.id}>
           <div className="asset-version-heading"><b>V{version.ordinal} · {LABELS[version.status] ?? version.status}</b><small>{version.width && version.height ? `${version.width} × ${version.height} · ` : ''}{version.content_sha256.slice(0, 12)}</small></div>
           <div className="asset-version-meta"><span>{version.source_mode}</span><span>{version.is_mock ? '模拟结果' : '真实文件'}</span></div>
+          {version.provenance?.character_sheet?.artifact_label && (
+            <div className="asset-cs-version-meta">
+              <span className="asset-cs-role-badge">{version.provenance.character_sheet.artifact_label}</span>
+              {version.provenance.character_sheet.layout_version && <small>{version.provenance.character_sheet.layout_version}</small>}
+            </div>
+          )}
           {version.kind === 'image' && version.id !== selected.current_version?.id
             && <img className="asset-preview-image large asset-version-image" src={version.media_url}
               alt={`${selected.title} V${version.ordinal} 预览`} loading="lazy" />}
@@ -1219,17 +1325,50 @@ function TaskRow({ task, onLibrary }: { task: LibraryTask; onLibrary?: () => voi
     } catch (error) { setReconcileMessage(errorText(error)); }
     finally { setReconciling(false); }
   }
-  return <div className="asset-task-row"><span className={`asset-task-kind ${task.kind}`}>
-    {task.kind === 'image' ? <FileImage size={15} /> : <FileAudio2 size={15} />}
-  </span><div><b>{task.mode === 'T2I' ? '图片候选' : task.kind === 'voice' ? '声音任务' : task.mode}</b><small>{taskLabel(task)}{task.external_prompt_id ? ` · ${task.external_prompt_id.slice(0, 8)}` : ''}</small>
-    {reconcileMessage && <small role="status">{reconcileMessage}</small>}</div>
-    {task.kind === 'image' && ['UNKNOWN', 'RECONCILE_REQUIRED'].includes(task.status)
-      ? <button className="btn-text" disabled={reconciling} title="只读取已有任务结果，不会重新提交" onClick={() => void reconcile()}>{reconciling ? '核对中…' : '对账'}</button>
-      : task.can_new_attempt
-        ? <button className="btn-text" disabled={reconciling} onClick={() => void createNewAttempt()}>{reconciling ? '创建中…' : '创建新任务'}</button>
-        : task.result_version_id && onLibrary
-        ? <button className="btn-text" onClick={onLibrary}>审核候选</button>
-        : <span className={`asset-task-status ${task.status === 'BLOCKED_CAPABILITY' ? 'pending' : ''}`}>{LABELS[task.status] ?? task.status}</span>}
+  const csInfo = task.character_sheet;
+  const csProgress = csInfo?.progress;
+  const csOutputs = csInfo?.outputs;
+  const csStepText = csInfo?.enabled && task.status === 'RUNNING' && csProgress?.current_step_label
+    ? ` · 步骤 ${Math.min((csProgress.completed_steps?.length ?? 0) + 1, csProgress.total_steps || 5)}/${csProgress.total_steps || 5}：${csProgress.current_step_label}`
+    : '';
+  return <div className="asset-task-card-wrap">
+    <div className="asset-task-row"><span className={`asset-task-kind ${task.kind}`}>
+      {task.kind === 'image' ? <FileImage size={15} /> : <FileAudio2 size={15} />}
+    </span><div><b>{csInfo?.enabled ? '角色定妆照' : task.mode === 'T2I' ? '图片候选' : task.kind === 'voice' ? '声音任务' : task.mode}</b><small>{taskLabel(task)}{csStepText}{task.external_prompt_id ? ` · ${task.external_prompt_id.slice(0, 8)}` : ''}</small>
+      {reconcileMessage && <small role="status">{reconcileMessage}</small>}</div>
+      {task.kind === 'image' && ['UNKNOWN', 'RECONCILE_REQUIRED'].includes(task.status)
+        ? <button className="btn-text" disabled={reconciling} title="只读取已有任务结果，不会重新提交" onClick={() => void reconcile()}>{reconciling ? '核对中…' : '对账'}</button>
+        : task.can_new_attempt
+          ? <button className="btn-text" disabled={reconciling} onClick={() => void createNewAttempt()}>{reconciling ? '创建中…' : '创建新任务'}</button>
+          : task.result_version_id && onLibrary
+          ? <button className="btn-text" onClick={onLibrary}>审核候选</button>
+          : <span className={`asset-task-status ${task.status === 'BLOCKED_CAPABILITY' ? 'pending' : ''}`}>{LABELS[task.status] ?? task.status}</span>}
+    </div>
+    {csInfo?.enabled && csOutputs?.composite_sheet && (
+      <div className="asset-cs-task-outputs" data-testid="character-sheet-task-outputs">
+        <img src={csOutputs.composite_sheet.media_url} alt="整体角色定妆照预览" className="asset-cs-task-preview" loading="lazy" />
+        <div className="asset-cs-output-links">
+          <a href={csOutputs.composite_sheet.media_url} target="_blank" rel="noreferrer">
+            整体定妆照（{csOutputs.composite_sheet.width}×{csOutputs.composite_sheet.height}）
+          </a>
+          {csOutputs.closeup_front && (
+            <a href={csOutputs.closeup_front.media_url} target="_blank" rel="noreferrer">
+              肩上正面照（{csOutputs.closeup_front.width}×{csOutputs.closeup_front.height}）
+            </a>
+          )}
+          {csOutputs.closeup_3_4 && (
+            <a href={csOutputs.closeup_3_4.media_url} target="_blank" rel="noreferrer">
+              3/4 侧面肩上照（{csOutputs.closeup_3_4.width}×{csOutputs.closeup_3_4.height}）
+            </a>
+          )}
+          {csOutputs.fullbody_triview && (
+            <a href={csOutputs.fullbody_triview.media_url} target="_blank" rel="noreferrer">
+              全身三视图（{csOutputs.fullbody_triview.width}×{csOutputs.fullbody_triview.height}）
+            </a>
+          )}
+        </div>
+      </div>
+    )}
   </div>;
 }
 

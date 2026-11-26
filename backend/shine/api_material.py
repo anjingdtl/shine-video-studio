@@ -602,6 +602,7 @@ def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: 
         rights_id=body.rights_id,
         seeds=body.seeds,
         image_style=resolve_image_style_request(db, settings, body),
+        settings=settings,
     )
     return {"status": "accepted", **result}
 
@@ -729,6 +730,7 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
         briefs={body.requirement_id: brief},
         new_revision=True,
         image_style=image_style,
+        settings=settings,
     )
     return {"status": "accepted", **result}
 
@@ -840,6 +842,7 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
         rights_id=None,
         new_revision=True,
         image_style=image_style,
+        settings=settings,
     )
     return {"status": "accepted", **result}
 

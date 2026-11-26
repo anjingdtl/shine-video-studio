@@ -18,11 +18,36 @@ export type LibraryAsset = {
   favorite: boolean; status: string; state_version: number; version_count: number;
   current_version: LibraryVersion | null; versions?: LibraryVersion[]; usage?: Array<Record<string, any>>;
 };
+export type CharacterSheetOutputRef = {
+  version_id: string;
+  asset_id: string;
+  ordinal: number;
+  status: string;
+  width: number | null;
+  height: number | null;
+  sha256: string;
+  media_url: string;
+};
+
+export type CharacterSheetTaskInfo = {
+  enabled: boolean;
+  layout_version: string;
+  note: string;
+  progress: {
+    current_step: string | null;
+    current_step_label: string | null;
+    completed_steps: Array<Record<string, any>>;
+    total_steps: number;
+  };
+  outputs: Partial<Record<'composite_sheet' | 'closeup_front' | 'closeup_3_4' | 'fullbody_triview', CharacterSheetOutputRef>>;
+};
+
 export type LibraryTask = {
   id: string; kind: 'image' | 'voice'; mode: string; status: string; state_version: number; error_code: string | null;
   external_outcome: string; external_prompt_id: string | null; result_version_id: string | null;
   can_new_attempt?: boolean;
   capability: { state: string; can_generate?: boolean; reason?: string } | null; candidate_index: number | null;
+  character_sheet?: CharacterSheetTaskInfo;
   attempts: Array<Record<string, any>>; created_at: string; updated_at: string;
 };
 export type ImageGraphReport = {
@@ -37,6 +62,8 @@ export type CapabilityReport = {
   image_capabilities: Record<string, {
     state: string; can_generate?: boolean; can_validate?: boolean; reason: string; max_total_images?: number;
     graph_report?: ImageGraphReport | null; verified_families?: string[]; inherits?: string;
+    lora_id?: string; lora_sha256?: string; lora_status?: string; lora_ready?: boolean;
+    setup_hint?: string; layout_version?: string;
   }>;
   voice_capabilities: Record<string, { state: string; reason: string; can_generate?: boolean; can_queue?: boolean }>;
   t2i_runtime: Record<string, any>;

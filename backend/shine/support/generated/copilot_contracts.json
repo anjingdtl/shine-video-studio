@@ -3418,8 +3418,8 @@
   ],
   "digests": {
     "api_contract": "a072ca7ccde56397f08bf41ed8722684618a4c66501b35556f385c9c8c459878",
-    "api_schema": "afdb4a9999361c9af5ffc153f6d4310822bed5208b907164d6ff9e7c9b5e484d",
-    "contracts": "0a8c0b4ca57c44396e1ba798092ed6ac54a9559cb84e9b79888b883b770467a5"
+    "api_schema": "0807460b8153a327631fbcd13baa50f2905b15a7fc98b0043df6c6732894f355",
+    "contracts": "0cb7fece8a2c47721dae9ff9142c528e8a7a34db984fa33c8021df611293baf4"
   },
   "discovered": [
     {
@@ -6427,7 +6427,7 @@
     }
   ],
   "knowledge": {
-    "content_sha256": "96a7af1f9b4f13ed667d21bc4851c378008d39981da7f6f1bf6592abd30a9ae3",
+    "content_sha256": "f5265b67c8cabb33abdae99dcaf5ef2d5c971f0db7d56acfecf2d5b0bfabe42e",
     "entries": [
       {
         "api_contract": {
@@ -6826,31 +6826,34 @@
             "POST /api/v1/asset-center/image-jobs",
             "POST /api/v1/projects/{project_id}/material-preparation/generate",
             "GET /api/v1/loras",
-            "GET /api/v1/setup/summary"
+            "GET /api/v1/setup/summary",
+            "GET /api/v1/asset-center/capabilities"
           ]
         },
         "apis": [
           "POST /api/v1/asset-center/image-jobs",
           "POST /api/v1/projects/{project_id}/material-preparation/generate",
           "GET /api/v1/loras",
-          "GET /api/v1/setup/summary"
+          "GET /api/v1/setup/summary",
+          "GET /api/v1/asset-center/capabilities"
         ],
         "app_version": "2.2.0",
-        "content_hash": "cf18990c22de6a03f522d37412a3de4d504d50409baf48d60b4958c28aeafbaf",
-        "description": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
+        "content_hash": "aadd3f07e9f269ba5a634c0466d01d06184fa373353841e611dfed1b56c8a3af",
+        "description": "文生图、图生图、局部修订、多参考图、换装、透明底与角色定妆照生成按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。角色定妆照从图生图入口启动，依赖多视角 LoRA 权重在单次租约内串行生成肩上正面照、3/4 侧面肩上照与全身正/侧/背三视图，并由服务端确定性拼合为 16:9 横版定妆照（不叠加 T2I 风格配方）；项目素材准备中的人物素材同样复用该流水线执行文生图到 16:9 定妆照的转换。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
         "docs": [],
         "evidence": [
           "backend/tests/test_image_managed_renderer.py",
           "backend/tests/test_material_image_jobs.py",
           "backend/tests/test_image_lora_assembly.py",
-          "backend/tests/test_image_prompt_v6_alignment.py"
+          "backend/tests/test_image_prompt_v6_alignment.py",
+          "backend/tests/test_character_sheet.py"
         ],
         "evidence_level": "VERSIONED_PROJECT_DOCS",
         "feature_id": "qwen-image",
         "id": "qwen-image",
         "implementation_status": "IMPLEMENTED",
         "knowledge_id": "kb-qwen-image",
-        "knowledge_revision": "2.2.0-cf18990c",
+        "knowledge_revision": "2.2.0-aadd3f07",
         "knowledge_version": "shine-project-kb-2.2.0",
         "module": "image",
         "not_supported": null,
@@ -6859,6 +6862,7 @@
           "backend/shine/comfyops/setup_summary.py",
           "backend/shine/comfyops/loras.py",
           "backend/shine/materialprep",
+          "backend/shine/asset_center/character_sheet.py",
           "config/image_lora_presets.json"
         ],
         "source_revision": "",
@@ -6866,11 +6870,12 @@
           "backend/shine/comfyops/setup_summary.py",
           "backend/shine/comfyops/loras.py",
           "backend/shine/materialprep",
+          "backend/shine/asset_center/character_sheet.py",
           "config/image_lora_presets.json"
         ],
         "status": "IMPLEMENTED",
         "status_label": "已实现",
-        "summary": "文生图、图生图、局部修订、多参考图、换装与透明底六种能力按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
+        "summary": "文生图、图生图、局部修订、多参考图、换装、透明底与角色定妆照生成按项目资源独立核验；素材中心与项目素材准备共享生图 LoRA 台账、配方、图谱和触发词。生图风格 LoRA 包在制作环境按需下载，零 LoRA 可直接使用基础出图能力。角色定妆照从图生图入口启动，依赖多视角 LoRA 权重在单次租约内串行生成肩上正面照、3/4 侧面肩上照与全身正/侧/背三视图，并由服务端确定性拼合为 16:9 横版定妆照（不叠加 T2I 风格配方）；项目素材准备中的人物素材同样复用该流水线执行文生图到 16:9 定妆照的转换。手动画布抠图使用本机像素运算。剧本实体档案在出品人外观描述中提供固定事实，候选仍由用户选用。",
         "tags": [
           "出图",
           "Qwen",
@@ -6880,7 +6885,9 @@
           "多参考",
           "RGBA",
           "LoRA",
-          "剧本对齐"
+          "剧本对齐",
+          "定妆照",
+          "三视图"
         ],
         "title": "Qwen-Image 出图能力",
         "verification": "AUTOMATED",

@@ -1238,6 +1238,13 @@ def _strategy_references_lora(strategy: Any, lora_id: str, sha256: str) -> bool:
             continue
         if row.get("lora_id") == lora_id or row.get("sha256") == sha256:
             return True
+    cs_lora = strategy.get("character_sheet_lora")
+    if isinstance(cs_lora, dict):
+        for row in cs_lora.get("style_loras") or []:
+            if isinstance(row, dict) and (row.get("lora_id") == lora_id or row.get("sha256") == sha256):
+                return True
+        if cs_lora.get("lora_id") == lora_id or cs_lora.get("sha256") == sha256:
+            return True
     return False
 
 

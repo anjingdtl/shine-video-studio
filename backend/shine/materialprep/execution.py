@@ -509,7 +509,16 @@ def _candidate_filename(db, project_id: str, family: str, entity_id: str) -> str
     return material_filename(db, project_id, family, entity_id)
 
 
-def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: str, content: bytes, family: str):
+def _register_candidate(
+    factory,
+    settings,
+    context: dict[str, Any],
+    attempt_id: str,
+    content: bytes,
+    family: str,
+    *,
+    extra_provenance: dict[str, Any] | None = None,
+):
     """Verify the bytes through the shared candidate ledger and link the attempt."""
     from shine.comfy.workflow import graph_hash as _hash
 
@@ -533,6 +542,7 @@ def _register_candidate(factory, settings, context: dict[str, Any], attempt_id: 
             "usage_scope": "LOCAL_RESEARCH_AND_EVALUATION_ONLY",
             "license": "Qwen RESEARCH LICENSE AGREEMENT (2026-09-20), non-commercial",
             **image_style_payload(context["item_payload"]),
+            **(extra_provenance or {}),
         }
         row = candidate_assets.create_candidate(
             db,
@@ -687,6 +697,11 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             graph = _build_graph(config, prompt, seed=seed, width=width, height=height,
                                  style_loras=style_loras, style_sampling=payload.get("style_sampling"))
             graph_sha = graph_hash(graph)
+            if family == "character" and kind == "production":
+                return _render_character_sheet_inside_lease(
+                    factory, settings, context, version, client, lease_id, graph, graph_sha,
+                    fingerprint, family, prompt, renderer, object_info=resolved.get("object_info"),
+                )
             return _render_inside_lease(
                 factory, settings, context, version, client, lease_id, graph, graph_sha, fingerprint, family, prompt,
                 renderer,
@@ -842,8 +857,560 @@ def _render_inside_lease(factory, settings, context, version, client, lease_id, 
     }
 
 
+def _set_character_sheet_progress(factory, item_id: str, version: int, progress: dict[str, Any],
+                                  *, character_sheet_lora: dict[str, Any] | None = None) -> int:
+    with factory.begin() as db:
+        item = db.get(MaterialItem, item_id)
+        if item is None or item.state_version != version:
+            raise ImageExecutionError("CLAIM_LOST", item_id=item_id)
+        payload = {
+            **(item.payload or {}),
+            "character_sheet_mode": True,
+            "character_sheet_progress": progress,
+            **({"character_sheet_lora": character_sheet_lora} if character_sheet_lora is not None else {}),
+        }
+        item.payload = payload
+        item.sha256 = graph_hash(payload)
+        item.state_version += 1
+        item.heartbeat_at = utcnow()
+        return item.state_version
+
+
+def _execute_step_attempt(
+    factory,
+    settings,
+    context: dict[str, Any],
+    *,
+    version: int,
+    client: ComfyUIClient,
+    lease_id: str,
+    graph: dict[str, Any],
+    graph_sha: str,
+    fingerprint: str,
+    family: str,
+    prompt: image_prompts.ImagePrompt | None,
+    prompt_text: str,
+    negative_prompt_text: str,
+    seed: int,
+    width: int,
+    height: int,
+    renderer: dict[str, Any],
+    stage_key: str,
+    extra_attempt_payload: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Run one ComfyUI graph inside the active lease with durable SUBMIT_INTENT / non-replay rules."""
+    item_id = context["item_id"]
+    if prompt is not None:
+        attempt_prompt = prompt
+    else:
+        attempt_prompt = image_prompts.ImagePrompt(
+            prompt=prompt_text,
+            negative_prompt=negative_prompt_text,
+            template_version="character-sheet-v2",
+            sha256=graph_hash({"prompt": prompt_text, "negative_prompt": negative_prompt_text, "stage": stage_key}),
+        )
+
+    attempt_id = _open_attempt(
+        factory,
+        context,
+        lease_id=lease_id,
+        graph_sha=graph_sha,
+        prompt=attempt_prompt,
+        seed=seed,
+        width=width,
+        height=height,
+        fingerprint=fingerprint,
+        renderer=renderer,
+        extra_payload=extra_attempt_payload,
+    )
+    next_version = touch_item(
+        factory, item_id, version, status=ITEM_SUBMIT_INTENT, lease_id=lease_id, current_attempt_id=attempt_id
+    )
+    if next_version is None:
+        _close_attempt(factory, attempt_id, status=ATTEMPT_CANCELLED, outcome=OUTCOME_NOT_SENT,
+                       error_code="CLAIM_LOST", release_intent=True)
+        return False, {"item_id": item_id, "status": "CLAIM_LOST", "attempt_id": attempt_id}
+    version = next_version
+
+    try:
+        response = client.queue_prompt(
+            graph,
+            extra_data={"shine_kind": "material_image", "shine_attempt": attempt_id, "shine_step": stage_key},
+        )
+    except Exception as exc:  # noqa: BLE001 - _submit_outcome decides recoverability
+        status, outcome, code = _submit_outcome(exc)
+        unknown = outcome == OUTCOME_UNKNOWN
+        item_status = ITEM_NEEDS_REVIEW if unknown else ITEM_FAILED
+        _close_attempt(factory, attempt_id, status=status, outcome=outcome, error_code=code,
+                       details={"error_type": type(exc).__name__, "stage": stage_key}, release_intent=not unknown)
+        touch_item(factory, item_id, version, status=item_status, error_code=code)
+        _audit(factory, context,
+               "MATERIAL_IMAGE_SUBMISSION_UNCERTAIN" if unknown else "MATERIAL_IMAGE_SUBMISSION_FAILED",
+               {"attempt_id": attempt_id, "code": code, "stage": stage_key})
+        return False, {
+            "item_id": item_id, "status": item_status, "code": code,
+            "external_outcome": outcome, "attempt_id": attempt_id,
+        }
+
+    prompt_id = str(response.get("prompt_id") or "")
+    _close_attempt(factory, attempt_id, status=ATTEMPT_SUBMITTED, outcome=OUTCOME_ACKNOWLEDGED,
+                   prompt_id=prompt_id, keep_intent=True)
+    next_version = touch_item(factory, item_id, version, status="RUNNING")
+    version = next_version if next_version is not None else version
+    _audit(factory, context, "MATERIAL_IMAGE_SUBMITTED",
+           {"attempt_id": attempt_id, "prompt_id": prompt_id, "stage": stage_key})
+
+    try:
+        history_entry = _poll(client, prompt_id)
+        content, source = _harvest(client, history_entry)
+    except ImageExecutionError as exc:
+        uncertain = exc.code == "IMAGE_OUTCOME_RECONCILIATION_REQUIRED"
+        _close_attempt(factory, attempt_id,
+                       status=ATTEMPT_UNKNOWN if uncertain else ATTEMPT_FAILED,
+                       outcome=OUTCOME_UNKNOWN if uncertain else OUTCOME_FAILED,
+                       error_code=exc.code, details={**exc.details, "stage": stage_key}, release_intent=not uncertain)
+        touch_item(factory, item_id, version,
+                   status=ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED, error_code=_blocking_code(exc))
+        _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN" if uncertain else "MATERIAL_IMAGE_EXECUTION_FAILED",
+               {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": exc.code, "stage": stage_key})
+        return False, {
+            "item_id": item_id,
+            "status": ITEM_NEEDS_REVIEW if uncertain else ITEM_FAILED,
+            "code": exc.code,
+            "prompt_id": prompt_id,
+            "attempt_id": attempt_id,
+        }
+    except ComfyError as exc:
+        gone = _renderer_gone(factory, settings, renderer)
+        code = "IMAGE_RENDERER_GONE" if gone else "IMAGE_OUTCOME_RECONCILIATION_REQUIRED"
+        _close_attempt(factory, attempt_id, status=ATTEMPT_UNKNOWN, outcome=OUTCOME_UNKNOWN,
+                       error_code=code,
+                       details={"error_type": type(exc).__name__, "renderer_gone": gone,
+                                "comfy_code": getattr(exc, "code", None), "stage": stage_key},
+                       release_intent=False)
+        touch_item(factory, item_id, version, status=ITEM_NEEDS_REVIEW, error_code=code)
+        _audit(factory, context, "MATERIAL_IMAGE_OUTCOME_UNCERTAIN",
+               {"attempt_id": attempt_id, "prompt_id": prompt_id, "code": code,
+                "renderer_gone": gone, "stage": stage_key})
+        return False, {"item_id": item_id, "status": ITEM_NEEDS_REVIEW, "code": code,
+                       "prompt_id": prompt_id, "attempt_id": attempt_id}
+
+    return True, {
+        "attempt_id": attempt_id,
+        "prompt_id": prompt_id,
+        "content": content,
+        "harvest": source,
+        "version": version,
+    }
+
+
+def _render_character_sheet_inside_lease(
+    factory,
+    settings,
+    context: dict[str, Any],
+    version: int,
+    client: ComfyUIClient,
+    lease_id: str,
+    t2i_graph: dict[str, Any],
+    t2i_graph_sha: str,
+    fingerprint: str,
+    family: str,
+    prompt: image_prompts.ImagePrompt,
+    renderer: dict[str, Any],
+    *,
+    object_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Generate a production character as T2I seed portrait -> 5-view 16:9 Character Sheet in 1 lease."""
+    import hashlib
+
+    from shine.asset_center.character_sheet import (
+        CHARACTER_SHEET_BASE_SAMPLING,
+        CHARACTER_SHEET_LAYOUT_VERSION,
+        CHARACTER_SHEET_LORA_SAMPLING,
+        CHARACTER_SHEET_OPERATION,
+        CHARACTER_SHEET_SETUP_HINT,
+        STEP_SPECS,
+        build_step_prompts,
+        compose_character_sheet,
+        extract_character_sheet_note_from_material,
+        freeze_character_sheet_lora,
+        step_dimensions,
+    )
+    from shine.asset_center.contracts import build_qwen_edit_graph
+    from shine.asset_center.execution import _reference_prompt
+    from shine.comfy.workflow import validate_against_object_info
+    from shine.security import probe_upload, verify_upload
+
+    item_id = context["item_id"]
+    live_object_info = object_info if object_info is not None else client.object_info()
+
+    # Fail-closed before running T2I: validate multiple-angles LoRA + edit graph contract first.
+    with factory.begin() as db:
+        cs_frozen = freeze_character_sheet_lora(db, settings)
+    cs_style_payload = {
+        "style_loras": cs_frozen["style_loras"],
+        "style_sampling": cs_frozen["style_sampling"],
+    }
+    cs_loras = resolve_live_image_loras(factory, settings, cs_style_payload, object_info=live_object_info)
+    if not cs_loras:
+        raise StyleLoraError(
+            "CHARACTER_SHEET_LORA_REQUIRED",
+            f"缺少「Qwen 多视角镜头」LoRA 权重。{CHARACTER_SHEET_SETUP_HINT}",
+        )
+    probe_graph = build_qwen_edit_graph(
+        prompt="probe",
+        negative_prompt="probe",
+        uploaded_names=["probe.png"],
+        width=STEP_SPECS[0].target_width,
+        height=STEP_SPECS[0].target_height,
+        seed=1,
+        style_loras=cs_loras,
+        **CHARACTER_SHEET_LORA_SAMPLING,
+    )
+    validate_graph(probe_graph, required_nodes=[str(node["class_type"]) for node in probe_graph.values()])
+    edit_report = validate_against_object_info(probe_graph, {}, live_object_info)
+    if edit_report["missing_nodes"] or edit_report["missing_inputs"]:
+        raise ImageExecutionError("QWEN_EDIT_WORKFLOW_CONTRACT_CHANGED", **edit_report)
+
+    total_steps = 1 + len(STEP_SPECS)
+    version = _set_character_sheet_progress(
+        factory,
+        item_id,
+        version,
+        {
+            "current_step": "t2i_seed_portrait",
+            "current_step_label": "文生图基准肖像",
+            "completed_steps": [],
+            "total_steps": total_steps,
+        },
+        character_sheet_lora=cs_frozen,
+    )
+
+    base_seed = int(context["item_payload"].get("seed") or 0)
+    t2i_latent = t2i_graph[qwen_workflow.EMPTY_LATENT_NODE]["inputs"]
+    t2i_w, t2i_h = int(t2i_latent["width"]), int(t2i_latent["height"])
+
+    # Stage 0: T2I base character portrait (retains project style & T2I appearance brief).
+    ok, res = _execute_step_attempt(
+        factory,
+        settings,
+        context,
+        version=version,
+        client=client,
+        lease_id=lease_id,
+        graph=t2i_graph,
+        graph_sha=t2i_graph_sha,
+        fingerprint=fingerprint,
+        family=family,
+        prompt=prompt,
+        prompt_text=prompt.prompt,
+        negative_prompt_text=prompt.negative_prompt,
+        seed=base_seed,
+        width=t2i_w,
+        height=t2i_h,
+        renderer=renderer,
+        stage_key="t2i_seed_portrait",
+        extra_attempt_payload={"character_sheet_stage": "t2i_seed_portrait", "step_index": 0},
+    )
+    if not ok:
+        return res
+
+    version = res["version"]
+    t2i_bytes = res["content"]
+    t2i_type = verify_upload("image", "t2i_seed_portrait.png", t2i_bytes, settings.max_upload_bytes)
+    t2i_info = probe_upload("image", t2i_bytes, t2i_type)
+    t2i_sha = hashlib.sha256(t2i_bytes).hexdigest()
+    t2i_record = {
+        "step_key": "t2i_seed_portrait",
+        "label": "文生图基准肖像",
+        "prompt_id": res["prompt_id"],
+        "graph_sha256": t2i_graph_sha,
+        "sha256": t2i_sha,
+        "seed": base_seed,
+        "width": t2i_info.width,
+        "height": t2i_info.height,
+    }
+    _close_attempt(
+        factory,
+        res["attempt_id"],
+        status=ATTEMPT_SUCCEEDED,
+        outcome=OUTCOME_SUCCEEDED,
+        content_sha256=t2i_sha,
+        harvest=res["harvest"],
+        details={"stage": "t2i_seed_portrait", "step_record": t2i_record},
+        release_intent=True,
+    )
+
+    cs_note = extract_character_sheet_note_from_material(
+        context["requirement_payload"],
+        context["item_payload"].get("brief"),
+        str(context["item_payload"].get("brief_note") or ""),
+    )
+    step_outputs: dict[str, bytes] = {}
+    step_records: list[dict[str, Any]] = []
+    front_dims: tuple[int, int] | None = None
+    final_attempt_id = res["attempt_id"]
+    final_prompt_id = res["prompt_id"]
+    final_graph_sha = t2i_graph_sha
+    final_harvest = res["harvest"]
+    completed_progress_steps: list[dict[str, Any]] = [t2i_record]
+
+    # Stages 1..5: Fixed Character Sheet pipeline inside the same GPU lease.
+    for step_index, spec in enumerate(STEP_SPECS):
+        version = _set_character_sheet_progress(
+            factory,
+            item_id,
+            version,
+            {
+                "current_step": spec.key,
+                "current_step_label": spec.label,
+                "completed_steps": list(completed_progress_steps),
+                "total_steps": total_steps,
+            },
+        )
+        step_seed = (base_seed + step_index + 1) & qwen_workflow.MAX_SEED
+        step_loras = cs_loras if spec.uses_lora else ()
+        step_sampling = dict(CHARACTER_SHEET_LORA_SAMPLING if spec.uses_lora else CHARACTER_SHEET_BASE_SAMPLING)
+
+        if spec.reference_source == "input":
+            if spec.key.startswith("closeup_"):
+                step_w, step_h = spec.target_width, spec.target_height
+            else:
+                step_w, step_h = step_dimensions(
+                    t2i_info.width, t2i_info.height, target_width=spec.target_width, target_height=spec.target_height
+                )
+            step_ref_bytes = t2i_bytes
+            step_ref_sha = t2i_sha
+            step_ref_type = t2i_type
+        else:
+            step_ref_bytes = step_outputs["fullbody_front"]
+            step_w, step_h = front_dims or (spec.target_width, spec.target_height)
+            step_ref_sha = hashlib.sha256(step_ref_bytes).hexdigest()
+            step_ref_type = "image/png"
+
+        step_pos, step_neg = build_step_prompts(
+            spec.key,
+            note=cs_note,
+            style_loras=cs_frozen["style_loras"] if spec.uses_lora else (),
+        )
+        graph_refs = [{"order": 0, "role": "subject", "sha256": step_ref_sha}]
+        uploaded = client.upload_image(
+            f"mat_{step_ref_sha[:16]}.png",
+            step_ref_bytes,
+            subfolder="",
+            content_type=step_ref_type,
+        )
+        uploaded_name = str(uploaded.get("name") or "")
+        if not uploaded_name or "/" in uploaded_name or "\\" in uploaded_name:
+            raise ImageExecutionError("COMFY_INPUT_UPLOAD_RESPONSE_INVALID", stage=spec.key)
+        step_graph = build_qwen_edit_graph(
+            prompt=_reference_prompt(step_pos, graph_refs),
+            negative_prompt=step_neg,
+            uploaded_names=[uploaded_name],
+            width=step_w,
+            height=step_h,
+            seed=step_seed,
+            style_loras=step_loras,
+            **step_sampling,
+        )
+        validate_graph(step_graph, required_nodes=[str(node["class_type"]) for node in step_graph.values()])
+        step_graph_sha = graph_hash(step_graph)
+
+        ok, step_res = _execute_step_attempt(
+            factory,
+            settings,
+            context,
+            version=version,
+            client=client,
+            lease_id=lease_id,
+            graph=step_graph,
+            graph_sha=step_graph_sha,
+            fingerprint=fingerprint,
+            family=family,
+            prompt=None,
+            prompt_text=step_pos,
+            negative_prompt_text=step_neg,
+            seed=step_seed,
+            width=step_w,
+            height=step_h,
+            renderer=renderer,
+            stage_key=spec.key,
+            extra_attempt_payload={
+                "character_sheet_stage": spec.key,
+                "step_index": step_index + 1,
+                **({"style_loras": cs_frozen["style_loras"]} if spec.uses_lora else {}),
+            },
+        )
+        if not ok:
+            return step_res
+
+        version = step_res["version"]
+        step_bytes = step_res["content"]
+        harvested_type = verify_upload("image", f"{spec.key}.png", step_bytes, settings.max_upload_bytes)
+        harvested_info = probe_upload("image", step_bytes, harvested_type)
+        if harvested_info.width != step_w or harvested_info.height != step_h:
+            _close_attempt(
+                factory,
+                step_res["attempt_id"],
+                status=ATTEMPT_FAILED,
+                outcome=OUTCOME_FAILED,
+                error_code="IMAGE_STEP_DIMENSIONS_MISMATCH",
+                details={
+                    "stage": spec.key,
+                    "expected": [step_w, step_h],
+                    "actual": [harvested_info.width, harvested_info.height],
+                },
+                release_intent=True,
+            )
+            touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_STEP_DIMENSIONS_MISMATCH")
+            return {
+                "item_id": item_id,
+                "status": ITEM_FAILED,
+                "code": "IMAGE_STEP_DIMENSIONS_MISMATCH",
+                "attempt_id": step_res["attempt_id"],
+            }
+
+        step_sha = hashlib.sha256(step_bytes).hexdigest()
+        record = {
+            "step_key": spec.key,
+            "label": spec.label,
+            "prompt_id": step_res["prompt_id"],
+            "graph_sha256": step_graph_sha,
+            "sha256": step_sha,
+            "seed": step_seed,
+            "width": harvested_info.width,
+            "height": harvested_info.height,
+            "uses_lora": spec.uses_lora,
+            "sampling": step_sampling,
+        }
+        step_outputs[spec.key] = step_bytes
+        step_records.append(record)
+        completed_progress_steps.append(record)
+        if spec.key == "fullbody_front":
+            front_dims = (harvested_info.width, harvested_info.height)
+
+        final_attempt_id = step_res["attempt_id"]
+        final_prompt_id = step_res["prompt_id"]
+        final_graph_sha = step_graph_sha
+        final_harvest = step_res["harvest"]
+        is_last = step_index == len(STEP_SPECS) - 1
+        if not is_last:
+            _close_attempt(
+                factory,
+                step_res["attempt_id"],
+                status=ATTEMPT_SUCCEEDED,
+                outcome=OUTCOME_SUCCEEDED,
+                content_sha256=step_sha,
+                harvest=step_res["harvest"],
+                details={"stage": spec.key, "step_record": record},
+                release_intent=True,
+            )
+
+    composed = compose_character_sheet(
+        closeup_front_bytes=step_outputs["closeup_front"],
+        closeup_3_4_bytes=step_outputs["closeup_3_4"],
+        front_bytes=step_outputs["fullbody_front"],
+        side_bytes=step_outputs["fullbody_side"],
+        back_bytes=step_outputs["fullbody_back"],
+    )
+    composite_bytes = composed["composite_sheet_bytes"]
+    composite_sha = hashlib.sha256(composite_bytes).hexdigest()
+    composite_provenance = {
+        "pipeline": "t2i_to_character_sheet_v2",
+        "t2i_seed_portrait": t2i_record,
+        "character_sheet": {
+            "operation": CHARACTER_SHEET_OPERATION,
+            "artifact_role": "composite_sheet",
+            "artifact_label": "16:9 整体角色定妆照（正面/3/4 侧面肩上 + 全身三视图）",
+            "layout_version": CHARACTER_SHEET_LAYOUT_VERSION,
+            "layout": composed["layout"],
+            "source_reference_sha256": t2i_sha,
+            "note": cs_note,
+            "lora": dict(cs_frozen["style_loras"][0]),
+            "steps": step_records,
+        },
+    }
+    candidate_id, content_sha = _register_candidate(
+        factory,
+        settings,
+        context,
+        final_attempt_id,
+        composite_bytes,
+        family,
+        extra_provenance=composite_provenance,
+    )
+    _close_attempt(
+        factory,
+        final_attempt_id,
+        status=ATTEMPT_QC_PENDING,
+        outcome=OUTCOME_SUCCEEDED,
+        content_sha256=content_sha,
+        keep_intent=True,
+        harvest=final_harvest,
+        details={"stage": STEP_SPECS[-1].key, "composite_sha256": composite_sha,
+                 "composite_dimensions": composed["composite_sheet_size"]},
+    )
+    next_version = touch_item(factory, item_id, version, status="OUTPUT_STORED")
+    version = next_version if next_version is not None else version
+
+    qc = _technical_qc(factory, settings, candidate_id)
+    passed = qc["candidate_status"] == "READY_FOR_REVIEW"
+    _close_attempt(
+        factory,
+        final_attempt_id,
+        status=ATTEMPT_SUCCEEDED if passed else ATTEMPT_FAILED,
+        outcome=OUTCOME_SUCCEEDED if passed else OUTCOME_FAILED,
+        error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED",
+        qc=qc["qc"],
+        release_intent=True,
+    )
+    version = _set_character_sheet_progress(
+        factory,
+        item_id,
+        version,
+        {
+            "current_step": None,
+            "current_step_label": None,
+            "completed_steps": list(completed_progress_steps),
+            "total_steps": total_steps,
+        },
+    )
+    touch_item(
+        factory,
+        item_id,
+        version,
+        status=ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+        error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED",
+    )
+    _audit(
+        factory,
+        context,
+        "MATERIAL_IMAGE_CANDIDATE_READY" if passed else "MATERIAL_IMAGE_QC_FAILED",
+        {
+            "attempt_id": final_attempt_id,
+            "candidate_id": candidate_id,
+            "content_sha256": content_sha,
+            "prompt_id": final_prompt_id,
+            "graph_sha256": final_graph_sha,
+            "pipeline": "t2i_to_character_sheet_v2",
+            "technical": qc["qc"].get("technical"),
+            "semantic": qc["qc"].get("semantic"),
+        },
+    )
+    return {
+        "item_id": item_id,
+        "status": ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+        "attempt_id": final_attempt_id,
+        "candidate_id": candidate_id,
+        "content_sha256": content_sha,
+        "prompt_id": final_prompt_id,
+        "graph_sha256": final_graph_sha,
+        "runtime_fingerprint": fingerprint,
+    }
+
+
 def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width, height, fingerprint,
-                  renderer) -> str:
+                  renderer, extra_payload: dict[str, Any] | None = None) -> str:
     """Persist the submit intent and return its attempt id.
 
     The unique ``active_intent_key`` makes this the atomic guard against a second
@@ -860,6 +1427,7 @@ def _open_attempt(factory, context, *, lease_id, graph_sha, prompt, seed, width,
         "prompt": prompt.prompt,
         "negative_prompt": prompt.negative_prompt,
         **image_style_payload(context["item_payload"]),
+        **(extra_payload or {}),
         "graph_sha256": graph_sha,
         "output_node_id": qwen_workflow.OUTPUT_NODE,
         "output_class_type": qwen_workflow.OUTPUT_CLASS_TYPE,
