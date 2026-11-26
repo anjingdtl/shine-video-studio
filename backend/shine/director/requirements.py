@@ -60,6 +60,7 @@ def _preparation_catalog(
     db: Session, project_id: str, section_ids: list[str],
     section_keys: dict[str, list[str]],
     section_span_ids: dict[str, set[str]] | None = None,
+    drama_span_ids: dict[str, set[str]] | None = None,
 ) -> dict[str, Any]:
     """The entity source for projects without a four-stage catalogue.
 
@@ -94,13 +95,26 @@ def _preparation_catalog(
                 continue
             req_spans = {str(s).strip() for s in (req.get("source_span_ids") or []) if str(s).strip()}
             matched: list[str] = []
-            for sid in key_matched:
-                sec_spans = (section_span_ids or {}).get(sid) or set()
-                if req_spans and sec_spans:
-                    if req_spans & sec_spans:
+            matched_drama = False
+            # Prefer dramatic (non-front-matter) spans when any exist across key_matched
+            # sections so a setup preamble list (e.g. 【关键道具】 merged into scene 1)
+            # never pulls scene 2 props into scene 1.
+            if req_spans and drama_span_ids:
+                drama_matched = [
+                    sid for sid in key_matched
+                    if req_spans & (drama_span_ids.get(sid) or set())
+                ]
+                if drama_matched:
+                    matched = drama_matched
+                    matched_drama = True
+            if not matched:
+                for sid in key_matched:
+                    sec_spans = (section_span_ids or {}).get(sid) or set()
+                    if req_spans and sec_spans:
+                        if req_spans & sec_spans:
+                            matched.append(sid)
+                    else:
                         matched.append(sid)
-                else:
-                    matched.append(sid)
             if not matched:
                 continue
             entry = merged.setdefault((family, name), {
@@ -109,7 +123,9 @@ def _preparation_catalog(
                 "section_ids": [],
                 "carrier": req.get("carrier"),
                 "core_prop_reason": req.get("core_prop_reason"),
+                "has_drama_spans": matched_drama,
             })
+            entry["has_drama_spans"] = bool(entry.get("has_drama_spans") or matched_drama)
             for sid in matched:
                 if sid not in entry["section_ids"]:
                     entry["section_ids"].append(sid)
@@ -258,7 +274,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
     from shine.director.contracts import EpisodePlanPayload
     from shine.director.journey import _shot_material_problems
     from shine.director.streamline import _latest_plan
-    from shine.materialprep.source_spans import segment_document
+    from shine.materialprep.source_spans import front_matter_span_ids, segment_document
     from shine.materialprep.story import section_storyboard_shot_ids
 
     project_id = project.id
@@ -278,10 +294,12 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
 
     document = db.get(ProjectDocument, outline_payload.get("document_id"))
     document_scenes = segment_document(document.text or "") if document is not None else []
+    fm_spans = front_matter_span_ids(document_scenes)
 
     scoped_sections = [str(sid) for ep in episodes for sid in ep.section_ids]
     section_keys: dict[str, list[str]] = {}
     section_span_ids: dict[str, set[str]] = {}
+    drama_span_ids: dict[str, set[str]] = {}
     for sid in scoped_sections:
         section = sections_by_id.get(sid)
         if section is None:
@@ -291,13 +309,17 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
         section_keys[sid] = [row.key for row in document_scenes
                              if row.spans and row.spans[0].start_offset < end
                              and row.spans[-1].end_offset > start]
-        section_span_ids[sid] = {
+        spans_in_sec = {
             span.id for row in document_scenes for span in row.spans
             if span.start_offset < end and span.end_offset > start
         }
+        section_span_ids[sid] = spans_in_sec
+        drama_span_ids[sid] = spans_in_sec - fm_spans
     catalog = _catalog(db, project_id)
     if not catalog:
-        catalog = _preparation_catalog(db, project_id, scoped_sections, section_keys, section_span_ids)
+        catalog = _preparation_catalog(
+            db, project_id, scoped_sections, section_keys, section_span_ids, drama_span_ids
+        )
     aliases = _alias_index(catalog)
     capacity = reference_capacity(bound_profile(db, project_id))
     masters = list(db.scalars(select(Asset).where(
@@ -552,8 +574,47 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 shot_obj for sid in shot_ids
                 if (shot_obj := db.get(Shot, str(sid))) is not None and shot_obj.project_id == project_id
             ]
-            def _prop_matches_shot(prop_name: str, beat_blob: str, spec_text: str) -> bool:
+            def _english_prop_aliases(prop_name: str, specs: list[dict[str, Any]]) -> tuple[str, ...]:
+                aliases_out: list[str] = []
+                for sp in specs:
+                    zh_facts = sp.get("locked_story_facts") or []
+                    en_facts = sp.get("prompt_story_facts") or []
+                    if not (isinstance(zh_facts, list) and isinstance(en_facts, list)
+                            and len(zh_facts) == len(en_facts)):
+                        continue
+                    for zh_line, en_line in zip(zh_facts, en_facts, strict=True):
+                        zh_text = str(zh_line or "")
+                        if prop_name not in zh_text:
+                            continue
+                        zh_body = re.sub(r"^[^：:]+[：:]", "", zh_text)
+                        zh_body = re.sub(r"（[^）]*）|\([^)]*\)", "", zh_body)
+                        en_body = re.sub(r"^[^:]+:", "", str(en_line or ""))
+                        en_body = re.sub(r"（[^）]*）|\([^)]*\)", "", en_body)
+                        zh_parts = [p.strip() for p in re.split(r"[、，,;；]", zh_body) if p.strip()]
+                        en_parts = [p.strip(" .") for p in re.split(r"[,;]", en_body) if p.strip(" .")]
+                        if len(zh_parts) == len(en_parts):
+                            for z_part, e_part in zip(zh_parts, en_parts, strict=True):
+                                if prop_name in z_part and len(e_part) >= 3:
+                                    norm = re.sub(r"[\s_-]+", " ", e_part.lower()).strip()
+                                    if norm and norm not in aliases_out:
+                                        aliases_out.append(norm)
+                        elif len(en_parts) == 1 and len(en_parts[0]) >= 3:
+                            norm = re.sub(r"[\s_-]+", " ", en_parts[0].lower()).strip()
+                            if norm and norm not in aliases_out:
+                                aliases_out.append(norm)
+                return tuple(aliases_out)
+
+            def _prop_matches_shot(
+                prop_name: str,
+                beat_blob: str,
+                spec_text: str,
+                english_aliases: tuple[str, ...] = (),
+            ) -> bool:
                 if prop_name in beat_blob or prop_name in spec_text:
+                    return True
+                norm_spec = re.sub(r"[\s_-]+", " ", spec_text.lower())
+                if any(re.search(r"(?<!\w)" + re.escape(alias) + r"(?!\w)", norm_spec)
+                       for alias in english_aliases):
                     return True
                 if len(prop_name) >= 4 and re.search(r"[\u4e00-\u9fff]", prop_name):
                     prefix = prop_name[:2]
@@ -566,6 +627,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                         return True
                 return False
 
+            section_specs = [dict(shot_obj.spec or {}) for shot_obj in section_shots]
             for prop in (catalog.get("props") or []):
                 if str(section_id) not in [str(item) for item in prop.get("section_ids") or []]:
                     continue
@@ -573,6 +635,7 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                 if not name:
                     continue
                 core_prop = bool(prop.get("carrier") or prop.get("core_prop_reason"))
+                english_aliases = _english_prop_aliases(name, section_specs)
                 matched_shot_ids: list[str] = []
                 if drama_beats_by_id:
                     # Prefer exact per-shot beat evidence when a DramaSceneScript
@@ -600,11 +663,19 @@ def derive(db: Session, project: Project, *, episode_ids: list[str] | None = Non
                             str(spec.get("exit_state") or ""),
                             spec_props,
                         ])
-                        if (_prop_matches_shot(name, beat_blob, spec_text)
+                        if (_prop_matches_shot(name, beat_blob, spec_text, english_aliases)
                                 or any(str(r.get("name") or "") == name
                                        for r in (spec.get("requested_assets") or []) if isinstance(r, dict))):
                             matched_shot_ids.append(shot_obj.id)
-                target_shots = matched_shot_ids or [str(sid) for sid in shot_ids]
+                # When per-shot beat evidence exists and the prop carries real dramatic
+                # span citations (or spanned multiple sections), skip any section whose
+                # shots never mention it; legacy unspan-cited props still surface once.
+                skip_blanket = bool(drama_beats_by_id and prop.get("has_drama_spans"))
+                target_shots = matched_shot_ids if (matched_shot_ids or skip_blanket) else [
+                    str(sid) for sid in shot_ids
+                ]
+                if not target_shots:
+                    continue
                 _note_local(local, "prop", name, cited=core_prop)
                 for shot_id in target_shots:
                     note("prop", name, shot_id=str(shot_id), episode_id=episode.episode_id,

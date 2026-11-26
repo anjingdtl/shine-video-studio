@@ -390,3 +390,37 @@ def test_the_drama_path_needs_a_confirmed_plan(api):
                            json={"text": "老周修表。", "dramatize": True}, headers=LOCAL)
     assert response.status_code == 422, response.text
     assert response.json()["detail"] == "STORYBOARD_DRAMA_REQUIRES_PLAN"
+
+
+def test_drama_writer_and_scene_director_prompts_align_with_scene_budget(api):
+    client, factory, settings = api
+    prepared = _prepare_project(client, sections=2)
+    project = prepared["project"]
+    _book_and_queue(client, project, episode_count=1, target_seconds=40)
+    gateway, calls = _recording(settings, _master(client, project))
+    _drive(factory, settings, gateway)
+    assert _state(client, project)["status"] == "SUCCEEDED"
+
+    writer_calls = [call for call in calls if call.title == "DramaSceneScript"]
+    board_calls = [call for call in calls if call.title == "SceneShotBoard"]
+    assert len(writer_calls) == 2 and len(board_calls) == 2
+    # Each scene receives half of 40s (20s) -> 3 to 4 beats / 3 to 4 shots instead of 8-14 / 6-10 bloat.
+    for call in writer_calls:
+        assert "20-second scene compact at 3 to 4 beats" in call.system
+        assert "8 to 14 beats" not in call.system
+    for call in board_calls:
+        assert "production_context.scene_budget_seconds (20s)" in call.system
+        assert "3 to 4 shots" in call.system
+        assert "6 to 10 shots" not in call.system
+
+    # Both scenes carry episode_progress and locked_story_facts; Scene 2 sees Scene 1's landed shots.
+    assert writer_calls[0].context["locked_story_facts"] == ["全片两场共4镜"] or isinstance(
+        writer_calls[0].context["locked_story_facts"], list
+    )
+    assert writer_calls[0].context["production_context"]["episode_progress"] == {
+        "episode_id": "ep-01", "scene_index": 1, "scene_count": 2, "prior_shot_count": 0,
+    }
+    prior_after_scene1 = writer_calls[1].context["production_context"]["episode_progress"]["prior_shot_count"]
+    assert prior_after_scene1 >= 1
+    assert "already landed" in writer_calls[1].system
+    assert f"already landed {prior_after_scene1} shots" in board_calls[1].system

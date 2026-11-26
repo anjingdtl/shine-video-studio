@@ -1,0 +1,366 @@
+[
+  {
+    "file": "01-setup-initial.jpg",
+    "source": "00-setup-initial.png",
+    "source_sha256": "e6b28e00c4c9f5b1fcd01b5a46ebe75ee7bb5a8a0c174a7341c17835b3c53cfd",
+    "source_bytes": 272440,
+    "archive_bytes": 118083
+  },
+  {
+    "file": "02-setup-preparing.jpg",
+    "source": "02-setup-preparing.png",
+    "source_sha256": "b85d2870fed5d3281a868c908fddc729e9f13e91d172de453bfe75513c2c184f",
+    "source_bytes": 203938,
+    "archive_bytes": 106225
+  },
+  {
+    "file": "03-setup-after-lora-recovery.jpg",
+    "source": "07-setup-after-lora-recovery.png",
+    "source_sha256": "a88ae7555cc9d5feb369c3244a456a3bbc0af90231bb3262b150ef147b7a9254",
+    "source_bytes": 289022,
+    "archive_bytes": 117411
+  },
+  {
+    "file": "04-setup-loras-ready.jpg",
+    "source": "10b-setup-loras-ready.png",
+    "source_sha256": "236cf45fed263ccaed59588531577ed6b02bc29148a1a8bdbb4bb6e57be2c8f7",
+    "source_bytes": 286877,
+    "archive_bytes": 108369
+  },
+  {
+    "file": "05-setup-all-ready.jpg",
+    "source": "10-setup-all-ready.png",
+    "source_sha256": "040e780bb4f6e8a59c66123bdf114998a7be575804eef089e61d05f8220abef8",
+    "source_bytes": 288919,
+    "archive_bytes": 116164
+  },
+  {
+    "file": "06-creative-entry.jpg",
+    "source": "11-creative-entry.png",
+    "source_sha256": "3f7c7b814d8cac8a58444ab0d85c572c5b3845ca12b785c982d4b3918ef92b93",
+    "source_bytes": 236923,
+    "archive_bytes": 81852
+  },
+  {
+    "file": "07-script-imported.jpg",
+    "source": "12-script-imported.png",
+    "source_sha256": "ebb080ef6a78f316afd0e755930ce12aee5a8ee19ab33b46dcbd80a9a2e4f3ed",
+    "source_bytes": 243025,
+    "archive_bytes": 98346
+  },
+  {
+    "file": "08-outline-ready.jpg",
+    "source": "14-outline-ready.png",
+    "source_sha256": "3fed8de6917de7076d917d111d2e6ef3412d38762144be6d6dcf1e3f0e228953",
+    "source_bytes": 250036,
+    "archive_bytes": 93315
+  },
+  {
+    "file": "09-storyboard-book-60s.jpg",
+    "source": "15-stage2-storyboard-book.png",
+    "source_sha256": "b44ee0d4d98a20a7a46ef8a9663d874e4825c0e78937d069c766e28a5f2f2c81",
+    "source_bytes": 257985,
+    "archive_bytes": 98258
+  },
+  {
+    "file": "10-storyboard-book-confirmed.jpg",
+    "source": "20-storyboard-book-confirmed.png",
+    "source_sha256": "bfb58b3e272842fd6a9b0127003bb6a5e14f56a709d4229fd05bdd8634966085",
+    "source_bytes": 302233,
+    "archive_bytes": 112105
+  },
+  {
+    "file": "11-storyboard-blocked-18shots.jpg",
+    "source": "26-storyboard-blocked-axis.png",
+    "source_sha256": "7200ca906a18df479c3f39e994f7412a631da5feae9c05acdb936b193cd43444",
+    "source_bytes": 319011,
+    "archive_bytes": 123535
+  },
+  {
+    "file": "12-storyboard-8shot-confirmed.jpg",
+    "source": "stage3-8shot-confirmed.png",
+    "source_sha256": "7051f3c65b3f754148e6154996c21e0189fcdbb142eedadc69d4d9bede8bf86f",
+    "source_bytes": 241997,
+    "archive_bytes": 86235
+  },
+  {
+    "file": "13-storyboard-8shot-table.jpg",
+    "source": "stage3-8shot-table.png",
+    "source_sha256": "89e951037e697cb8389f03ecaee3dcfadd8714d5ccc68d5235838e7648c0660b",
+    "source_bytes": 355426,
+    "archive_bytes": 138927
+  },
+  {
+    "file": "14-materials-derived.jpg",
+    "source": "stage4-materials-init.png",
+    "source_sha256": "d2e98b390c61ad1ce4af1b429d54085c297edec4c684476cbe67afadb2e9990f",
+    "source_bytes": 253199,
+    "archive_bytes": 89988
+  },
+  {
+    "file": "15-dark-fantasy-5view-option.jpg",
+    "source": "stage4-dark-fantasy-lora-5view.png",
+    "source_sha256": "2e9eca6fcd407c0e53b55f0a1639b1a3c39eb99f5c21526d62328b95945cd234",
+    "source_bytes": 643066,
+    "archive_bytes": 264122
+  },
+  {
+    "file": "16-materials-candidates-grid.jpg",
+    "source": "stage4-candidates-grid.png",
+    "source_sha256": "9120f9562b082c0e87e59cba1500f3cc092b77cb35edec09091596e19abdc607",
+    "source_bytes": 939401,
+    "archive_bytes": 322315
+  },
+  {
+    "file": "17-materials-promoted-and-bound.jpg",
+    "source": "stage4-materials-promoted.png",
+    "source_sha256": "ee06e4e13e1a3b8f318c3f2f8229729c3035af960056b35f8c478854d2c17005",
+    "source_bytes": 967439,
+    "archive_bytes": 334422
+  },
+  {
+    "file": "19-package-ready.jpg",
+    "source": "stage5-package-confirm-ready.png",
+    "source_sha256": "72d05b6df5b11576730113504c042951b38ac8a22e32576ff1fd73bdc80af9b6",
+    "source_bytes": 309705,
+    "archive_bytes": 122226
+  },
+  {
+    "file": "20-package-clean-start.jpg",
+    "source": "stage5_package_before_clean_start.png",
+    "source_sha256": "52b37fdd9ac795f66d0705c5c79ced26728833953583582368af840e0a62feb0",
+    "source_bytes": 268056,
+    "archive_bytes": 103645
+  },
+  {
+    "file": "21-run-started-with-pause-cancel.jpg",
+    "source": "stage5_run_clean_started.png",
+    "source_sha256": "009f1d25f9ae0d2f4c3db9e17d571f6e32198417b22bf8d0982c0f45429b9d1a",
+    "source_bytes": 269507,
+    "archive_bytes": 101902
+  },
+  {
+    "file": "22-run-completed.jpg",
+    "source": "stage6-run1-completed.png",
+    "source_sha256": "0067a8329e8b0beee7acc30cb3e4aced6ba8cadefd6561f6920237a770e75e4b",
+    "source_bytes": 235414,
+    "archive_bytes": 94142
+  },
+  {
+    "file": "23-deliver-episode-delivered.jpg",
+    "source": "stage7-deliver-episode-v1.png",
+    "source_sha256": "21556c44a5b69f1015e3df4a585263f1907f584487bba7478b7e6c348fe21bd7",
+    "source_bytes": 245055,
+    "archive_bytes": 84627
+  },
+  {
+    "file": "24-temple-plate-regenerating.jpg",
+    "source": "stage7-temple-regenerating.png",
+    "source_sha256": "4db759be1f5f2066f37f573a066a7e8096cc47aab48df201fe50c72afae3e336",
+    "source_bytes": 270165,
+    "archive_bytes": 83929
+  },
+  {
+    "file": "25-temple-plate-candidate-clean.jpg",
+    "source": "stage7-temple-regenerated-candidate.png",
+    "source_sha256": "4e89b3eb28d7ee565785a4013ba3a165bc63dc7256ed3a0eb6985a1f911fbb51",
+    "source_bytes": 268355,
+    "archive_bytes": 83356
+  },
+  {
+    "file": "26-temple-promoted-shots-still-on-old-plate.jpg",
+    "source": "stage7-temple-two-masters.png",
+    "source_sha256": "e5938e1e625dbde15944be56e233889eb2c822677d50bf2ae3d70f21577a570e",
+    "source_bytes": 408020,
+    "archive_bytes": 108311
+  },
+  {
+    "file": "27-temple-row-after-promote.jpg",
+    "source": "stage7-temple-two-masters-2.png",
+    "source_sha256": "d4d9cf10195066ba9a25c192a7257a05c905ec74380b0f76c15befd4489c0dea",
+    "source_bytes": 306183,
+    "archive_bytes": 101205
+  },
+  {
+    "file": "30-ref-adrian-5view-sheet.jpg",
+    "source": "ref_01-艾德里安.png",
+    "source_sha256": "65541b498e9f39369e94048d10040c9b26ea4291c9d2eb83d1e54494e0bb5ddc",
+    "source_bytes": 5679218,
+    "archive_bytes": 86563
+  },
+  {
+    "file": "31-ref-morrigan-5view-sheet.jpg",
+    "source": "ref_02-莫瑞甘.png",
+    "source_sha256": "9381ff03f9d7f682d874747fc642ff298b99d7e6f65bbc2436d933f02a3f61f2",
+    "source_bytes": 5036155,
+    "archive_bytes": 80379
+  },
+  {
+    "file": "32-ref-rune-sword.jpg",
+    "source": "ref_03-符文长剑.png",
+    "source_sha256": "4e63a57e83d6c8b3285ba72974753ad5c0273e9af3d1407b6ee2df7998b5ca6c",
+    "source_bytes": 1137087,
+    "archive_bytes": 24671
+  },
+  {
+    "file": "33-ref-brass-lantern.jpg",
+    "source": "ref_04-黄铜提灯.png",
+    "source_sha256": "dc3231774dcc0ca7b33db3d0085846d1afd1ccdfc1757cd789797131164a8903",
+    "source_bytes": 1348421,
+    "archive_bytes": 35856
+  },
+  {
+    "file": "34-ref-courtyard-plate.jpg",
+    "source": "ref_05-哥特石砌古堡庭院.png",
+    "source_sha256": "61068ca99848f737dacfa6052a9b761bd88b848519f4073476603e3a0c2f7272",
+    "source_bytes": 1993593,
+    "archive_bytes": 122727
+  },
+  {
+    "file": "35-ref-temple-plate-with-lantern.jpg",
+    "source": "ref_06-圣殿残垣祭坛.png",
+    "source_sha256": "f79a3fdc19b05f7d71c79590659bb5ea060438ebfb3cc0dbfeeb7531fa04b47f",
+    "source_bytes": 2006198,
+    "archive_bytes": 119779
+  },
+  {
+    "file": "36-ref-temple-plate-regenerated-clean.jpg",
+    "source": "灰烬圣剑：古堡守望_素材_圣殿残垣祭坛_v2.png",
+    "source_sha256": "f12a4f6d0d451f9e6710f3d2bfc4d698c59fcde040b6f444e86f0743866c8eb8",
+    "source_bytes": 1829318,
+    "archive_bytes": 80696
+  },
+  {
+    "file": "40-before-fix-shot01-ghost-cast.jpg",
+    "source": "shot01_grid_before_scoped_facts.png",
+    "source_sha256": "8c201c4ce2ef6651e8ce1548860a298b1e6c56a4cbef9a9840e478349015c1d1",
+    "source_bytes": 1289791,
+    "archive_bytes": 87676
+  },
+  {
+    "file": "41-before-fix-shot02-ghost-cast.jpg",
+    "source": "shot02_grid_before_scoped_facts.png",
+    "source_sha256": "4a9838a83746869175963278153ae3c16f932bfd000c0a124b290acacb4248bb",
+    "source_bytes": 1111414,
+    "archive_bytes": 78574
+  },
+  {
+    "file": "42-run1-shot08-frame000-two-lanterns.jpg",
+    "source": "shot08_frame000.png",
+    "source_sha256": "cae5a5a86215216483324a642bd83e820ccf347c98be050515cebe9ceee094ed",
+    "source_bytes": 661035,
+    "archive_bytes": 57260
+  },
+  {
+    "file": "51-shot01-grid.jpg",
+    "source": "shot01_run1_grid.png",
+    "source_sha256": "31da68db7fd5cc18e1635bdd458e11fab09bf4f58ea79810e37d7c86a3c06f52",
+    "source_bytes": 3445013,
+    "archive_bytes": 109453
+  },
+  {
+    "file": "52-shot02-grid.jpg",
+    "source": "shot02_run1_grid.png",
+    "source_sha256": "9378e53fbef3c8726311e3171bbf97eb01a8a706fe175b7e72a6ad9ec0baf1f2",
+    "source_bytes": 2942767,
+    "archive_bytes": 105046
+  },
+  {
+    "file": "53-shot03-grid.jpg",
+    "source": "shot03_run1_grid.png",
+    "source_sha256": "e498102a6501acede41b82bdb464fb522da3114fa5b5626bb70a921c80154125",
+    "source_bytes": 2983403,
+    "archive_bytes": 100588
+  },
+  {
+    "file": "54-shot04-grid.jpg",
+    "source": "shot04_run1_grid.png",
+    "source_sha256": "d1854e34f76976f5324b878c3bd6ecf60ae54feddcf94e2835bf93b668e2dabe",
+    "source_bytes": 3381687,
+    "archive_bytes": 106374
+  },
+  {
+    "file": "55-shot05-grid.jpg",
+    "source": "shot05_run1_grid.png",
+    "source_sha256": "f192e47f83fc04ab7c10d62a6b3fbf41e64d2bc0b41fae6c4d35c75339be319c",
+    "source_bytes": 3379689,
+    "archive_bytes": 104311
+  },
+  {
+    "file": "56-shot06-grid.jpg",
+    "source": "shot06_run1_grid.png",
+    "source_sha256": "b19bf9980c43b5d67dd61d3299a6cfa9bc9c655c077a831a435e77b00f6e6f54",
+    "source_bytes": 3468118,
+    "archive_bytes": 117201
+  },
+  {
+    "file": "57-shot07-grid.jpg",
+    "source": "shot07_run1_grid.png",
+    "source_sha256": "c89249633c69cfda2232fc04228a6ea30b73a099efeee2679d70b8c893bf157d",
+    "source_bytes": 3514598,
+    "archive_bytes": 135715
+  },
+  {
+    "file": "58-shot08-grid.jpg",
+    "source": "shot08_run1_grid.png",
+    "source_sha256": "f88c0658a88fe0eb14441bb6220144d392a1d0e65b73ebea83d0fe17ed31fc2d",
+    "source_bytes": 3077358,
+    "archive_bytes": 111878
+  },
+  {
+    "file": "60-episode-reel-grid.jpg",
+    "source": "episode_run1_grid.png",
+    "source_sha256": "84084391b96569b8dbb08781276e436d884959d7a27ca04ecd29959c06c7bd47",
+    "source_bytes": 6141909,
+    "archive_bytes": 165599
+  },
+  {
+    "file": "script_medieval_8shot.txt",
+    "source": "script_medieval_8shot.txt",
+    "source_sha256": "9ac8da133ba82a862b958ddc2327f5cf8e02e065c69316cfd3dc96758f5ca5bb",
+    "source_bytes": 3057,
+    "archive_bytes": 3057
+  },
+  {
+    "file": "h3_prompt_shot01_run1.txt",
+    "source": "h3_prompt_shot01_clean_run.txt",
+    "source_sha256": "f49df5c51c6f48e902b83f3817ae7b51e449772fc0659b1285017443d276220d",
+    "source_bytes": 5211,
+    "archive_bytes": 5211
+  },
+  {
+    "file": "run-control-before-fix-stuck-pause-requested.txt",
+    "source": "snap-run-tocancel.txt",
+    "source_sha256": "f6c7bd9a38cafc11ff4bb148bdf1d082eabdab557df2f0da033a9e35e2ff2e8e",
+    "source_bytes": 2281,
+    "archive_bytes": 2281
+  },
+  {
+    "file": "run-control-after-fix-paused-with-cancel.txt",
+    "source": "snap-run-after-fix.txt",
+    "source_sha256": "ce4db72470a1bdf874304f303286dce7873908e454313c79eecd7c77298472c6",
+    "source_bytes": 2385,
+    "archive_bytes": 2385
+  },
+  {
+    "file": "run-control-after-fix-cancelled.txt",
+    "source": "snap-run-cancelled.txt",
+    "source_sha256": "43b20dbe59548868411d3921649650d02e30b6c31a95e180f968cc2a8c47b7e0",
+    "source_bytes": 2319,
+    "archive_bytes": 2319
+  },
+  {
+    "file": "shot-evidence-run1.json",
+    "source": "evidence_run1.json",
+    "source_sha256": "198ea3361f4ccf93b4369ce984595eff142a3733ce4a695fcd3f5fdda9569527",
+    "source_bytes": 11349,
+    "archive_bytes": 11349
+  },
+  {
+    "file": "compiler-version-verification.txt",
+    "source": "compiler-version-verification.log",
+    "source_sha256": "750eb9ba79d9997681882fa11c6fb864f20e9c3b669c6d6e2cc0f4e2fed18ac0",
+    "source_bytes": 2253,
+    "archive_bytes": 2253
+  }
+]

@@ -954,7 +954,8 @@ fieldset.binding-list{margin:0;padding:0;border:0;min-width:0}
 .setup-needs-project>div:first-child{flex:1;min-width:240px}
 .setup-needs-project b{font-size:var(--fs-caption);color:var(--ink-mid)}
 .setup-needs-project p{margin:4px 0 0;font-size:var(--fs-caption);color:var(--muted);line-height:1.55}
-.setup-needs-project .create-project{margin:0;max-width:420px}
+.setup-needs-project .create-project{margin:0;max-width:none;flex-wrap:wrap}
+.setup-needs-project .create-project input{min-width:220px}
 .upload-stack details{margin-bottom:6px}
 .upload-stack details summary{font-size:var(--fs-caption);color:var(--muted);cursor:pointer;padding:2px 0 6px}
 .upload-stack details label{display:block;font-size:var(--fs-caption);color:var(--muted);margin-bottom:6px}
@@ -1099,6 +1100,8 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .material-step-report{font-size:var(--fs-caption);color:var(--ink-mid);margin:4px 0;line-height:1.6}
 .material-field{display:flex;align-items:center;gap:8px;margin:7px 0;font-size:var(--fs-caption);color:var(--ink-mid)}
 .material-field>span{flex:0 0 92px;color:var(--ink-2)}
+.material-field:has(textarea){flex-direction:column;align-items:stretch}
+.material-field:has(textarea)>span{flex:none}
 .material-field select,.material-field input{flex:1;min-width:0;height:30px;border:1px solid var(--olive-line);border-radius:6px;padding:0 8px;font-size:var(--fs-caption);background:var(--paper);color:var(--ink-mid)}
 /* ① 创意与剧本：想法输入占满整张卡片的一行，标签在上、输入框通栏，便于写较长的想法 */
 .script-entry-grid{display:grid;grid-template-columns:1fr;gap:16px}

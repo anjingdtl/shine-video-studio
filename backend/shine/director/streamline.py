@@ -25,7 +25,7 @@ import re
 from typing import Any
 
 from fastapi import HTTPException
-from sqlalchemy import select, text
+from sqlalchemy import or_, select, text
 
 from shine.agents import continuity_engine
 from shine.h3.rulebook import digest
@@ -1531,7 +1531,9 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
         AgentTaskRecord.role_id == DIRECTOR_STORYBOARD_RUN,
     ).order_by(AgentTaskRecord.created_at.desc())).first()
     if row is None:
-        return {"task_id": None, "status": None, "episodes": []}
+        return {"task_id": None, "status": None, "episodes": [],
+                "stale_for_basis": False, "basis_changed_reason": None}
+    project = require_project(db, project_id)
     trace = row.trace or {}
     units = trace.get("units", [])
     results = {(r.get("unit") or {}).get("start_offset"): r for r in trace.get("results", [])}
@@ -1629,9 +1631,26 @@ def director_storyboard_state(db, project_id: str) -> dict[str, Any]:
         elif ep["status"] == "PENDING" and ep["units"] and all(
                 u["state"] == "APPLIED" for u in ep["units"]):
             ep["status"] = "APPLIED"
+    style_changed = bool(
+        project.frozen_style_version_id
+        and row.style_version_id
+        and project.frozen_style_version_id != row.style_version_id
+    )
+    plan_changed = bool(
+        plan is not None
+        and plan.status == "CONFIRMED"
+        and not any((ep.get("shot_ids") or []) for ep in (plan_payload.get("episodes") or []))
+        and plan.sha256 != trace.get("plan_sha256")
+    )
+    stale_for_basis = style_changed or plan_changed
+    basis_changed_reason = (
+        "STYLE_UPDATED" if style_changed else "PLAN_UPDATED" if plan_changed else None
+    )
     return {"task_id": row.id, "status": row.status, "state_version": row.state_version,
             "error_code": row.error_code, "cursor": trace.get("cursor", 0),
-            "total_units": len(units), "episodes": episodes}
+            "total_units": len(units), "episodes": episodes,
+            "stale_for_basis": stale_for_basis,
+            "basis_changed_reason": basis_changed_reason}
 
 
 def retry_director_episode(db, project_id: str, episode_id: str, *, expected_state_version: int,
@@ -2362,11 +2381,34 @@ def start_director_production(
             })
         confirm_package(db, package, actor=actor)
 
-    request_key = "director:" + graph_hash({
+    from shine.production.models import TERMINAL_RUN_STATUSES, ProductionRun
+
+    base_key = "director:" + graph_hash({
         "project": project_id,
         "package": package.manifest_sha256,
         "episodes": sorted(requested),
     })
+    # 任务复用看状态，不把已取消/已失败/已完成的旧运行原样返还：
+    # 同配置仍在推进或待核对的运行保持幂等复用；全部终结后递增 attempt 发起新运行，
+    # 旧运行的 idempotency_key 保持历史不变。
+    prior_runs = list(db.scalars(
+        select(ProductionRun).where(
+            ProductionRun.project_id == project_id,
+            or_(
+                ProductionRun.idempotency_key == base_key,
+                ProductionRun.idempotency_key.like(f"{base_key}:a%"),
+            ),
+        ).order_by(ProductionRun.created_at.desc())
+    ).all())
+    reusable = next(
+        (row for row in prior_runs if row.status not in TERMINAL_RUN_STATUSES),
+        None,
+    )
+    request_key = (
+        reusable.idempotency_key
+        if reusable is not None
+        else (base_key if not prior_runs else f"{base_key}:a{len(prior_runs) + 1}")
+    )
     run, created = run_engine.create_run(
         db, package, episode_ids=requested, idempotency_key=request_key, actor=actor)
     add_audit(db, actor, "DIRECTOR_PRODUCTION_STARTED", "production_run", run.id,

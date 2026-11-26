@@ -1,0 +1,22 @@
+HEAD current=shine-h3-compiler/2.1.0  worktree current=shine-h3-compiler/2.2.0
+== A. released 2.1.0 replays byte-exactly; current run equals 2.2.0 bytes ==
+job ac55dc2c shot 228c5752 at 09:05:40 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: pre-upgrade 2.1.0 | labels 2.1.0/2.2.0 | OK
+job 711c8b3b shot fe2f557c at 09:15:58 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: pre-upgrade 2.1.0 | labels 2.1.0/2.2.0 | OK
+job ecfac935 shot 4b248b18 at 09:25:48 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: pre-upgrade 2.1.0 | labels 2.1.0/2.2.0 | OK
+job cb0b1917 shot 228c5752 at 10:14:06 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: this run (2.2.0 bytes) | labels 2.1.0/2.2.0 | OK
+job 72f0396d shot fe2f557c at 10:24:01 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: this run (2.2.0 bytes) | labels 2.1.0/2.2.0 | OK
+job 8fe79262 shot 4b248b18 at 10:33:32 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: this run (2.2.0 bytes) | labels 2.1.0/2.2.0 | OK
+job 2102abbd shot a0d75492 at 10:44:17 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: this run (2.2.0 bytes) | labels 2.1.0/2.2.0 | OK
+job c0e54257 shot 370254df at 10:55:08 stored_ver=shine-h3-compiler/2.1.0 | HEAD@2.1.0==CUR@2.1.0: True | stored==: this run (2.2.0 bytes) | labels 2.1.0/2.2.0 | OK
+== B. every legacy version: HEAD vs worktree ==
+  shine-h3-compiler/1.2.1            identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.2.2            identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.2.3            identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.3.0            identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.3.0-original   identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.4.0            identical on 8/8 stored shots  OK
+  shine-h3-compiler/1.4.0-original   identical on 8/8 stored shots  OK
+  shine-h3-compiler/2.0.0            identical on 8/8 stored shots  OK
+  shine-h3-compiler/2.1.0            identical on 8/8 stored shots  OK
+versions known to the worktree but not to HEAD (expected: none): []
+RESULT: ALL OK

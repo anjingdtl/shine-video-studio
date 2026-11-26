@@ -1777,6 +1777,8 @@ export type EpisodeStoryboardState = {
   error_code?: string | null;
   cursor?: number;
   total_units?: number;
+  stale_for_basis?: boolean;
+  basis_changed_reason?: string | null;
   episodes: Array<{
     episode_id: string;
     order?: number;

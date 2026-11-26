@@ -19,6 +19,7 @@ from shine.agents.crew_prompts import drama_screenwriter_prompt
 from shine.agents.scene_director import scene_director_prompt
 from shine.h3.compiler import (
     COMPILER_VERSION,
+    LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     LEGACY_THIN_SHELL_COMPILER_VERSION,
     H3PromptCompiler,
 )
@@ -181,6 +182,35 @@ def test_scene_brief_context_isolates_character_costume_rules():
     assert "EMPTY environment plate" in rules_joined
     assert "NEVER mention, imply or depict any person" in rules_joined
     assert "dress and build" not in rules_joined
+
+
+@pytest.mark.unit
+def test_scene_brief_context_keeps_handheld_story_props_out_of_the_environment_plate():
+    """场景底图不得把角色携带的道具烤进环境（会发光也不行）。
+
+    2026-11-26 真机复现：剧本里黄铜提灯是莫瑞甘手里的道具，场景简报却把它当成
+    实用光源固定在祭坛台阶上；她出场的每一镜又都绑定了提灯道具，同一物体就会在
+    画面里出现两次。道具是按镜绑定的独立素材，这条边界写在场景简报的规则处。
+    """
+    ctx = material_brief.build_context(
+        requirement_payload={"family": "scene", "entity_id": "圣殿残垣祭坛",
+                             "description": "薄雾弥漫的废墟石砌圣殿内部"},
+        visual_direction={},
+        locked_facts=["莫瑞甘手提燃烧琥珀火光的黄铜提灯走向祭坛，提灯在石壁投下长影。"],
+        project_language="Chinese",
+    )
+    rules_joined = " ".join(ctx["rules"])
+    assert "separate prop materials" in rules_joined
+    assert ("NEVER place, mention or depict them in the environment plate, even when they give "
+            "off light") in rules_joined
+    assert "wall torches" in rules_joined
+    # 人物边界不变；道具规则只出现在场景族，不进人物/道具族的简报。
+    assert "NEVER mention, imply or depict any person" in rules_joined
+    prop_ctx = material_brief.build_context(
+        requirement_payload={"family": "prop", "entity_id": "黄铜提灯"},
+        visual_direction={}, locked_facts=[], project_language="Chinese",
+    )
+    assert "separate prop materials" not in " ".join(prop_ctx["rules"])
 
 
 # ---------------------------------------------------------------------------
@@ -365,8 +395,15 @@ def test_h3_compiler_v21_resolves_character_tokens_anchors_outfit_and_distinguis
         ),
     ]
 
-    compiled = compiler.compile(spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA)
-    assert compiled.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.1.0"
+    compiled = compiler.compile(
+        spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA,
+        compiler_version=LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+    )
+    assert compiled.compiler_version == LEGACY_ANCHORED_TOKENS_COMPILER_VERSION == "shine-h3-compiler/2.1.0"
+    # 2.2.0 继承 2.1.0 的全部锚定与图片角色行为：没有锁定故事事实的镜头，两个版本逐字节相同。
+    current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA)
+    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.2.0"
+    assert current.prompt == compiled.prompt
     desc = compiled.sections["detailed_description"]
     assert "{{C2}}" not in desc and "{{C1}}" not in desc
     assert "<Subject 1> enters the wooden doorway" in desc
@@ -798,3 +835,146 @@ def test_derive_skips_out_of_scope_and_unmatched_props_and_prefers_arch_scene(st
     assert reqs[("prop", "银壳兰草怀表")]["used_shot_ids"] == [s2["id"]]
     assert reqs[("scene", "周记钟表铺")]["description"] == "老城区街尾木柜台钟表铺，墙上挂满旧钟。"
 
+
+@pytest.mark.integration
+def test_prop_matching_uses_english_fact_aliases_and_skips_unmentioned_front_matter_props(studio):
+    """A prop listed in merged front-matter spans must not blanket-bind onto a scene
+    whose shots never mention it, and a shot's English blocking.props ('brass lantern')
+    matches its Chinese prop requirement via locked_story_facts/prompt_story_facts."""
+    client, factory, _tmp, _settings = studio
+    project_id = create_project(client, "前导道具与英文匹配验收")
+    style = freeze_style(client, project_id)
+    script = (
+        "【关键道具】\n1. 黄铜提灯\n\n"
+        "第1场 雨夜庭院\n老周在雨里独自站立。\n\n"
+        "第2场 废墟圣殿\n陈默走近石台。\n"
+    )
+    sec1_end = script.index("第2场")
+    s1 = create_shot(client, project_id, style["id"], title="导演分镜-ep-01-sec-1-s1", duration=5, characters=["老周"])
+    s2 = create_shot(client, project_id, style["id"], title="导演分镜-ep-01-sec-2-s2", duration=5, characters=["陈默"])
+    with factory.begin() as db:
+        from shine.materialprep.source_spans import segment_document
+        from shine.models import AppSetting, ProjectDocument, Shot
+        doc = ProjectDocument(
+            project_id=project_id,
+            filename="script.txt",
+            content_type="text/plain",
+            source_format="txt",
+            text=script,
+            sha256=digest(script),
+            parsed={},
+        )
+        db.add(doc)
+        db.flush()
+        scenes = segment_document(script)
+        all_spans = [sp.id for sc in scenes for sp in sc.spans]
+        task = AgentTaskRecord(
+            project_id=project_id, role_id="scriptwriter", input_hash="h",
+            asset_manifest_hash="a", rulepack_id="r", rulepack_hash="rh",
+            model_profile_id="p", model_id="m", schema_version="1.0",
+            status="SUCCEEDED", trace={},
+        )
+        db.add(task)
+        db.flush()
+        sec1_id = "sec-1"
+        sec2_id = "sec-2"
+        outline_payload = {
+            "schema_version": "1.0", "document_id": doc.id, "document_sha256": doc.sha256,
+            "summary": "s", "story_line": ["l"], "timeline": ["t"], "relationships": [],
+            "questions": [], "characters": [{"name": "老周"}, {"name": "陈默"}],
+            "production_sections": [
+                {"production_section_id": sec1_id, "order": 1, "title": "第1场",
+                 "start_offset": 0, "end_offset": sec1_end, "estimated_duration_s": 10.0},
+                {"production_section_id": sec2_id, "order": 2, "title": "第2场",
+                 "start_offset": sec1_end, "end_offset": len(script), "estimated_duration_s": 10.0},
+            ],
+            "locked_facts": [],
+        }
+        outline_art = AgentArtifact(
+            project_id=project_id, kind="StoryOutline", schema_version="1.0",
+            payload_json=outline_payload, sha256=digest(outline_payload),
+            producer_role="scriptwriter", source_task_id=task.id, input_revision_ids=[],
+            approved_by="local-user", approved_at=utcnow(),
+        )
+        db.add(outline_art)
+        prep_payload = {
+            "schema_version": "1.0", "scene_key": "S1", "summary": "s", "locked_facts": [],
+            "requirements": [
+                {"family": "prop", "name": "黄铜提灯", "description": "六角提灯",
+                 "carrier": "object", "core_prop_reason": "照明",
+                 "source_span_ids": all_spans},
+            ],
+            "questions": [],
+        }
+        db.add(AgentArtifact(
+            project_id=project_id, kind="ScriptPreparation", schema_version="1.0",
+            payload_json=prep_payload, sha256=digest(prep_payload),
+            producer_role="scriptwriter", source_task_id=task.id, input_revision_ids=[],
+        ))
+        for idx, (sec_id, b_text, s_obj, shot_key, props) in enumerate([
+            (sec1_id, "老周独自站在雨里。", s1, "s1", []),
+            (sec2_id, "陈默走近石台。", s2, "s2", ["brass lantern"]),
+        ], 1):
+            drama = AgentArtifact(
+                project_id=project_id, kind="DramaSceneScript", schema_version="1.0",
+                payload_json={"schema_version": "1.0", "location": "庭院" if idx == 1 else "圣殿",
+                              "beats": [{"beat_type": "action", "visible_action": b_text,
+                                         "characters": ["老周" if idx == 1 else "陈默"], "spoken_lines": []}]},
+                sha256=digest({"idx": idx, "b": b_text}), producer_role="scriptwriter",
+                source_task_id=task.id, input_revision_ids=[],
+            )
+            db.add(drama)
+            db.flush()
+            board = AgentArtifact(
+                project_id=project_id, kind="SceneShotBoard", schema_version="1.0",
+                payload_json={"schema_version": "1.0", "production_section_id": sec_id,
+                              "drama_scene_artifact_id": drama.id,
+                              "shots": [{"id": shot_key, "beat_ids": ["B1"]}]},
+                sha256=digest({"idx": idx, "k": shot_key}), producer_role="director",
+                source_task_id=task.id, input_revision_ids=[],
+            )
+            db.add(board)
+            db.flush()
+            shot_row = db.get(Shot, s_obj["id"])
+            shot_row.name = f"导演分镜-ep-01-{sec_id}-{shot_key}"
+            shot_row.spec = {
+                **shot_row.spec,
+                "locked_story_facts": ["道具：符文长剑（魔纹剑）、黄铜提灯（六角提灯）"],
+                "prompt_story_facts": ["Props: rune sword (runed blade), brass lantern (hexagonal lantern)."],
+                "blocking": {"axis": "g1", "placements": [
+                    {"character": "老周" if idx == 1 else "陈默", "zone": "center_mg",
+                     "facing": "facing_camera", "posture": "standing", "props": props}
+                ]},
+            }
+            apply_p = {"shot_ids": [s_obj["id"]]}
+            db.add(AppSetting(key=f"film-apply:{board.id}", value=apply_p))
+            db.add(AgentTaskRecord(
+                project_id=project_id, role_id="director_storyboard_run",
+                input_hash=f"run-{idx}", asset_manifest_hash="a", rulepack_id="r",
+                rulepack_hash="rh", model_profile_id="p", model_id="m",
+                schema_version="1.0", status="SUCCEEDED",
+                trace={"units": [{"episode_id": "ep-01", "production_section_id": sec_id,
+                                  "start_offset": 0 if idx == 1 else sec1_end}],
+                       "results": [{"unit": {"start_offset": 0 if idx == 1 else sec1_end},
+                                    "apply": {"shot_ids": [s_obj["id"]]}}]},
+            ))
+        outline_dict = {"id": outline_art.id, "sha256": outline_art.sha256}
+    from shine.director.models import DirectorEpisodePlan
+    with factory.begin() as db:
+        plan_p = {
+            "schema_version": "1.0", "mode": "sections", "target_seconds": 60, "tolerance_seconds": 15,
+            "episodes": [{"episode_id": "ep-01", "order": 1, "title": "第1集",
+                          "shot_ids": [s1["id"], s2["id"]],
+                          "section_ids": [sec1_id, sec2_id], "planned_seconds": 12.0}],
+            "allowed_repeats": [], "out_of_scope_section_ids": [],
+            "source": {"outline_artifact_id": outline_dict["id"], "outline_sha256": outline_dict["sha256"]},
+        }
+        db.add(DirectorEpisodePlan(
+            project_id=project_id, version=1, status="CONFIRMED", target_seconds=60,
+            tolerance_seconds=15, payload=plan_p, sha256=digest(plan_p),
+            source="script_sections_materialized", created_by="local-user",
+        ))
+    derived = client.post(f"/api/v1/projects/{project_id}/director/materials/derive", json={}, headers=LOCAL)
+    assert derived.status_code == 200, derived.text
+    reqs = {(row["family"], row["entity_id"]): row for row in derived.json()["requirements"]}
+    assert reqs[("prop", "黄铜提灯")]["used_shot_ids"] == [s2["id"]]

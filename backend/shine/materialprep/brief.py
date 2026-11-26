@@ -102,6 +102,15 @@ def build_context(
             "depict any person, human figure, silhouette, character, costume, posture or character action.",
             "Read story_world and locked_story_facts strictly to infer the era, architecture, weather "
             "and lighting atmosphere; strip out every character name, dialogue and plot action.",
+            # A prop the characters carry is its own material, bound to the shots that use it.
+            # Letting the producer plant it in the place (a carried lantern read as a practical
+            # light on the altar step) puts the same object on screen twice once the shot also
+            # binds the prop, so the boundary is stated here, where the scene brief is authored.
+            "Props that a character carries, holds or uses in the story - weapons, lanterns, tools, "
+            "letters, anything the script lists among its key props - are separate prop materials "
+            "bound shot by shot: NEVER place, mention or depict them in the environment plate, even "
+            "when they give off light. Describe only fixtures that belong to the place itself, such "
+            "as wall torches, chandeliers, windows or built-in hearths.",
             "Write the appearance as one flowing descriptive passage for a Qwen-Image-2.1 prompt: name the "
             "space and architecture first, then layout and set dressing, then lighting, weather and surface "
             "materials. Use concrete nouns ('weathered dark timber', 'rain-beaded lattice glass'), not bare "

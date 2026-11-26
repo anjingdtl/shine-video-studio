@@ -1051,6 +1051,7 @@ function App() {
               )}
               <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解" blockers={railBlockers('storyboard')}>
                 <EpisodeStoryboardPanel key={`ep-storyboard-${projectId}`} projectId={projectId}
+                  active={directorPage === 'produce'}
                   onMessage={report} onJourneyRefresh={() => refreshAll().catch(() => undefined)}
                   onGoStage={(target) => { resolveBlockerTarget(target)(); }} />
                 {routes.length === 0 && <div className="blocked-callout">

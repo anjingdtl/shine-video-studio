@@ -198,3 +198,33 @@ it('超窗时确认的是整集全部落镜：不取前缀，偏差由用户显�
     .toEqual({ acknowledge_duration_deviation: true });
   stub.restore();
 });
+
+it('②确认新风格后③页优先提示按新设定重新生成分镜，并可点击重排', async () => {
+  const staleState = {
+    ...STATE, status: 'SUCCEEDED', stale_for_basis: true, basis_changed_reason: 'STYLE_UPDATED',
+    episodes: [{ ...STATE.episodes[0], status: 'APPLIED', blocker: null }],
+  };
+  const stub = new StudioStub([
+    { method: 'GET', pattern: /\/director\/storyboard\/state$/, respond: () => jsonResponse(staleState) },
+    { method: 'GET', pattern: /\/episodes\/ep-01\/shots$/, respond: () => jsonResponse({
+      episode_id: 'ep-01', shots: [shot('s1', 1), shot('s2', 2)],
+      total_editorial_seconds: 12, shot_count: 2,
+      confirmed_version: null, confirmation_stale: false,
+    }) },
+    { method: 'GET', pattern: /\/episode-plans$/, respond: () => jsonResponse([]) },
+    { method: 'POST', pattern: /\/director\/storyboard\/generate$/,
+      respond: () => jsonResponse({ task_id: 'run-2', status: 'QUEUED', replayed: false }) },
+  ]);
+  render(
+    <StageRailProvider stageId="storyboard" stageLabel="第③步 · 镜头拆解">
+      <EpisodeStoryboardPanel projectId="p1" />
+    </StageRailProvider>,
+  );
+  await screen.findByText(/已冻结的导演风格或分集方案已更新/);
+  const rail = screen.getByLabelText('本阶段操作');
+  await userEvent.setup().click(within(rail).getByRole('button', { name: '按新设定重新生成分镜' }));
+  await waitFor(() => {
+    expect(stub.callsOf('POST', /director\/storyboard\/generate$/)).toHaveLength(1);
+  });
+  stub.restore();
+});

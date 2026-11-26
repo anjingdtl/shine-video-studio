@@ -74,7 +74,15 @@ LEGACY_THIN_SHELL_COMPILER_VERSION = "shine-h3-compiler/2.0.0"
 # outfit/hairstyle preservation, and distinguishes scene, prop and continuity
 # ``<Picture k>`` roles so H3 never confuses an environment plate with a prop or
 # preceding final frame.
-COMPILER_VERSION = "shine-h3-compiler/2.1.0"
+LEGACY_ANCHORED_TOKENS_COMPILER_VERSION = "shine-h3-compiler/2.1.0"
+# 2.2.0 scopes the project-wide locked story facts to what this shot can show.
+# 2.1.0 emitted every one of them into every shot, so a solo shot of one
+# character also carried the other character's appearance bio, the props the
+# shot never uses and the plan's own structure note ("two scenes, split into 8
+# shots"), and H3 rendered that off-screen cast into frame.  The scoping lands
+# here, in the next version: 2.1.0 keeps its released bytes, so every stored
+# 2.1.0 request still replays through the single provenance verifier.
+COMPILER_VERSION = "shine-h3-compiler/2.2.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -84,6 +92,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_TIMELINE_COMPILER_VERSION,
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
     LEGACY_THIN_SHELL_COMPILER_VERSION,
+    LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -105,6 +114,12 @@ LEGACY_SHELL_VERSIONS = (
 LEGACY_200_VERSIONS = (
     *LEGACY_SHELL_VERSIONS,
     LEGACY_THIN_SHELL_COMPILER_VERSION,
+)
+#: Versions that keep the pre-2.2.0 behaviour of emitting every locked story fact
+#: into every shot.
+LEGACY_210_VERSIONS = (
+    *LEGACY_200_VERSIONS,
+    LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -171,6 +186,8 @@ class _Context:
     #: 2.1.0+: resolve ``{{Ck}}`` tokens into ``<Subject n>``, state explicit
     #: outfit/hairstyle retention, and distinguish scene/prop/continuity pictures.
     anchored_v21: bool = False
+    #: 2.2.0+: locked story facts are scoped to the shot's visible cast and props.
+    scoped_facts: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -768,6 +785,160 @@ def _resolve_character_tokens(text: str, ctx: _Context) -> str:
     return CHARACTER_TOKEN_PATTERN.sub(replace, text)
 
 
+_FACT_NON_PERSON_PREFIXES = frozenset({
+    "道具", "关键道具", "物品", "场景", "核心场景", "世界观", "背景", "风格", "规则",
+    "时间", "地点", "人物", "角色", "说明", "提示", "注意",
+    "prop", "props", "scene", "scenes", "world", "setting", "style", "rule", "note",
+})
+_META_STRUCTURE_FACT_RE = re.compile(
+    r"(?:全片共\s*[0-9一二三四五六七八九十两]+\s*[场集]|拆分为\s*\d+\s*个?镜头|总计\s*\d+\s*个?镜头)"
+)
+_PERSON_BIO_START_RE = re.compile(
+    r"^\s*(?:大约|约|年约)?\s*[0-9０-９一二三四五六七八九十两]{1,4}\s*(?:岁|余年|多岁|来岁)"
+    r"|^\s*[^，,。.；;：:]{0,10}?(?:男性|女性|男孩|女孩|男人|女人|男子|女子|少年|少女|老者|老妇|老人|中年|青年|孩童)"
+)
+_PERSON_BIO_EN_RE = re.compile(r"\b\d{1,3}\s*[-–]?\s*years?\s*[-–]?\s*old\b", re.IGNORECASE)
+
+
+def _looks_like_person_bio(zh_fact: str, en_fact: str) -> bool:
+    """Whether one labelled fact is a person's appearance bio rather than a world note."""
+    body = re.sub(r"^\s*[^：:]{1,20}\s*[：:]\s*", "", zh_fact)
+    return bool(_PERSON_BIO_START_RE.search(body) or _PERSON_BIO_EN_RE.search(en_fact))
+
+
+def _split_top_level(text: str, seps: str) -> list[str]:
+    items: list[str] = []
+    buf: list[str] = []
+    depth = 0
+    for ch in text:
+        if ch in "（(":
+            depth += 1
+            buf.append(ch)
+        elif ch in "）)":
+            depth = max(0, depth - 1)
+            buf.append(ch)
+        elif depth == 0 and ch in seps:
+            part = "".join(buf).strip()
+            if part:
+                items.append(part)
+            buf = []
+        else:
+            buf.append(ch)
+    tail = "".join(buf).strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str]) -> list[str]:
+    """Keep only background facts relevant to this shot's visible cast, props and world.
+
+    A project locks cast bios and prop inventories globally; emitting an off-cast
+    character's appearance bio (e.g. Morrigan's silver braid and velvet cloak) inside
+    a solo shot of Adrian causes H3 to render that off-screen character into frame.
+    Every version before 2.2.0 emits the facts unchanged, so a stored request of
+    those versions still replays byte-exactly.
+    """
+    if not ctx.scoped_facts:
+        return list(en_facts)
+    cast_names = {
+        name.strip()
+        for name in (ctx.spec.characters or [])
+        if isinstance(name, str) and name.strip()
+    }
+    for ref in ctx.manifest:
+        if ref.use_as == ReferenceUse.SUBJECT:
+            for candidate in (ref.entity_id, ref.role):
+                if isinstance(candidate, str) and candidate.strip():
+                    cast_names.add(candidate.strip())
+    off_cast_names = {
+        str(name).strip()
+        for name in (ctx.spec.character_tokens or {}).values()
+        if isinstance(name, str) and name.strip()
+        and not any(character_reference_matches(name.strip(), c) for c in cast_names)
+    }
+    shot_props: set[str] = set()
+    for ref in ctx.manifest:
+        if ref.use_as == ReferenceUse.PICTURE and ref.asset_role == "prop":
+            for candidate in (ref.entity_id, ref.role):
+                if isinstance(candidate, str) and candidate.strip():
+                    shot_props.add(candidate.strip())
+    if ctx.spec.blocking:
+        for pl in ctx.spec.blocking.placements:
+            for prop in pl.props:
+                if isinstance(prop, str) and prop.strip():
+                    shot_props.add(prop.strip())
+    story_norm = re.sub(r"[\s_-]+", " ", (ctx.spec.story_beat or "").lower())
+    props_norm = {re.sub(r"[\s_-]+", " ", p.lower()).strip() for p in shot_props if p.strip()}
+
+    kept: list[str] = []
+    paired_zh = zh_facts if len(zh_facts) == len(en_facts) else en_facts
+    for zh_raw, en_raw in zip(paired_zh, en_facts, strict=True):
+        zh_fact = str(zh_raw or "").strip()
+        en_fact = str(en_raw or "").strip()
+        if not en_fact:
+            continue
+        if _META_STRUCTURE_FACT_RE.search(zh_fact):
+            continue
+        # Off-cast character bio filtering.
+        zh_prefix_m = re.match(r"^\s*([^：:\s]{1,20})\s*[：:]", zh_fact)
+        zh_prefix = zh_prefix_m.group(1).strip() if zh_prefix_m else ""
+        if off_cast_names:
+            mentions_off = any(off in zh_fact for off in off_cast_names)
+            mentions_in = any(c in zh_fact for c in cast_names)
+            if (zh_prefix and any(character_reference_matches(zh_prefix, off) for off in off_cast_names)) or (
+                mentions_off and not mentions_in
+            ):
+                continue
+        elif zh_prefix and cast_names and zh_prefix.lower() not in _FACT_NON_PERSON_PREFIXES:
+            if (
+                not any(character_reference_matches(zh_prefix, c) for c in cast_names)
+                and zh_prefix not in (ctx.spec.story_beat or "")
+                and _looks_like_person_bio(zh_fact, en_fact)
+            ):
+                # A bio of somebody this shot's scene never tokenised. A labelled world
+                # fact (Era: …, Tone: …) carries an equally unfamiliar prefix and must
+                # stay: dropping a fact merely because its label is unknown would erase
+                # the world of some other script.
+                continue
+
+        # Prop inventory fact filtering (e.g. "Props: rune sword (...), brass lantern (...)").
+        is_prop_fact = bool(
+            re.match(r"^\s*(?:道具|关键道具|物品)\s*[：:]", zh_fact)
+            or re.match(r"^\s*Props?\s*:", en_fact, flags=re.IGNORECASE)
+        )
+        if is_prop_fact:
+            en_head_m = re.match(r"^\s*(Props?\s*:)\s*(.*)$", en_fact, flags=re.IGNORECASE)
+            zh_head_m = re.match(r"^\s*[^：:]+[：:]\s*(.*)$", zh_fact)
+            en_prefix = en_head_m.group(1) if en_head_m else "Props:"
+            en_body = (en_head_m.group(2) if en_head_m else en_fact).strip().rstrip(".")
+            zh_body = (zh_head_m.group(1) if zh_head_m else zh_fact).strip().rstrip("。")
+            en_items = _split_top_level(en_body, ",;")
+            zh_items = _split_top_level(zh_body, "、，,;；")
+            if len(en_items) == len(zh_items) and len(en_items) >= 1:
+                selected_en: list[str] = []
+                for z_item, e_item in zip(zh_items, en_items, strict=True):
+                    z_name = re.sub(r"（[^）]*）|\([^)]*\)", "", z_item).strip()
+                    e_name = re.sub(r"（[^）]*）|\([^)]*\)", "", e_item).strip()
+                    e_norm = re.sub(r"[\s_-]+", " ", e_name.lower()).strip()
+                    matched = (
+                        (z_name and z_name in shot_props)
+                        or (e_norm and (
+                            e_norm in props_norm
+                            or any(e_norm in p or p in e_norm for p in props_norm if len(p) >= 3)
+                            or re.search(r"(?<!\w)" + re.escape(e_norm) + r"(?!\w)", story_norm) is not None
+                        ))
+                    )
+                    if matched:
+                        selected_en.append(e_item.strip().rstrip("."))
+                if not selected_en:
+                    continue
+                kept.append(f"{en_prefix} {', '.join(selected_en)}.")
+                continue
+        kept.append(en_fact)
+    return kept
+
+
 def _shot_text_thin(ctx: _Context) -> str:
     """The 2.0.0+ shot text: one shell, a rich timeline, every line in its own block.
 
@@ -815,6 +986,7 @@ def _shot_text_thin(ctx: _Context) -> str:
         blocks[0].append(f"The scene is set in {environment}.")
     blocks[0].extend(_resolve_character_tokens(line, ctx) for line in _environment_sentences(ctx))
     facts = spec.locked_story_facts
+    raw_zh_facts = list(facts)
     if any(re.search(r"[\u3400-\u9fff]", fact) for fact in facts):
         translated = spec.prompt_story_facts
         if (len(translated) != len(facts) or any(not value.strip() or re.search(r"[\u3400-\u9fff]", value)
@@ -822,6 +994,7 @@ def _shot_text_thin(ctx: _Context) -> str:
             raise PromptCompilationError("H3_LOCKED_FACT_TRANSLATION_REQUIRED",
                                          "Chinese locked facts require corresponding English prompt translations")
         facts = translated
+    facts = _scoped_story_facts(ctx, raw_zh_facts, list(facts))
     if facts:
         blocks[0].append(
             "Background story facts, for the picture only and never heard: "
@@ -1307,6 +1480,7 @@ class H3PromptCompiler:
         pre_sanitize = compiler_version == LEGACY_PRE_SANITIZE_COMPILER_VERSION
         thin_shell = compiler_version not in LEGACY_SHELL_VERSIONS
         anchored_v21 = compiler_version not in LEGACY_200_VERSIONS
+        scoped_facts = compiler_version not in LEGACY_210_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1335,6 +1509,7 @@ class H3PromptCompiler:
             pre_sanitize=pre_sanitize,
             thin_shell=thin_shell,
             anchored_v21=anchored_v21,
+            scoped_facts=scoped_facts,
         )
         if language_fallback:
             ctx.warnings.append(

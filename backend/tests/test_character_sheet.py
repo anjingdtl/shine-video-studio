@@ -1494,3 +1494,126 @@ def test_materialprep_character_sheet_mode_missing_lora_refuses_synchronously_ac
         assert items[0].payload["character_sheet_mode"] is True
         assert items[0].payload["character_sheet_lora"]["style_loras"][0]["sha256"] == lora_row.sha256
 
+
+def test_setup_download_waits_for_cached_lora_packs_and_validate_defers_when_thread_alive(
+    tmp_path, monkeypatch
+):
+    from shine.comfyops import deployment, installation_worker, setup_preparation
+    from shine.comfyops.models import InstallationAttempt
+
+    _app, factory, settings = make_studio(tmp_path)
+    cache_dir = settings.comfyops_dir / "isolated-packages" / ".cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cs_catalog = deployment.load_deployment_catalog(deployment.CHARACTER_SHEET_CATALOG)
+    cs_comp = cs_catalog["components"][0]
+    cs_file = cs_comp["files"][0]
+    cs_sha, cs_size = _make_valid_safetensors(cache_dir / cs_file["sha256"], seed_tag=b"cached-cs")
+    monkeypatch.setattr(
+        deployment,
+        "load_deployment_catalog",
+        lambda name: (
+            {
+                **cs_catalog,
+                "components": [{**cs_comp, "files": [{**cs_file, "sha256": cs_sha, "size": cs_size}]}],
+                "total_bytes": cs_size,
+            }
+            if name == deployment.CHARACTER_SHEET_CATALOG
+            else deployment.load_default_catalog()
+            if name == "h3-ref2va-windows-x64"
+            else {"catalog_id": f"shine-{name}", "catalog_version": "1.0", "components": []}
+        ),
+    )
+
+    with factory.begin() as db:
+        from shine.comfyops.verification_receipts import verify_receipt
+
+        comp_copy = {**cs_comp, "files": [{**cs_file, "sha256": cs_sha, "size": cs_size}]}
+        verify_receipt(
+            db,
+            component=comp_copy,
+            variant_id=None,
+            catalog_id=cs_catalog["catalog_id"],
+            catalog_version="1.0",
+            cache_dir=cache_dir,
+            read_only=False,
+        )
+        setup_preparation.enqueue(
+            db,
+            project_id=None,
+            capabilities=["character_sheet", "h3"],
+            settings=settings,
+        )
+
+    plan_bundle = {
+        "plans": [
+            {
+                "capability": "h3",
+                "label": "H3 视频生成",
+                "catalog": "shine-h3-ref2va-windows-x64",
+                "_catalog_file": "h3-ref2va-windows-x64",
+                "_capability_components": [],
+                "_closure_components": [],
+                "components": [],
+                "download_bytes": 0,
+                "needs_download": False,
+            },
+            {
+                "capability": "character_sheet",
+                "label": "角色五视图定妆照",
+                "catalog": cs_catalog["catalog_id"],
+                "_catalog_file": deployment.CHARACTER_SHEET_CATALOG,
+                "_capability_components": [cs_comp["component_id"]],
+                "_closure_components": [],
+                "components": [cs_comp["component_id"]],
+                "download_bytes": 0,
+                "needs_download": False,
+            },
+        ],
+    }
+    monkeypatch.setattr(setup_preparation, "plan_prepare_downloads", lambda *a, **kw: plan_bundle)
+    monkeypatch.setattr(setup_preparation, "_assert_claim_in_tx", lambda *a, **kw: None)
+    monkeypatch.setattr(setup_preparation, "_claim_guard_for", lambda task: (lambda db: None))
+
+    task = {
+        "task_id": "setup-cached-cs",
+        "project_id": None,
+        "claim_token": "tok-1",
+        "request": {"capabilities": ["character_sheet", "h3"], "verify_runtime": True},
+        "downloads": {},
+    }
+    first = setup_preparation._step_download(factory, settings, task)
+    assert first["status"] == "PENDING"
+    cs_dl = task["downloads"]["character_sheet"]
+    assert cs_dl["background"] is False
+
+    # While attempt is still in DOWNLOADING, _step_download stays PENDING (does not jump to VALIDATE).
+    with factory.begin() as db:
+        att = db.get(InstallationAttempt, cs_dl["attempt_id"])
+        att.stage = "DOWNLOADING"
+        att.status = "DOWNLOADING"
+    second = setup_preparation._step_download(factory, settings, task)
+    assert second["status"] == "PENDING"
+
+    # Once cached copy finishes, _step_download reports DONE.
+    with factory.begin() as db:
+        att = db.get(InstallationAttempt, cs_dl["attempt_id"])
+        att.stage = "FILES_VERIFIED_PENDING_RUNTIME"
+        att.status = "FILES_VERIFIED_PENDING_RUNTIME"
+    third = setup_preparation._step_download(factory, settings, task)
+    assert third["status"] == "DONE"
+
+    # _step_validate must defer if a background LoRA thread is still alive in the Worker.
+    monkeypatch.setattr(installation_worker, "has_active_background_install", lambda: True)
+    monkeypatch.setattr(
+        setup_preparation,
+        "_delegate_supervisor_validation",
+        lambda *a, **kw: pytest.fail("must not delegate worker stop while background install thread is alive"),
+    )
+    with factory.begin() as db:
+        from shine.comfyops.runtime_configuration import CANDIDATE_KEY
+        from shine.models import AppSetting
+
+        db.add(AppSetting(key=CANDIDATE_KEY, value={"project_id": None, "identity": {"recipe_sha256": "r" * 64}}))
+    val_res = setup_preparation._step_validate(factory, settings, task)
+    assert val_res["status"] == "PENDING"
+    assert val_res["code"] == "BACKGROUND_INSTALL_IN_PROGRESS"

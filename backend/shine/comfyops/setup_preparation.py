@@ -888,21 +888,35 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
 
     request = task.get("request") or {}
     capabilities = request.get("capabilities") or []
-    # Combined preparation can advance the base image/H3 capability while the
-    # optional image LoRA pack keeps its own progress in the installer ledger.
-    background_caps = {key.lower() for key in REVIEW_COMPONENTS}
-    if {"h3", "image"}.intersection(capabilities):
+    review_caps = {key.lower() for key in REVIEW_COMPONENTS}
+    has_base_caps = bool({"h3", "image"}.intersection(capabilities))
+    # Combined preparation can advance the base image/H3 capability while an
+    # optional image LoRA pack downloads over the network; when its bytes are
+    # already verified on disk (needs_download=False), wait for local placement
+    # so VALIDATE does not stop the Worker mid-copy and strand its lease.
+    background_caps = set(review_caps)
+    if has_base_caps:
         background_caps.update(IMAGE_LORA_PACK_CAPS)
     downloads = task.setdefault("downloads", {})
+
+    def _is_background(cap: str, info: dict | None = None) -> bool:
+        if cap in review_caps:
+            return True
+        if cap in IMAGE_LORA_PACK_CAPS and has_base_caps:
+            if isinstance(info, dict) and "background" in info:
+                return bool(info["background"])
+            return True
+        return False
 
     pending: list[str] = []
     for capability, info in list(downloads.items()):
         if info.get("done"):
             continue  # 这次授权已取回并核验过字节，不必再查安装记录
+        is_bg = _is_background(capability, info)
         with factory() as db:
             attempt = db.get(InstallationAttempt, info.get("attempt_id"))
         if attempt is None:
-            if capability in background_caps:
+            if is_bg:
                 info.pop("attempt_id", None)
                 continue
             return {"status": "FAILED", "code": "DOWNLOAD_ATTEMPT_MISSING",
@@ -910,7 +924,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         stage = attempt.stage or attempt.status
         if attempt.status in {"FAILED", "FAILED_RECONCILE_REQUIRED"} or stage in {
                 "NEEDS_REVIEW", "CANCELLED", "FAILED_RETRYABLE"}:
-            if capability in background_caps:
+            if is_bg:
                 info["review_state"] = "failed"
                 continue
             return {"status": "FAILED", "code": attempt.error_code or "DOWNLOAD_FAILED",
@@ -920,12 +934,12 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
             info["done"] = True
             continue
         if stage in _DOWNLOAD_ACTIVE or attempt.status in _DOWNLOAD_ACTIVE:
-            if capability in background_caps:
+            if is_bg:
                 info["review_state"] = "running"
                 continue
             pending.append(capability)
         else:
-            if capability in background_caps:
+            if is_bg:
                 info["review_state"] = "unknown"
                 continue
             return {"status": "FAILED", "code": "DOWNLOAD_STATE_UNKNOWN",
@@ -944,20 +958,24 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
             variant_id=request.get("variant_id"),
             verify_runtime=bool(request.get("verify_runtime", True)),
         )
-    plans_needed: list[tuple[str, list[str], str]] = []
+    plans_needed: list[tuple[str, list[str], str, bool]] = []
     for plan_row in plan_bundle["plans"]:
         capability = plan_row["capability"]
         if downloads.get(capability, {}).get("done"):
             continue  # this authorization already fetched and verified the bytes
-        if capability in background_caps and downloads.get(capability, {}).get("attempt_id"):
+        cap_is_bg = (
+            capability in review_caps
+            or (capability in IMAGE_LORA_PACK_CAPS and has_base_caps and bool(plan_row.get("needs_download")))
+        )
+        if cap_is_bg and downloads.get(capability, {}).get("attempt_id"):
             continue
         catalog_file = plan_row["_catalog_file"]
         if capability == "h3":
             if plan_row["components"]:
-                plans_needed.append(("h3", plan_row["components"], catalog_file))
+                plans_needed.append(("h3", plan_row["components"], catalog_file, False))
         elif capability == "image":
             if plan_row["_capability_components"]:
-                plans_needed.append(("image", plan_row["_capability_components"], catalog_file))
+                plans_needed.append(("image", plan_row["_capability_components"], catalog_file, False))
             closure_cids = plan_row["_closure_components"]
             if closure_cids and not downloads.get("runtime", {}).get("done"):
                 from shine.comfyops import deployment as _dep
@@ -970,10 +988,10 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                     )["verified"]
                 missing_rt = sorted(cid for cid in closure_cids if cid not in verified_rt)
                 if missing_rt:
-                    plans_needed.append(("runtime", missing_rt, "h3-ref2va-windows-x64"))
+                    plans_needed.append(("runtime", missing_rt, "h3-ref2va-windows-x64", False))
         else:
             if plan_row["_capability_components"]:
-                plans_needed.append((capability, plan_row["_capability_components"], catalog_file))
+                plans_needed.append((capability, plan_row["_capability_components"], catalog_file, cap_is_bg))
     if not plans_needed:
         return {"status": "DONE", "detail": "固定清单的文件都已在本机，无需下载。"}
 
@@ -985,7 +1003,9 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.services import add_audit
 
     guard = _claim_guard_for(task)
-    for capability, components, catalog_file in sorted(plans_needed, key=lambda row: row[0] in IMAGE_LORA_PACK_CAPS):
+    for capability, components, catalog_file, cap_is_bg in sorted(
+        plans_needed, key=lambda row: row[0] in IMAGE_LORA_PACK_CAPS
+    ):
         # create_install_plan 自己提交建计划；批准与审计必须显式提交，
         # 否则会话关闭即回滚，queue_install_attempt 读到的仍是 AWAITING_APPROVAL。
         with factory() as db:
@@ -1004,10 +1024,11 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
                 raise
             except Exception as exc:  # noqa: BLE001 - admission refusal is the answer
                 db.rollback()
-                if capability in background_caps:
+                if cap_is_bg:
                     # 可选审片的下载被拒绝（如硬件门槛）只记录，不卡生产链。
                     downloads[capability] = {"review_state": "failed",
-                                             "error_code": _code_of(exc)}
+                                             "error_code": _code_of(exc),
+                                             "background": True}
                     continue
                 return {"status": "FAILED", "code": _code_of(exc),
                         "detail": f"{capability} 的安装计划被拒绝：{_message_of(exc)}"}
@@ -1026,11 +1047,11 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
         q_extra = {"claim_guard": guard} if _accepts_kwarg(queue_install_attempt, "claim_guard") else {}
         attempt_id, _reused = queue_install_attempt(
             factory, settings, plan_id, digest, "worker:setup", "LOCAL_ISOLATED", **q_extra)
-        downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id}
-    production_queued = [row[0] for row in plans_needed if row[0] not in background_caps]
+        downloads[capability] = {"attempt_id": attempt_id, "plan_id": plan_id, "background": cap_is_bg}
+    production_queued = [row[0] for row in plans_needed if not row[3]]
     if production_queued:
         return {"status": "PENDING",
-                "detail": f"已排队下载：{'、'.join(production_queued)}（关闭页面也会继续）。"}
+                "detail": f"已排队安装：{'、'.join(production_queued)}（关闭页面也会继续）。"}
     return {"status": "DONE",
             "detail": "生产所需文件已就绪；所选可选权重沿用安装记录在后台继续。"}
 
@@ -1471,9 +1492,16 @@ def _step_validate(factory, settings, task) -> dict[str, Any]:
         return {"status": "FAILED", "code": "GENERATE_RUNTIME_CONFIGURATION_FIRST",
                 "detail": "还没有生成这部作品的运行配置。"}
     # Service validation needs the Worker offline, but this task runs *inside*
-    # the Worker. Delegate to the supervisor: it stops the Worker, validates and
-    # activates, records this step, then
-    # restarts the Worker, which resumes here.
+    # the Worker. Wait if an optional LoRA background thread is actively writing
+    # in this Worker so stopping the Worker never strands a 300s target lease.
+    from shine.comfyops.installation_worker import has_active_background_install
+
+    if has_active_background_install():
+        return {
+            "status": "PENDING",
+            "code": "BACKGROUND_INSTALL_IN_PROGRESS",
+            "detail": "等待后台可选包完成当前落盘后再核对运行合同。",
+        }
     delegation = {
         "task_id": task.get("task_id"),
         "claim_token": task.get("claim_token"),

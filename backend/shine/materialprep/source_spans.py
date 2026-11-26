@@ -42,6 +42,14 @@ narrative scene instead of becoming its own unit.  Without this, a character
 intro long enough to pass the body floor was storyboarded as a standalone unit
 and the crew retold the whole story_line inside it, duplicating every scene."""
 
+FRONT_MATTER_SECTION = re.compile(
+    r"^\s*(?:【\s*(?:人物设定|角色设定|主要人物|出场人物|人物|角色|关键道具|道具设定|道具|核心场景|场景设定|场景|世界观|背景|故事背景)\s*】"
+    r"|#{1,3}\s*(?:人物设定|角色设定|关键道具|核心场景|背景设定)\s*$)"
+)
+"""A structured cast/prop/setting block header in script front matter."""
+
+HORIZONTAL_RULE = re.compile(r"^\s*(?:-{3,}|\*{3,})\s*$")
+
 MIN_NARRATIVE_BODY_CHARS = 20
 """The smallest body that counts as a narratable creation unit.
 
@@ -52,13 +60,66 @@ narrative unit instead, or refused by name when it stands alone.
 """
 
 
+def strip_front_matter_lines(text: str) -> str:
+    """Remove structured setup/front-matter blocks (e.g. 【人物设定】) while keeping drama."""
+    kept: list[str] = []
+    in_front_matter_section = False
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            in_front_matter_section = False
+            kept.append(line)
+            continue
+        if HEADING.match(line) or CHAPTER_MARKER.match(line):
+            in_front_matter_section = False
+            kept.append(line)
+            continue
+        if FRONT_MATTER_SECTION.match(line):
+            in_front_matter_section = True
+            continue
+        if HORIZONTAL_RULE.match(line):
+            in_front_matter_section = False
+            continue
+        if in_front_matter_section or FRONT_MATTER.match(line):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
+
+
+def front_matter_span_ids(scenes: list[Scene]) -> set[str]:
+    """Span IDs whose lines belong to non-narrative setup blocks (e.g. 【关键道具】)."""
+    front_ids: set[str] = set()
+    for scene in scenes:
+        in_front_matter_section = False
+        for span in scene.spans:
+            line = span.text
+            stripped = line.strip()
+            if not stripped:
+                in_front_matter_section = False
+                front_ids.add(span.id)
+                continue
+            if HEADING.match(line) or CHAPTER_MARKER.match(line):
+                in_front_matter_section = False
+                continue
+            if FRONT_MATTER_SECTION.match(line):
+                in_front_matter_section = True
+                front_ids.add(span.id)
+                continue
+            if HORIZONTAL_RULE.match(line):
+                in_front_matter_section = False
+                front_ids.add(span.id)
+                continue
+            if in_front_matter_section or FRONT_MATTER.match(line):
+                front_ids.add(span.id)
+    return front_ids
+
+
 def narrative_body(text: str) -> str:
     """The story prose of a fragment, with heading/marker lines removed."""
     parts: list[str] = []
-    for line in (text or "").splitlines():
+    for line in strip_front_matter_lines(text).splitlines():
         stripped = line.strip()
-        if not stripped or HEADING.match(line) or CHAPTER_MARKER.match(line) \
-                or FRONT_MATTER.match(line):
+        if not stripped or HEADING.match(line) or CHAPTER_MARKER.match(line):
             continue
         parts.append(stripped)
     return "".join(parts)

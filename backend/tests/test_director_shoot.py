@@ -65,6 +65,47 @@ def test_one_shoot_action_builds_the_package_and_replays_the_same_run(api):
     assert again.json()["created"] is False
 
 
+def test_cancelled_run_allows_starting_fresh_run_with_same_package(api):
+    """取消旧运行后，用同一导演包再次开拍必须创建新运行，不得把已取消的旧运行原样返还。"""
+    client, _factory, settings = api
+    project, _pending = _ready_first_episode(client, settings)
+    profile = register_workflow_profile(client, mode="Ref2VA")
+
+    first = client.post(
+        f"/api/v1/projects/{project}/director/production/start",
+        json={"episode_ids": ["ep-01"], "workflow_profile_id": profile["id"]},
+        headers=LOCAL)
+    assert first.status_code == 201, first.text
+    first_body = first.json()
+    assert first_body["created"] is True
+
+    cancelled = client.post(
+        f"/api/v1/production-runs/{first_body['run_id']}/cancel",
+        json={}, headers=LOCAL)
+    assert cancelled.status_code in (200, 201, 202), cancelled.text
+    assert cancelled.json()["status"] == "CANCELLED"
+
+    second = client.post(
+        f"/api/v1/projects/{project}/director/production/start",
+        json={"episode_ids": ["ep-01"], "workflow_profile_id": profile["id"]},
+        headers=LOCAL)
+    assert second.status_code == 201, second.text
+    second_body = second.json()
+    assert second_body["created"] is True
+    assert second_body["run_id"] != first_body["run_id"]
+    assert second_body["run_status"] == "QUEUED"
+    assert second_body["package_id"] == first_body["package_id"]
+
+    # Double-clicking after the fresh run started still replays the new active run.
+    replay = client.post(
+        f"/api/v1/projects/{project}/director/production/start",
+        json={"episode_ids": ["ep-01"], "workflow_profile_id": profile["id"]},
+        headers=LOCAL)
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["run_id"] == second_body["run_id"]
+    assert replay.json()["created"] is False
+
+
 def test_shoot_action_names_an_unready_episode_instead_of_stopping_everything(api):
     client, _factory, settings = api
     project, _pending = _ready_first_episode(client, settings)

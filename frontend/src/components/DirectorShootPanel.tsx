@@ -33,6 +33,7 @@ import { frameSize, ORIENTATION_LABELS, RESOLUTION_SCALES, scaleLabel, type Orie
 import { useRailPresent, useStageRail } from './StageRail';
 import type { RailAction } from './ActionRail';
 import { GuideTip } from './GuideTip';
+import { ArmedButton } from './ArmedButton';
 import { rememberShootStrategy, storedShootStrategy } from '../productionProfile';
 
 function describeError(error: unknown): string {
@@ -43,6 +44,22 @@ function describeError(error: unknown): string {
 const PACKAGE_STATUS_TEXT: Record<string, string> = {
   DRAFT: '待确认', CONFIRMED: '已确认', STALE: '已失效', SUPERSEDED: '已被新版取代',
 };
+
+/** 运行仍在逐镜推进或等待当前镜头落盘的状态：此期间正在渲染的任务属于整片运行，
+ *  不显示成「单镜重拍」。只是展示归类，不是第二份占用裁决。 */
+const RUN_RENDERING = ['QUEUED', 'RUNNING', 'PAUSE_REQUESTED', 'CANCEL_REQUESTED'];
+
+function runHeading(status: string): string {
+  if (status === 'QUEUED' || status === 'RUNNING') return '后台正在逐镜生成';
+  if (status === 'PAUSE_REQUESTED') return '正在等待当前镜头落盘后暂停';
+  if (status === 'PAUSED') return '运行已暂停';
+  if (status === 'CANCEL_REQUESTED') return '正在安全取消（等待当前镜头与资源收尾）';
+  if (status === 'RECONCILING') return '正在核对受管产物与资源';
+  if (status === 'COMPLETED') return '这次运行已经完成';
+  if (status === 'NEEDS_REVIEW') return '运行等待人工核对';
+  if (status === 'CANCELLED') return '运行已取消';
+  return '运行已停止';
+}
 
 /** 版本历史的绝对时间（本地时区）：每一版生成的时刻是可核对的记录。 */
 function versionTime(iso: string | null | undefined): string {
@@ -333,7 +350,10 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const chosenVariantAvailable = chosen?.available ?? false;
   const chosenVariantReason = chosen?.reason
     ?? (availabilityLoaded ? '本机没有这套权重' : '正在读取本机模型状态…');
-  const running = Boolean(run && ['DRAFT', 'QUEUED', 'RUNNING', 'PAUSED', 'BLOCKED'].includes(run.status));
+  // 是否已有运行占着本次拍摄范围（占着就不许并发开第二轮）：只读服务端
+  // overview.run.active 这一份裁决——它是后端 ACTIVE_RUN_STATUSES 的唯一投影；
+  // 前端不再另抄一份状态清单，免得两处清单各自漂移。
+  const running = Boolean(run && overview?.run?.active);
 
   // 进度条只读两份既有事实：run 的 passed/total 与 job 台账正在渲染的任务；
   // 前端不自己累计进度，也不另设第二套判定（三原则）。
@@ -349,7 +369,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   const activeShotNo = activeJob ? orderedShotIds.indexOf(activeJob.shot_id) + 1 : 0;
   const currentShotNo = activeShotNo > 0 ? activeShotNo : Math.min(passedShots + 1, Math.max(totalShots, 1));
   const barWorking = !productionDone
-    && (Boolean(activeJob) || run?.status === 'RUNNING' || run?.status === 'QUEUED');
+    && (Boolean(activeJob) || Boolean(run && ['RUNNING', 'QUEUED', 'PAUSE_REQUESTED'].includes(run.status)));
   // 单镜重拍进度：读同一份 job/attempt 台账；整片运行在跑时不叠加显示。
   const retakePct = activeJob
     ? (activeJob.status === 'PASSED' ? 100
@@ -374,7 +394,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
   };
 
   const start = useCallback(async () => {
-    if (submitting.current || !selected.length || !chosenVariantAvailable) return;
+    if (submitting.current || !selected.length || !chosenVariantAvailable || running) return;
     submitting.current = true;
     setBusy('start'); setProblem(''); setStyleGap(false);
     try {
@@ -424,7 +444,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     }
   }, [acceleratorId, chosenVariantAvailable, onMessage, onNavigate, onRefresh,
     options.second_pass.supported, options.upscale, orientation,
-    projectId, resolutionScale, secondPass, selected, styleLoras, upscale, variantId]);
+    projectId, resolutionScale, secondPass, selected, styleLoras, upscale, variantId, running]);
 
   const applyStyle = async () => {
     setBusy('style'); setProblem('');
@@ -449,7 +469,14 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       const fresh = await getProductionRun(run.id);
       setRun(fresh);
       onRefresh?.();
-      if (action === 'resume') {
+      if (action === 'pause') {
+        onMessage?.(
+          result.status === 'PAUSE_REQUESTED'
+            ? '已请求暂停：等待当前镜头安全落盘后暂停，已产出镜头全部保留。'
+            : '已暂停运行，已产出镜头全部保留。',
+          'success',
+        );
+      } else if (action === 'resume') {
         if (result.status === 'NEEDS_REVIEW') {
           const msg = result.message || '当前批次没有可安全续拍的未提交镜头，请先处理阻塞项。';
           setProblem(msg);
@@ -457,6 +484,13 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         } else {
           onMessage?.('已恢复安全可恢复批次，后台 Worker 正在继续推进。', 'success');
         }
+      } else if (action === 'cancel') {
+        onMessage?.(
+          result.status === 'CANCEL_REQUESTED'
+            ? '已请求取消：等待当前镜头与受管资源收尾，已产出镜头全部保留。'
+            : '已取消运行，已产出数据全部保留，可回「导演包」重新开拍。',
+          'success',
+        );
       } else if (action === 'reconcile') {
         onMessage?.('已按真实产物核对运行状态。', 'success');
       }
@@ -473,7 +507,8 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
     ? `确认拍摄方案并开始真实制作（${selected.length} 集）` : '先选择要拍的集';
   const startBlockedReason = !chosenVariantAvailable ? chosenVariantReason
     : demo ? '当前是演示模式：先启用真实制作'
-      : !selected.length ? '至少选择一集' : undefined;
+      : !selected.length ? '至少选择一集'
+        : running ? '这次拍摄正在视频生产里进行，完成或取消后再开拍' : undefined;
   const primary: RailAction | null = mode === 'package' && !running
     ? { label: startLabel,
         onClick: () => void start(),
@@ -694,8 +729,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
         </div>
 
         {problem && <p role="alert" className="form-error">{problem}</p>}
-        {!railPresent && <button type="button" className="btn-primary" disabled={!selected.length || demo || busy !== '' || !chosenVariantAvailable}
-          title={chosenVariantAvailable ? undefined : chosenVariantReason}
+        {!railPresent && <button type="button" className="btn-primary"
+          disabled={!selected.length || demo || busy !== '' || !chosenVariantAvailable || running}
+          title={startBlockedReason}
           onClick={() => void start()}>
           <Clapperboard size={14} /> 确认拍摄方案并开始真实制作
         </button>}
@@ -740,7 +776,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
             : `已通过 ${passedShots} / ${totalShots} 镜${activeJob ? `，正在渲染「${activeJob.shot_name}」` : ''}。后台 Worker 持续推进，页面跟读同一份台账。`}
       </p>
     </section>}
-    {activeJob && (!run || !['QUEUED', 'RUNNING'].includes(run.status)) && <section className="card section-card run-progress" aria-label="单镜重拍进度">
+    {activeJob && (!run || !RUN_RENDERING.includes(run.status)) && <section className="card section-card run-progress" aria-label="单镜重拍进度">
       <div className="run-progress-head">
         <b>{activeJob.status === 'PASSED' ? '重拍已通过质检' : `正在重拍「${activeJob.shot_name}」`}</b>
         <span className="run-progress-pct">{retakePct}%</span>
@@ -759,11 +795,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
       <div className="section-heading">
         <div>
           <div className="section-kicker">第 6 阶段 · 真实拍摄</div>
-          <h2>{running ? '后台正在逐镜生成'
-          : run ? (run.status === 'COMPLETED' ? '这次运行已经完成'
-            : run.status === 'NEEDS_REVIEW' ? '运行等待人工核对'
-              : `运行${run.status === 'CANCELLED' ? '已取消' : '已停止'}`)
-            : '还没有在拍的运行'}</h2>
+          <h2>{run ? runHeading(run.status) : '还没有在拍的运行'}</h2>
           <p>拍摄由常驻 Worker 推进，关掉浏览器也会继续；每一镜的产物、质检和成片都落在这台电脑上。</p>
         </div>
         {run && <span className={`head-chip ${run.status === 'COMPLETED' ? 'ok' : ''}`}>{run.status}</span>}
@@ -808,7 +840,7 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
                 onClick={() => void control('pause')}>{busy === 'pause'
                   ? <Loader2 size={13} className="spin" /> : <Square size={13} />} 暂停</button>
             : null}
-          {run.status === 'PAUSED' && <button type="button" className="btn-secondary" disabled={busy !== ''}
+          {(run.status === 'PAUSED' || run.status === 'PAUSE_REQUESTED') && <button type="button" className="btn-secondary" disabled={busy !== ''}
             onClick={() => void control('resume')}><Play size={13} /> 继续</button>}
           {(running || run.status === 'NEEDS_REVIEW') && <button type="button" className="btn-text"
             disabled={busy !== ''}
@@ -817,6 +849,9 @@ export function DirectorShootPanel({ projectId, overview, demo, mode, refreshEpo
             disabled={busy !== ''}
             title="只恢复服务端能够证明尚未提交到 H3 的批次；其他阻塞保持待处理"
             onClick={() => void control('resume')}><Play size={13} /> 继续安全可恢复批次</button>}
+          {!['COMPLETED', 'CANCELLED', 'FAILED'].includes(run.status) && <ArmedButton
+            label="取消" armedLabel="再点一次确认取消" disabled={busy !== ''}
+            icon={<Square size={13} />} onConfirm={() => void control('cancel')} />}
           <button type="button" className="btn-text" disabled={busy !== ''}
             onClick={() => { onRefresh?.(); void (run && getProductionRun(run.id).then(setRun).catch(() => undefined)); }}>
             <RefreshCw size={13} /> 刷新进度

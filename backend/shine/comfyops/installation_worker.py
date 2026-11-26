@@ -41,6 +41,11 @@ IMAGE_LORA_SEGMENT_BYTES = 16 * 1024**2
 _image_lora_install: threading.Thread | None = None
 
 
+def has_active_background_install() -> bool:
+    """Whether an optional image-LoRA install thread is currently running in this Worker."""
+    return bool(_image_lora_install and _image_lora_install.is_alive())
+
+
 def _read_control(factory, attempt_id: str) -> dict:
     with factory() as db:
         attempt = db.get(InstallationAttempt, attempt_id)

@@ -19,6 +19,7 @@ verdict is not here, and nothing here calls a model or writes the ledger.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Literal
 
 from pydantic import Field
@@ -139,7 +140,9 @@ class SceneShotBoard(APIModel):
 
 
 def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predecessor: bool,
-                          translation_supplied: bool, narration_allowed: bool) -> str:
+                          translation_supplied: bool, narration_allowed: bool,
+                          scene_budget_seconds: float | None = None,
+                          episode_progress: dict | None = None) -> str:
     """The scene director's system prompt.
 
     States three kinds of thing and nothing else: the director's authority,
@@ -150,6 +153,46 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
     """
     ceiling = int(max_shot_seconds) if max_shot_seconds is not None else 15
     exchange = f"ONE segment of 8 to {ceiling} seconds" if ceiling > 8 else "ONE segment of about 8 seconds"
+    if scene_budget_seconds is not None and scene_budget_seconds > 0:
+        effective_max = min(float(ceiling), 8.0)
+        min_shots = max(1, math.ceil(scene_budget_seconds / effective_max))
+        max_shots = max(min_shots + 1, round(scene_budget_seconds / 5.5))
+        segment_budget = (
+            f"Aim the scene's total duration (sum of duration_s across all shots) near "
+            f"production_context.scene_budget_seconds ({scene_budget_seconds:g}s), keeping total "
+            f"segments at {min_shots} to {max_shots} shots (if locked_story_facts specifies an "
+            "explicit shot count across the work, honor it alongside this budget). When the scene "
+            f"already has {min_shots} to {max_shots} beats, one beat per shot (5 to {ceiling}s) with "
+            "no internal cut fits naturally; when there are more beats, actively group 2 or 3 "
+            f"consecutive adjacent beats in the same setup into one 6 to {ceiling}-second shot "
+            "(listing them in order in beat_ids) "
+        )
+        json_shot_cap = f"at most {max(max_shots, min_shots + 2)} shots"
+        tail_grouping = (
+            f"Group adjacent beats per shot where framing holds (aiming for {min_shots} to "
+            f"{max_shots} shots and total duration near {scene_budget_seconds:g}s) "
+        )
+    else:
+        segment_budget = (
+            "One action, or one person's emotional line, is one "
+            f"segment of 5 to 8 seconds with no internal cut; actively group 2 or 3 consecutive adjacent beats in "
+            f"the same setup into one 6 to {ceiling}-second shot (listing them in order in beat_ids, keeping total "
+            "segments around 6 to 10 shots per scene unless dense dialogue exchanges require more) "
+        )
+        json_shot_cap = "~8–12 shots total"
+        tail_grouping = "Group 2 adjacent beats per shot where framing holds (aiming for 6 to 10 shots total) "
+    progress_clause = ""
+    if isinstance(episode_progress, dict) and episode_progress.get("scene_count"):
+        s_idx = episode_progress.get("scene_index")
+        s_cnt = episode_progress.get("scene_count")
+        prior = int(episode_progress.get("prior_shot_count") or 0)
+        progress_clause = (
+            f"Episode progress: this is scene {s_idx} of {s_cnt} in the episode, and earlier scenes "
+            f"have already landed {prior} shots. If locked_story_facts specifies an explicit total shot "
+            "count across the script, converge THIS scene's shots[] count to match the remaining shot "
+            "budget (total_shots - prior_shot_count on the final scene) by merging adjacent beats with "
+            f"internal_cuts or grouped beat_ids (each shot up to {ceiling}s). "
+        )
     opening = (
         "No earlier shot of this episode exists: your first shot is a cut that opens the scene, so its "
         "transition_motivation is establishing_reset (or time_or_space_jump), never a continuation."
@@ -189,10 +232,7 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "shots at the exact indoor location and switch to the exact exterior location on the exit shot via a "
         "time_or_space_jump or establishing_reset cut. "
         f"Each shots entry is one H3 Ref2VA render segment of 4 to {ceiling} seconds; the server refuses a "
-        "longer one. Choose the segments by the drama. One action, or one person's emotional line, is one "
-        f"segment of 5 to 8 seconds with no internal cut; actively group 2 or 3 consecutive adjacent beats in "
-        f"the same setup into one 6 to {ceiling}-second shot (listing them in order in beat_ids, keeping total "
-        "segments around 6 to 10 shots per scene unless dense dialogue exchanges require more) so the whole "
+        f"longer one. Choose the segments by the drama. {segment_budget}{progress_clause}so the whole "
         "scene covers EVERY beat from B1 to the final beat comfortably inside one compact response. "
         f"A fast exchange between two people in the same place (one speaks, the other answers or reacts) is "
         f"{exchange} with exactly ONE internal cut to the later beat: never two cuts, never three pictures "
@@ -234,6 +274,8 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "glasses in props, because the compiler renders props as 'holding ...'). "
         "blocking.placements[].facing MUST be one of "
         "{facing_camera, facing_left, facing_right, three_quarter_left, three_quarter_right, back_to_camera}. "
+        "Choose the facing that matches the character's primary orientation in the shot (use back_to_camera "
+        "when the character turns away or walks with their back to the lens). "
         "Whoever stands on the left keeps standing "
         "on the left in every shot of the scene and faces right; whoever stands on the right faces left; a "
         "single of either keeps that side and that facing. blocking.axis labels the spatial group with a short "
@@ -284,12 +326,12 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "When a character has no approved master yet, leave it out: the material stage prepares it. "
         "Never list a style or last-frame image, and never list an asset twice. "
         "JSON shape: emit compact minified single-line JSON (no indentation spaces or newlines between keys) "
-        "with 1–2 concise sentences per prose field (<=1,400 chars per shot, ~8–12 shots total, keeping the "
+        f"with 1–2 concise sentences per prose field (<=1,400 chars per shot, {json_shot_cap}, keeping the "
         "entire response cleanly under 15,000 characters without repeating wording). "
         "Keep every shot lean (~1200-1600 chars): visual_description 15-25 words, camera.composition 12-20 words, "
         "environment.{depth,light,micro_motion} / entry_state / exit_state 6-12 words each, and 2 timeline windows "
         "with 6-10 word action/expression/camera (never repeat environment prose inside visual or timeline). "
-        "Group 2 adjacent beats per shot where framing holds (aiming for 6 to 10 shots total) "
+        f"{tail_grouping}"
         "so ALL shots covering EVERY beat B1..Bn fit comfortably in one response. "
         "Inside each shots entry, camera contains ONLY {composition, shot_size, angle, lens, move, motive, "
         "movement, lighting}; always close camera's } before writing blocking/environment/timeline/"

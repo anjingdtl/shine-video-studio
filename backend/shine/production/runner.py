@@ -78,7 +78,7 @@ RUN_PAUSE_REASONS = {"USER_PAUSED", "BUDGET_EXHAUSTED", "STORAGE_LOW", "TIME_WIN
 # Job statuses whose external outcome may still be unknown or in flight.
 INFLIGHT_JOB_STATUSES = ("SUBMITTING", "RUNNING", "QC_PENDING", "REPAIR_PENDING")
 
-ADVANCEABLE_RUN_STATUSES = ("QUEUED", "RUNNING", "CANCEL_REQUESTED")
+ADVANCEABLE_RUN_STATUSES = ("QUEUED", "RUNNING", "PAUSE_REQUESTED", "CANCEL_REQUESTED")
 
 
 class RunBlocked(Exception):
@@ -1033,6 +1033,36 @@ def _pause_child_series(db: Session, run_id: str, reason: str) -> bool:
     return live
 
 
+def _has_inflight_series(db: Session, run_id: str) -> bool:
+    """Whether any child series of ``run_id`` still owns inflight external work."""
+    return any(
+        _series_has_inflight_work(db, db.get(ProductionSeries, batch.series_id))
+        for batch in _batch_rows(db, run_id) if batch.series_id
+    )
+
+
+def _finalize_pause(db: Session, run: ProductionRun, *, actor: str = "user") -> None:
+    """Complete a pause once every child series has settled at a safe boundary."""
+    episodes = _episode_rows(db, run.id)
+    batches = _batch_rows(db, run.id)
+    delivered = [episode for episode in episodes if episode.status == "DELIVERED"]
+    blocked_batches = [batch for batch in batches if batch.status == "BLOCKED"]
+    run.blocker_count = len(blocked_batches)
+    run.counters = {
+        **dict(run.counters or {}),
+        "required_episode_count": len(episodes),
+        "delivered_episode_count": len(delivered),
+        "batch_count": len(batches),
+        "passed_batch_count": len([batch for batch in batches if batch.status == "PASSED"]),
+        "delivered_seconds": round(sum(episode.actual_seconds or 0.0 for episode in delivered), 3),
+    }
+    _control(run, "PAUSED", run.control_reason or "USER_PAUSED")
+    run.claim_owner = None
+    run.claim_expires_at = None
+    _event(db, run, "RUN_PAUSED", "用户暂停：已到安全边界，受管资源已释放")
+    db.flush()
+
+
 def _finalize_cancel(db: Session, run: ProductionRun, *, actor: str = "user") -> None:
     """Complete a cancellation whose external work has settled."""
     from shine.comfyops.production_series import cancel_series_in_session
@@ -1081,18 +1111,36 @@ def advance_run(
     if run.status not in ADVANCEABLE_RUN_STATUSES:
         return {"run_id": run.id, "status": run.status, "action": "skipped"}
 
+    if run.status == "PAUSE_REQUESTED":
+        # The pause is waiting for active child series to reach a safe shot
+        # boundary and release their renderer.  This beat only reconciles; it
+        # never dispatches new work.  While external work is still settling it
+        # reports ``pause_reconciling`` so the Worker tick proceeds to the
+        # series executor in the same beat instead of starving it.
+        if not _claim_run(db, run, worker_id):
+            return {"run_id": run.id, "status": run.status, "action": "claimed_elsewhere"}
+        db.refresh(run)
+        changed = False
+        for batch in _batch_rows(db, run.id):
+            if _sync_batch_from_series(db, batch):
+                changed = True
+        if not _has_inflight_series(db, run.id):
+            _finalize_pause(db, run, actor=worker_id)
+            return {"run_id": run.id, "status": run.status, "action": "paused"}
+        if changed:
+            run.state_version += 1
+        db.flush()
+        return {"run_id": run.id, "status": run.status, "action": "pause_reconciling"}
+
     if run.status == "CANCEL_REQUESTED":
         # The cancellation is waiting for its external work to settle.  This
         # beat only reconciles; it never starts anything new.
         if not _claim_run(db, run, worker_id):
             return {"run_id": run.id, "status": run.status, "action": "claimed_elsewhere"}
+        db.refresh(run)
         for batch in _batch_rows(db, run.id):
             _sync_batch_from_series(db, batch)
-        inflight = any(
-            _series_has_inflight_work(db, db.get(ProductionSeries, batch.series_id))
-            for batch in _batch_rows(db, run.id) if batch.series_id
-        )
-        if not inflight:
+        if not _has_inflight_series(db, run.id):
             _finalize_cancel(db, run, actor=worker_id)
             return {"run_id": run.id, "status": run.status, "action": "cancelled"}
         db.flush()
@@ -1968,7 +2016,13 @@ def reconcile_run(session_factory, run_id: str, *, worker_id: str = "user") -> d
 
         episodes = _episode_rows(db, run.id)
         batches = _batch_rows(db, run.id)
-        if run.status == "NEEDS_REVIEW" and not any(
+        if run.status == "PAUSE_REQUESTED" and not _has_inflight_series(db, run.id):
+            _finalize_pause(db, run, actor=worker_id)
+            synced += 1
+        elif run.status == "CANCEL_REQUESTED" and not _has_inflight_series(db, run.id):
+            _finalize_cancel(db, run, actor=worker_id)
+            synced += 1
+        elif run.status == "NEEDS_REVIEW" and not any(
                 episode.status == "BLOCKED" for episode in episodes) and not any(
                 batch.status == "BLOCKED" for batch in batches):
             _control(run, "QUEUED", None)

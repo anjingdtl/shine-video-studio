@@ -24,7 +24,13 @@ from shine.llm.gateway import LLMGateway
 from shine.llm.secrets import SecretStore
 from shine.materialprep import scenes, text_consent
 from shine.materialprep.agent_call import budget_report, call_material_agent
-from shine.materialprep.source_spans import HEADING, MAX_SCENE_CHARS, is_narrative_fragment, segment_document
+from shine.materialprep.source_spans import (
+    HEADING,
+    MAX_SCENE_CHARS,
+    is_narrative_fragment,
+    segment_document,
+    strip_front_matter_lines,
+)
 from shine.models import AgentArtifact, AgentTaskRecord, Project, ProjectDocument, ProviderProfile, utcnow
 from shine.schemas import APIModel
 from shine.services import add_audit
@@ -108,23 +114,46 @@ def source_sections(project_id, document):
         # Untitled manuscripts exceeding a single volume (45k chars) must remain
         # one monolithic section so volume planning records an explicit hard-split cut.
         boundaries = _paragraph_section_boundaries(source, lines)
+    elif titles:
+        first_h = min(titles)
+        if first_h > 0 and not is_narrative_fragment(source[:first_h]):
+            # Non-narrative title / character / prop / setting preamble before the
+            # first heading is absorbed into that opening scene instead of becoming
+            # a fake "前言与人物设定" section that steals Episode 1's runtime budget.
+            boundaries = [b for b in boundaries if b != first_h]
+            titles[0] = titles.pop(first_h)
     boundaries = sorted({*boundaries, len(source)})
     if len(boundaries) > 2 and not titles:
         for left, right in zip(boundaries, boundaries[1:], strict=False):
             first_line = next((ln.strip() for ln in source[left:right].splitlines() if ln.strip()), "")
             if first_line:
                 titles[left] = (first_line[:36] + "…") if len(first_line) > 36 else first_line
-    return [{"production_section_id": str(uuid5(NAMESPACE_URL,
+    sections = []
+    for index, (left, right) in enumerate(zip(boundaries, boundaries[1:], strict=False)):
+        if right <= left:
+            continue
+        raw_slice = source[left:right]
+        drama_slice = strip_front_matter_lines(raw_slice)
+        # Preserve exact raw slice length when no front-matter block was stripped,
+        # only discounting non-narrative setup blocks (e.g. 【人物设定】).
+        estimate_chars = (
+            len(drama_slice.strip())
+            if len(drama_slice) < len(raw_slice) and drama_slice.strip()
+            else (right - left)
+        )
+        sections.append({
+            "production_section_id": str(uuid5(NAMESPACE_URL,
                 f"shine:{project_id}:{titles.get(left, 'preamble')}:"
                 f"{sum(titles.get(other, 'preamble') == titles.get(left, 'preamble')
                        for other in boundaries[:index])}")),
-             "order": index + 1, "title": titles.get(left, "前言与人物设定" if left == 0 else "生产段落"),
-             "source_sha256": hashlib.sha256(source[left:right].encode()).hexdigest(),
-             "start_offset": left, "end_offset": right,
-             "estimated_duration_s": round((right - left) / 5, 1),
-             "estimate_basis": "原文字数/5，仅供规划，不是 H3 时长或实测",
-             "status": "OUTLINE_CONFIRMATION_REQUIRED"}
-            for index, (left, right) in enumerate(zip(boundaries, boundaries[1:], strict=False)) if right > left]
+            "order": index + 1, "title": titles.get(left, "前言与人物设定" if left == 0 else "生产段落"),
+            "source_sha256": hashlib.sha256(source[left:right].encode()).hexdigest(),
+            "start_offset": left, "end_offset": right,
+            "estimated_duration_s": round(estimate_chars / 5, 1),
+            "estimate_basis": "原文字数/5，仅供规划，不是 H3 时长或实测",
+            "status": "OUTLINE_CONFIRMATION_REQUIRED",
+        })
+    return sections
 
 
 #: A queued task may only be handed back when it can still move - or when
@@ -1498,6 +1527,24 @@ def verified_production_context(db, project_id, source_text, supplied, *, requir
                                          if not (isinstance(entry, dict) and entry.get("name") in named))],
             "registered_locations": registered,
         })
+        ep_obj = next(
+            (ep for ep in (plan.payload or {}).get("episodes") or []
+             if str(ep.get("episode_id")) == episode_id),
+            None,
+        )
+        ep_sections = [str(s) for s in ((ep_obj or {}).get("section_ids") or [])]
+        if section_id in ep_sections:
+            idx = ep_sections.index(section_id)
+            prior_shots = sum(
+                len(section_storyboard_shot_ids(db, project_id, prior_sid).get("shot_ids") or [])
+                for prior_sid in ep_sections[:idx]
+            )
+            context["episode_progress"] = {
+                "episode_id": episode_id,
+                "scene_index": idx + 1,
+                "scene_count": len(ep_sections),
+                "prior_shot_count": prior_shots,
+            }
         # The scene before this one in the same episode, as its own script left
         # it: read from the ledger, and only ever inside one episode.
         previous = db.get(AgentArtifact, supplied.get("previous_scene_artifact_id")) \

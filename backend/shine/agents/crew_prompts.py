@@ -284,13 +284,40 @@ def series_architect_prompt() -> str:
     )
 
 
-def drama_screenwriter_prompt() -> str:
+def drama_screenwriter_prompt(
+    scene_budget_seconds: float | None = None,
+    episode_progress: dict | None = None,
+) -> str:
     """The drama writer's system prompt for ONE scene of the novel.
 
     States the three kinds of thing a crew prompt states: the writer's
     authority, the limits its answer must survive, and the numbers the server
     checks it against.
     """
+    if scene_budget_seconds is not None and scene_budget_seconds > 0 and scene_budget_seconds < 80:
+        min_beats = max(2, round(scene_budget_seconds / 7.5))
+        max_beats = min(15, max(min_beats + 1, round(scene_budget_seconds / 5.5)))
+        beat_sizing = (
+            f"Because each downstream video segment lasts 4 to 8 seconds, keep this "
+            f"{scene_budget_seconds:g}-second scene compact at {min_beats} to {max_beats} beats "
+            "(at most 15 beats) so beats map naturally to shot segments without padding extra "
+            "micro-beats beyond the source passage's real dramatic turns: "
+        )
+    else:
+        beat_sizing = "Keep each scene compact at 8 to 14 beats (at most 15 beats): "
+    progress_clause = ""
+    if isinstance(episode_progress, dict) and episode_progress.get("scene_count"):
+        s_idx = episode_progress.get("scene_index")
+        s_cnt = episode_progress.get("scene_count")
+        prior = int(episode_progress.get("prior_shot_count") or 0)
+        progress_clause = (
+            f" Episode progress: this is scene {s_idx} of {s_cnt}, and earlier scenes in this "
+            f"episode have already landed {prior} shots. If locked_story_facts specifies a total "
+            "shot count across the work (such as an exact total number of shots across all scenes), "
+            "size this scene's beats within production_context.scene_budget_seconds so the "
+            "remaining scenes converge cleanly to that exact total without splitting a single "
+            "dramatic paragraph into extra beats."
+        )
     return (
         "You are Shine's drama screenwriter for one scene of a short drama. Turn the source "
         "passage into a shootable drama scene script: a novel's psychology, summary and "
@@ -336,13 +363,14 @@ def drama_screenwriter_prompt() -> str:
         "shot, a camera move, a duration in seconds, H3 prompt text or an asset id. "
         "The server measures every line at 4.2 characters per second and refuses what does not "
         "fit: one line is at most 27 characters, and all lines of one beat together are at most "
-        "31 characters. Keep each scene compact at 8 to 14 beats (at most 15 beats): bundle silent actions "
+        f"31 characters. {beat_sizing}bundle silent actions "
         "or combine two short same-speaker clauses (total <= 28 chars, keeping punctuation) into two "
         "spoken_lines of one beat. "
         "The scene's length is decided here, "
         "not cut later: aim the whole scene at production_context.scene_budget_seconds by choosing "
         "how many beats it has, and when the passage holds more story than that budget, compress each "
         "event into fewer and shorter beats instead of leaving any event out."
+        f"{progress_clause}"
     )
 
 
@@ -360,12 +388,17 @@ def crew_prompt(
     cinema_skills_block: str = "",
     continuity_predecessor: bool = False,
     translation_supplied: bool = False,
+    scene_budget_seconds: float | None = None,
+    episode_progress: dict | None = None,
 ) -> str:
     """The system prompt of one crew role."""
     if tool == "series_architecture":
         return series_architect_prompt()
     if tool == "drama_scene":
-        return drama_screenwriter_prompt()
+        return drama_screenwriter_prompt(
+            scene_budget_seconds=scene_budget_seconds,
+            episode_progress=episode_progress,
+        )
     if tool == "scene_board":
         from shine.agents.scene_director import scene_director_prompt
 
@@ -374,6 +407,8 @@ def crew_prompt(
             continuity_predecessor=continuity_predecessor,
             translation_supplied=translation_supplied,
             narration_allowed=narration_level in {"low", "high"},
+            scene_budget_seconds=scene_budget_seconds,
+            episode_progress=episode_progress,
         )
     if tool == "script_prepare":
         return script_prepare_prompt()

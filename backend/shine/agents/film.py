@@ -1464,6 +1464,8 @@ class FilmAgentDispatcher:
                         (context.get("production_context") or {}).get("continuity_predecessor")
                     ),
                     translation_supplied=False,
+                    scene_budget_seconds=(context.get("production_context") or {}).get("scene_budget_seconds"),
+                    episode_progress=(context.get("production_context") or {}).get("episode_progress"),
                 )
             if repair_visual_language:
                 prompt_text += (

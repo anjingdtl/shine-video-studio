@@ -1092,7 +1092,9 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     from shine.h3.compiler import COMPILER_VERSION
 
     compiler = H3PromptCompiler()
-    assert COMPILER_VERSION == "shine-h3-compiler/2.1.0"
+    # 当前版本的哨兵：提升版本号必须是有意为之，并同时保证每个已发布版本的字节不变
+    # （见 test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay）。
+    assert COMPILER_VERSION == "shine-h3-compiler/2.2.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1493,3 +1495,212 @@ def test_rulebook_accepts_sanitized_dialogue_with_trailing_comma():
     report = H3RulebookRegistry().validate(req, pack)
     assert report.passed, report.violations
 
+
+def test_scoped_story_facts_omit_off_cast_bios_and_off_shot_props():
+    """Off-cast character bios and off-shot props in project-wide locked_story_facts
+    must never leak into a single-character shot's H3 detailed_description."""
+    zh_facts = [
+        "欧洲中世纪西方暗黑奇幻世界观，禁止现代物件",
+        "艾德里安：35岁男性骑士，左颧骨旧剑疤，深墨绿斗篷",
+        "莫瑞甘：28岁女性守望者，银白色高盘长编发，暗紫色短斗篷",
+        "道具：符文长剑（冰蓝魔纹）、黄铜提灯（琥珀圣火）",
+        "全片共两场，精准拆分为8个镜头",
+    ]
+    en_facts = [
+        "European medieval dark-fantasy world; no modern objects.",
+        "Adrian: 35-year-old male knight, left-cheekbone scar, dark-green cloak.",
+        "Morrigan: 28-year-old female watcher, silver-white braided updo, dark-purple short cloak.",
+        "Props: rune sword (ice-blue sigils), brass lantern (amber sacred flame).",
+        "Two scenes in total, divided into 8 shots.",
+    ]
+    tokens = {"{{C1}}": "艾德里安", "{{C2}}": "莫瑞甘"}
+
+    # Shot 1: Adrian alone, no sword, no lantern -> Morrigan bio + both props + meta omitted.
+    shot1 = spec(
+        characters=["艾德里安"],
+        character_tokens=tokens,
+        story_beat="{{C1}} strides into the rain-lashed courtyard.",
+        locked_story_facts=zh_facts,
+        prompt_story_facts=en_facts,
+    )
+    m1 = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="艾德里安", role="艾德里安").model_copy(
+            update={"asset_role": "character"}
+        ),
+        item("<Picture 2>", ReferenceUse.PICTURE, entity_id="古堡庭院").model_copy(
+            update={"asset_role": "scene"}
+        ),
+    ]
+    c1 = compile_prompt(m1, shot=shot1)
+    desc1 = c1.sections["detailed_description"]
+    assert "European medieval dark-fantasy world" in desc1
+    assert "Adrian: 35-year-old male knight" in desc1
+    assert "Morrigan" not in desc1
+    assert "rune sword" not in desc1
+    assert "brass lantern" not in desc1
+    assert "divided into 8 shots" not in desc1
+
+    # Shot 3: Adrian draws rune sword (no Morrigan, no brass lantern) -> keeps rune sword only.
+    shot3 = spec(
+        characters=["艾德里安"],
+        character_tokens=tokens,
+        story_beat="{{C1}} draws the rune sword.",
+        locked_story_facts=zh_facts,
+        prompt_story_facts=en_facts,
+    )
+    m3 = [
+        *m1,
+        item("<Picture 3>", ReferenceUse.PICTURE, entity_id="符文长剑", role="符文长剑").model_copy(
+            update={"asset_role": "prop"}
+        ),
+    ]
+    desc3 = compile_prompt(m3, shot=shot3).sections["detailed_description"]
+    assert "Props: rune sword (ice-blue sigils)." in desc3
+    assert "brass lantern" not in desc3
+    assert "Morrigan" not in desc3
+
+    # Shot 5: Morrigan alone with brass lantern -> omits Adrian and rune sword.
+    shot5 = spec(
+        characters=["莫瑞甘"],
+        character_tokens=tokens,
+        story_beat="{{C2}} walks out of the mist holding a lantern.",
+        locked_story_facts=zh_facts,
+        prompt_story_facts=en_facts,
+    )
+    m5 = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="莫瑞甘", role="莫瑞甘").model_copy(
+            update={"asset_role": "character"}
+        ),
+        item("<Picture 2>", ReferenceUse.PICTURE, entity_id="圣殿祭坛").model_copy(
+            update={"asset_role": "scene"}
+        ),
+        item("<Picture 3>", ReferenceUse.PICTURE, entity_id="黄铜提灯", role="黄铜提灯").model_copy(
+            update={"asset_role": "prop"}
+        ),
+    ]
+    desc5 = compile_prompt(m5, shot=shot5).sections["detailed_description"]
+    assert "Morrigan: 28-year-old female watcher" in desc5
+    assert "Props: brass lantern (amber sacred flame)." in desc5
+    assert "Adrian" not in desc5
+    assert "rune sword" not in desc5
+
+
+def test_scoped_story_facts_keep_labelled_world_facts_with_unfamiliar_prefixes():
+    """Scoping may drop a person's bio, never a world fact whose label it does not know.
+
+    The scene here tokenises only its own cast, so an off-scene character's bio is
+    recognised by its *content* (an age or sex description), not by "the prefix is
+    not in a whitelist": "Era:" and "Tone:" are not whitelisted either, and a rule
+    that dropped every unfamiliar label would silently erase the world of another
+    script.
+    """
+    zh_facts = [
+        "时代：欧洲中世纪晚期，战火初歇",
+        "基调：阴郁压抑的暗黑奇幻",
+        "维伦：35岁男性牧师，灰色粗布法袍",
+        "艾德里安：35岁男性骑士，左颧骨旧剑疤",
+    ]
+    en_facts = [
+        "Era: late medieval Europe, the war freshly ended.",
+        "Tone: grim, oppressive dark fantasy.",
+        "Velen: 35-year-old male priest in a grey rough-cloth robe.",
+        "Adrian: 35-year-old male knight, left-cheekbone scar.",
+    ]
+    shot = spec(
+        characters=["艾德里安"],
+        character_tokens={"{{C1}}": "艾德里安"},
+        story_beat="{{C1}} stands alone in the rain.",
+        locked_story_facts=zh_facts,
+        prompt_story_facts=en_facts,
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="艾德里安", role="艾德里安").model_copy(
+            update={"asset_role": "character"}
+        ),
+        item("<Picture 2>", ReferenceUse.PICTURE, entity_id="古堡庭院").model_copy(
+            update={"asset_role": "scene"}
+        ),
+    ]
+    desc = compile_prompt(manifest, shot=shot).sections["detailed_description"]
+    assert "Era: late medieval Europe, the war freshly ended." in desc
+    assert "Tone: grim, oppressive dark fantasy." in desc
+    assert "Adrian: 35-year-old male knight" in desc
+    assert "Velen" not in desc, "a bio of a character this scene never tokenised still leaks"
+
+
+def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
+    """New prompt behaviour goes into the next compiler version; stored requests replay.
+
+    The project's rule after two version-drift incidents (1.3.0, 1.4.0): behaviour
+    never changes under a released version.  Scoping the locked story facts is new
+    behaviour, so it belongs to 2.2.0; a request frozen under the released 2.1.0
+    must still replay byte-exactly through the single provenance verifier, or an
+    upgrade would refuse every queued job that was compiled before it.
+    """
+    from types import SimpleNamespace
+
+    from shine.h3.compiler import COMPILER_VERSION, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION
+    from shine.h3.rulebook import recompile_for_provenance
+
+    compiler = H3PromptCompiler()
+    shot = spec(
+        characters=["艾德里安"],
+        character_tokens={"{{C1}}": "艾德里安", "{{C2}}": "莫瑞甘"},
+        story_beat="{{C1}} strides into the rain-lashed courtyard.",
+        locked_story_facts=[
+            "欧洲中世纪西方暗黑奇幻世界观，禁止现代物件",
+            "艾德里安：35岁男性骑士，左颧骨旧剑疤，深墨绿斗篷",
+            "莫瑞甘：28岁女性守望者，银白色高盘长编发，暗紫色短斗篷",
+            "道具：符文长剑（冰蓝魔纹）、黄铜提灯（琥珀圣火）",
+            "全片共两场，精准拆分为8个镜头",
+        ],
+        prompt_story_facts=[
+            "European medieval dark-fantasy world; no modern objects.",
+            "Adrian: 35-year-old male knight, left-cheekbone scar, dark-green cloak.",
+            "Morrigan: 28-year-old female watcher, silver-white braided updo, dark-purple short cloak.",
+            "Props: rune sword (ice-blue sigils), brass lantern (amber sacred flame).",
+            "Two scenes in total, divided into 8 shots.",
+        ],
+    )
+    manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="艾德里安", role="艾德里安").model_copy(
+            update={"asset_role": "character"}
+        ),
+        item("<Picture 2>", ReferenceUse.PICTURE, entity_id="古堡庭院").model_copy(
+            update={"asset_role": "scene"}
+        ),
+    ]
+    released = compiler.compile(
+        spec=shot, style=STYLE, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+    )
+    scoped = compile_prompt(manifest, shot=shot)
+
+    # The current version is 2.2.0 and it is the one that scopes.
+    assert COMPILER_VERSION == "shine-h3-compiler/2.2.0"
+    assert scoped.compiler_version == COMPILER_VERSION
+    released_desc = released.sections["detailed_description"]
+    assert "Morrigan: 28-year-old female watcher" in released_desc
+    assert "brass lantern" in released_desc
+    assert "divided into 8 shots" in released_desc
+    assert "Morrigan" not in scoped.sections["detailed_description"]
+    assert "brass lantern" not in scoped.sections["detailed_description"]
+    assert released.prompt_sha256 != scoped.prompt_sha256
+
+    def frozen(compiled, version) -> SimpleNamespace:
+        return SimpleNamespace(
+            compiler_version=version, shot_spec=shot, style_snapshot=STYLE, reference_manifest=manifest,
+            generation_mode=compiled.mode, project_language="Chinese", compiled_prompt=compiled.prompt,
+            prompt_sha256=compiled.prompt_sha256, compiled_prompt_sections=compiled.sections,
+        )
+
+    # A request stored under either version replays byte-exactly, with no fallback variant.
+    for stored, version in ((released, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION), (scoped, COMPILER_VERSION)):
+        replayed, variant = recompile_for_provenance(frozen(stored, version))
+        assert variant is None
+        assert replayed.prompt == stored.prompt
+        assert replayed.prompt_sha256 == stored.prompt_sha256
+    # The scoped bytes never existed under the released 2.1.0: labelled as 2.1.0 they do not replay.
+    mislabelled = frozen(scoped, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION)
+    replayed, _variant = recompile_for_provenance(mislabelled)
+    assert replayed.prompt != mislabelled.compiled_prompt

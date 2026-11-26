@@ -147,11 +147,70 @@ def test_r2_pause_running_series_must_request_safe_boundary(api):
     with factory.begin() as db:
         batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id==run['id']))
         db.get(ProductionSeries,batch.series_id).status='RUNNING'
-    runner.pause_run(factory,run['id'])
+    assert runner.pause_run(factory, run['id']) == 'PAUSE_REQUESTED'
     with factory() as db:
         batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id==run['id']))
         series=db.get(ProductionSeries,batch.series_id)
         assert series.status=='PAUSE_REQUESTED', 'No safe-boundary pause reached the running child series'
+
+
+def test_pause_requested_run_converges_to_paused_once_child_series_settles(api):
+    """PAUSE_REQUESTED must yield the tick while active and settle to PAUSED once the series pauses."""
+    from dataclasses import replace
+
+    from shine.director.overview import build_overview
+    from shine.models import Project
+
+    client, factory, settings = api
+    studio, package, run = start(api, shots=2)
+    _advance(factory, settings, run['id'])
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run['id']))
+        series = db.get(ProductionSeries, batch.series_id)
+        series.status = 'RUNNING'
+        series.finalization_state = 'ACTIVE'
+    assert runner.pause_run(factory, run['id']) == 'PAUSE_REQUESTED'
+
+    with factory() as db:
+        overview = build_overview(db, db.get(Project, studio['project']))
+    assert overview['run'] is not None and overview['run']['active'] is True
+
+    # While external work is still settling, advancing the run must not claim the tick.
+    summary = runner.advance_runs(
+        factory, worker_id='test-worker', settings=replace(settings, render_provider='comfyui'), limit=1,
+    )
+    assert summary.progressed == 0
+    with factory() as db:
+        assert db.get(ProductionRun, run['id']).status == 'PAUSE_REQUESTED'
+
+    # Once the child series finishes its boundary shot and releases the renderer,
+    # the next advance converges the run to PAUSED.
+    with factory.begin() as db:
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.run_id == run['id']))
+        series = db.get(ProductionSeries, batch.series_id)
+        series.status = 'PAUSED'
+        series.finalization_state = 'RELEASED'
+        series.lease_id = None
+        for item in series.items:
+            if item.job_id:
+                db.get(Job, item.job_id).status = 'PASSED'
+                item.status = 'PASSED'
+    summary2 = runner.advance_runs(
+        factory, worker_id='test-worker', settings=replace(settings, render_provider='comfyui'), limit=1,
+    )
+    assert summary2.progressed == 1
+    with factory() as db:
+        row = db.get(ProductionRun, run['id'])
+        assert row.status == 'PAUSED'
+        assert row.claim_owner is None
+
+    # reconcile_run must also converge a settled PAUSE_REQUESTED run immediately.
+    with factory.begin() as db:
+        db.get(ProductionRun, run['id']).status = 'PAUSE_REQUESTED'
+    reconciled = runner.reconcile_run(factory, run['id'], worker_id='local-user')
+    assert reconciled['status'] == 'PAUSED'
+    with factory() as db:
+        assert db.get(ProductionRun, run['id']).status == 'PAUSED'
 
 
 def test_r3_changed_workflow_must_block_dispatch_after_start(api):

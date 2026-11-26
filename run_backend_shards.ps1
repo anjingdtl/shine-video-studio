@@ -178,6 +178,15 @@ function Remove-ShineDir([string]$Path) {
             # 函数钩子，删自己的 basetemp 也会命中 BULK_CONFIRM_REQUIRED（阈值 50 次），
             # 结果是删到一半停下、留下半套目录——比不删更难收拾。删除目标始终是本
             # 脚本本次刚产出的临时目录，不涉及用户文件。
+            # git 对象文件在 Windows 上是只读的（test_clean_checkout_identity 会在
+            # basetemp 里建真实仓库），.NET 的递归删除碰到只读文件会整目录失败：每轮
+            # 留下一个 bt-*，历史 run 目录也永远清不掉。先去掉只读属性再删。
+            foreach ($file in [System.IO.DirectoryInfo]::new($Path).EnumerateFiles(
+                    '*', [System.IO.SearchOption]::AllDirectories)) {
+                if ($file.Attributes -band [System.IO.FileAttributes]::ReadOnly) {
+                    $file.Attributes = $file.Attributes -band (-bnot [System.IO.FileAttributes]::ReadOnly)
+                }
+            }
             [System.IO.Directory]::Delete($Path, $true)
             return
         } catch {
@@ -201,8 +210,10 @@ if ($keepBasetemp) {
 }
 
 # 只清本脚本自己的产物（shards-*），WorkRoot 下的其它目录不动。
+# 「最近」按目录名里的创建时间戳排，不按最后修改时间：删除旧目录里的文件会刷新
+# 旧目录的修改时间，按修改时间排会把自己刚产出的这一轮排到后面、当成旧目录删掉。
 $runs = @(Get-ChildItem -LiteralPath $WorkRoot -Directory -Filter 'shards-*' -ErrorAction SilentlyContinue |
-    Sort-Object LastWriteTime -Descending)
+    Sort-Object Name -Descending)
 $stale = @($runs | Select-Object -Skip $KeepRuns)
 foreach ($dir in $stale) { Remove-ShineDir $dir.FullName }
 if ($stale.Count -gt 0) {

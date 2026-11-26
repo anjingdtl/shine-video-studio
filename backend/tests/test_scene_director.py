@@ -187,3 +187,27 @@ def test_every_prompt_prose_field_the_compiler_reads_is_in_the_language_list():
             "shots[0].environment.light", "shots[0].environment.micro_motion",
             "shots[0].internal_cuts[0].visual_description"} <= set(fields)
     assert fields["shots[0].blocking.placements[0].posture"] == "leaning forward"
+
+
+def test_scene_director_prompt_sizes_shot_count_to_scene_budget():
+    short_prompt = director.scene_director_prompt(
+        max_shot_seconds=8.0,
+        continuity_predecessor=False,
+        translation_supplied=False,
+        narration_allowed=False,
+        scene_budget_seconds=20.0,
+    )
+    assert "production_context.scene_budget_seconds (20s)" in short_prompt
+    assert "3 to 4 shots" in short_prompt
+    assert "6 to 10 shots" not in short_prompt
+
+    mid_prompt = director.scene_director_prompt(
+        max_shot_seconds=8.0,
+        continuity_predecessor=True,
+        translation_supplied=False,
+        narration_allowed=False,
+        scene_budget_seconds=40.0,
+    )
+    assert "production_context.scene_budget_seconds (40s)" in mid_prompt
+    assert "5 to 7 shots" in mid_prompt
+    assert "6 to 10 shots" not in mid_prompt

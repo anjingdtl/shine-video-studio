@@ -2,7 +2,7 @@
  *
  *  三原则：进度只读 run 的 passed/total 与 job 台账正在渲染的任务（同一事实），
  *  前端不累计自己的进度；跟读节奏与集卡/运行卡相同，后台推进时一起前进。 */
-import { act, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import App from '../App';
@@ -153,5 +153,38 @@ describe('⑥ 显性生产进度条', () => {
     const bar = screen.getByRole('progressbar', { name: '单镜重拍进度' });
     expect(bar).toHaveAttribute('aria-valuenow', '42');
     expect(screen.getByText('正在重拍「镜4」')).toBeInTheDocument();
+  });
+
+  it('PAUSE_REQUESTED 期间显示收尾文案而非已停止/单镜重拍，并提供二次确认取消入口', async () => {
+    let runStatus = 'PAUSE_REQUESTED';
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/projects\/proj-1\/director\/overview/,
+      respond: () => jsonResponse({
+        ...overviewBody(),
+        run: { run_id: 'run-1', status: runStatus, active: runStatus !== 'CANCELLED',
+          scope_episode_ids: ['ep-01'] },
+      }) });
+    stub.add({ method: 'GET', pattern: /\/api\/v1\/production-runs\/run-1$/,
+      respond: () => jsonResponse({ ...runBody(), status: runStatus }) });
+    stub.add({ method: 'POST', pattern: /\/api\/v1\/production-runs\/run-1\/cancel$/,
+      respond: () => {
+        runStatus = 'CANCELLED';
+        return jsonResponse({ id: 'run-1', status: 'CANCELLED', state_version: 3 });
+      } });
+
+    render(<App />);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+
+    expect(screen.getByRole('heading', { name: '正在等待当前镜头落盘后暂停' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: '运行已停止' })).toBeNull();
+    expect(screen.queryByRole('progressbar', { name: '单镜重拍进度' })).toBeNull();
+    expect(screen.getByRole('button', { name: '继续' })).toBeInTheDocument();
+
+    const cancel = screen.getByRole('button', { name: '取消' });
+    fireEvent.click(cancel);
+    expect(screen.getByRole('button', { name: '再点一次确认取消' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: '再点一次确认取消' }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(stub.callsOf('POST', /\/api\/v1\/production-runs\/run-1\/cancel$/)).toHaveLength(1);
+    expect(screen.getByRole('heading', { name: '运行已取消' })).toBeInTheDocument();
   });
 });

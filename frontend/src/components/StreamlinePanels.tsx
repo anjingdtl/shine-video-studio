@@ -732,8 +732,10 @@ function refusalReason(rejection: { code?: string; rejection_reason_code?: strin
   return label ? `${label}（${code}）` : (code || '分镜被拒绝');
 }
 
-export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh, onGoStage }: {
+export function EpisodeStoryboardPanel({ projectId, active = true, onMessage, onJourneyRefresh, onGoStage }: {
   projectId: string;
+  /** ② 与 ③ 保持挂载时，切回 ③ 页自动刷新最新风格/分集状态，避免停留在旧冻结视图。 */
+  active?: boolean;
   onMessage?: (message: string) => void;
   onJourneyRefresh?: () => void;
   /** 必做动作失败时，把「下一步」送到对应阶段。 */
@@ -802,7 +804,9 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     } catch { /* keep prior */ }
   }, [projectId]);
 
-  useEffect(() => { void load().catch(() => undefined); }, [load]);
+  useEffect(() => {
+    if (active) void load().catch(() => undefined);
+  }, [active, load]);
   const running = state?.status === 'QUEUED' || state?.status === 'RUNNING';
   // 右轨读 journey：任务推进时跟读同一刷新执行者，投影不留在旧事实上。
   // 回调用 ref 持有：App 每次渲染都新建回调，进依赖会不断重置定时器。
@@ -951,13 +955,16 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
     }, '后台分镜已继续。');
   };
   const blockedEpisode = episodes.find((row) => row.status === 'BLOCKED' && row.blocker);
-  // 主按钮与页内按钮共用同一执行者：暂停→继续；全确认→去素材准备；
-  // 已有可确认落镜→确认全部落镜（不误报「再跑一遍」）；被阻塞且未知→核对+授权重发+重试。
+  const basisUpdated = Boolean(state?.stale_for_basis && !running);
+  // 主按钮与页内按钮共用同一执行者：暂停→继续；底盘风格/分集已更新→按新设定重新生成；
+  // 全确认→去素材准备；已有可确认落镜→确认全部落镜（不误报「再跑一遍」）；被阻塞且未知→核对+授权重发+重试。
   const primary: RailAction | null = running
     ? null
     : state?.status === 'PAUSED'
       ? { label: '继续后台分镜', onClick: resumeRun, loading: busy === 'resume', icon: <Play size={14} /> }
-      : allConfirmed
+      : basisUpdated
+        ? { label: '按新设定重新生成分镜', onClick: generate, loading: busy === 'generate', icon: <Sparkles size={14} /> }
+        : allConfirmed
         ? { label: '去素材准备', onClick: () => onGoStage?.('assets-stage'), icon: <Film size={14} /> }
         : blockedEpisode?.blocker?.uncertain
           ? { label: '核对并重试被阻塞的集',
@@ -981,7 +988,7 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
         sum + row.units.filter((unit) => unit.state === 'APPLIED').length, 0),
       total: episodes.reduce((sum, row) => sum + row.units.length, 0) || undefined,
     } : null,
-  }, [state, busy, running, tables, confirmedEpisodes, allConfirmed]);
+  }, [state, busy, running, tables, confirmedEpisodes, allConfirmed, basisUpdated]);
 
   return <section className="card section-card" id="episode-storyboard">
     <div className="section-heading">
@@ -1003,6 +1010,9 @@ export function EpisodeStoryboardPanel({ projectId, onMessage, onJourneyRefresh,
         onClick={primary?.onClick}>
         <Play size={13} /> {running ? '分镜生成中…' : primary?.label}
       </button>}
+      {basisUpdated && <span className="run-hint">
+        <TriangleAlert size={12} /> 已冻结的导演风格或分集方案已更新；建议点「按新设定重新生成分镜」按最新预算与风格拆镜。
+      </span>}
       {state?.status === 'NEEDS_REVIEW' && <span className="run-hint">
         <TriangleAlert size={12} /> 有集被阻塞；每一集可单独重试，其余集不受影响。
       </span>}

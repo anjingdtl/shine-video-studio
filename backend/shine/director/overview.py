@@ -31,6 +31,7 @@ from shine.director.models import (
 )
 from shine.director.package import package_readiness
 from shine.models import Project, Shot, StyleVersion
+from shine.production.models import ACTIVE_RUN_STATUSES
 
 #: Episode states, in the order a person walks them.  ``REVIEW_READY`` means a
 #: real reel exists and waits for human review; ``DELIVERED`` means the episode
@@ -62,7 +63,7 @@ _STATE_LABELS = {
 }
 
 #: A run in one of these states is real work in progress for its episodes.
-_ACTIVE_RUN = {"DRAFT", "QUEUED", "RUNNING", "PAUSED", "BLOCKED"}
+_ACTIVE_RUN = {"DRAFT", "BLOCKED", *ACTIVE_RUN_STATUSES}
 
 
 def _plans(db: Session, project_id: str) -> list[DirectorEpisodePlan]:

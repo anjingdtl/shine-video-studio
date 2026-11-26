@@ -1838,6 +1838,88 @@ def test_continuity_conflict_reports_reason_and_retries_director_with_lesson(api
     assert retry_director_prompts and conflict_issue in retry_director_prompts[0]
 
 
+def test_structured_front_matter_merges_into_first_scene_and_excludes_setup_from_duration(api):
+    from shine.materialprep.source_spans import is_narrative_fragment, narrative_body
+    from shine.materialprep.story import source_sections
+    from tests.test_film_crew import prepare
+
+    client, factory, _settings = api
+    project_id, _style, _profile = prepare(
+        client, freeze=False, character_entity_id="艾德里安", character_filename="艾德里安.png"
+    )
+    story_text = (
+        "《灰烬圣剑：古堡守望》\n\n"
+        "【人物设定】\n"
+        "1. 艾德里安：三十五岁欧洲中世纪男骑士，灰蓝双眼，左颧骨旧剑疤，身着雕花钢制胸甲与深墨绿色连帽斗篷。\n\n"
+        "【关键道具】\n"
+        "1. 符文长剑：刻有冰蓝色魔纹的中世纪双手长剑。\n\n"
+        "【核心场景】\n"
+        "1. 哥特石砌古堡庭院：暴雨夜晚的灰色花岗岩尖拱庭院。\n\n"
+        "---\n\n"
+        "第一场 哥特石砌古堡庭院 夜 暴雨\n"
+        "暴雨倾盆，艾德里安正面走向镜头，说道：“城门已破，誓约不能断。”\n\n"
+        "第二场 圣殿残垣祭坛 夜 薄雾\n"
+        "薄雾弥漫的祭坛前，艾德里安举起符文长剑凝望黑暗。\n"
+    )
+    preamble = story_text[: story_text.index("第一场")]
+    assert narrative_body(preamble) == "《灰烬圣剑：古堡守望》"
+    assert not is_narrative_fragment(preamble)
+
+    doc = _document(client, project_id, "medieval.txt", story_text)
+    sections = source_sections(project_id, type("Doc", (), {"text": story_text})())
+    assert [sec["title"] for sec in sections] == [
+        "第一场 哥特石砌古堡庭院 夜 暴雨",
+        "第二场 圣殿残垣祭坛 夜 薄雾",
+    ]
+    assert sections[0]["start_offset"] == 0
+    assert sections[-1]["end_offset"] == len(story_text)
+    assert "".join(story_text[s["start_offset"]:s["end_offset"]] for s in sections) == story_text
+    # Setup bio block must not inflate Scene 1's estimated narrative duration.
+    assert sections[0]["estimated_duration_s"] < 15.0
+
+    _approved_outline(factory, project_id, doc, sections)
+    book = _storyboard_book(client, project_id, episode_count=1, target_seconds=48, tolerance_seconds=12)
+    assert book["preview"]["episode_count"] == 1
+    assert book["preview"]["out_of_scope"] is None
+    assert [sec["title"] for sec in book["preview"]["episodes"][0]["sections"]] == [
+        "第一场 哥特石砌古堡庭院 夜 暴雨",
+        "第二场 圣殿残垣祭坛 夜 薄雾",
+    ]
 
 
+def test_director_storyboard_state_flags_stale_for_basis_after_new_style_freeze(api):
+    client, _factory, settings = api
+    prepared = _prepare_project(client, sections=2)
+    project = prepared["project"]
+    book = _storyboard_book(client, project, episode_count=1, target_seconds=60)
+    _confirm_book(client, project, book["plan_version"], book["plan_sha256"])
+    queued = client.post(f"/api/v1/projects/{project}/director/storyboard/generate", json={}, headers=LOCAL)
+    assert queued.status_code == 202
+    _run_storyboard_to_rest(client, settings, project)
 
+    before = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert before["stale_for_basis"] is False
+    assert before["basis_changed_reason"] is None
+
+    # Confirm a fresh storyboard book with a new frozen style in Stage 2.
+    book2 = _storyboard_book(client, project, episode_count=1, target_seconds=60)
+    confirm2 = client.post(
+        f"/api/v1/projects/{project}/director/storyboard-book/confirm",
+        json={
+            "plan_version": book2["plan_version"],
+            "expected_sha256": book2["plan_sha256"],
+            "style": {
+                "profile_id": "",
+                "film_type": "live_action",
+                "max_shot_seconds": 8.0,
+                "dimensions": {"color_palette": "冷色低饱和暗调"},
+            },
+            "acknowledge_deviation": True,
+        },
+        headers=LOCAL,
+    )
+    assert confirm2.status_code == 200, confirm2.text
+
+    after = client.get(f"/api/v1/projects/{project}/director/storyboard/state").json()
+    assert after["stale_for_basis"] is True
+    assert after["basis_changed_reason"] == "STYLE_UPDATED"

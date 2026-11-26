@@ -1807,9 +1807,11 @@ def generate_storyboard(
                     db, project_id, brief,
                     {"outline_artifact_id": outline.id, "outline_sha256": outline.sha256,
                      "plan_sha256": plan.sha256})
-                step_sha = digest({"step": active_step, "production_context": body.production_context})
+                step_sha = digest({"step": active_step, "production_context": body.production_context,
+                                   "locked_story_facts": body.locked_story_facts})
                 steps[active_step] = _run(
                     "scriptwriter", tool=active_step, brief=brief,
+                    locked_story_facts=body.locked_story_facts,
                     allow_remote_text=body.allow_remote_text, request_sha256=step_sha)
                 architecture = db.get(AgentArtifact, steps[active_step]["artifact_id"])
             if architecture is None:
@@ -1829,9 +1831,11 @@ def generate_storyboard(
                     {**base, "architecture_artifact_id": architecture.id,
                      "architecture_sha256": architecture.sha256},
                     require_architecture=True)
-                step_sha = digest({"step": active_step, "production_context": body.production_context})
+                step_sha = digest({"step": active_step, "production_context": body.production_context,
+                                   "locked_story_facts": body.locked_story_facts})
                 steps[active_step] = _run(
                     "scriptwriter", tool=active_step, brief=raw_text,
+                    locked_story_facts=body.locked_story_facts,
                     allow_remote_text=body.allow_remote_text, request_sha256=step_sha)
                 scene = db.get(AgentArtifact, steps[active_step]["artifact_id"])
             if scene is None:

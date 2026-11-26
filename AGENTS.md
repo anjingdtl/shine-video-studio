@@ -2638,3 +2638,33 @@ V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权�
   前端 `tsc` / Vitest（96 文件 506/506）/ Vite build 全部通过、后端 8 分片 316 文件（`shards-20261126-010210-636`，
   墙钟 `863.8s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）全部通过。证据、更正与遗留问题见
   `docs/ACCEPTANCE_20261125_IMAGE_LORA_AND_PROMPT_V1.md`。
+
+## 2026-11-26 中世纪奇幻 8 镜全流程真机穿测（导演模式七阶段 + 1.0× 原生出片）
+
+原始剧本定为 1 集 60 秒、单镜 8 秒，全程只在界面操作，最终精确落成 8 镜 / 59.5 秒并在 RTX 5080 上真实出片。
+报告与证据：`docs/ACCEPTANCE_20261126_MEDIEVAL_FANTASY_8SHOT_E2E.md`、`docs/evidence/20261126-medieval-fantasy-8shot-e2e/`。
+
+- **提示词的新行为只进下一个编译器版本，这条要当硬规则执行。** 按镜裁剪锁定故事事实（不在场人物的设定、
+  本镜没用到的道具、计划自身的结构说明不进提示词）落在 `shine-h3-compiler/2.2.0`；已发布的 `2.1.0` 转为
+  `LEGACY_ANCHORED_TOKENS_COMPILER_VERSION`，保持发布字节。`h3/rulebook.py::recompile_for_provenance` 要求存档请求
+  按钉住的版本逐字节重放，行为在旧版本号下变了，升级前排队的任务就会被判 `SHINE_PROVENANCE`。改任何提示词行为后，
+  用 `git show HEAD:backend/shine/h3/compiler.py` 取出已发布的编译器，与工作区编译器对真实存档请求逐条比对。
+- **裁剪事实只丢人物设定，不丢带标签的世界观事实。** 「前缀不认识」不能作为丢弃理由（「时代：…」「基调：…」
+  会中枪）；只丢弃值以年龄或性别描述开头的人物设定。
+- **场景底图不得含角色携带的道具**（`materialprep/brief.py` 场景族规则）。会发光的手持道具（提灯）会被模型当成
+  场景里的实用光源写进 `must_keep`，成片里就出现「手里一只、祭坛上一只」。
+- **运行控制**：`ADVANCEABLE_RUN_STATUSES` 含 `PAUSE_REQUESTED`，暂停请求由 Worker 在子序列到达安全边界后收敛为
+  `PAUSED`，收尾期间以 `pause_reconciling` 让出节拍。前端「是否已有运行占着拍摄范围」只读 `overview.run.active`
+  （后端 `ACTIVE_RUN_STATUSES` 的唯一投影），不得另抄状态清单。
+- **运行的幂等复用看状态**：仍在推进或待核对的运行原样复用；全部终结后用同一导演包再开拍必须发起新运行。
+- **剧组提示词里的拍数、镜头数按分集预算给**（`scene_budget_seconds` + `episode_progress`），不写死与预算矛盾的数字。
+- **道具绑定**：清单优先用戏剧场次的 `drama_span_ids`，道具名中英都要能对上（`_english_prop_aliases`）。
+- **回归脚本**：`Remove-ShineDir` 删除前先清只读属性（`test_clean_checkout_identity` 会建真实 git 仓库，对象文件只读，
+  否则每轮留下一个 `bt-*`）；「最近 N 轮」按目录名里的时间戳排，不按最后修改时间。跑之前按上一节的提醒确认 `-KeepRuns`。
+- **遗留 D12（未修，待产品决定）**：镜头冻结在已确认导演包里且已有通过成片时，素材页「选用并晋升」新主素材后不会
+  回绑（`bind_adopted_masters_to_shots` 的保护规则），需求行却已指向新主素材，页面还写死显示「已采用 / 已回绑」。
+  结果是需求清单与镜头绑定不一致，且没有给已开拍镜头换素材的路径。
+- 出片耗时参考：`1344×768`、原生 20 步、INT8，单镜 9–15 分钟（参考图越多越慢），60 秒一集约 1 小时 40 分钟。
+- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。收尾门禁：Ruff 全部通过；前端
+  `tsc` / Vitest（99 文件 518/518）/ Vite build 全部通过；后端 8 分片 317 文件（`shards-20261126-195824-351`，
+  墙钟 858.8s，8 分片全部 exit 0、`shards_with_failure_markers=0`）全部通过。
