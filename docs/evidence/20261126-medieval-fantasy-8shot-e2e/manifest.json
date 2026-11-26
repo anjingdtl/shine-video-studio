@@ -70,6 +70,13 @@
     "archive_bytes": 112105
   },
   {
+    "file": "10b-storyboard-book-reconfirmed-style-v2.jpg",
+    "source": "stage-2 storyboard book reconfirmed with style v2 (browser screenshot 2026-11-26 15:54)",
+    "source_sha256": "8f0bf4ea163348812743962e61072b37364489d6f918f5c8e84d9bdd4c08e504",
+    "source_bytes": 283930,
+    "archive_bytes": 105682
+  },
+  {
     "file": "11-storyboard-blocked-18shots.jpg",
     "source": "26-storyboard-blocked-axis.png",
     "source_sha256": "7200ca906a18df479c3f39e994f7412a631da5feae9c05acdb936b193cd43444",
@@ -315,11 +322,11 @@
     "archive_bytes": 165599
   },
   {
-    "file": "script_medieval_8shot.txt",
-    "source": "script_medieval_8shot.txt",
-    "source_sha256": "9ac8da133ba82a862b958ddc2327f5cf8e02e065c69316cfd3dc96758f5ca5bb",
-    "source_bytes": 3057,
-    "archive_bytes": 3057
+    "file": "compiler-version-verification.txt",
+    "source": "compiler-version-verification.log",
+    "source_sha256": "750eb9ba79d9997681882fa11c6fb864f20e9c3b669c6d6e2cc0f4e2fed18ac0",
+    "source_bytes": 2253,
+    "archive_bytes": 2253
   },
   {
     "file": "h3_prompt_shot01_run1.txt",
@@ -329,11 +336,11 @@
     "archive_bytes": 5211
   },
   {
-    "file": "run-control-before-fix-stuck-pause-requested.txt",
-    "source": "snap-run-tocancel.txt",
-    "source_sha256": "f6c7bd9a38cafc11ff4bb148bdf1d082eabdab557df2f0da033a9e35e2ff2e8e",
-    "source_bytes": 2281,
-    "archive_bytes": 2281
+    "file": "run-control-after-fix-cancelled.txt",
+    "source": "snap-run-cancelled.txt",
+    "source_sha256": "43b20dbe59548868411d3921649650d02e30b6c31a95e180f968cc2a8c47b7e0",
+    "source_bytes": 2319,
+    "archive_bytes": 2319
   },
   {
     "file": "run-control-after-fix-paused-with-cancel.txt",
@@ -343,11 +350,18 @@
     "archive_bytes": 2385
   },
   {
-    "file": "run-control-after-fix-cancelled.txt",
-    "source": "snap-run-cancelled.txt",
-    "source_sha256": "43b20dbe59548868411d3921649650d02e30b6c31a95e180f968cc2a8c47b7e0",
-    "source_bytes": 2319,
-    "archive_bytes": 2319
+    "file": "run-control-before-fix-stuck-pause-requested.txt",
+    "source": "snap-run-tocancel.txt",
+    "source_sha256": "f6c7bd9a38cafc11ff4bb148bdf1d082eabdab557df2f0da033a9e35e2ff2e8e",
+    "source_bytes": 2281,
+    "archive_bytes": 2281
+  },
+  {
+    "file": "script_medieval_8shot.txt",
+    "source": "script_medieval_8shot.txt",
+    "source_sha256": "9ac8da133ba82a862b958ddc2327f5cf8e02e065c69316cfd3dc96758f5ca5bb",
+    "source_bytes": 3057,
+    "archive_bytes": 3057
   },
   {
     "file": "shot-evidence-run1.json",
@@ -355,12 +369,5 @@
     "source_sha256": "198ea3361f4ccf93b4369ce984595eff142a3733ce4a695fcd3f5fdda9569527",
     "source_bytes": 11349,
     "archive_bytes": 11349
-  },
-  {
-    "file": "compiler-version-verification.txt",
-    "source": "compiler-version-verification.log",
-    "source_sha256": "750eb9ba79d9997681882fa11c6fb864f20e9c3b669c6d6e2cc0f4e2fed18ac0",
-    "source_bytes": 2253,
-    "archive_bytes": 2253
   }
 ]
