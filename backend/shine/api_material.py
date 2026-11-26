@@ -59,6 +59,7 @@ class GenerateBody(ImageStyleRequest):
     rights_id: str | None = None
     mode: Literal["real"] = EXECUTION_MODE_REAL
     seeds: dict[str, int] = Field(default_factory=dict)
+    character_sheet_mode: bool = False
 
 
 class StateVersionBody(APIModel):
@@ -83,6 +84,7 @@ class RegenerateBody(ImageStyleRequest):
     rights_id: str | None = None
     brief: dict
     seed: int = Field(default=0, ge=0)
+    character_sheet_mode: bool = False
 
 
 class ImageRuntimeBody(APIModel):
@@ -602,6 +604,7 @@ def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: 
         rights_id=body.rights_id,
         seeds=body.seeds,
         image_style=resolve_image_style_request(db, settings, body),
+        character_sheet_mode=body.character_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}
@@ -730,6 +733,7 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
         briefs={body.requirement_id: brief},
         new_revision=True,
         image_style=image_style,
+        character_sheet_mode=body.character_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}
@@ -738,6 +742,7 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
 class RegenerateAllBody(ImageStyleRequest):
     idempotency_key: str = Field(min_length=1, max_length=128)
     requirement_ids: list[str] = Field(default_factory=list, max_length=200)
+    character_sheet_mode: bool = False
 
 
 @router.post("/projects/{project_id}/material-preparation/regenerate-all", status_code=202)
@@ -842,6 +847,7 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
         rights_id=None,
         new_revision=True,
         image_style=image_style,
+        character_sheet_mode=body.character_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}

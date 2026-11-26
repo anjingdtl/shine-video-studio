@@ -85,3 +85,38 @@
 
 - **显存与租约清零**：初始 `1117 MiB` → 双链路峰值 `15548 MiB`（`165` 次采样）→ 调用 `POST /setup/image-runtime/stop` 返回 `STOPPED`（`active_processes: 0`）、`11` 条 `resource_leases` 全为 `RELEASED`、`8318/5378/8898/8250` 零端口监听，停机后显存回落至 `826–1098 MiB`。
 - **未验证边界**：① 本轮真机主要通过 API 端到端链路完成，未另开桌面浏览器手工点击截图；② 真机仅在 RTX 5080 `16 GB` 实测，`12 GB` 分页档与 `24 GB` 档未在本轮实机跑样；③ 视频 H3 Ref2VA 真实渲染消费该 `3584×2016` 角色主资产属于下一阶段真实出片验收范围，本轮已确认 `MiniMaxH3ReferenceToVideo` 按 `ref_image_size="match"` 可无裁剪接入 `16:9` 参考图。
+
+---
+
+## 六、收尾改造：独立可选能力 `character_sheet` 与视频生产一步勾选开关（2026-11-26）
+
+- **代码基线**：`main`（`95ae2e0` + 本轮收尾改造）
+- **三原则收敛核对**：
+  1. **一套事实**：将 `qwen-image-2.1-lora-multiple-angles`（SHA-256 `548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6`，`318,819,792` B）从 `config/deployment/qwen-image-loras-windows-x64.json` 拆出至独立清单 [qwen-character-sheet-windows-x64.json](../../config/deployment/qwen-character-sheet-windows-x64.json)（`catalog_id: "shine-qwen-character-sheet-windows-x64"`）；原 `qwen-image-loras-windows-x64.json` 仅保留 3 枚纯画风/画质 LoRA（`fix` + `natural-exposure` + `anything2real`，`457,564,276` B，约 `436 MiB`），与 2 套出厂画风配方严格一一对应。在 `capability.py`、`deployment.py`、`api_setup.py`、`resource_discovery.py`、`setup_summary.py`、`setup_preparation.py`、`setup_reconcile.py`、`installation_worker.py` 与 `loras.py` 中统一注册独立可选能力 `character_sheet`（纳入 `OPTIONAL_INSTALL_COMPONENTS` 与 `optional_only_plan()`，不阻塞零 LoRA 基础出图或 H3 生产门禁）。`GET /api/v1/loras?base_model=qwen_image_21` 复用 `project_character_sheet_lora_from_listed()` 输出统一实时就绪投影 `character_sheet`，前端共享开关组件 [CharacterSheetToggle.tsx](../../frontend/src/shared/CharacterSheetToggle.tsx) 仅消费该服务端投影。
+  2. **一个裁决**：`api_material.py`（`/generate`、`/regenerate`、`/regenerate-all`）、`api_streamline.py`（`/director/materials/commit`）及 `materialprep/service.py::create_batch()` 新增显式开关参数 `character_sheet_mode: bool = False`。未勾选（`False`）时人物条目严格走既有单步 T2I（零 LoRA 新机器开箱可用）；勾选（`True`）时建单阶段即调用唯一裁决口 `freeze_character_sheet_lora()` 同步校验，缺失时直接返回 `409 CHARACTER_SHEET_LORA_REQUIRED`（不写 `MaterialRun`/`MaterialItem` 也不排入后台队列才失败），就绪时冻结 `character_sheet_mode=True` 与 `character_sheet_lora` 到 `MaterialItem.payload`，Worker 执行期继续通过 `resolve_live_image_loras()` 做提交前最后防线复检；`_ensure_lora_not_in_use()` 保持在途任务 `409 LORA_IN_USE` 删除保护。
+  3. **一个执行者**：下载整备复用 `setup_preparation.py` / `installation_worker.py`，生成复用 `materialprep/execution.py` 与 `asset_center/execution.py`。前端 `SetupCenter.tsx` / `SetupEnvironmentStatus.tsx` 新增与「RelayVSR 2X 精修」「生图风格 LoRA 包（约 436 MiB）」并列的独立勾选项「角色五视图定妆照（约 304 MiB）」；`MaterialPreparationPanel.tsx` / `StreamlinePanels.tsx` 新增一步勾选开关「人物生成 16:9 五视图定妆照」，未整备时默认关闭且禁用并支持直达「设置 → 制作环境」下载，所有引导文案统一指向「设置 → 制作环境 → 角色五视图定妆照」。
+  4. **保护红线**：`backend/shine/worker.py`、`backend/shine/comfy/client.py`、`backend/shine/comfyops/preproduction.py` 全程零改动（`git diff --name-only 95ae2e0` 核验为空）。
+
+### 老机器权重复用核验记录
+
+1. **回执跨清单同源兼容**：`verification_receipts.py` 为拆出的 `(shine-qwen-character-sheet-windows-x64, qwen-image-2.1-lora-multiple-angles)` 声明前序合法目录 `shine-qwen-image-loras-windows-x64`（仍严格校对 `component_identity` + 磁盘字节/头尾采样见证），`setup_reconcile.py` 与 `setup_summary.py` 同步纳入 `isolated-packages/<cid>` 与 `models/loras/shine_user/`。
+2. **真实老数据目录纯只读复核**（`.local-acceptance/character-sheet-20261126/隔离 数据`）：
+   - `setup_summary.capability_report(..., "character_sheet")` → `state="READY"`, `FILES_FOUND=True`, `FILES_VERIFIED=True`, `RESOURCE_REGISTERED=True`, `missing_bytes=0`；
+   - `setup_preparation.plan_prepare_downloads(..., capabilities=["character_sheet"])` → `download_bytes=0`, `needs_download=False`（零重复下载）；
+   - `setup_summary.capability_report(..., "image_loras")` → `state="MISSING"`, `missing_bytes=457564276`（准确反映拆分后剩余 3 枚画风 LoRA）；
+   - `project_character_sheet_lora()` → `lora_ready=True`, `lora_id="qwen-image-2.1-lora-multiple-angles"`, `lora_sha256="548c5797..."`。
+3. **无旧回执裸文件复核**：单测 `test_character_sheet_capability_discovery_plan_and_legacy_sha256_reuse` 覆盖裸文件经 `resource_discovery` + `setup_reconcile.reconcile_installation(..., capability="character_sheet")` 按 SHA-256 核验登记并复用（`download_bytes=0`）。
+
+### 本轮全量门禁结果（最终代码树）
+
+| 检查项 | 命令与实测结果 |
+|---|---|
+| Python 锁文件一致性 | `uv --no-config sync --project backend --locked --dry-run` → `Would make no changes` |
+| Ruff 静态检查 | `backend/.venv/Scripts/python.exe -m ruff check backend/shine backend/tests backend/alembic/versions` → `All checks passed!`（exit `0`） |
+| Copilot 契约与知识校验 | `python -m scripts.generate_shine_copilot_contracts --check` & `python -m scripts.generate_copilot_knowledge --check` → 均返回 `contracts ok: app=2.2.0 actions=16 knowledge=22 discovered=482` |
+| 审计事件码同步检查 | `pytest backend/tests/test_audit_event_codes.py -q` → **3/3 passed** |
+| 后端专项单测 | `pytest backend/tests/test_character_sheet.py backend/tests/test_image_lora_assembly.py backend/tests/test_image_vram_advice.py -q` → **30/30 passed**（`test_character_sheet.py` 10 例、`test_image_lora_assembly.py` 7 例、`test_image_vram_advice.py` 13 例） |
+| 前端专项单测 | `npx vitest run src/test/setupCenter.test.tsx src/test/characterSheet.test.tsx src/test/characterSheetToggle.test.tsx src/test/materialPreparation.test.tsx src/test/setupOptionalCapabilities.test.tsx` → **5 文件 / 47 项全绿** |
+| 前端全量门禁 | `npx tsc --noEmit`（exit `0`）、`npx vitest run --no-file-parallelism`（**98 个文件 / 514 项测试全绿**）、`npm run build`（exit `0`） |
+| 后端全量 8 分片回归 | `CODEBUDDY_SAFE_DELETE_ENABLED=0 pwsh -NoProfile -File ./run_backend_shards.ps1 -WorkRoot 'F:\ShineTest' -Shards 8 -KeepRuns 5` → **8/8 分片全部 clean（exit `0`）**，覆盖 `317` 个测试文件，`shards_with_failure_markers=0`，总耗时 `886.5s`，日志归档 `F:\ShineTest\shards-20261126-131655-619` |
+

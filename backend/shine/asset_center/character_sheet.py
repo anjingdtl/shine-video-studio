@@ -40,7 +40,7 @@ MULTIPLE_ANGLES_LORA_SHA256 = "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab
 MULTIPLE_ANGLES_DEFAULT_STRENGTH = 0.8
 
 CHARACTER_SHEET_SETUP_HINT = (
-    "请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载并完成纳管；"
+    "请前往「设置 → 制作环境 → 角色五视图定妆照」勾选下载并完成纳管；"
     "角色定妆照不会静默降级为无 LoRA 生图。"
 )
 
@@ -249,17 +249,8 @@ def build_step_prompts(
     raise ValueError(f"Unsupported character sheet step: {step_key}")
 
 
-def project_character_sheet_lora(
-    db: Session,
-    settings: Any,
-    *,
-    object_info: dict[str, Any] | None = None,
-    probe_comfy: bool = False,
-) -> dict[str, Any]:
-    """Read readiness of ``qwen-image-2.1-lora-multiple-angles`` from ``style_lora_assets``."""
-    listed = list_style_loras(
-        db, settings, base_model=IMAGE_LORA_BASE, object_info=object_info, probe_comfy=probe_comfy
-    )
+def project_character_sheet_lora_from_listed(listed: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive character-sheet LoRA readiness from an already-projected Qwen-Image LoRA listing."""
     items = listed.get("items") or []
     match = next(
         (
@@ -291,6 +282,20 @@ def project_character_sheet_lora(
         "display_name": str(match.get("display_name") or "Qwen 多视角镜头"),
         "setup_hint": "" if lora_ready else CHARACTER_SHEET_SETUP_HINT,
     }
+
+
+def project_character_sheet_lora(
+    db: Session,
+    settings: Any,
+    *,
+    object_info: dict[str, Any] | None = None,
+    probe_comfy: bool = False,
+) -> dict[str, Any]:
+    """Read readiness of ``qwen-image-2.1-lora-multiple-angles`` from ``style_lora_assets``."""
+    listed = list_style_loras(
+        db, settings, base_model=IMAGE_LORA_BASE, object_info=object_info, probe_comfy=probe_comfy
+    )
+    return project_character_sheet_lora_from_listed(listed)
 
 
 def _find_multiple_angles_asset(db: Session) -> StyleLoraAsset | None:

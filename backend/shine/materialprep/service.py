@@ -562,6 +562,7 @@ def create_batch(
     trust_current_list: bool = False,
     commit: bool = True,
     image_style: dict[str, Any] | None = None,
+    character_sheet_mode: bool = False,
     settings: Any | None = None,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
@@ -579,6 +580,7 @@ def create_batch(
     if not trust_current_list and plan.payload["confirmation"]["confirmation_hash"] != confirmation_hash:
         raise HTTPException(409, "MATERIAL_PLAN_STALE")
 
+    use_character_sheet = bool(character_sheet_mode) and kind == "production"
     request_payload = {
         "confirmation_id": confirmation_id,
         "confirmation_hash": confirmation_hash,
@@ -590,6 +592,7 @@ def create_batch(
         # first batch's image.
         "briefs": {key: briefs[key] for key in sorted(briefs or {})},
         "new_revision": new_revision,
+        **({"character_sheet_mode": True} if use_character_sheet else {}),
         **(image_style or {}),
     }
     request_hash = graph_hash(request_payload)
@@ -614,6 +617,31 @@ def create_batch(
         require_rights(db, project_id, rights_id)
 
     generate_ids = _select_generable(db, plan, requirement_ids)
+    # Single pre-queue adjudicator for character-sheet mode: when the operator
+    # explicitly opted into 16:9 5-view character sheets and this batch has at
+    # least one character requirement, validate and freeze multiple-angles LoRA
+    # synchronously so missing weights fail fast with 409 instead of failing
+    # asynchronously in the background queue.
+    frozen_character_sheet_lora: dict[str, Any] | None = None
+    if use_character_sheet:
+        has_character = False
+        for rid in generate_ids:
+            req_row = db.get(AssetRequirement, rid)
+            if req_row is not None and str((req_row.payload or {}).get("family") or "") == "character":
+                has_character = True
+                break
+        if has_character:
+            from shine.asset_center.character_sheet import freeze_character_sheet_lora
+            from shine.comfyops.loras import StyleLoraError
+
+            try:
+                frozen_character_sheet_lora = freeze_character_sheet_lora(db, settings)
+            except StyleLoraError as exc:
+                raise HTTPException(
+                    exc.http_status,
+                    detail={"code": exc.code, "message": exc.message, "details": exc.details},
+                ) from exc
+
     if new_revision:
         # Fence allocation before computing the next revision. A second tab
         # cannot turn a duplicate click into another legitimate generation.
@@ -636,7 +664,9 @@ def create_batch(
         mode=EXECUTION_MODE_REAL,
         status=RUN_QUEUED,
         payload={"kind": kind, "rights_id": rights_id, "requirement_ids": generate_ids,
-                 "confirmation_snapshot": confirmation_hash, **(image_style or {})},
+                 "confirmation_snapshot": confirmation_hash,
+                 **({"character_sheet_mode": True} if use_character_sheet else {}),
+                 **(image_style or {})},
         sha256=graph_hash(request_payload),
     )
     db.add(run)
@@ -660,16 +690,11 @@ def create_batch(
         requirement = db.get(AssetRequirement, requirement_id)
         item_family = str((requirement.payload or {}).get("family") or "")
         extra_character_sheet: dict[str, Any] = {}
-        if kind == "production" and item_family == "character":
-            from shine.asset_center.character_sheet import freeze_character_sheet_lora
-            from shine.comfyops.loras import StyleLoraError
-
-            extra_character_sheet["character_sheet_mode"] = True
-            if settings is not None:
-                try:
-                    extra_character_sheet["character_sheet_lora"] = freeze_character_sheet_lora(db, settings)
-                except StyleLoraError:
-                    pass
+        if use_character_sheet and item_family == "character" and frozen_character_sheet_lora is not None:
+            extra_character_sheet = {
+                "character_sheet_mode": True,
+                "character_sheet_lora": frozen_character_sheet_lora,
+            }
         seed = int((seeds or {}).get(requirement_id, 0))
         brief = (briefs or {}).get(requirement_id)
         item = MaterialItem(

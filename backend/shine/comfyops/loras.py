@@ -108,15 +108,23 @@ def image_lora_presets() -> dict[str, Any]:
 
 
 def _image_lora_components() -> list[dict]:
-    from shine.comfyops.deployment import IMAGE_LORA_CATALOG, load_deployment_catalog
+    from shine.comfyops.deployment import CHARACTER_SHEET_CATALOG, IMAGE_LORA_CATALOG, load_deployment_catalog
 
-    return load_deployment_catalog(IMAGE_LORA_CATALOG)["components"]
+    components: list[dict] = []
+    seen: set[str] = set()
+    for catalog_name in (IMAGE_LORA_CATALOG, CHARACTER_SHEET_CATALOG):
+        for row in load_deployment_catalog(catalog_name)["components"]:
+            cid = str(row.get("component_id") or "")
+            if cid and cid not in seen:
+                seen.add(cid)
+                components.append(row)
+    return components
 
 
 def _image_package_lora_roots(base: Path) -> list[Path]:
-    from shine.comfyops.deployment import IMAGE_LORA_COMPONENTS
+    from shine.comfyops.deployment import ALL_IMAGE_LORA_COMPONENTS
 
-    return [base / "isolated-packages" / cid for cid in IMAGE_LORA_COMPONENTS]
+    return [base / "isolated-packages" / cid for cid in ALL_IMAGE_LORA_COMPONENTS]
 
 
 def _comfyops_dir(settings: Any) -> Path | None:
@@ -648,6 +656,17 @@ def import_style_lora(
             tmp_path = None
 
         ensure_style_lora_extra_paths_config(settings)
+        if base_model == IMAGE_LORA_BASE:
+            base_dir = _comfyops_dir(settings)
+            if base_dir is not None:
+                from shine.comfyops.verification_receipts import write_cache_sidecar
+
+                write_cache_sidecar(
+                    target_path,
+                    sha256,
+                    size_bytes,
+                    cache_dir=base_dir / "isolated-packages" / ".cache",
+                )
         clean_display = str(display_name or "").strip()[:160] or Path(source_name).stem[:160] or target_path.stem
         row = StyleLoraAsset(
             id=f"lora_{uuid4().hex[:12]}",

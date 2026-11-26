@@ -618,7 +618,7 @@ function ImageWorkshop({ capabilities, onNavigate, onValidated, onOpenImageSetup
           {csLoraMissing && (
             <div className="asset-cs-lora-warn" role="status">
               <b>缺少「Qwen 多视角镜头」LoRA（{characterSheetCapability?.lora_status ?? 'NOT_INSTALLED'}）</b>
-              <p>{characterSheetCapability?.setup_hint || '请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载并完成纳管；角色定妆照不会静默降级为无 LoRA 生图。'}</p>
+              <p>{characterSheetCapability?.setup_hint || '请前往「设置 → 制作环境 → 角色五视图定妆照」勾选下载并完成纳管；角色定妆照不会静默降级为无 LoRA 生图。'}</p>
               {onOpenImageSetup && (
                 <button type="button" className="btn-secondary" onClick={onOpenImageSetup}>前往设置 → 制作环境</button>
               )}

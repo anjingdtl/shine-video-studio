@@ -93,11 +93,13 @@ def get_loras(request: Request, db: DBSession, base_model: StyleLoraBase = H3_LO
     db.commit()
     if base_model == IMAGE_LORA_BASE:
         # The generation forms read this ledger to let a person assemble a
-        # style, so the card's VRAM advice rides along: "does a recipe fit this
-        # GPU" is answered where the choice is made.  It is advice, never a gate.
+        # style, so the card's VRAM advice and character-sheet LoRA projection
+        # ride along: one single authoritative fact read for every surface.
+        from shine.asset_center.character_sheet import project_character_sheet_lora_from_listed
         from shine.comfyops.capability import image_vram_advice_for_host
 
         result["vram_advice"] = image_vram_advice_for_host(settings)
+        result["character_sheet"] = project_character_sheet_lora_from_listed(result)
     return result
 
 

@@ -2808,3 +2808,9 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .image-vram-classes th{color:var(--muted);font-weight:600;border-top:0}
 .image-vram-classes tr.is-current{background:var(--panel,var(--surface-3));font-weight:600;color:var(--ink)}
 .image-vram-current-tag{display:inline-block;margin-left:6px;padding:0 5px;border-radius:5px;border:1px solid var(--accent);color:var(--accent);font-size:10px;font-weight:600}
+
+/* ---- 人物 16:9 五视图定妆照一步勾选开关 ----------------------------------- */
+.character-sheet-toggle{margin:8px 0;padding:10px 12px;border:1px solid var(--border,var(--line));border-radius:9px;background:var(--surface-2,rgba(255,255,255,.04));display:flex;flex-direction:column;gap:4px}
+.character-sheet-toggle[data-ready="true"]{border-color:var(--ok-line,#9ec8a9)}
+.character-sheet-toggle-label{display:inline-flex;align-items:center;gap:6px;font-size:var(--fs-body);color:var(--ink);cursor:pointer}
+.character-sheet-toggle-label input:disabled{cursor:not-allowed}

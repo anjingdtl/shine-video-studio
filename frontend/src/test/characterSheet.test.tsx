@@ -98,7 +98,7 @@ function capabilitiesPayload(loraReady: boolean) {
         lora_id: 'qwen-image-2.1-lora-multiple-angles',
         lora_status: loraReady ? 'READY' : 'NOT_INSTALLED',
         lora_ready: loraReady,
-        setup_hint: loraReady ? '' : '请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载并完成纳管；角色定妆照不会静默降级为无 LoRA 生图。',
+        setup_hint: loraReady ? '' : '请前往「设置 → 制作环境 → 角色五视图定妆照」勾选下载并完成纳管；角色定妆照不会静默降级为无 LoRA 生图。',
         layout_version: 'character-sheet-16x9-dual-closeup-triview-v2',
       },
     },
@@ -119,7 +119,7 @@ it('缺少多视角 LoRA 时展示制作环境引导且禁止提交定妆照任�
   await user.click(screen.getByRole('button', { name: '图生图' }));
   expect(await screen.findByTestId('character-sheet-card')).toBeInTheDocument();
   expect(screen.getByText(/缺少「Qwen 多视角镜头」LoRA/)).toBeInTheDocument();
-  expect(screen.getByText(/勾选「生图风格 LoRA 包」/)).toBeInTheDocument();
+  expect(screen.getByText(/设置 → 制作环境 → 角色五视图定妆照/)).toBeInTheDocument();
 
   await user.click(screen.getByRole('switch', { name: '启用角色定妆照生成' }));
   expect(screen.getByLabelText(/补充描述/)).toBeInTheDocument();

@@ -13,6 +13,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { imageStyleInput, StyleLoraAssemblyPanel, type StyleLoraConfig } from '../shared/StyleLoraAssemblyPanel';
+import { CharacterSheetToggle } from '../shared/CharacterSheetToggle';
 import { Check, Film, History, ListChecks, Play, RefreshCw, ShieldCheck, Sparkles, TriangleAlert, Upload } from 'lucide-react';
 import { RequiredActionNotice } from './RequiredActionNotice';
 import type { ErrorActionTarget } from '../errorActions';
@@ -1311,6 +1312,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   const [promptTarget, setPromptTarget] = useState<DirectorMaterialRequirement | null>(null);
   const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>([]);
   const [stylePreset, setStylePreset] = useState<string | null>(null);
+  const [characterSheetMode, setCharacterSheetMode] = useState(false);
   const imageStyle = useMemo(() => imageStyleInput(styleLoras, stylePreset), [styleLoras, stylePreset]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [batchTarget, setBatchTarget] = useState<Decision>('generate');
@@ -1410,7 +1412,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         expected_snapshot: view.expected_snapshot,
         decisions: rows,
         queue_generation: queueGeneration,
-        ...(queueGeneration ? imageStyle : {}),
+        ...(queueGeneration ? { ...imageStyle, character_sheet_mode: characterSheetMode } : {}),
       });
       const queued = outcome.batch?.item_count ?? outcome.generate_count;
       const parts = [
@@ -1458,7 +1460,12 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       const outcome = await api<{ items?: string[] }>(
         `/projects/${projectId}/material-preparation/regenerate-all`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idempotency_key: `director-regen-all-${Date.now()}`, requirement_ids: ids, ...imageStyle }) });
+          body: JSON.stringify({
+            idempotency_key: `director-regen-all-${Date.now()}`,
+            requirement_ids: ids,
+            ...imageStyle,
+            character_sheet_mode: characterSheetMode,
+          }) });
       setResult(`已为 ${outcome.items?.length ?? ids.length} 项重新排队出图；旧候选保留，出图后在上方选定并采用。`);
       await load();
       onJourneyRefresh?.();
@@ -1480,8 +1487,12 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         // 在途项，已有批次时会被 MATERIAL_NOTHING_TO_GENERATE 拒绝。
         await api(`/projects/${projectId}/material-preparation/regenerate-all`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idempotency_key: `director-regen-one-${Date.now()}`,
-            requirement_ids: [row.requirement_id], ...imageStyle }),
+          body: JSON.stringify({
+            idempotency_key: `director-regen-one-${Date.now()}`,
+            requirement_ids: [row.requirement_id],
+            ...imageStyle,
+            character_sheet_mode: characterSheetMode,
+          }),
         });
       } else {
         await commitDirectorMaterials(projectId, {
@@ -1600,7 +1611,12 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       const outcome = await api<{ items?: string[]; run_id?: string }>(
         `/projects/${projectId}/material-preparation/regenerate-all`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idempotency_key: `director-regen-${Date.now()}`, requirement_ids: selectedIds, ...imageStyle }) });
+          body: JSON.stringify({
+            idempotency_key: `director-regen-${Date.now()}`,
+            requirement_ids: selectedIds,
+            ...imageStyle,
+            character_sheet_mode: characterSheetMode,
+          }) });
       setResult(`已为所选 ${outcome.items?.length ?? selectedIds.length} 项重新排队出图；旧候选保留，出图后在同一候选栏选定并采用。`);
       setSelected({});
       await load();
@@ -1635,7 +1651,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         loading: busy === 'commit', disabled: busy !== '', icon: <RefreshCw size={14} /> }]
     : [];
   useStageRail('shot-materials', { priority: 1, primary, secondary },
-    [view, decisions, busy, assetsDone, onAdvance, generating]);
+    [view, decisions, busy, assetsDone, onAdvance, generating, characterSheetMode, imageStyle]);
 
   return <section className="card section-card" id="shot-materials">
     <div className="section-heading">
@@ -1732,6 +1748,15 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         <button type="button" className="btn-text" disabled={busy !== '' || selectedIds.length === 0}
           onClick={() => setSelected({})}>清空选择</button>
       </div>
+      <CharacterSheetToggle
+        checked={characterSheetMode}
+        onChange={setCharacterSheetMode}
+        disabled={busy !== ''}
+        onGoSetup={() => {
+          if (onGoStage) onGoStage('setup-env');
+          else window.location.hash = '#d/setup';
+        }}
+      />
       <details className="advanced-fold">
         <summary>生图风格 LoRA{styleLoras.length ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
         <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}

@@ -289,7 +289,7 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
             <em className={item.status === 'FAILED' || item.status === 'NEEDS_REVIEW' ? 'warn' : ''}>
               {ITEM_LABEL[item.status] ?? item.status}
               {item.error_code === 'CHARACTER_SHEET_LORA_REQUIRED'
-                ? '（缺少「Qwen 多视角镜头」LoRA，请前往「设置 → 制作环境」勾选「生图风格 LoRA 包」下载）'
+                ? '（缺少「Qwen 多视角镜头」LoRA，请前往「设置 → 制作环境 → 角色五视图定妆照」勾选下载）'
                 : item.error_code ? `（${item.error_code}）` : ''}</em>
           </li>)}</ul>
         </details>

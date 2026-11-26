@@ -526,9 +526,9 @@ def _run_local_attempt(factory, worker_id: str, attempt_id: str, plan: Installat
                 root=install_root,
                 directory=install_root / spec["name"],
             )
-        from shine.comfyops.deployment import IMAGE_LORA_COMPONENTS
+        from shine.comfyops.deployment import ALL_IMAGE_LORA_COMPONENTS
 
-        if any(package["spec"]["name"] in IMAGE_LORA_COMPONENTS for package in packages):
+        if any(package["spec"]["name"] in ALL_IMAGE_LORA_COMPONENTS for package in packages):
             from shine.comfyops.loras import IMAGE_LORA_BASE, sync_discovered_loras
 
             sync_discovered_loras(db, settings, base_model=IMAGE_LORA_BASE)

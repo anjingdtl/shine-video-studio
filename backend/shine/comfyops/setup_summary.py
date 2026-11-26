@@ -43,7 +43,10 @@ RELAYVSR_COMPONENTS = deployment.RELAYVSR_COMPONENTS
 #: capability -> catalog file stem (the name load_deployment_catalog accepts).
 #: The catalog's own ``catalog_id`` (shine-…) is an identity, not a file name.
 CATALOG_FILE_BY_CAPABILITY = {
-    "image": IMAGE_CATALOG, "relayvsr": RELAYVSR_CATALOG, "image_loras": deployment.IMAGE_LORA_CATALOG,
+    "image": IMAGE_CATALOG,
+    "relayvsr": RELAYVSR_CATALOG,
+    "image_loras": deployment.IMAGE_LORA_CATALOG,
+    "character_sheet": deployment.CHARACTER_SHEET_CATALOG,
 }
 H3_CATALOG = "h3-ref2va-windows-x64"
 
@@ -54,10 +57,12 @@ CAPABILITY_LABELS = {
     "asr": "语音核对",
     "relayvsr": "RelayVSR 2X 精修",
     "image_loras": "生图风格 LoRA 包",
+    "character_sheet": "角色五视图定妆照",
 }
 
 CAPABILITIES = tuple(CAPABILITY_LABELS)
-OPTIONAL_CAPABILITIES = frozenset({"vlm", "asr", "relayvsr", "image_loras"})
+OPTIONAL_CAPABILITIES = frozenset({"vlm", "asr", "relayvsr", "image_loras", "character_sheet"})
+IMAGE_LORA_PACK_CAPABILITIES = frozenset({"image_loras", "character_sheet"})
 
 
 # --- installation selection -------------------------------------------------
@@ -163,7 +168,7 @@ def model_file_presence(models_root: str | Path | None, catalog: dict, component
             continue
         family = component.get("destination_family")
         review_store = store / component_id if (
-            store is not None and component.get("kind") == "review-model") else None
+            store is not None and (component.get("kind") == "review-model" or base is None)) else None
         for item in component.get("files") or []:
             relative = Path(str(item.get("relative_path") or ""))
             target = None
@@ -259,6 +264,39 @@ def _verified_components(db, settings, catalog: dict, component_ids,
                 continue
             if cache_candidates(cache, component, read_only=True).get("verified"):
                 verified.add(component_id)
+                continue
+            if component.get("role") == "style_lora":
+                from shine.comfyops.loras import IMAGE_LORA_BASE
+                from shine.comfyops.models import StyleLoraAsset
+                from shine.comfyops.verification_receipts import file_digest
+
+                files = component.get("files") or []
+                if len(files) == 1:
+                    pinned = files[0]
+                    lora_row = db.scalar(
+                        select(StyleLoraAsset).where(
+                            StyleLoraAsset.base_model == IMAGE_LORA_BASE,
+                            StyleLoraAsset.sha256 == str(pinned.get("sha256") or "").lower(),
+                        )
+                    )
+                    if lora_row is not None and lora_row.storage_path:
+                        lora_path = Path(lora_row.storage_path)
+                        proof = file_digest(
+                            lora_path,
+                            str(pinned.get("sha256") or ""),
+                            int(pinned.get("size") or 0),
+                            cache_dir=cache,
+                            read_only=True,
+                        )
+                        if proof.get("verified"):
+                            verified.add(component_id)
+                            resolved_lora = lora_path.resolve()
+                            if any(
+                                resolved_lora.is_relative_to(Path(r).resolve())
+                                for r in (served_roots or [])
+                                if r
+                            ):
+                                in_place.add(component_id)
         except OSError:  # an unreadable file is not evidence
             continue
     return {"verified": verified, "in_place": in_place}
@@ -447,6 +485,8 @@ def _component_ids_for(capability: str, catalog: dict) -> set[str]:
         return set(RELAYVSR_COMPONENTS)
     if capability == "image_loras":
         return set(_catalog_components(catalog)).intersection(deployment.IMAGE_LORA_COMPONENTS)
+    if capability == "character_sheet":
+        return set(_catalog_components(catalog)).intersection(deployment.CHARACTER_SHEET_COMPONENTS)
     if capability in REVIEW_COMPONENTS:
         return {REVIEW_COMPONENTS[capability]}
     from shine.comfyops.variant_readiness import required_h3_components
@@ -598,12 +638,19 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
                           "reason": "仓库里的固定清单缺失或损坏。", "action": "DIAGNOSE"},
             "missing_files": [], "advisories": [],
         }
-    served_root = None if capability == "image_loras" else _effective_models_root(settings, capability, installation)
-    # 审片模型的消费根是隔离包目录（与 advisory_review_readiness 同一根），
+    served_root = (
+        None
+        if capability in IMAGE_LORA_PACK_CAPABILITIES
+        else _effective_models_root(settings, capability, installation)
+    )
+    # 审片模型与生图 LoRA 包的消费根是隔离包目录（与 advisory_review_readiness / loras 同一根），
     # 不是 ComfyUI 的 models 目录；presence 与 in_place 都跟着它走。
-    package_root = (Path(settings.comfyops_dir) / "isolated-packages"
-                    if settings is not None and (capability in REVIEW_COMPONENTS or capability == "image_loras")
-                    else None)
+    package_root = (
+        Path(settings.comfyops_dir) / "isolated-packages"
+        if settings is not None
+        and (capability in REVIEW_COMPONENTS or capability in IMAGE_LORA_PACK_CAPABILITIES)
+        else None
+    )
     from shine.comfyops.adoption import runtime_root
     from shine.comfyops.existing_installation import declared_model_family_roots
 
@@ -617,6 +664,8 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
     served_roots.extend(str(path) for paths in declared.values() for path in paths)
     if package_root is not None:
         served_roots.extend(str(package_root / cid) for cid in sorted(component_ids))
+    if capability in IMAGE_LORA_PACK_CAPABILITIES and settings is not None:
+        served_roots.append(str(Path(settings.comfyops_dir) / "models" / "loras"))
     evidence = _verified_components(
         db, settings, catalog, component_ids, served_roots=served_roots)
     verified_now = evidence["verified"]
@@ -637,7 +686,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
             }
     unplaced = [item for item in presence["missing"]
                 if item["component_id"] not in evidence["in_place"]]
-    if capability == "image_loras":
+    if capability in IMAGE_LORA_PACK_CAPABILITIES:
         # Sizes alone do not clear the optional pack. A stale or corrupt placed file
         # remains a candidate for the installer to restore from verified bytes.
         catalog_components = _catalog_components(catalog)
@@ -670,7 +719,7 @@ def capability_report(db, settings, capability: str, *, installation: dict | Non
         "RENDER_VERIFIED": False,
         "PRODUCTION_READY": False,
     }
-    if capability == "image_loras":
+    if capability in IMAGE_LORA_PACK_CAPABILITIES:
         facts["RESOURCE_REGISTERED"] = files_verified and component_ids <= evidence["in_place"]
     advisories: list[dict[str, Any]] = []
     try:
@@ -830,8 +879,13 @@ def _two_step_projection(capability: str, facts: dict, *, missing_bytes: int,
         }
     reason = next((str(a.get("message") or a.get("detail")) for a in advisories
                    if a.get("message") or a.get("detail")), None)
-    if capability == "image_loras" and facts.get("RESOURCE_REGISTERED"):
-        run = {"state": "READY", "label": "权重已核验，由素材生图加载"}
+    if capability in IMAGE_LORA_PACK_CAPABILITIES and facts.get("RESOURCE_REGISTERED"):
+        run = {
+            "state": "READY",
+            "label": "权重已核验，可生成 16:9 角色五视图定妆照"
+            if capability == "character_sheet"
+            else "权重已核验，由素材生图加载",
+        }
     elif facts.get("RENDER_VERIFIED") or facts.get("PRODUCTION_READY") or facts.get("RUNTIME_SERVICES_VERIFIED"):
         run = {"state": "READY", "label": "已验证可运行"}
     elif facts.get("WORKFLOW_VALIDATED"):
@@ -894,6 +948,13 @@ def _capability_verdict(capability: str, facts: dict, *, missing_bytes: int,
             return "READY", "风格 LoRA 已核验，可在素材生图中选择。", None
         return "VERIFIED", "风格 LoRA 已核验，待放入受管目录。", {
             "code": "FILES_PENDING_PLACEMENT", "label": "整备风格 LoRA",
+            "reason": "复用已核验字节完成落位。", "action": "PREPARE_ENVIRONMENT",
+        }
+    if capability == "character_sheet":
+        if facts.get("RESOURCE_REGISTERED"):
+            return "READY", "角色五视图定妆照权重已核验，可在人物素材生成中开启。", None
+        return "VERIFIED", "角色五视图定妆照权重已核验，待放入受管目录。", {
+            "code": "FILES_PENDING_PLACEMENT", "label": "整备角色五视图定妆照",
             "reason": "复用已核验字节完成落位。", "action": "PREPARE_ENVIRONMENT",
         }
     if not (facts.get("INSTANCE_BOUND") or facts.get("RUNTIME_SERVICES_VERIFIED")):

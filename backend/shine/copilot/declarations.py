@@ -46,9 +46,9 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         feature_id="setup-verdict",
         module="comfyops",
         label="补齐真实制作环境",
-        description="复用统一安装器的持久准备任务。生图风格 LoRA 包按用户选择单独整备。",
+        description="复用统一安装器的持久准备任务。生图风格 LoRA 包、角色五视图定妆照按用户选择单独整备。",
         params=_sorted_params(
-            _P("capabilities", type="string_list", max_length=6),
+            _P("capabilities", type="string_list", max_length=7),
             _P("deep_scan", type="boolean", required=False),
             _P("installation_path", max_length=1024, required=False),
             _P("port", type="integer", required=False, max_length=65535),
@@ -75,7 +75,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         page="基础配置",
         examples=("把 H3 需要的模型文件补齐",),
         note="只补齐缺失文件；不改别人的 ComfyUI 配置。",
-        contract_revision=4,
+        contract_revision=5,
     ),
     CapabilityDeclaration(
         action_id="setup_reconcile",

@@ -759,7 +759,14 @@ def test_character_sheet_blocks_revoked_rights_and_supports_promoted_version_ref
     assert blocked.json()["detail"]["code"] == "LIBRARY_RIGHTS_NOT_APPROVED"
 
 
-def _seed_material_batch(client: TestClient, factory, settings, *, families=("character", "prop")):
+def _seed_material_batch(
+    client: TestClient,
+    factory,
+    settings,
+    *,
+    families=("character", "prop"),
+    character_sheet_mode: bool = False,
+):
     from shine.comfyops.models import AssetRequirement, CandidateAsset, PreProductionPlan
     from shine.comfyops.preproduction import current_material_plan
     from shine.materialprep import execution as mat_execution
@@ -832,6 +839,7 @@ def _seed_material_batch(client: TestClient, factory, settings, *, families=("ch
             idempotency_key="mat-cs-batch-1",
             rights_id=rights_id,
             briefs=briefs,
+            character_sheet_mode=character_sheet_mode,
             settings=settings,
         )
     for item_id in batch["items"]:
@@ -856,7 +864,9 @@ def test_materialprep_character_runs_t2i_to_16x9_character_sheet_and_keeps_prop_
     lora_row = _install_multiple_angles_lora(factory, settings, tmp_path)
     monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", lora_row.sha256)
 
-    project_id, item_ids, ctx = _seed_material_batch(client, factory, settings, families=("character", "prop"))
+    project_id, item_ids, ctx = _seed_material_batch(
+        client, factory, settings, families=("character", "prop"), character_sheet_mode=True
+    )
     MaterialItem = ctx["MaterialItem"]
     MaterialImageAttempt = ctx["MaterialImageAttempt"]
     CandidateAsset = ctx["CandidateAsset"]
@@ -987,12 +997,31 @@ def test_materialprep_character_runs_t2i_to_16x9_character_sheet_and_keeps_prop_
 def test_materialprep_character_fails_closed_without_lora_and_halts_on_unknown_timeout(tmp_path, monkeypatch):
     app, factory, settings = make_studio(tmp_path)
     client = TestClient(app)
-    _project_id, item_ids, ctx = _seed_material_batch(client, factory, settings, families=("character",))
+    # Seed a character-sheet item whose frozen LoRA disappears before Worker execution
+    # (verifies Worker-side last-line defense fails closed without wasting GPU T2I).
+    lora_row_tmp = _install_multiple_angles_lora(factory, settings, tmp_path)
+    monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", lora_row_tmp.sha256)
+    _project_id, item_ids, ctx = _seed_material_batch(
+        client, factory, settings, families=("character",), character_sheet_mode=True
+    )
     char_item_id = item_ids[0]
     MaterialItem = ctx["MaterialItem"]
     mat_execution = ctx["mat_execution"]
     mat_runtime = ctx["mat_runtime"]
     object_info_fixture = ctx["object_info_fixture"]
+
+    # Remove the LoRA asset and frozen pin to simulate a pre-execution missing-LoRA condition.
+    from pathlib import Path
+
+    with factory.begin() as db:
+        from shine.comfyops.models import StyleLoraAsset
+
+        item_row = db.get(MaterialItem, char_item_id)
+        item_row.payload = {k: v for k, v in (item_row.payload or {}).items() if k != "character_sheet_lora"}
+        row_to_del = db.get(StyleLoraAsset, lora_row_tmp.id)
+        if row_to_del is not None:
+            db.delete(row_to_del)
+    Path(lora_row_tmp.storage_path).unlink(missing_ok=True)
 
     submitted: list[dict] = []
 
@@ -1037,7 +1066,9 @@ def test_materialprep_character_fails_closed_without_lora_and_halts_on_unknown_t
     # With LoRA installed, a timeout on edit step 2 halts in NEEDS_REVIEW / UNKNOWN without replaying.
     lora_row = _install_multiple_angles_lora(factory, settings, tmp_path)
     monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", lora_row.sha256)
-    _project_id2, item_ids2, _ctx2 = _seed_material_batch(client, factory, settings, families=("character",))
+    _project_id2, item_ids2, _ctx2 = _seed_material_batch(
+        client, factory, settings, families=("character",), character_sheet_mode=True
+    )
     char_item_id2 = item_ids2[0]
     merged_object_info = {**object_info_fixture(), **_fake_object_info(lora_row.filename)}
     call_count = {"n": 0}
@@ -1094,3 +1125,372 @@ def test_materialprep_character_fails_closed_without_lora_and_halts_on_unknown_t
     with factory() as db:
         row = db.get(MaterialItem, char_item_id2)
         assert row.status == "NEEDS_REVIEW"
+
+
+def test_character_sheet_capability_discovery_plan_and_legacy_sha256_reuse(tmp_path, monkeypatch):
+    from shine.comfyops import deployment, loras, resource_discovery, setup_preparation, setup_reconcile, setup_summary
+    from shine.comfyops.verification_receipts import save_receipt
+    from tests.test_style_lora_assembly import _make_valid_safetensors
+
+    app, factory, settings = make_studio(tmp_path)
+    client = TestClient(app)
+
+    # 1. Fresh machine: character_sheet is an independent optional capability (1 file, ~304 MiB)
+    #    and never blocks zero-LoRA image or H3 readiness.
+    with factory() as db:
+        cap = setup_summary.capability_report(db, settings, "character_sheet", installation=None, project_id=None)
+        assert cap["optional"] is True
+        assert cap["state"] == "MISSING"
+        assert cap["missing_bytes"] == 318_819_792
+        assert len(cap["missing_files"]) == 1
+        assert cap["missing_files"][0]["component_id"] == cs.MULTIPLE_ANGLES_LORA_ID
+
+        plan_bundle = setup_preparation.plan_prepare_downloads(
+            db, settings, capabilities=["character_sheet"], verify_runtime=True
+        )
+        assert plan_bundle["download_bytes"] == 318_819_792
+        assert plan_bundle["plans"][0]["capability"] == "character_sheet"
+        assert plan_bundle["plans"][0]["components"] == [cs.MULTIPLE_ANGLES_LORA_ID]
+
+    exec_resp = client.post(
+        "/api/v1/setup/prepare/execute",
+        headers={"X-Shine-Local-Action": "1"},
+        json={"capabilities": ["character_sheet"], "verify_runtime": True, "deep_scan": False},
+    )
+    assert exec_resp.status_code == 200
+    assert exec_resp.json()["steps"] == ["RECONCILE", "DOWNLOAD"]
+
+    # 2. Legacy machine scenario A: file already installed in isolated-packages under the former
+    #    ``shine-qwen-image-loras-windows-x64`` receipt must immediately project READY with 0 download bytes.
+    cs_catalog = deployment.load_deployment_catalog(deployment.CHARACTER_SHEET_CATALOG)
+    comp = cs_catalog["components"][0]
+    pinned = comp["files"][0]
+    pkg_dir = settings.comfyops_dir / "isolated-packages" / comp["component_id"]
+    pkg_file = pkg_dir / pinned["relative_path"]
+    real_sha, real_size = _make_valid_safetensors(pkg_file, seed_tag=b"legacy-cs")
+    patched_catalog = {
+        **cs_catalog,
+        "components": [
+            {
+                **comp,
+                "files": [{**pinned, "sha256": real_sha, "size": real_size}],
+            }
+        ],
+        "total_bytes": real_size,
+    }
+    monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", real_sha)
+    orig_loader = deployment.load_deployment_catalog
+
+    def _patched_loader(name: str):
+        if name == deployment.CHARACTER_SHEET_CATALOG:
+            return patched_catalog
+        return orig_loader(name)
+
+    monkeypatch.setattr(deployment, "load_deployment_catalog", _patched_loader)
+
+    with factory.begin() as db:
+        save_receipt(
+            db,
+            variant_id=None,
+            catalog_id="shine-qwen-image-loras-windows-x64",
+            catalog_version="1.0",
+            component=patched_catalog["components"][0],
+            root=settings.comfyops_dir / "isolated-packages",
+            directory=pkg_dir,
+        )
+    with factory() as db:
+        legacy_cap = setup_summary.capability_report(
+            db, settings, "character_sheet", installation=None, project_id=None
+        )
+        assert legacy_cap["state"] == "READY"
+        assert legacy_cap["facts"]["FILES_VERIFIED"] is True
+        assert legacy_cap["facts"]["RESOURCE_REGISTERED"] is True
+        assert legacy_cap["missing_bytes"] == 0
+        legacy_plan = setup_preparation.plan_prepare_downloads(
+            db, settings, capabilities=["character_sheet"], verify_runtime=True
+        )
+        assert legacy_plan["download_bytes"] == 0
+        assert legacy_plan["plans"][0]["needs_download"] is False
+
+    # 3. Legacy machine scenario B: file only exists on disk (no receipt) in isolated-packages;
+    #    resource_discovery + setup_reconcile verify by SHA-256 and register without re-downloading.
+    app2, factory2, settings2 = make_studio(tmp_path / "legacy-reconcile")
+    client2 = TestClient(app2)
+    pkg_dir2 = settings2.comfyops_dir / "isolated-packages" / comp["component_id"]
+    pkg_file2 = pkg_dir2 / pinned["relative_path"]
+    sha2, size2 = _make_valid_safetensors(pkg_file2, seed_tag=b"legacy-cs")
+    assert (sha2, size2) == (real_sha, real_size)
+
+    with factory2() as db:
+        disc = resource_discovery.report(db)
+        assert "character_sheet" in disc["capabilities"]
+        rec = setup_reconcile.reconcile_installation(
+            db, settings2, path=None, capability="character_sheet", adopt=False
+        )
+        assert rec["status"] == "RECONCILED"
+        assert rec["complete"] is True
+        assert comp["component_id"] in rec["registered"]
+
+    with factory2() as db:
+        cap2 = setup_summary.capability_report(
+            db, settings2, "character_sheet", installation=None, project_id=None
+        )
+        assert cap2["state"] == "READY"
+        assert cap2["missing_bytes"] == 0
+        plan2 = setup_preparation.plan_prepare_downloads(
+            db, settings2, capabilities=["character_sheet"], verify_runtime=True
+        )
+        assert plan2["download_bytes"] == 0
+
+    loras_resp = client2.get("/api/v1/loras?base_model=qwen_image_21")
+    assert loras_resp.status_code == 200
+    assert loras_resp.json()["character_sheet"]["lora_ready"] is True
+    assert loras_resp.json()["character_sheet"]["lora_id"] == cs.MULTIPLE_ANGLES_LORA_ID
+    assert loras.list_style_loras(factory2(), settings2, base_model=loras.IMAGE_LORA_BASE, probe_comfy=False)["items"]
+
+
+def test_materialprep_character_default_mode_runs_single_t2i_without_lora(tmp_path, monkeypatch):
+    from shine.quality.technical import TechnicalCheck
+
+    app, factory, settings = make_studio(tmp_path)
+    client = TestClient(app)
+
+    # Zero-LoRA machine: character_sheet_mode defaults to False -> character runs standard single-step T2I.
+    _project_id, item_ids, ctx = _seed_material_batch(
+        client, factory, settings, families=("character",), character_sheet_mode=False
+    )
+    char_item_id = item_ids[0]
+    MaterialItem = ctx["MaterialItem"]
+    CandidateAsset = ctx["CandidateAsset"]
+    mat_execution = ctx["mat_execution"]
+    mat_runtime = ctx["mat_runtime"]
+    object_info_fixture = ctx["object_info_fixture"]
+
+    with factory() as db:
+        item = db.get(MaterialItem, char_item_id)
+        assert not (item.payload or {}).get("character_sheet_mode")
+        assert "character_sheet_lora" not in (item.payload or {})
+
+    submitted: list[dict] = []
+
+    @contextmanager
+    def fake_resource_slot(*_args, **_kwargs):
+        yield "lease-zero-lora"
+
+    class SingleT2IClient:
+        def __init__(self, base_url, **_kwargs):
+            self.base_url = base_url
+
+        def object_info(self):
+            return object_info_fixture()
+
+        def queue_prompt(self, graph, **_kwargs):
+            submitted.append(graph)
+            return {"prompt_id": "t2i-only-1"}
+
+        def history(self, prompt_id):
+            return {
+                prompt_id: {
+                    "status": {"status_str": "success", "completed": True},
+                    "outputs": {
+                        "461": {"images": [{"filename": f"{prompt_id}.png", "subfolder": "", "type": "output"}]}
+                    },
+                }
+            }
+
+        def view(self, _filename, **_kwargs):
+            return _make_png(1024, 1024, (90, 120, 150))
+
+        def free_models(self):
+            return None
+
+    monkeypatch.setattr(mat_execution, "resource_slot", fake_resource_slot)
+    monkeypatch.setattr(mat_execution, "ComfyUIClient", SingleT2IClient)
+    monkeypatch.setattr(mat_execution, "_ensure_renderer", lambda *_a, **_k: {"renderer_owned": True})
+    monkeypatch.setattr(
+        mat_execution,
+        "resolve_runtime",
+        lambda *_a, **_k: {
+            "config": mat_runtime.ImageRuntimeConfig(),
+            "base_url": "http://127.0.0.1:8188",
+            "fingerprint": "f" * 64,
+            "graph_report": {"complete": True},
+            "object_info": object_info_fixture(),
+        },
+    )
+    monkeypatch.setattr(mat_execution, "POLL_INTERVAL_S", 0.0)
+    monkeypatch.setattr(
+        "shine.quality.technical._full_decode_check",
+        lambda *_a, **_k: TechnicalCheck(name="decode", status="pass", detail="decoded_ok"),
+    )
+
+    res = mat_execution.execute_item(factory, settings, char_item_id, "mat-worker-t2i")
+    assert res["status"] == "CANDIDATE_READY", res
+    assert len(submitted) == 1
+    assert all(node.get("class_type") != "LoraLoaderModelOnly" for node in submitted[0].values())
+    with factory() as db:
+        cand = db.get(CandidateAsset, res["candidate_id"])
+        assert cand is not None
+        assert cand.payload["media"]["width"] == 1024
+        assert cand.payload["media"]["height"] == 1024
+
+
+def test_materialprep_character_sheet_mode_missing_lora_refuses_synchronously_across_routes(tmp_path, monkeypatch):
+    from sqlalchemy import select
+
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement, PreProductionPlan
+    from shine.materialprep import service as mat_service
+    from shine.materialprep.models import MaterialItem, MaterialRun
+
+    app, factory, settings = make_studio(tmp_path)
+    client = TestClient(app)
+
+    # Readiness projection reports not ready when LoRA is absent.
+    loras_before = client.get("/api/v1/loras?base_model=qwen_image_21")
+    assert loras_before.status_code == 200
+    assert loras_before.json()["character_sheet"]["lora_ready"] is False
+    assert "设置 → 制作环境 → 角色五视图定妆照" in loras_before.json()["character_sheet"]["setup_hint"]
+
+    project_id = client.post("/api/v1/projects", json={"title": "同步裁决校验"}).json()["id"]
+    with factory.begin() as db:
+        plan_payload = {
+            "purpose": "asset_preparation",
+            "document_id": None,
+            "script_hash": "h",
+            "scene_preparations": [],
+            "requirements": [],
+            "visual_direction": None,
+            "confirmation": None,
+            "manifest": None,
+        }
+        plan = PreProductionPlan(
+            project_id=project_id,
+            payload=plan_payload,
+            sha256="p" * 64,
+            status="CONFIRMED",
+            purpose="asset_preparation",
+        )
+        db.add(plan)
+        db.flush()
+        req = AssetRequirement(
+            project_id=project_id,
+            plan_id=plan.id,
+            payload={"family": "character", "entity_id": "燕三娘", "description": "武侠女侠", "strategy": "generate"},
+            sha256="c" * 64,
+            status="CONFIRMED",
+        )
+        db.add(req)
+        db.flush()
+        conf_id = "a" * 64
+        conf_hash = "b" * 64
+        plan.payload = {
+            **plan_payload,
+            "requirements": [
+                {"requirement_id": req.id, "family": "character", "entity_id": "燕三娘", "description": "武侠女侠"}
+            ],
+            "confirmation": {"confirmation_id": conf_id, "confirmation_hash": conf_hash},
+        }
+        plan.sha256 = graph_hash(plan.payload)
+        db.flush()
+        snapshot = mat_service.confirmation_snapshot_hash(plan)
+        req_id = req.id
+        plan_id = plan.id
+
+    headers = {"X-Shine-Local-Action": "1"}
+
+    # 1. /generate refuses synchronously with 409 CHARACTER_SHEET_LORA_REQUIRED and creates no run/item.
+    gen_resp = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/generate",
+        headers=headers,
+        json={
+            "confirmation_id": conf_id,
+            "confirmation_hash": conf_hash,
+            "requirement_ids": [req_id],
+            "idempotency_key": "sync-refuse-gen-1",
+            "mode": "real",
+            "character_sheet_mode": True,
+        },
+    )
+    assert gen_resp.status_code == 409
+    assert gen_resp.json()["detail"]["code"] == "CHARACTER_SHEET_LORA_REQUIRED"
+    assert "设置 → 制作环境 → 角色五视图定妆照" in gen_resp.json()["detail"]["message"]
+
+    # 2. /regenerate refuses synchronously.
+    regen_resp = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/regenerate",
+        headers=headers,
+        json={
+            "requirement_id": req_id,
+            "confirmation_id": conf_id,
+            "confirmation_hash": conf_hash,
+            "idempotency_key": "sync-refuse-regen-1",
+            "brief": {
+                "schema_version": "1.0",
+                "appearance": "Ming-dynasty wuxia heroine in dark teal martial robe",
+                "must_keep": [],
+                "avoid": [],
+                "questions": [],
+            },
+            "seed": 1,
+            "character_sheet_mode": True,
+        },
+    )
+    assert regen_resp.status_code == 409
+    assert regen_resp.json()["detail"]["code"] == "CHARACTER_SHEET_LORA_REQUIRED"
+
+    # 3. /regenerate-all refuses synchronously.
+    regen_all_resp = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/regenerate-all",
+        headers=headers,
+        json={"idempotency_key": "sync-refuse-regen-all-1", "requirement_ids": [req_id], "character_sheet_mode": True},
+    )
+    assert regen_all_resp.status_code == 409
+    assert regen_all_resp.json()["detail"]["code"] == "CHARACTER_SHEET_LORA_REQUIRED"
+
+    # 4. /director/materials/commit refuses synchronously and rolls back cleanly.
+    commit_resp = client.post(
+        f"/api/v1/projects/{project_id}/director/materials/commit",
+        headers=headers,
+        json={
+            "plan_revision_id": plan_id,
+            "expected_snapshot": snapshot,
+            "decisions": [{"requirement_id": req_id, "strategy": "generate", "entity_id": "燕三娘"}],
+            "queue_generation": True,
+            "character_sheet_mode": True,
+        },
+    )
+    assert commit_resp.status_code == 409
+    assert commit_resp.json()["detail"]["code"] == "CHARACTER_SHEET_LORA_REQUIRED"
+
+    with factory() as db:
+        assert list(db.scalars(select(MaterialRun).where(MaterialRun.project_id == project_id))) == []
+        assert list(db.scalars(select(MaterialItem).where(MaterialItem.project_id == project_id))) == []
+
+    # 5. Once multiple-angles LoRA is installed, projection turns ready and /generate succeeds with frozen pin.
+    lora_row = _install_multiple_angles_lora(factory, settings, tmp_path)
+    monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", lora_row.sha256)
+
+    loras_after = client.get("/api/v1/loras?base_model=qwen_image_21")
+    assert loras_after.status_code == 200
+    assert loras_after.json()["character_sheet"]["lora_ready"] is True
+
+    ok_resp = client.post(
+        f"/api/v1/projects/{project_id}/material-preparation/generate",
+        headers=headers,
+        json={
+            "confirmation_id": conf_id,
+            "confirmation_hash": conf_hash,
+            "requirement_ids": [req_id],
+            "idempotency_key": "sync-ok-gen-1",
+            "mode": "real",
+            "character_sheet_mode": True,
+        },
+    )
+    assert ok_resp.status_code == 202
+    with factory() as db:
+        items = list(db.scalars(select(MaterialItem).where(MaterialItem.project_id == project_id)))
+        assert len(items) == 1
+        assert items[0].payload["character_sheet_mode"] is True
+        assert items[0].payload["character_sheet_lora"]["style_loras"][0]["sha256"] == lora_row.sha256
+

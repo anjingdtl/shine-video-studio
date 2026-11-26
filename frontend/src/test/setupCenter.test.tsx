@@ -57,6 +57,27 @@ describe('制作环境：检测快照与候选下载', () => {
     expect(stub.callsOf('POST', /setup\/prepare\/execute/)[0].body).toMatchObject({ capabilities: ['image_loras'] });
   });
 
+  it('独立展示角色五视图定妆照复选框并通过同一整备入口下发 capabilities: ["character_sheet"]', async () => {
+    stub.add({ method: 'POST', pattern: /setup\/prepare\/execute$/, respond: () => jsonResponse({
+      status: 'QUEUED', task_id: 'character-sheet-pack', steps: ['RECONCILE', 'DOWNLOAD'],
+    }) });
+    const user = userEvent.setup();
+    render(<SetupCenter projectId="proj-1" />);
+    await detect();
+    expect(screen.getByText(/生图风格 LoRA 包（写实 \/ 奇幻，约 436 MiB）/)).toBeInTheDocument();
+    const csCheckbox = screen.getByRole('checkbox', { name: /角色五视图定妆照（约 304 MiB）/ });
+    expect(csCheckbox).not.toBeChecked();
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(0);
+    await user.click(csCheckbox);
+    await user.click(screen.getByRole('button', { name: '确认整备所选能力' }));
+    await user.click(screen.getByRole('button', { name: '开始准备' }));
+    await waitFor(() => expect(stub.callsOf('POST', /setup\/prepare\/execute/)).toHaveLength(1));
+    expect(stub.callsOf('POST', /setup\/prepare\/execute/)[0].body).toMatchObject({
+      capabilities: ['character_sheet'],
+      deep_scan: false,
+    });
+  });
+
   it('硬件推荐候选时仍默认使用服务端指定的已验收基线', async () => {
     stub.add({ method: 'GET', pattern: /setup\/variant-recommendations$/, respond: () => jsonResponse({
       tier: 'lowend_12gb', host: { gpu: 'RTX 4070', vram_mb: 12282 },

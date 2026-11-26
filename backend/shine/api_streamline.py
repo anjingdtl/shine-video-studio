@@ -592,6 +592,7 @@ class MaterialCommitBody(ImageStyleRequest):
     expected_snapshot: str = Field(min_length=64, max_length=64)
     decisions: list[MaterialDecisionBody] = Field(min_length=1, max_length=200)
     queue_generation: bool = True
+    character_sheet_mode: bool = False
     notes: str = Field(default="", max_length=600)
 
 
@@ -627,6 +628,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
         "plan_revision_id": body.plan_revision_id,
         "expected_snapshot": body.expected_snapshot,
         "decisions": decision_rows,
+        **({"character_sheet_mode": True} if body.queue_generation and body.character_sheet_mode else {}),
         **image_style,
     })
     receipt = _material_receipt(db, project_id, request_key)
@@ -672,6 +674,7 @@ def commit_director_materials(project_id: str, body: MaterialCommitBody, actor: 
                 rights_id=None,
                 commit=False,
                 image_style=image_style,
+                character_sheet_mode=body.character_sheet_mode,
                 settings=settings,
             )
         result = {

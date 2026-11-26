@@ -61,6 +61,9 @@ STEP_LABELS = {
 }
 
 
+IMAGE_LORA_PACK_CAPS = frozenset({"image_loras", "character_sheet"})
+
+
 def _steps_for(capabilities: list[str], *, verify_runtime: bool,
                deep_scan: bool = False, adopt: bool = True,
                reconcile_only: bool = False) -> list[str]:
@@ -71,7 +74,7 @@ def _steps_for(capabilities: list[str], *, verify_runtime: bool,
         steps.append("SCAN")
     # 补工具是整备链的一环（与下载/实例/核验同一个后台任务），不再是页面直连
     # 的独立长请求；工具已达标时这一步如实跳过。
-    if capabilities != ["image_loras"]:
+    if not (capabilities and set(capabilities).issubset(IMAGE_LORA_PACK_CAPS)):
         steps.append("TOOL_REPAIR")
     steps.extend(["RECONCILE", "DOWNLOAD"])
     if "h3" in capabilities or "image" in capabilities:
@@ -654,7 +657,7 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
 
     request = task.get("request") or {}
     capabilities = [row for row in request.get("capabilities") or []
-                    if row in {"h3", "image", "relayvsr", "image_loras"}]
+                    if row in {"h3", "image", "relayvsr", "image_loras", "character_sheet"}]
     if not capabilities:
         from shine.comfyops.local import reconcile_stopped_isolated_attempts
 
@@ -670,7 +673,7 @@ def _step_reconcile(factory, settings, task) -> dict[str, Any]:
         request.get("adopt", True)
         and not (selected.get("managed") and not selected.get("adopted"))
     )
-    if resolved.get("choice_required") and capabilities != ["image_loras"]:
+    if resolved.get("choice_required") and not set(capabilities).issubset(IMAGE_LORA_PACK_CAPS):
         return {"status": "FAILED", "code": "INSTALLATION_SELECTION_REQUIRED",
                 "detail": "检索发现多套 ComfyUI，请选择本次使用的安装。"}
     notes: list[str] = []
@@ -889,7 +892,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     # optional image LoRA pack keeps its own progress in the installer ledger.
     background_caps = {key.lower() for key in REVIEW_COMPONENTS}
     if {"h3", "image"}.intersection(capabilities):
-        background_caps.add("image_loras")
+        background_caps.update(IMAGE_LORA_PACK_CAPS)
     downloads = task.setdefault("downloads", {})
 
     pending: list[str] = []
@@ -982,7 +985,7 @@ def _step_download(factory, settings, task) -> dict[str, Any]:
     from shine.services import add_audit
 
     guard = _claim_guard_for(task)
-    for capability, components, catalog_file in sorted(plans_needed, key=lambda row: row[0] == "image_loras"):
+    for capability, components, catalog_file in sorted(plans_needed, key=lambda row: row[0] in IMAGE_LORA_PACK_CAPS):
         # create_install_plan 自己提交建计划；批准与审计必须显式提交，
         # 否则会话关闭即回滚，queue_install_attempt 读到的仍是 AWAITING_APPROVAL。
         with factory() as db:

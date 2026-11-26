@@ -353,6 +353,16 @@ def _verify_recorded_paths(receipt: dict, component: dict,
             "paths_verified": True}
 
 
+_MIGRATED_COMPONENT_CATALOGS: dict[tuple[str, str], frozenset[str]] = {
+    # ``qwen-image-2.1-lora-multiple-angles`` was split out of the style LoRA pack into its own
+    # optional capability catalog. Existing machines that already verified the exact pinned bytes
+    # under the former catalog still hold valid receipts (checked against component_identity + disk).
+    ("shine-qwen-character-sheet-windows-x64", "qwen-image-2.1-lora-multiple-angles"): frozenset(
+        {"shine-qwen-image-loras-windows-x64"}
+    ),
+}
+
+
 def verify_receipt(db, *, component: dict, variant_id: str | None,
                    catalog_id: str | None, catalog_version: str | None,
                    cache_dir: Path | None = None, read_only: bool = False) -> dict:
@@ -378,7 +388,8 @@ def verify_receipt(db, *, component: dict, variant_id: str | None,
     if receipt.get("identity") != expected:
         return {"verified": False, "present": False, "reason": "RECEIPT_IDENTITY_CHANGED",
                 "identity": expected, "receipt": receipt}
-    if catalog_id and receipt.get("catalog_id") not in {None, catalog_id}:
+    allowed_catalogs = {None, catalog_id, *_MIGRATED_COMPONENT_CATALOGS.get((str(catalog_id or ""), component_id), ())}
+    if catalog_id and receipt.get("catalog_id") not in allowed_catalogs:
         return {"verified": False, "present": False, "reason": "RECEIPT_CATALOG_CHANGED",
                 "identity": expected, "receipt": receipt}
     check = _verify_recorded_paths(receipt, component, cache_dir=cache_dir, read_only=read_only)

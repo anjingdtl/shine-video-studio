@@ -697,7 +697,7 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             graph = _build_graph(config, prompt, seed=seed, width=width, height=height,
                                  style_loras=style_loras, style_sampling=payload.get("style_sampling"))
             graph_sha = graph_hash(graph)
-            if family == "character" and kind == "production":
+            if family == "character" and kind == "production" and bool(payload.get("character_sheet_mode")):
                 return _render_character_sheet_inside_lease(
                     factory, settings, context, version, client, lease_id, graph, graph_sha,
                     fingerprint, family, prompt, renderer, object_info=resolved.get("object_info"),
@@ -1044,12 +1044,15 @@ def _render_character_sheet_inside_lease(
     item_id = context["item_id"]
     live_object_info = object_info if object_info is not None else client.object_info()
 
-    # Fail-closed before running T2I: validate multiple-angles LoRA + edit graph contract first.
-    with factory.begin() as db:
-        cs_frozen = freeze_character_sheet_lora(db, settings)
+    # Fail-closed before running T2I: re-verify frozen multiple-angles LoRA (or freeze if
+    # legacy item) + live ComfyUI visibility + edit graph contract first.
+    cs_frozen = context["item_payload"].get("character_sheet_lora")
+    if not isinstance(cs_frozen, dict) or not cs_frozen.get("style_loras"):
+        with factory.begin() as db:
+            cs_frozen = freeze_character_sheet_lora(db, settings)
     cs_style_payload = {
         "style_loras": cs_frozen["style_loras"],
-        "style_sampling": cs_frozen["style_sampling"],
+        "style_sampling": cs_frozen.get("style_sampling") or dict(CHARACTER_SHEET_LORA_SAMPLING),
     }
     cs_loras = resolve_live_image_loras(factory, settings, cs_style_payload, object_info=live_object_info)
     if not cs_loras:

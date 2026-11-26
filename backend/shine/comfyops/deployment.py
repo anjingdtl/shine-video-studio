@@ -742,10 +742,14 @@ IMAGE_LORA_COMPONENTS = (
     "qwen-image-2.1-lora-fix",
     "qwen-image-2.1-lora-natural-exposure",
     "qwen-image-2.1-lora-anything2real",
+)
+CHARACTER_SHEET_CATALOG = "qwen-character-sheet-windows-x64"
+CHARACTER_SHEET_COMPONENTS = (
     "qwen-image-2.1-lora-multiple-angles",
 )
+ALL_IMAGE_LORA_COMPONENTS = (*IMAGE_LORA_COMPONENTS, *CHARACTER_SHEET_COMPONENTS)
 OPTIONAL_INSTALL_COMPONENTS = frozenset({
-    *REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS, RELAYVSR_CORE, *IMAGE_LORA_COMPONENTS,
+    *REVIEW_COMPONENTS.values(), *RELAYVSR_COMPONENTS, RELAYVSR_CORE, *ALL_IMAGE_LORA_COMPONENTS,
     "relayvsr-comfy-kitchen", "relayvsr-comfy-aimdo",
 })
 
@@ -769,7 +773,7 @@ def optional_only_plan(payload: dict | None) -> bool:
 
 def image_lora_only_plan(payload: dict | None) -> bool:
     packages = {row.get("id") for row in ((payload or {}).get("packages") or [])}
-    return bool(packages) and packages.issubset(IMAGE_LORA_COMPONENTS)
+    return bool(packages) and packages.issubset(ALL_IMAGE_LORA_COMPONENTS)
 
 
 IMAGE_CAPABILITY_CATALOG = "qwen-image-2.1-windows-x64"

@@ -18,7 +18,7 @@ import { describeBlocker } from '../errorActions';
  * - `PENDING_RECIPE` 不是「已就绪」，页面不能给它绿灯。
  */
 
-export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr' | 'image_loras';
+export type CapabilityKey = 'h3' | 'image' | 'vlm' | 'asr' | 'relayvsr' | 'image_loras' | 'character_sheet';
 
 export type CapabilityFacts = {
   FILES_FOUND?: boolean;
@@ -128,7 +128,9 @@ export type MachineProgress = {
   active: boolean; percent: number; label: string; detail: string; source: string;
 };
 
-export const CAPABILITY_ORDER: CapabilityKey[] = ['h3', 'image', 'vlm', 'asr', 'relayvsr', 'image_loras'];
+export const CAPABILITY_ORDER: CapabilityKey[] = [
+  'h3', 'image', 'vlm', 'asr', 'relayvsr', 'image_loras', 'character_sheet',
+];
 
 function gib(bytes?: number | null): string {
   if (!bytes) return '0 GiB';
@@ -342,6 +344,13 @@ export function SetupEnvironmentStatus({
                 return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
                   onClick={() => onPrepare?.(key, summary as SetupSummary)}>
                   <Download size={12} /> 整备生图风格 LoRA
+                </button>;
+              }
+              if (key === 'character_sheet') {
+                if (!action) return null;
+                return <button type="button" className="btn-primary setup-cap-fix" disabled={!!busy}
+                  onClick={() => onPrepare?.(key, summary as SetupSummary)}>
+                  <Download size={12} /> 整备角色五视图定妆照
                 </button>;
               }
               // 文件已齐但运行未核验：交给同一个「一键准备」后台任务核对运行

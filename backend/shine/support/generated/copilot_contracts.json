@@ -1001,7 +1001,7 @@
       "body": {
         "fields": {
           "capabilities": {
-            "maxItems": 6,
+            "maxItems": 7,
             "minItems": 1,
             "type": "array"
           },
@@ -1041,11 +1041,12 @@
                   "vlm",
                   "asr",
                   "relayvsr",
-                  "image_loras"
+                  "image_loras",
+                  "character_sheet"
                 ],
                 "type": "string"
               },
-              "maxItems": 6,
+              "maxItems": 7,
               "minItems": 1,
               "type": "array"
             },
@@ -1107,7 +1108,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "0dea54b32fe39465cad019097b4cab9175a74c66b594a3a6fbb0fb37a4494896"
+        "schema_digest": "25a0ca7310ee97762626f1c400d7c649c4ab1a371f3c0654bd6bb49b48f17169"
       },
       "operation": "POST /api/v1/setup/prepare/execute",
       "parameters": [
@@ -1818,7 +1819,7 @@
   "capabilities": [
     {
       "action_id": "setup_repair",
-      "api_contract_digest": "d445660d7a939862a16370e7bdc96021723d11758a2b6b132a2b4e7ec6f64b6e",
+      "api_contract_digest": "fa58be246f678fc8fb7cf07764fe9cb185f29c075428d17252f72798c1537cf2",
       "api_operations": [
         "POST /api/v1/setup/prepare/execute",
         "GET /api/v1/setup/verdict"
@@ -1827,9 +1828,9 @@
       "authority": "GET /api/v1/setup/verdict",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示要补的文件与安装位置，确认后由原安装器执行。",
-      "contract_digest": "1f069da2b73f06564bbecb4401640a3847786659c28b09113ec482bc78b035bd",
-      "contract_revision": 4,
-      "description": "复用统一安装器的持久准备任务。生图风格 LoRA 包按用户选择单独整备。",
+      "contract_digest": "f4c004b64a4368571ead578de3b2f49605f1511bf62b4fa705b4fe569039a4b1",
+      "contract_revision": 5,
+      "description": "复用统一安装器的持久准备任务。生图风格 LoRA 包、角色五视图定妆照按用户选择单独整备。",
       "dispatch": "setup_repair",
       "examples": [
         "把 H3 需要的模型文件补齐"
@@ -1857,10 +1858,11 @@
             "vlm",
             "asr",
             "relayvsr",
-            "image_loras"
+            "image_loras",
+            "character_sheet"
           ],
           "has_default": false,
-          "max_length": 6,
+          "max_length": 7,
           "min_length": 1,
           "name": "capabilities",
           "nullable": false,
@@ -1972,7 +1974,7 @@
     },
     {
       "action_id": "setup_reconcile",
-      "api_contract_digest": "d445660d7a939862a16370e7bdc96021723d11758a2b6b132a2b4e7ec6f64b6e",
+      "api_contract_digest": "fa58be246f678fc8fb7cf07764fe9cb185f29c075428d17252f72798c1537cf2",
       "api_operations": [
         "POST /api/v1/setup/prepare/execute",
         "GET /api/v1/setup/verdict"
@@ -3417,9 +3419,9 @@
     }
   ],
   "digests": {
-    "api_contract": "a072ca7ccde56397f08bf41ed8722684618a4c66501b35556f385c9c8c459878",
-    "api_schema": "0807460b8153a327631fbcd13baa50f2905b15a7fc98b0043df6c6732894f355",
-    "contracts": "0cb7fece8a2c47721dae9ff9142c528e8a7a34db984fa33c8021df611293baf4"
+    "api_contract": "5dfe9252e08980c1d1e6267bdc65930f1cbff59f426211cd3516e50b327a84bd",
+    "api_schema": "e5c335d0a6f894544cea33f2b16fb374f1097fd861e628965b870edf2afe810c",
+    "contracts": "df39378a030ad6be7c2db48671e4b7d80a423f9825d6d984d9a887e7defeac85"
   },
   "discovered": [
     {

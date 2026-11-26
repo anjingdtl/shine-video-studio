@@ -933,6 +933,7 @@ def _setup_plan(db, settings, *, request: str, project_id: str | None) -> dict[s
         ("vlm", ("审片", "vlm")),
         ("asr", ("语音", "asr")),
         ("relayvsr", ("精修", "relayvsr", "超分")),
+        ("character_sheet", ("定妆照", "五视图", "character_sheet")),
     )
     wanted = [
         cap

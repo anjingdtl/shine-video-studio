@@ -1,0 +1,39 @@
+{
+  "catalog_id": "shine-qwen-character-sheet-windows-x64",
+  "catalog_version": "1.0",
+  "schema_version": 1,
+  "generated": "2026-11-26",
+  "platform": {
+    "os": "windows-x64"
+  },
+  "components": [
+    {
+      "component_id": "qwen-image-2.1-lora-multiple-angles",
+      "kind": "model",
+      "revision": "175b29b6eb41",
+      "license_id": "apache-2.0",
+      "license_url": "https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/blob/175b29b6eb41307473eebc363fca8fc198216b60/README.md",
+      "usage": "commercial",
+      "origin_repo": "akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA",
+      "origin_revision": "175b29b6eb41307473eebc363fca8fc198216b60",
+      "origin_kind": "huggingface-lfs",
+      "destination_family": "loras",
+      "dependencies": [],
+      "role": "style_lora",
+      "status": "READY",
+      "files": [
+        {
+          "relative_path": "angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+          "sha256": "548c57977c3f1c09c2c9e5f4e83e930cbc6f719c878a576ab8666ce29fef39b6",
+          "size": 318819792,
+          "url": "https://huggingface.co/akhaliq/Qwen-Image-2.1-Multiple-Angles-LoRA/resolve/175b29b6eb41307473eebc363fca8fc198216b60/checkpoints_v2/angles_v2_full_qwen21_multiple_angles_v2_qwen21_multiple_angles_v2_000001500.safetensors",
+          "redirect_hosts": [
+            "huggingface.co",
+            "us.aws.cdn.hf.co"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_bytes": 318819792
+}

@@ -15,14 +15,29 @@ from tests.test_style_lora_assembly import _make_valid_safetensors
 def test_optional_pack_is_separate_from_required_install_plans():
     from shine.comfyops.setup_preparation import _steps_for
 
-    catalog = deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)
-    ids = {row["component_id"] for row in catalog["components"]}
-    assert ids == set(deployment.IMAGE_LORA_COMPONENTS)
-    assert sum(file["size"] for row in catalog["components"] for file in row["files"]) == 776_384_068
-    assert deployment.optional_only_plan({"packages": [{"id": cid} for cid in ids]})
+    style_catalog = deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)
+    style_ids = {row["component_id"] for row in style_catalog["components"]}
+    assert style_ids == set(deployment.IMAGE_LORA_COMPONENTS)
+    assert len(style_ids) == 3
+    assert "qwen-image-2.1-lora-multiple-angles" not in style_ids
+    assert sum(file["size"] for row in style_catalog["components"] for file in row["files"]) == 457_564_276
+
+    cs_catalog = deployment.load_deployment_catalog(deployment.CHARACTER_SHEET_CATALOG)
+    cs_ids = {row["component_id"] for row in cs_catalog["components"]}
+    assert cs_ids == set(deployment.CHARACTER_SHEET_COMPONENTS) == {"qwen-image-2.1-lora-multiple-angles"}
+    assert sum(file["size"] for row in cs_catalog["components"] for file in row["files"]) == 318_819_792
+    assert style_ids.isdisjoint(cs_ids)
+
+    all_ids = style_ids | cs_ids
+    assert deployment.optional_only_plan({"packages": [{"id": cid} for cid in style_ids]})
+    assert deployment.optional_only_plan({"packages": [{"id": cid} for cid in cs_ids]})
+    assert deployment.image_lora_only_plan({"packages": [{"id": cid} for cid in cs_ids]})
     for name in (deployment.IMAGE_CAPABILITY_CATALOG, "h3-ref2va-windows-x64"):
-        assert ids.isdisjoint(row["component_id"] for row in deployment.load_deployment_catalog(name)["components"])
+        assert all_ids.isdisjoint(row["component_id"] for row in deployment.load_deployment_catalog(name)["components"])
     assert _steps_for(["image_loras"], verify_runtime=True, deep_scan=False, adopt=True) == ["RECONCILE", "DOWNLOAD"]
+    assert _steps_for(
+        ["character_sheet"], verify_runtime=True, deep_scan=False, adopt=True
+    ) == ["RECONCILE", "DOWNLOAD"]
 
 
 def test_optional_pack_does_not_hold_worker_tick_or_claim_twice(tmp_path, monkeypatch):
@@ -68,13 +83,16 @@ def test_optional_pack_does_not_hold_worker_tick_or_claim_twice(tmp_path, monkey
 
 def test_verified_packages_discover_once_and_project_preset_availability(tmp_path, monkeypatch):
     _app, factory, settings = make_studio(tmp_path)
-    catalog = deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)
+    components = [
+        *deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)["components"],
+        *deployment.load_deployment_catalog(deployment.CHARACTER_SHEET_CATALOG)["components"],
+    ]
     packages = settings.comfyops_dir / "isolated-packages"
-    for index, component in enumerate(catalog["components"]):
+    for index, component in enumerate(components):
         file, = component["files"]
         path = packages / component["component_id"] / file["relative_path"]
         file["sha256"], file["size"] = _make_valid_safetensors(path, seed_tag=bytes([index]))
-    monkeypatch.setattr(loras, "_image_lora_components", lambda: catalog["components"])
+    monkeypatch.setattr(loras, "_image_lora_components", lambda: components)
     with factory.begin() as db:
         rows = loras.sync_discovered_loras(db, settings, base_model=loras.IMAGE_LORA_BASE)
         assert len(rows) == 4
@@ -89,7 +107,7 @@ def test_verified_packages_discover_once_and_project_preset_availability(tmp_pat
         cinematic = listed["presets"][0]
         assert {row["status"] for row in cinematic["loras"]} == {"COMFY_UNREACHABLE"}
     yaml = loras.style_lora_extra_paths_file(settings).read_text(encoding="utf-8")
-    assert all(cid in yaml for cid in deployment.IMAGE_LORA_COMPONENTS)
+    assert all(cid in yaml for cid in deployment.ALL_IMAGE_LORA_COMPONENTS)
 
 
 def test_image_selection_uses_ledger_metadata_and_fences_active_task(tmp_path):

@@ -52,6 +52,8 @@ def _capability_catalog(capability: str) -> dict:
         return deployment.load_deployment_catalog(deployment.RELAYVSR_CATALOG)
     if capability == "image_loras":
         return deployment.load_deployment_catalog(deployment.IMAGE_LORA_CATALOG)
+    if capability == "character_sheet":
+        return deployment.load_deployment_catalog(deployment.CHARACTER_SHEET_CATALOG)
     return deployment.load_default_catalog()
 
 
@@ -234,6 +236,25 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
 
                     candidates.append({**item, "component_id": component["component_id"],
                                        "path": str(source), "stat": _stat_identity(source.stat())})
+        if capability in {"image_loras", "character_sheet"}:
+            from shine.comfyops.existing_installation import _stat_identity
+            from shine.comfyops.loras import managed_user_loras_dir
+
+            user_lora_dir = managed_user_loras_dir(settings)
+            user_files = sorted(user_lora_dir.glob("*.safetensors")) if user_lora_dir.is_dir() else []
+            for component in catalog.get("components") or []:
+                if component.get("kind") != "model":
+                    continue
+                for item in component.get("files") or []:
+                    expected_size = int(item.get("size") or -1)
+                    for source in user_files:
+                        try:
+                            st = source.stat()
+                        except OSError:
+                            continue
+                        if st.st_size == expected_size:
+                            candidates.append({**item, "component_id": component["component_id"],
+                                               "path": str(source), "stat": _stat_identity(st)})
         report = _with_scan_candidates(report, candidates)
         cache_root = Path(settings.comfyops_dir) / "isolated-packages" / ".cache"
         result = verify_models(report, report["snapshot"], cache_dir=cache_root)
@@ -274,7 +295,7 @@ def reconcile_installation(db, settings, *, path: str | None, project_id: str | 
         candidate_dirs = [cache_root, *(Path(row["path"]).parent for row in candidates)]
         registered = register_verified_packages(db, verified, catalog, root=report["root"],
                                                 extra_roots=candidate_dirs)
-        if capability == "image_loras":
+        if capability in {"image_loras", "character_sheet"}:
             from shine.comfyops.loras import IMAGE_LORA_BASE, sync_discovered_loras
 
             sync_discovered_loras(db, settings, base_model=IMAGE_LORA_BASE)

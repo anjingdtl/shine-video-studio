@@ -2295,6 +2295,7 @@ export const commitDirectorMaterials = (
     decisions: Array<{ requirement_id: string; strategy: string; entity_id?: string | null;
                        asset_id?: string | null }>;
     queue_generation?: boolean;
+    character_sheet_mode?: boolean;
     notes?: string;
   },
 ) => api<DirectorMaterialCommitResult>(`/projects/${projectId}/director/materials/commit`, json('POST', body));
