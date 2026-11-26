@@ -1617,3 +1617,34 @@ def test_setup_download_waits_for_cached_lora_packs_and_validate_defers_when_thr
     val_res = setup_preparation._step_validate(factory, settings, task)
     assert val_res["status"] == "PENDING"
     assert val_res["code"] == "BACKGROUND_INSTALL_IN_PROGRESS"
+
+
+def test_material_preferences_persist_per_project_and_gate_on_lora(api, tmp_path, monkeypatch):
+    """5-view toggle preference persists per project and forces effective=false if LoRA is absent."""
+    from shine.asset_center import character_sheet as cs
+    from tests.conftest import create_project
+
+    client, factory, settings = api
+    p1 = create_project(client, "偏好项目A")
+    p2 = create_project(client, "偏好项目B")
+
+    # Without LoRA, saving True keeps stored preference but effective_character_sheet_mode stays False.
+    r1 = client.put(
+        f"/api/v1/projects/{p1}/material-preparation/preferences",
+        json={"character_sheet_mode": True},
+        headers={"x-shine-local-action": "1"},
+    )
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["character_sheet_mode"] is True
+    assert r1.json()["effective_character_sheet_mode"] is False
+
+    # Install Multiple-Angles LoRA -> reload reads effective True on p1, still False on p2.
+    lora = _install_multiple_angles_lora(factory, settings, tmp_path)
+    monkeypatch.setattr(cs, "MULTIPLE_ANGLES_LORA_SHA256", lora.sha256)
+    g1 = client.get(f"/api/v1/projects/{p1}/material-preparation").json()
+    assert g1["preferences"]["effective_character_sheet_mode"] is True
+    g2 = client.get(f"/api/v1/projects/{p2}/material-preparation").json()
+    assert g2["preferences"]["effective_character_sheet_mode"] is False
+    d1 = client.get(f"/api/v1/projects/{p1}/director/materials/requirements").json()
+    assert d1["preferences"]["effective_character_sheet_mode"] is True
+

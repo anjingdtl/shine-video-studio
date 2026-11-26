@@ -492,7 +492,10 @@ function App() {
   const materialMissing = journeyCount(materialStage, 'material_missing_count') ?? 0;
   const storyboardStage = journey?.stages.find((stage) => stage.id === 'storyboard');
   const productionStage = journey?.stages.find((stage) => stage.id === 'production');
-  const projectShotCount = journeyCount(storyboardStage, 'shot_count') ?? shots.length;
+  const projectShotCount = journeyCount(storyboardStage, 'confirmed_shot_count')
+    ?? journeyCount(storyboardStage, 'planned_shot_count')
+    ?? journeyCount(storyboardStage, 'shot_count')
+    ?? shots.length;
   const plannedShotCount = journeyCount(storyboardStage, 'planned_shot_count') ?? projectShotCount;
   // 分集未物化时「在册」是 0，但逐场落镜已有真实镜头：页头与折叠行读同一份
   // journey 事实，不得一个说 0 一个说 13。

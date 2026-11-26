@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, Clapperboard, Plus } from 'lucide-react';
 import {
-  api, type Asset, type Journey, type Project, type Shot, type StyleVersion, type WorkflowKind,
+  api, type Asset, type Journey, type Project, type StyleVersion, type WorkflowKind,
 } from '../api';
 import type { M4Overview } from '../manual4/api/client';
 
@@ -106,22 +106,29 @@ export function ProjectPortfolio({
           return { ...emptyRow(project, 'manual4'), state: 'error' };
         }
       }
-      const [assetResult, styleResult, shotResult, journeyResult, deliveryResult] = await Promise.allSettled([
+      const [assetResult, styleResult, journeyResult, deliveryResult] = await Promise.allSettled([
         api<Asset[]>(`/projects/${project.id}/assets`),
         api<StyleVersion[]>(`/projects/${project.id}/styles`),
-        api<Shot[]>(`/projects/${project.id}/shots`),
         api<Journey>(`/projects/${project.id}/journey`),
         api<unknown[]>(`/projects/${project.id}/deliveries`),
       ]);
       const assets = valueOf(assetResult, [] as Asset[]);
       const styles = valueOf(styleResult, [] as StyleVersion[]);
-      const shots = valueOf(shotResult, [] as Shot[]);
       const journey = valueOf(journeyResult, null as Journey | null);
       const deliveries = valueOf(deliveryResult, [] as unknown[]);
       const currentStyle = styles.find((style) => style.id === project.frozen_style_version_id)
         ?? styles.at(-1) ?? null;
-      const failed = [assetResult, styleResult, shotResult, journeyResult]
+      const failed = [assetResult, styleResult, journeyResult]
         .some((result) => result.status === 'rejected');
+      const scopeObj = (journey?.scope ?? {}) as { confirmed_shot_count?: number; shot_count?: number };
+      const storyboardFacts = journey?.stages.find((stage) => stage.id === 'storyboard')?.facts as
+        | { confirmed_shot_count?: number; planned_shot_count?: number; shot_count?: number }
+        | undefined;
+      const confirmedShots = scopeObj.confirmed_shot_count
+        ?? storyboardFacts?.confirmed_shot_count
+        ?? scopeObj.shot_count
+        ?? storyboardFacts?.planned_shot_count
+        ?? 0;
       return {
         id: project.id,
         title: project.title,
@@ -129,7 +136,7 @@ export function ProjectPortfolio({
         approvedAssets: assets.filter((asset) => asset.approved && asset.locked).length,
         totalAssets: assets.length,
         styleVersion: currentStyle?.version ?? null,
-        shots: shots.length,
+        shots: confirmedShots,
         outputs: deliveries.length,
         nextStage: journey?.next_stage ?? null,
         state: failed ? 'error' : 'ready',

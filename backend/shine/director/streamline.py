@@ -1798,6 +1798,26 @@ def confirm_episode_shots(db, project_id: str, episode_id: str, *, actor: str,
         raise HTTPException(409, {"code": "EPISODE_SECTION_NOT_STORYBOARDED",
                                   "message": "本集还有场次没有拆成镜头", "episode_id": episode_id,
                                   "pending": pending[:50]})
+    from shine.agents.continuity_engine import check_continuation_opening
+
+    for idx in range(1, len(ordered_shots)):
+        prev_spec = ordered_shots[idx - 1].spec or {}
+        cur_shot = ordered_shots[idx]
+        cur_spec = cur_shot.spec or {}
+        cur_mode = ((cur_spec.get("continuity") or {}).get("mode")) or "cut"
+        opening_conflicts = check_continuation_opening(
+            prev_spec, cur_spec, mode=str(cur_mode), shot_id=cur_shot.id
+        )
+        if opening_conflicts:
+            raise HTTPException(409, {
+                "code": "CONTINUATION_OPENING_CONFLICT",
+                "message": (
+                    "接拍镜头的起手姿态与上一镜末帧或首个动作自相矛盾，"
+                    "请先修订镜头起手状态或改为切镜（CUT）后再确认。"
+                ),
+                "episode_id": episode_id,
+                "details": opening_conflicts,
+            })
     # The episode is confirmed whole: every one of its sections has landed and
     # every landed shot goes into it.  The landed total is still checked
     # against the target window the plan was confirmed under, but a total

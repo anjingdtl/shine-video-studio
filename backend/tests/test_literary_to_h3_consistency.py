@@ -20,6 +20,7 @@ from shine.agents.scene_director import scene_director_prompt
 from shine.h3.compiler import (
     COMPILER_VERSION,
     LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+    LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     LEGACY_THIN_SHELL_COMPILER_VERSION,
     H3PromptCompiler,
 )
@@ -400,9 +401,15 @@ def test_h3_compiler_v21_resolves_character_tokens_anchors_outfit_and_distinguis
         compiler_version=LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     )
     assert compiled.compiler_version == LEGACY_ANCHORED_TOKENS_COMPILER_VERSION == "shine-h3-compiler/2.1.0"
-    # 2.2.0 继承 2.1.0 的全部锚定与图片角色行为：没有锁定故事事实的镜头，两个版本逐字节相同。
+    # 2.2.0 与当前 2.3.0 继承 2.1.0 的全部锚定与图片角色行为：对于 cut 且无锁定故事事实的镜头逐字节相同。
+    scoped_220 = compiler.compile(
+        spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA,
+        compiler_version=LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+    )
+    assert scoped_220.compiler_version == LEGACY_SCOPED_FACTS_COMPILER_VERSION == "shine-h3-compiler/2.2.0"
+    assert scoped_220.prompt == compiled.prompt
     current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA)
-    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.2.0"
+    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.3.0"
     assert current.prompt == compiled.prompt
     desc = compiled.sections["detailed_description"]
     assert "{{C2}}" not in desc and "{{C1}}" not in desc

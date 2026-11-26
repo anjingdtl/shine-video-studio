@@ -2225,6 +2225,7 @@ class AdoptionPreviewRequest(BaseModel):
     shot_ids: list[str] | None = Field(default=None, max_length=200)
     role: str | None = None
     entity_id: str | None = None
+    allow_revise_frozen: bool = False
 
 
 class AdoptionRequest(AdoptionPreviewRequest):
@@ -2329,6 +2330,9 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
     use_as = "subject" if (body.role == "character" or asset.kind == "image" and asset.role == "character") else (
         {"image": "picture", "video": "video", "audio": "audio"}.get(asset.kind, "picture")
     )
+    from shine.materialprep.service import _entity_matches
+
+    target_entity = (body.entity_id or asset.entity_id or "").strip()
     entries = []
     for shot in scoped:
         already = [row for row in shot.bindings if row.asset_id == asset.id]
@@ -2344,6 +2348,24 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
                 ),
             ).order_by(Job.created_at.desc())
         ).first()
+        replaced_links = []
+        for link in sorted(shot.bindings, key=lambda item: item.ordinal):
+            if link.asset_id == asset.id or link.use_as != use_as:
+                continue
+            linked_asset = db.get(Asset, link.asset_id)
+            if linked_asset is None:
+                continue
+            if asset.role == "scene":
+                if linked_asset.role == "scene" and (
+                    not target_entity or _entity_matches("scene", linked_asset.entity_id, target_entity)
+                ):
+                    replaced_links.append((link, linked_asset))
+            elif linked_asset.role == asset.role and target_entity and (
+                _entity_matches(asset.role, link.role, target_entity)
+                or _entity_matches(asset.role, linked_asset.entity_id, target_entity)
+            ):
+                replaced_links.append((link, linked_asset))
+        package_blocker = bool(package_id and not body.allow_revise_frozen)
         entries.append({
             "shot_id": shot.id,
             "shot_name": shot.name,
@@ -2353,6 +2375,9 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
             "use_as": already[0].use_as if already else use_as,
             "will_bump_revision": not already,
             "confirmed_package_id": package_id,
+            "requires_shot_revision": bool(package_id and body.allow_revise_frozen and not already),
+            "replaces_asset_id": replaced_links[0][1].id if replaced_links else None,
+            "replaces_asset_filename": replaced_links[0][1].filename if replaced_links else None,
             "production_job_id": getattr(in_flight, "id", None),
             "production_status": getattr(in_flight, "status", None),
             "rights": {"approved": rights["approved"], "code": rights["code"],
@@ -2361,13 +2386,13 @@ def _adoption_plan(db, body: AdoptionPreviewRequest) -> tuple[Any, list[dict[str
                 "ASSET_RIGHTS_NOT_APPROVED" if not rights["approved"]
                 else None if already
                 else ("SHOT_PRODUCTION_IN_FLIGHT" if in_flight
-                      else "SHOT_IN_CONFIRMED_PACKAGE" if package_id else None)
+                      else "SHOT_IN_CONFIRMED_PACKAGE" if package_blocker else None)
             ),
             "action": (
                 "REPLACE_WITH_AUTHORIZED_VERSION" if not rights["approved"]
                 else None if already
                 else ("RECONCILE_OR_FINISH_CURRENT_TAKE" if in_flight
-                      else "REGENERATE_PACKAGE_AFTER_ADOPTION" if package_id else None)
+                      else "REGENERATE_PACKAGE_AFTER_ADOPTION" if package_blocker else None)
             ),
         })
     return asset, entries
@@ -2423,6 +2448,7 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
         "shot_ids": sorted(set(body.shot_ids)) if body.shot_ids is not None else None,
         "role": body.role,
         "entity_id": body.entity_id,
+        "allow_revise_frozen": body.allow_revise_frozen,
         "expected_shot_revisions": {key: body.expected_shot_revisions[key]
                                     for key in sorted(body.expected_shot_revisions)},
     }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -2463,7 +2489,12 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
         raise HTTPException(409, {"code": "PROJECT_ASSET_FILE_MISSING", "message": "项目素材文件不可读取"}) from exc
     if digest != asset.sha256:
         raise HTTPException(409, {"code": "PROJECT_ASSET_HASH_CHANGED", "message": "项目素材文件校验失败"})
+    from shine.materialprep.service import _entity_matches
+    from shine.models import Asset
+
     results = []
+    target_entity = (body.entity_id or asset.entity_id or "").strip()
+    link_role = None if asset.role == "scene" else (body.entity_id or asset.entity_id or asset.role)
     for entry in entries:
         shot = db.get(Shot, entry["shot_id"])
         expected = body.expected_shot_revisions.get(shot.id)
@@ -2475,27 +2506,61 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
                 "expected": expected,
                 "current": shot.revision,
             })
-        current = [
-            ShotBindingInput(
-                asset_id=row.asset_id, use_as=row.use_as, role=row.role,
-                frame_role=row.frame_role, ordinal=row.ordinal,
-            )
-            for row in sorted(shot.bindings, key=lambda link: link.ordinal)
-        ]
-        if any(row.asset_id == asset.id for row in current):
+        existing_links = sorted(shot.bindings, key=lambda link: link.ordinal)
+        if any(row.asset_id == asset.id for row in existing_links):
             results.append({"shot_id": shot.id, "status": "ALREADY_BOUND", "revision": shot.revision})
             continue
-        if len(current) >= 12:
-            raise HTTPException(409, {"code": "SHOT_REFERENCE_LIMIT", "shot_id": shot.id})
-        current.append(ShotBindingInput(
-            asset_id=asset.id,
-            use_as=entry["use_as"],
-            role=body.role or asset.role,
-            ordinal=len(current),
-        ))
+        kept: list[ShotBindingInput] = []
+        replaced_ids: list[str] = []
+        inserted = False
+        for row in existing_links:
+            is_same_slot = False
+            if row.use_as == entry["use_as"]:
+                old_asset = db.get(Asset, row.asset_id)
+                if old_asset is not None:
+                    if asset.role == "scene":
+                        is_same_slot = old_asset.role == "scene" and (
+                            not target_entity or _entity_matches("scene", old_asset.entity_id, target_entity)
+                        )
+                    elif old_asset.role == asset.role and target_entity:
+                        is_same_slot = (
+                            _entity_matches(asset.role, row.role, target_entity)
+                            or _entity_matches(asset.role, old_asset.entity_id, target_entity)
+                        )
+            if is_same_slot:
+                replaced_ids.append(row.asset_id)
+                if not inserted:
+                    kept.append(ShotBindingInput(
+                        asset_id=asset.id,
+                        use_as=entry["use_as"],
+                        role=link_role,
+                        ordinal=len(kept),
+                    ))
+                    inserted = True
+                continue
+            kept.append(ShotBindingInput(
+                asset_id=row.asset_id, use_as=row.use_as, role=row.role,
+                frame_role=row.frame_role, ordinal=len(kept),
+            ))
+        if not inserted:
+            if len(kept) >= 12:
+                raise HTTPException(409, {"code": "SHOT_REFERENCE_LIMIT", "shot_id": shot.id})
+            kept.append(ShotBindingInput(
+                asset_id=asset.id,
+                use_as=entry["use_as"],
+                role=link_role,
+                ordinal=len(kept),
+            ))
+        spec = ShotSpec.model_validate(shot.spec)
+        replaced_set = set(replaced_ids)
+        next_required = list(dict.fromkeys([
+            *[aid for aid in (spec.required_asset_ids or []) if aid not in replaced_set],
+            *[item.asset_id for item in kept],
+        ]))
         revise_shot_record(
             db, project, shot,
-            spec=ShotSpec.model_validate(shot.spec), bindings=current, actor=actor,
+            spec=spec.model_copy(update={"required_asset_ids": next_required}),
+            bindings=kept, actor=actor,
         )
         results.append({
             "shot_id": shot.id,
@@ -2503,6 +2568,8 @@ def adopt_into_shots(body: AdoptionRequest, actor: Operator, settings: SettingsD
             "from_revision": entry["revision"],
             "to_revision": shot.revision,
             "use_as": entry["use_as"],
+            "replaced_asset_ids": replaced_ids,
+            "revised_from_confirmed_package": bool(entry.get("confirmed_package_id")),
         })
     receipt = {
         "adoption_id": receipt_key,

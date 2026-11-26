@@ -19,13 +19,41 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $env:CODEBUDDY_SAFE_DELETE_ENABLED = '0'
-# 宿主 NO_PROXY 可能含 [::1] 这类带方括号条目：httpx 会拒绝建客户端，
-# 环回真实 HTTP 用例（renderer_supervisor / v13_e2e 等）整片假失败。
-# 回归入口统一去掉，与 AGENTS.md 的 env -u NO_PROXY 口径一致。
-# 用赋值置 $null 而不是 Remove-Item Env:——宿主的 safe-delete 钩子会把
-# 「删除不存在的变量」判成 path-not-found 并 fail closed，脚本连启动都过不去。
-$env:NO_PROXY = $null
-$env:no_proxy = $null
+# Windows 宿主系统代理启用（如 ProxyEnable=1）时，若把 NO_PROXY 清成空，
+# Python urllib.request.getproxies() 会回退读取系统注册表 ProxyServer，导致 httpx
+# 把发往 127.0.0.1/localhost/::1 的本地测试请求转发进系统代理并失败；同时必须清洗
+# HTTPX 无法解析的条目（如 [::1]、<local>、通配符或带空格/CIDR 的无效项）。
+# 这里仅在回归脚本当前进程与分片子进程里写入清洗后的环回直连表，不修改系统代理与产品运行配置。
+function Resolve-LoopbackNoProxy {
+    param([string[]]$RawValues)
+    $required = @('127.0.0.1', 'localhost', '::1')
+    $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+    $result = New-Object System.Collections.Generic.List[string]
+    foreach ($item in $required) {
+        if ($seen.Add($item)) { [void]$result.Add($item) }
+    }
+    foreach ($raw in $RawValues) {
+        if ([string]::IsNullOrWhiteSpace($raw)) { continue }
+        foreach ($piece in ($raw -split '[,;]')) {
+            $token = $piece.Trim()
+            if (-not $token) { continue }
+            if ($token.StartsWith('[') -and $token.EndsWith(']') -and $token.Length -gt 2) {
+                $token = $token.Substring(1, $token.Length - 2).Trim()
+            }
+            if ($token.StartsWith('*.')) {
+                $token = $token.Substring(1)
+            }
+            if ($token -match '[\s<>*/\\:]' -and $token -ne '::1') { continue }
+            if ($token -match '^\*$' -or $token -eq '<local>' -or $token.Contains('://')) { continue }
+            if ($token -and $seen.Add($token)) { [void]$result.Add($token) }
+        }
+    }
+    return ($result -join ',')
+}
+
+$loopbackNoProxy = Resolve-LoopbackNoProxy @($env:NO_PROXY, $env:no_proxy)
+$env:NO_PROXY = $loopbackNoProxy
+$env:no_proxy = $loopbackNoProxy
 # 一个共享的 temproot 会让多进程抢同一批 pytest-N 编号目录，10 次抢不到就整体报错。
 $env:PYTEST_DEBUG_TEMPROOT = ''
 
@@ -132,14 +160,18 @@ for ($i = 0; $i -lt $Shards; $i++) {
     $log = Join-Path $outDir "chunk-$i.log"
     $basetemp = Join-Path $outDir "bt-$i"
     $jobs += Start-Job -ScriptBlock {
-        param($python, $cwd, [string[]]$chunk, $log, $basetemp, $idx)
+        param($python, $cwd, [string[]]$chunk, $log, $basetemp, $idx, $noProxyValue)
         Set-Location -LiteralPath $cwd
+        $env:CODEBUDDY_SAFE_DELETE_ENABLED = '0'
+        $env:NO_PROXY = $noProxyValue
+        $env:no_proxy = $noProxyValue
+        $env:PYTEST_DEBUG_TEMPROOT = ''
         $sw = [System.Diagnostics.Stopwatch]::StartNew()
         & $python -m pytest @chunk -q -p no:cacheprovider --basetemp=$basetemp *> $log
         $code = $LASTEXITCODE
         $sw.Stop()
         [PSCustomObject]@{ Index = $idx; ExitCode = $code; ElapsedSec = [Math]::Round($sw.Elapsed.TotalSeconds, 1) }
-    } -ArgumentList @($python, $repo, $chunk, $log, $basetemp, $i)
+    } -ArgumentList @($python, $repo, $chunk, $log, $basetemp, $i, $loopbackNoProxy)
 }
 $results = @{}
 foreach ($job in $jobs) {
@@ -199,14 +231,20 @@ function Remove-ShineDir([string]$Path) {
     }
 }
 
-$keepBasetemp = $KeepBasetemp.IsPresent -or ($bad -gt 0)
-if ($keepBasetemp) {
-    $why = if ($KeepBasetemp) { '-KeepBasetemp' } else { '有分片未通过，留作排障' }
+$shouldKeepBasetemp = $KeepBasetemp.IsPresent -or ($bad -gt 0)
+if ($shouldKeepBasetemp) {
+    $why = if ($KeepBasetemp.IsPresent -and $bad -gt 0) {
+        "显式指定 -KeepBasetemp，且有 $bad 个分片失败"
+    } elseif ($KeepBasetemp.IsPresent) {
+        '显式指定 -KeepBasetemp'
+    } else {
+        "失败自动保留（有 $bad 个分片未通过，留作排障）"
+    }
     Write-Output "basetemp kept ($why): $outDir\bt-*"
 } else {
     Get-ChildItem -LiteralPath $outDir -Directory -Filter 'bt-*' -ErrorAction SilentlyContinue |
         ForEach-Object { Remove-ShineDir $_.FullName }
-    Write-Output "basetemp removed: $outDir\bt-*"
+    Write-Output "basetemp removed (all passed): $outDir\bt-*"
 }
 
 # 只清本脚本自己的产物（shards-*），WorkRoot 下的其它目录不动。

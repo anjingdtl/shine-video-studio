@@ -4,7 +4,10 @@ import { ImagePreview } from './ImagePreview';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { StoryPreparationPanel } from './StoryPreparationPanel';
 import { ScriptTextConsent } from './ScriptTextConsent';
-import { API, api, ApiError, ERROR_CODE_LABELS, type Asset, type Shot, type StyleVersion } from '../api';
+import {
+  API, api, ApiError, ERROR_CODE_LABELS, updateMaterialPreferences,
+  type Asset, type MaterialPreferences, type Shot, type StyleVersion,
+} from '../api';
 import { assignLibraryVersion, searchLibraryForProject } from '../asset-center/api';
 import { reportCopilotFault } from '../copilotContext';
 import { useStageRail, useRailPresent } from './StageRail';
@@ -115,6 +118,7 @@ export type MaterialState = {
   expected_snapshot?: string | null;
   materials_ready?: boolean;
   material_evaluation?: MaterialEvaluation;
+  preferences?: MaterialPreferences | null;
   requirements: MaterialRequirement[];
   runs: MaterialRun[];
   blockers: { code: string; note: string }[];
@@ -399,8 +403,22 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     setState(material);
     setDocuments(docs);
     setAssets(masters);
+    if (material.preferences) {
+      setCharacterSheetMode(Boolean(material.preferences.effective_character_sheet_mode));
+    }
     setDirection((current) => directionDirty.current ? current : material.visual_direction ?? current);
     setDocumentId((current) => current || material.document_id || docs[0]?.id || '');
+  }, [projectId]);
+
+  const handleCharacterSheetToggle = useCallback((next: boolean) => {
+    setCharacterSheetMode(next);
+    void updateMaterialPreferences(projectId, next)
+      .then((prefs) => {
+        if (activeProject.current === projectId) {
+          setCharacterSheetMode(Boolean(prefs.effective_character_sheet_mode));
+        }
+      })
+      .catch(() => undefined);
   }, [projectId]);
 
   // The scene analysis is one long synchronous request on the server. Its
@@ -455,6 +473,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     setStrategy({});
     setEvaluation(null);
     setStepReport({});
+    setCharacterSheetMode(false);
     void load().catch(() => undefined);
   }, [load]);
 
@@ -1243,7 +1262,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </label>
             ))}
           </fieldset>
-          <CharacterSheetToggle checked={characterSheetMode} onChange={setCharacterSheetMode} disabled={busy} />
+          <CharacterSheetToggle checked={characterSheetMode} onChange={handleCharacterSheetToggle} disabled={busy} />
           <details className="advanced-fold">
             <summary>生图风格 LoRA{styleLoras.length ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
             <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}

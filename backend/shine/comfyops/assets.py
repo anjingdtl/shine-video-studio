@@ -387,15 +387,7 @@ def promote(db, settings, row, actor, decision, *, offline):
     db.flush()
     row.formal_asset_id = asset.id
     row.status = "PROMOTED"
-    add_audit(
-        db,
-        actor,
-        "CANDIDATE_PROMOTED",
-        "asset",
-        asset.id,
-        {"candidate_id": row.id, "offline_only": mock or unowned_renderer or offline},
-        project_id=row.project_id,
-    )
+    adoption_report: dict | None = None
     # Promotion IS the user's confirmation of this master.  Adopt it into the
     # requirement and the shots that need it through the same executor every
     # confirmation path uses, so the material list, the journey and the package
@@ -404,7 +396,7 @@ def promote(db, settings, row, actor, decision, *, offline):
         from shine.comfyops.models import AssetRequirement
         from shine.materialprep.models import MaterialItem
         from shine.materialprep.service import (
-            bind_adopted_masters_to_shots,
+            adopt_masters_to_shots,
             bind_material_master,
         )
 
@@ -413,7 +405,29 @@ def promote(db, settings, row, actor, decision, *, offline):
                        if item and item.requirement_id else None)
         if requirement is not None and requirement.project_id == row.project_id:
             bind_material_master(db, requirement, asset, actor)
-            bind_adopted_masters_to_shots(db, row.project_id, requirement.plan_id, actor)
+            adoption_report = adopt_masters_to_shots(
+                db,
+                row.project_id,
+                requirement.plan_id,
+                actor,
+                focus_requirement_id=requirement.id,
+                focus_asset_id=asset.id,
+            )
+            row.payload = {**row.payload, "adoption": adoption_report}
+            row.sha256 = graph_hash(row.payload)
+    add_audit(
+        db,
+        actor,
+        "CANDIDATE_PROMOTED",
+        "asset",
+        asset.id,
+        {
+            "candidate_id": row.id,
+            "offline_only": mock or unowned_renderer or offline,
+            **({"adoption": adoption_report} if adoption_report is not None else {}),
+        },
+        project_id=row.project_id,
+    )
     return asset
 
 

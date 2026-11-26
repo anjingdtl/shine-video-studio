@@ -362,3 +362,114 @@ def _rights_id(factory, version_id: str) -> str:
 
     with factory() as db:
         return db.get(LibraryVersion, version_id).rights_id
+
+
+def test_explicit_frozen_revision_adoption_replaces_old_scene_slot_without_rewriting_old_package(api):
+    """D12 swap: default adoption stays blocked, while explicit allow_revise_frozen swaps cleanly."""
+    client, factory, _ = api
+    project = create_project(client)
+    style = freeze_style(client, project)
+    subject = upload_asset(client, project, content=b"\x89PNG\r\n\x1a\n-knight",
+                           filename="01-knight.png", role="character", entity_id="Lin")
+    approve_lock(client, subject["id"])
+    old_plate = upload_asset(client, project, content=b"\x89PNG\r\n\x1a\n-old-sanctuary",
+                             filename="06-sanctuary-old.png", role="scene", entity_id="圣殿残垣祭坛")
+    approve_lock(client, old_plate["id"])
+    new_plate = upload_asset(client, project, content=b"\x89PNG\r\n\x1a\n-new-sanctuary",
+                             filename="06-sanctuary-new.png", role="scene", entity_id="圣殿残垣祭坛")
+    approve_lock(client, new_plate["id"])
+
+    shot = create_shot(
+        client, project, style["id"], title="第8镜", characters=["Lin"],
+        asset_ids=[subject["id"], old_plate["id"]],
+        bindings=[
+            {"asset_id": subject["id"], "use_as": "subject", "role": "CHAR_A", "ordinal": 0},
+            {"asset_id": old_plate["id"], "use_as": "picture", "role": None, "ordinal": 1},
+        ],
+    )
+    profile = register_workflow_profile(client, mode="Ref2VA")
+    plan = client.post(f"/api/v1/projects/{project}/episode-plans",
+                       json={"target_seconds": 60, "tolerance_seconds": 10}, headers=LOCAL).json()
+    client.post(f"/api/v1/projects/{project}/episode-plans/{plan['version']}/confirm",
+                json={"expected_sha256": plan["sha256"]}, headers=LOCAL)
+    pkg = client.post(f"/api/v1/projects/{project}/director-packages",
+                      json={"workflow_profile_id": profile["id"]}, headers=LOCAL).json()
+    confirm = client.post(f"/api/v1/director-packages/{pkg['id']}/confirm", json={}, headers=LOCAL)
+    assert confirm.status_code == 200, confirm.text
+
+    # Default preview still protects the confirmed package.
+    blocked = client.post("/api/v1/asset-center/adoptions/preview", json={
+        "project_id": project, "project_asset_id": new_plate["id"],
+        "shot_ids": [shot["id"]], "role": "scene", "entity_id": "圣殿残垣祭坛",
+    })
+    assert blocked.json()["blocked"][0]["conflict"] == "SHOT_IN_CONFIRMED_PACKAGE"
+
+    # Explicit revision swap unblocks cleanly, replaces old_plate -> new_plate in place, and preserves pkg.
+    preview = client.post("/api/v1/asset-center/adoptions/preview", json={
+        "project_id": project, "project_asset_id": new_plate["id"],
+        "shot_ids": [shot["id"]], "role": "scene", "entity_id": "圣殿残垣祭坛",
+        "allow_revise_frozen": True,
+    })
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["blocked"] == []
+    assert preview.json()["shots"][0]["replaces_asset_id"] == old_plate["id"]
+    assert preview.json()["shots"][0]["requires_shot_revision"] is True
+
+    applied = client.post("/api/v1/asset-center/adoptions", headers=LOCAL, json={
+        "project_id": project, "project_asset_id": new_plate["id"],
+        "shot_ids": [shot["id"]], "role": "scene", "entity_id": "圣殿残垣祭坛",
+        "allow_revise_frozen": True,
+        "expected_shot_revisions": {shot["id"]: shot["revision"]},
+        "idempotency_key": "swap-sanctuary-d12", "confirmed": True,
+    })
+    assert applied.status_code == 201, applied.text
+    assert applied.json()["adopted_count"] == 1
+    assert applied.json()["shots"][0]["replaced_asset_ids"] == [old_plate["id"]]
+
+    bindings = client.get(f"/api/v1/shots/{shot['id']}/bindings").json()
+    assert [row["asset_id"] for row in bindings] == [subject["id"], new_plate["id"]]
+    assert bindings[1]["role"] is None
+    updated_shot = next(s for s in client.get(f"/api/v1/projects/{project}/shots").json() if s["id"] == shot["id"])
+    assert updated_shot["revision"] == shot["revision"] + 1
+    assert updated_shot["spec"]["required_asset_ids"] == [subject["id"], new_plate["id"]]
+
+
+def test_journey_confirmed_shot_count_tracks_confirmed_scope_across_resplit_and_empty(api):
+    """Portfolio shot count uses confirmed scope, never unconfirmed/historical shot rows."""
+    client, factory, _ = api
+    empty_proj = create_project(client, "空作品")
+    empty_j = client.get(f"/api/v1/projects/{empty_proj}/journey").json()
+    assert empty_j["scope"]["confirmed_shot_count"] == 0
+
+    proj = create_project(client, "重拆切换")
+    style = freeze_style(client, proj)
+    shots = [create_shot(client, proj, style["id"], title=f"历史镜-{i}") for i in range(5)]
+
+    # Confirm 5 shots in episode plan v1.
+    client.post(f"/api/v1/projects/{proj}/episode-plans", json={
+        "mode": "shots", "target_seconds": 30, "tolerance_seconds": 10,
+        "episodes": [{"episode_id": "ep-01", "title": "第一集", "order": 1, "planned_seconds": 30,
+                      "shot_ids": [s["id"] for s in shots]}],
+    }, headers=LOCAL).raise_for_status()
+    # Re-confirm with 2 shots vs 3 shots via direct DB plan or re-split simulation:
+    from shine.director.models import DirectorEpisodePlan
+    with factory.begin() as db:
+        p1 = db.scalar(select(DirectorEpisodePlan).where(DirectorEpisodePlan.project_id == proj))
+        p1.status = "CONFIRMED"
+    j1 = client.get(f"/api/v1/projects/{proj}/journey").json()
+    assert j1["scope"]["confirmed_shot_count"] == 5
+
+    # Supersede with a re-split confirmed plan carrying only 2 active shots while 5 DB Shot rows stay in history.
+    with factory.begin() as db:
+        for row in db.scalars(select(DirectorEpisodePlan).where(DirectorEpisodePlan.project_id == proj)).all():
+            row.status = "SUPERSEDED"
+        db.add(DirectorEpisodePlan(
+            project_id=proj, version=9, status="CONFIRMED", target_seconds=12, tolerance_seconds=5,
+            payload={"target_seconds": 12, "tolerance_seconds": 5,
+                     "episodes": [{"episode_id": "ep-01", "title": "重拆集",
+                                   "shot_ids": [shots[0]["id"], shots[1]["id"]]}]},
+            sha256="f" * 64, source="test", created_by="local-user",
+        ))
+    j2 = client.get(f"/api/v1/projects/{proj}/journey").json()
+    assert j2["scope"]["confirmed_shot_count"] == 2
+

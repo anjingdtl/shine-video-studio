@@ -64,7 +64,8 @@ def _is_demo(db: Session, job: Job) -> bool:
 
 
 def _run_shot_jobs(db: Session, run_id: str) -> dict[str, str]:
-    """The job each shot of a run really owns, from its series items."""
+    """The job each shot of a run really owns, from its series items + assembly selection."""
+    from shine.models import AppSetting
     from shine.production.models import ProductionRunBatch
 
     series_ids = [
@@ -79,7 +80,24 @@ def _run_shot_jobs(db: Session, run_id: str) -> dict[str, str]:
         .where(ProductionSeriesItem.series_id.in_(series_ids))
         .order_by(ProductionSeriesItem.updated_at)
     ).all()
-    return {row.shot_id: row.job_id for row in rows if row.job_id}
+    owned = {row.shot_id: row.job_id for row in rows if row.job_id}
+    for sid in series_ids:
+        setting = db.get(AppSetting, f"assembly-selection:{sid}")
+        if setting is None:
+            continue
+        for shot_id, job_id in (setting.value or {}).items():
+            job = db.get(Job, job_id)
+            shot = db.get(Shot, shot_id)
+            if (
+                job is not None
+                and shot is not None
+                and job.status == "PASSED"
+                and not job.stale
+                and job.artifact_id
+                and job.shot_revision == shot.revision
+            ):
+                owned[shot_id] = job_id
+    return owned
 
 
 def _passed_shots(
@@ -291,6 +309,20 @@ def compute_journey(
             for shot in (episode.manifest or {}).get("shots", [])
         ]
     overview_shot_ids = package_shot_ids if package_shot_ids else plan_shot_ids
+    latest_confirmed = latest_confirmed_plan(db, project_id)
+    if package_id and package_shot_ids is not None:
+        confirmed_scope_ids = list(package_shot_ids)
+    elif latest_confirmed is not None:
+        confirmed_scope_ids = plan_shot_order(latest_confirmed)
+    elif package_shot_ids is not None:
+        confirmed_scope_ids = list(package_shot_ids)
+    else:
+        has_any_plan = db.scalar(
+            select(DirectorEpisodePlan.id)
+            .where(DirectorEpisodePlan.project_id == project_id)
+            .limit(1)
+        ) is not None
+        confirmed_scope_ids = [] if has_any_plan else [shot.id for shot in shots]
     # The current Run's scope is the run's own frozen selection: the episodes
     # it was started with and the shots those episodes name.  A run that was
     # started for one episode therefore counts one episode's shots, not the
@@ -539,6 +571,7 @@ def compute_journey(
         "summary": storyboard_summary if shots or scope_shot_ids else "还没有分镜",
         "blockers": shot_blockers,
         "facts": {"shot_count": len(shots), "planned_shot_count": len(scope_shot_ids),
+                  "confirmed_shot_count": len(confirmed_scope_ids),
                   "planned_shot_ids": scope_shot_ids,
                   "package_shot_count": len(overview_shot_ids),
                   "scope_episode_ids": run_episode_ids,
@@ -679,6 +712,7 @@ def compute_journey(
             # The denominator of this scope: the run's own selection when a
             # run is in scope, the whole package otherwise.
             "shot_count": len(scope_shot_ids),
+            "confirmed_shot_count": len(confirmed_scope_ids),
             "episode_ids": run_episode_ids,
         },
         # The whole-package overview, in its own field: it never becomes the

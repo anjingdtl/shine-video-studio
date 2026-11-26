@@ -307,7 +307,7 @@ def test_a_line_copy_ignores_typography_but_not_one_word():
 
 def test_every_refusal_has_one_sentence_for_a_person_and_one_instruction_for_the_retry():
     every = engine.refusal_codes()
-    assert len(every) == len(set(every)) == 28
+    assert len(every) == len(set(every)) == 29
     assert all(engine.refusal_label(code) for code in every)
     assert engine.refusal_label("NOT_A_CODE") is None
     # Each refusal the engine can raise is told to the retry in the verdict's own words.
@@ -414,4 +414,52 @@ def test_cross_space_shot_accepts_registered_location_with_location_switch_cut()
     unreg_shot = {**SECOND_SHOT, "location": "码头", "transition_motivation": "time_or_space_jump"}
     unregistered = engine.review_scene_board(board(indoor, unreg_shot, LAST_SHOT), SCENE, reg_ctx)
     assert unregistered.first_code() == "SHOT_LOCATION_CONFLICT"
+
+
+def test_last_frame_opening_conflict_is_refused_and_cut_counterexample_stays_allowed():
+    """Continuation opening pose/prop state must pick up from predecessor closing pose; CUT may differ."""
+    prev_raised = first_of(
+        placements=[placement(ZHOU, "left_fg", "facing_right", props=["rune sword"])],
+    )
+    prev_raised["exit_state"] = f"{ZHOU} holds the rune sword raised diagonally across his chest."
+    prev_raised["timeline"] = [{"start_s": 0.0, "end_s": 4.0, "action": f"{ZHOU} raises the rune sword.",
+                                "expression": "Steady.", "camera": "Static."}]
+
+    contradicting_continuation = {
+        **SECOND_SHOT,
+        "transition_motivation": "continuous_action",
+        "blocking": {"axis": "counter", "placements": [
+            {"character": ZHOU, "zone": "left_fg", "facing": "facing_right",
+             "posture": "sword tip dipped", "props": ["rune sword"]},
+            placement(GUEST, "right_fg", "facing_left"),
+        ]},
+        "entry_state": f"Blade lowered, {ZHOU} faces {GUEST}.",
+        "timeline": [{"start_s": 0.0, "end_s": 4.0, "action": f"{ZHOU} dips the blade tip and holds gaze.",
+                      "expression": "Steady.", "camera": "Static."}],
+    }
+    bad = engine.review_scene_board(
+        board(prev_raised, contradicting_continuation, LAST_SHOT), SCENE, CONTEXT
+    )
+    assert "CONTINUATION_OPENING_CONFLICT" in codes(bad)
+
+    clean_continuation = {
+        **contradicting_continuation,
+        "blocking": {"axis": "counter", "placements": [
+            {"character": ZHOU, "zone": "left_fg", "facing": "facing_right",
+             "posture": "standing, sword raised across chest", "props": ["rune sword"]},
+            placement(GUEST, "right_fg", "facing_left"),
+        ]},
+        "entry_state": f"Rune sword raised across {ZHOU}'s chest in standoff.",
+    }
+    good = engine.review_scene_board(
+        board(prev_raised, clean_continuation, LAST_SHOT), SCENE, CONTEXT
+    )
+    assert good.accepted, good.refusals
+
+    cut_counterexample = {**contradicting_continuation, "transition_motivation": "shot_reverse_shot"}
+    cut_verdict = engine.review_scene_board(
+        board(prev_raised, cut_counterexample, LAST_SHOT), SCENE, CONTEXT
+    )
+    assert cut_verdict.accepted, cut_verdict.refusals
+
 

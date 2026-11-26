@@ -82,7 +82,13 @@ LEGACY_ANCHORED_TOKENS_COMPILER_VERSION = "shine-h3-compiler/2.1.0"
 # shots"), and H3 rendered that off-screen cast into frame.  The scoping lands
 # here, in the next version: 2.1.0 keeps its released bytes, so every stored
 # 2.1.0 request still replays through the single provenance verifier.
-COMPILER_VERSION = "shine-h3-compiler/2.2.0"
+LEGACY_SCOPED_FACTS_COMPILER_VERSION = "shine-h3-compiler/2.2.0"
+# 2.3.0 puts soft last_frame opening continuity at the top of [Shot 1] (anchoring
+# 0.0s posture and held props before the new beat so actions do not repeat) and
+# tightens per-shot story-fact scoping for appearance-only off-cast bios and
+# English ``and``-joined prop inventories.  All pre-2.3.0 versions keep their
+# exact released bytes.
+COMPILER_VERSION = "shine-h3-compiler/2.3.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -93,6 +99,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
     LEGACY_THIN_SHELL_COMPILER_VERSION,
     LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+    LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -120,6 +127,11 @@ LEGACY_200_VERSIONS = (
 LEGACY_210_VERSIONS = (
     *LEGACY_200_VERSIONS,
     LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+)
+#: Versions that keep the 2.2.0 and earlier continuity-footer and scoping bytes.
+LEGACY_220_VERSIONS = (
+    *LEGACY_210_VERSIONS,
+    LEGACY_SCOPED_FACTS_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -188,6 +200,9 @@ class _Context:
     anchored_v21: bool = False
     #: 2.2.0+: locked story facts are scoped to the shot's visible cast and props.
     scoped_facts: bool = False
+    #: 2.3.0+: opening last_frame continuity sits at top of [Shot 1] and fact scoping
+    #: catches appearance-only off-cast bios and English ``and``-joined props.
+    handoff_v23: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -632,40 +647,69 @@ def _shot_text(ctx: _Context) -> str:
     return base
 
 
+def _continuity_mode(continuity: Any) -> tuple[ContinuityMode | None, str | None]:
+    if isinstance(continuity, dict):
+        raw_mode = continuity.get("mode")
+        prev_id = continuity.get("previous_shot_id")
+    else:
+        raw_mode = getattr(continuity, "mode", None)
+        prev_id = getattr(continuity, "previous_shot_id", None)
+    try:
+        mode = raw_mode if isinstance(raw_mode, ContinuityMode) else ContinuityMode(str(raw_mode))
+    except ValueError:
+        mode = None
+    return mode, (str(prev_id) if prev_id else None)
+
+
 def _continuity_sentences(ctx: _Context) -> list[str]:
     """How the shot joins the one before it, from the derivative it was given.
 
-    Both the historical and the 2.0.0 shot text read this one list: the
-    sentences were validated on the real renderer and are not restyled.
+    Every pre-2.3.0 version keeps its historical wording; 2.3.0+ places
+    soft ``last_frame`` opening continuity at the top of ``[Shot 1]`` and
+    anchors 0.0s posture and held props so actions from the previous shot
+    are not reset or repeated.
     """
-    continuity = ctx.spec.continuity
+    mode, prev_shot_id = _continuity_mode(ctx.spec.continuity)
     continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
     if continuation:
-        if continuity.mode == ContinuityMode.LAST_FRAME:
+        if mode == ContinuityMode.LAST_FRAME:
+            if ctx.handoff_v23:
+                return [
+                    f"At 0.0s, open seamlessly from the closing framing, character positions, posture, "
+                    f"gaze direction, and held prop placement of {continuation.label} (the preceding shot's "
+                    "final frame) as a soft visual reference; do not reset or repeat the preceding "
+                    "shot's ending motion, and proceed directly with the new action below."
+                ]
             return [f"Use {continuation.label}, the preceding shot's final frame, as a soft visual reference "
                     "for the opening composition."]
-        if continuity.mode == ContinuityMode.HARD_FRAME_ANCHOR:
+        if mode == ContinuityMode.HARD_FRAME_ANCHOR:
             return [f"Use {continuation.label}, the preceding shot's final frame, as the opening frame."]
-        if continuity.mode == ContinuityMode.VIDEO_REFERENCE:
+        if mode == ContinuityMode.VIDEO_REFERENCE:
             return [f"Continue the motion and framing in {continuation.label}, the source shot's video."]
-        if continuity.mode == ContinuityMode.AUDIO_REFERENCE:
+        if mode == ContinuityMode.AUDIO_REFERENCE:
             return [
                 f"Continue the sound bed in {continuation.label}, the source shot's audio."
                 if ctx.legacy_audio else
                 f"Use {continuation.label} for non-vocal ambience only."
             ]
         return []
-    if continuity.mode == ContinuityMode.LAST_FRAME and continuity.previous_shot_id:
+    if mode == ContinuityMode.LAST_FRAME and prev_shot_id:
+        if ctx.handoff_v23:
+            return [
+                f"At 0.0s, the opening framing, posture, gaze direction, and held prop placement continue "
+                f"seamlessly from the approved final frame of shot {prev_shot_id} without "
+                "resetting or repeating the ending motion."
+            ]
         return [
             f"The opening composition continues seamlessly from the approved final frame of shot "
-            f"{continuity.previous_shot_id}."
+            f"{prev_shot_id}."
         ]
-    if continuity.mode == ContinuityMode.VIDEO_REFERENCE and continuity.previous_shot_id:
+    if mode == ContinuityMode.VIDEO_REFERENCE and prev_shot_id:
         return [
             f"The shot continues the motion and framing of the approved video from shot "
-            f"{continuity.previous_shot_id}."
+            f"{prev_shot_id}."
         ]
-    if continuity.mode == ContinuityMode.AUDIO_REFERENCE and continuity.previous_shot_id:
+    if mode == ContinuityMode.AUDIO_REFERENCE and prev_shot_id:
         return [
             "The audio bed continues uninterrupted from the previous approved shot."
             if ctx.legacy_audio else
@@ -790,6 +834,13 @@ _FACT_NON_PERSON_PREFIXES = frozenset({
     "时间", "地点", "人物", "角色", "说明", "提示", "注意",
     "prop", "props", "scene", "scenes", "world", "setting", "style", "rule", "note",
 })
+_WORLD_FACT_PREFIXES = frozenset({
+    "时代", "年代", "基调", "气氛", "氛围", "世界观", "背景", "风格",
+    "时间", "地点", "场景", "天气", "光影", "色调", "配色", "主题", "环境",
+    "era", "period", "tone", "mood", "atmosphere", "world", "setting",
+    "background", "style", "time", "location", "place", "weather",
+    "lighting", "palette", "theme", "environment",
+})
 _META_STRUCTURE_FACT_RE = re.compile(
     r"(?:全片共\s*[0-9一二三四五六七八九十两]+\s*[场集]|拆分为\s*\d+\s*个?镜头|总计\s*\d+\s*个?镜头)"
 )
@@ -798,12 +849,29 @@ _PERSON_BIO_START_RE = re.compile(
     r"|^\s*[^，,。.；;：:]{0,10}?(?:男性|女性|男孩|女孩|男人|女人|男子|女子|少年|少女|老者|老妇|老人|中年|青年|孩童)"
 )
 _PERSON_BIO_EN_RE = re.compile(r"\b\d{1,3}\s*[-–]?\s*years?\s*[-–]?\s*old\b", re.IGNORECASE)
+_PERSON_APPEARANCE_ZH_RE = re.compile(
+    r"(?:法袍|长袍|长裙|短裙|斗篷|披风|铠甲|盔甲|甲胄|胸针|皮靴|靴子|兜帽|"
+    r"长编发|发辫|剑疤|银发|银白发|红发|黑发|金发|眼眸|双眼|双眸|"
+    r"手持|手提|手握|腰佩|背负|身穿|穿着|披着|戴着|"
+    r"骑士|牧师|法师|守望者|刺客|女巫)"
+)
+_PERSON_APPEARANCE_EN_RE = re.compile(
+    r"\b(?:robe|cloak|gown|tunic|armor|armour|brooch|boots|hood|braid|hair|eyes|scar|"
+    r"holding|carrying|wearing|wielding|staff|wand|sword|lantern|dagger|shield|bow|spear|"
+    r"knight|priest|mage|wizard|watcher)\b",
+    re.IGNORECASE,
+)
 
 
-def _looks_like_person_bio(zh_fact: str, en_fact: str) -> bool:
+def _looks_like_person_bio(zh_fact: str, en_fact: str, *, include_appearance: bool = False) -> bool:
     """Whether one labelled fact is a person's appearance bio rather than a world note."""
     body = re.sub(r"^\s*[^：:]{1,20}\s*[：:]\s*", "", zh_fact)
-    return bool(_PERSON_BIO_START_RE.search(body) or _PERSON_BIO_EN_RE.search(en_fact))
+    en_body = re.sub(r"^\s*[^:]{1,30}\s*:\s*", "", en_fact)
+    if _PERSON_BIO_START_RE.search(body) or _PERSON_BIO_EN_RE.search(en_fact):
+        return True
+    if include_appearance:
+        return bool(_PERSON_APPEARANCE_ZH_RE.search(body) or _PERSON_APPEARANCE_EN_RE.search(en_body))
+    return False
 
 
 def _split_top_level(text: str, seps: str) -> list[str]:
@@ -830,14 +898,56 @@ def _split_top_level(text: str, seps: str) -> list[str]:
     return items
 
 
+def _split_prop_items_en(text: str) -> list[str]:
+    """Split English prop inventories on top-level commas/semicolons and top-level ``and`` / ``&``."""
+    raw_chunks = _split_top_level(text, ",;")
+    items: list[str] = []
+    for chunk in raw_chunks:
+        cleaned = re.sub(r"^\s*(?:and|&)\s+", "", chunk.strip(), flags=re.IGNORECASE)
+        if not cleaned:
+            continue
+        buf: list[str] = []
+        depth = 0
+        i = 0
+        while i < len(cleaned):
+            ch = cleaned[i]
+            if ch in "（(":
+                depth += 1
+                buf.append(ch)
+                i += 1
+            elif ch in "）)":
+                depth = max(0, depth - 1)
+                buf.append(ch)
+                i += 1
+            elif depth == 0:
+                m = re.match(r"^\s+(?:and|&)\s+", cleaned[i:], flags=re.IGNORECASE)
+                if m:
+                    part = "".join(buf).strip()
+                    if part:
+                        items.append(part)
+                    buf = []
+                    i += len(m.group(0))
+                    continue
+                buf.append(ch)
+                i += 1
+            else:
+                buf.append(ch)
+                i += 1
+        tail = "".join(buf).strip()
+        if tail:
+            items.append(tail)
+    return items
+
+
 def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str]) -> list[str]:
     """Keep only background facts relevant to this shot's visible cast, props and world.
 
     A project locks cast bios and prop inventories globally; emitting an off-cast
     character's appearance bio (e.g. Morrigan's silver braid and velvet cloak) inside
     a solo shot of Adrian causes H3 to render that off-screen character into frame.
-    Every version before 2.2.0 emits the facts unchanged, so a stored request of
-    those versions still replays byte-exactly.
+    Every version before 2.2.0 emits the facts unchanged, and 2.2.0 keeps its
+    exact pre-2.3.0 scoping bytes, so stored requests of every released version
+    replay byte-exactly.
     """
     if not ctx.scoped_facts:
         return list(en_facts)
@@ -871,6 +981,18 @@ def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str])
     story_norm = re.sub(r"[\s_-]+", " ", (ctx.spec.story_beat or "").lower())
     props_norm = {re.sub(r"[\s_-]+", " ", p.lower()).strip() for p in shot_props if p.strip()}
 
+    def _en_prop_matches(e_item: str) -> bool:
+        e_name = re.sub(r"（[^）]*）|\([^)]*\)", "", e_item).strip()
+        e_norm = re.sub(r"[\s_-]+", " ", e_name.lower()).strip()
+        return bool(
+            e_norm
+            and (
+                e_norm in props_norm
+                or any(e_norm in p or p in e_norm for p in props_norm if len(p) >= 3)
+                or re.search(r"(?<!\w)" + re.escape(e_norm) + r"(?!\w)", story_norm) is not None
+            )
+        )
+
     kept: list[str] = []
     paired_zh = zh_facts if len(zh_facts) == len(en_facts) else en_facts
     for zh_raw, en_raw in zip(paired_zh, en_facts, strict=True):
@@ -883,6 +1005,8 @@ def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str])
         # Off-cast character bio filtering.
         zh_prefix_m = re.match(r"^\s*([^：:\s]{1,20})\s*[：:]", zh_fact)
         zh_prefix = zh_prefix_m.group(1).strip() if zh_prefix_m else ""
+        en_prefix_m = re.match(r"^\s*([A-Za-z][A-Za-z0-9' -]{0,24})\s*:", en_fact)
+        en_prefix = en_prefix_m.group(1).strip() if en_prefix_m else ""
         if off_cast_names:
             mentions_off = any(off in zh_fact for off in off_cast_names)
             mentions_in = any(c in zh_fact for c in cast_names)
@@ -890,17 +1014,28 @@ def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str])
                 mentions_off and not mentions_in
             ):
                 continue
-        elif zh_prefix and cast_names and zh_prefix.lower() not in _FACT_NON_PERSON_PREFIXES:
+        if zh_prefix and cast_names and zh_prefix.lower() not in _FACT_NON_PERSON_PREFIXES:
+            is_world_prefix = ctx.handoff_v23 and zh_prefix.lower() in _WORLD_FACT_PREFIXES
             if (
-                not any(character_reference_matches(zh_prefix, c) for c in cast_names)
+                not is_world_prefix
+                and not any(character_reference_matches(zh_prefix, c) for c in cast_names)
                 and zh_prefix not in (ctx.spec.story_beat or "")
-                and _looks_like_person_bio(zh_fact, en_fact)
+                and _looks_like_person_bio(zh_fact, en_fact, include_appearance=ctx.handoff_v23)
             ):
                 # A bio of somebody this shot's scene never tokenised. A labelled world
-                # fact (Era: …, Tone: …) carries an equally unfamiliar prefix and must
-                # stay: dropping a fact merely because its label is unknown would erase
-                # the world of some other script.
+                # fact (Era: …, Tone: …) stays untouched.
                 continue
+        elif (
+            ctx.handoff_v23
+            and en_prefix
+            and cast_names
+            and en_prefix.lower() not in _FACT_NON_PERSON_PREFIXES
+            and en_prefix.lower() not in _WORLD_FACT_PREFIXES
+            and not any(character_reference_matches(en_prefix, c) for c in cast_names)
+            and en_prefix.lower() not in story_norm
+            and _looks_like_person_bio(zh_fact, en_fact, include_appearance=True)
+        ):
+            continue
 
         # Prop inventory fact filtering (e.g. "Props: rune sword (...), brass lantern (...)").
         is_prop_fact = bool(
@@ -910,30 +1045,27 @@ def _scoped_story_facts(ctx: _Context, zh_facts: list[str], en_facts: list[str])
         if is_prop_fact:
             en_head_m = re.match(r"^\s*(Props?\s*:)\s*(.*)$", en_fact, flags=re.IGNORECASE)
             zh_head_m = re.match(r"^\s*[^：:]+[：:]\s*(.*)$", zh_fact)
-            en_prefix = en_head_m.group(1) if en_head_m else "Props:"
+            en_prefix_head = en_head_m.group(1) if en_head_m else "Props:"
             en_body = (en_head_m.group(2) if en_head_m else en_fact).strip().rstrip(".")
             zh_body = (zh_head_m.group(1) if zh_head_m else zh_fact).strip().rstrip("。")
-            en_items = _split_top_level(en_body, ",;")
+            en_items = _split_prop_items_en(en_body) if ctx.handoff_v23 else _split_top_level(en_body, ",;")
             zh_items = _split_top_level(zh_body, "、，,;；")
             if len(en_items) == len(zh_items) and len(en_items) >= 1:
                 selected_en: list[str] = []
                 for z_item, e_item in zip(zh_items, en_items, strict=True):
                     z_name = re.sub(r"（[^）]*）|\([^)]*\)", "", z_item).strip()
-                    e_name = re.sub(r"（[^）]*）|\([^)]*\)", "", e_item).strip()
-                    e_norm = re.sub(r"[\s_-]+", " ", e_name.lower()).strip()
-                    matched = (
-                        (z_name and z_name in shot_props)
-                        or (e_norm and (
-                            e_norm in props_norm
-                            or any(e_norm in p or p in e_norm for p in props_norm if len(p) >= 3)
-                            or re.search(r"(?<!\w)" + re.escape(e_norm) + r"(?!\w)", story_norm) is not None
-                        ))
-                    )
+                    matched = (z_name and z_name in shot_props) or _en_prop_matches(e_item)
                     if matched:
                         selected_en.append(e_item.strip().rstrip("."))
                 if not selected_en:
                     continue
-                kept.append(f"{en_prefix} {', '.join(selected_en)}.")
+                kept.append(f"{en_prefix_head} {', '.join(selected_en)}.")
+                continue
+            if ctx.handoff_v23 and en_items:
+                selected_en = [e_item.strip().rstrip(".") for e_item in en_items if _en_prop_matches(e_item)]
+                if not selected_en:
+                    continue
+                kept.append(f"{en_prefix_head} {', '.join(selected_en)}.")
                 continue
         kept.append(en_fact)
     return kept
@@ -969,6 +1101,12 @@ def _shot_text_thin(ctx: _Context) -> str:
     if cast:
         blocks[0].append(cast)
     blocks[0].append(_performance_sentence(ctx))
+    mode, _ = _continuity_mode(spec.continuity)
+    top_last_frame_continuity = (
+        ctx.handoff_v23 and mode == ContinuityMode.LAST_FRAME
+    )
+    if top_last_frame_continuity:
+        blocks[0].extend(_continuity_sentences(ctx))
     for sentence in (
         _placement_sentence(ctx),
         f"It opens on {_clause(_resolve_character_tokens(spec.entry_state, ctx))}" if spec.entry_state.strip() else "",
@@ -1004,7 +1142,8 @@ def _shot_text_thin(ctx: _Context) -> str:
         blocks[0].append(narrator_sentence())
     for line in sorted(spec.dialogue, key=lambda item: item.start_s):
         blocks[block_of(line.start_s)].append(_dialogue_sentence(ctx, line))
-    blocks[0].extend(_continuity_sentences(ctx))
+    if not top_last_frame_continuity:
+        blocks[0].extend(_continuity_sentences(ctx))
     if spec.exit_state.strip():
         blocks[-1].append(f"The shot settles on {_clause(_resolve_character_tokens(spec.exit_state, ctx))}")
     return "\n".join(" ".join(part.strip() for part in block if part.strip()) for block in blocks)
@@ -1307,10 +1446,11 @@ def _is_continuation_video(item: ReferenceManifestItem, ctx: _Context) -> bool:
     """A video is a true continuation only when the shot declares video-reference
     continuity AND the bound video is the continuity derivative (plan P0-D / R4).
     A video bound merely as a motion/pacing reference is NOT a continuation."""
+    mode, _ = _continuity_mode(ctx.spec.continuity)
     return (
         item.use_as == ReferenceUse.VIDEO
         and item.role == "continuity_derivative"
-        and ctx.spec.continuity.mode == ContinuityMode.VIDEO_REFERENCE
+        and mode == ContinuityMode.VIDEO_REFERENCE
     )
 
 
@@ -1387,10 +1527,18 @@ def _retention(ctx: _Context) -> str:
                     "the approved frame composition is retained."
                 )
             elif ctx.anchored_v21 and item.role == "continuity_derivative":
-                lines.append(
-                    f"{item.label} ([Shot 1] continuity reference): partially_preserved - "
-                    "guides the opening framing and lighting from the preceding shot's final frame."
-                )
+                mode, _ = _continuity_mode(ctx.spec.continuity)
+                if ctx.handoff_v23 and mode == ContinuityMode.LAST_FRAME:
+                    lines.append(
+                        f"{item.label} ([Shot 1] continuity reference): partially_preserved - "
+                        "guides the opening framing, lighting, character posture and held prop placement at 0.0s "
+                        "from the preceding shot's final frame before transitioning into the new action."
+                    )
+                else:
+                    lines.append(
+                        f"{item.label} ([Shot 1] continuity reference): partially_preserved - "
+                        "guides the opening framing and lighting from the preceding shot's final frame."
+                    )
             elif ctx.anchored_v21 and item.asset_role == "prop":
                 lines.append(
                     f"{item.label} ([Shot 1] prop reference): fully_preserved - "
@@ -1481,6 +1629,7 @@ class H3PromptCompiler:
         thin_shell = compiler_version not in LEGACY_SHELL_VERSIONS
         anchored_v21 = compiler_version not in LEGACY_200_VERSIONS
         scoped_facts = compiler_version not in LEGACY_210_VERSIONS
+        handoff_v23 = compiler_version not in LEGACY_220_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1510,6 +1659,7 @@ class H3PromptCompiler:
             thin_shell=thin_shell,
             anchored_v21=anchored_v21,
             scoped_facts=scoped_facts,
+            handoff_v23=handoff_v23,
         )
         if language_fallback:
             ctx.warnings.append(

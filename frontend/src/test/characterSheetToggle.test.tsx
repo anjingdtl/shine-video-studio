@@ -220,4 +220,99 @@ describe('ShotMaterialsPanel（精简流）：人物 16:9 五视图定妆照开�
       character_sheet_mode: true,
     });
   });
+
+  it('刷新恢复已保存的五视图状态、切换作品隔离、且缺 LoRA 时自动禁用不选中', async () => {
+    const prefsByProject: Record<string, boolean> = { p1: true, p2: false };
+    let loraReady = true;
+    stub = new StudioStub([
+      { method: 'GET', pattern: /loras\?base_model=qwen_image_21$/, respond: () => jsonResponse(lorasPayload(loraReady)) },
+      { method: 'GET', pattern: /material-preparation\/generation-progress$/, respond: () => jsonResponse({ runs: [] }) },
+      {
+        method: 'GET',
+        pattern: /projects\/([^/]+)\/director\/materials\/requirements/,
+        respond: (url) => {
+          const match = url.match(/projects\/([^/]+)\//);
+          const pid = match?.[1] ?? 'p1';
+          const saved = Boolean(prefsByProject[pid]);
+          return jsonResponse({
+            plan_revision_id: `plan-${pid}`,
+            expected_snapshot: 'a'.repeat(64),
+            preferences: {
+              character_sheet_mode: saved,
+              effective_character_sheet_mode: saved && loraReady,
+              character_sheet_lora_ready: loraReady,
+            },
+            requirements: [{
+              requirement_id: `req-${pid}`,
+              family: 'character',
+              entity_id: '角色A',
+              name: '角色A',
+              description: '测试角色',
+              critical: true,
+              optional: false,
+              strategy: 'generate',
+              matched_master: null,
+              used_shot_ids: ['s1'],
+              used_shot_count: 1,
+              used_episodes: ['第1集'],
+              variants: [],
+            }],
+          });
+        },
+      },
+      {
+        method: 'PUT',
+        pattern: /projects\/([^/]+)\/material-preparation\/preferences$/,
+        respond: (url, init) => {
+          const match = url.match(/projects\/([^/]+)\//);
+          const pid = match?.[1] ?? 'p1';
+          const parsed = JSON.parse(String(init?.body ?? '{}')) as { character_sheet_mode?: boolean };
+          prefsByProject[pid] = Boolean(parsed.character_sheet_mode);
+          return jsonResponse({
+            character_sheet_mode: prefsByProject[pid],
+            effective_character_sheet_mode: prefsByProject[pid] && loraReady,
+            character_sheet_lora_ready: loraReady,
+          });
+        },
+      },
+    ]);
+
+    const { unmount } = render(
+      <StageRailProvider stageId="assets">
+        <ShotMaterialsPanel projectId="p1" />
+      </StageRailProvider>,
+    );
+    const toggleP1 = await screen.findByRole('checkbox', { name: /人物生成 16:9 五视图定妆照/ });
+    await waitFor(() => expect(toggleP1).toBeChecked());
+
+    // Simulate reload on p1 -> still checked.
+    unmount();
+    const view2 = render(
+      <StageRailProvider stageId="assets">
+        <ShotMaterialsPanel projectId="p1" />
+      </StageRailProvider>,
+    );
+    const reloadedToggle = await screen.findByRole('checkbox', { name: /人物生成 16:9 五视图定妆照/ });
+    await waitFor(() => expect(reloadedToggle).toBeChecked());
+
+    // Switch project to p2 -> isolated as unchecked.
+    view2.rerender(
+      <StageRailProvider stageId="assets">
+        <ShotMaterialsPanel projectId="p2" />
+      </StageRailProvider>,
+    );
+    await waitFor(() => expect(screen.getByRole('checkbox', { name: /人物生成 16:9 五视图定妆照/ })).not.toBeChecked());
+
+    // Missing LoRA -> reload on p1 resets effective=false & disabled.
+    loraReady = false;
+    view2.unmount();
+    render(
+      <StageRailProvider stageId="assets">
+        <ShotMaterialsPanel projectId="p1" />
+      </StageRailProvider>,
+    );
+    const disabledToggle = await screen.findByRole('checkbox', { name: /人物生成 16:9 五视图定妆照/ });
+    await waitFor(() => expect(disabledToggle).toBeDisabled());
+    expect(disabledToggle).not.toBeChecked();
+  });
 });

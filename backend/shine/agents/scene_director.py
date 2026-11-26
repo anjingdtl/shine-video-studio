@@ -198,12 +198,14 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "transition_motivation is establishing_reset (or time_or_space_jump), never a continuation."
         if not continuity_predecessor else
         "An earlier shot of this episode exists. Your first shot may continue its final frame by stating "
-        "continuous_action or emotional_hold ONLY when its entry_state literally continues production_context."
-        "previous_shot_exit_state without flipping object state (open vs closed watch), changing pose/angle, or "
+        "continuous_action or emotional_hold ONLY when its entry_state and opening blocking literally start "
+        "from production_context.previous_shot_exit_state (same held-prop height, posture and gaze at 0.0s, "
+        "never flipping object state such as open vs closed watch or raised vs lowered blade, and never "
+        "anticipating timeline[0]'s next motion inside entry_state) without "
         "introducing a prop absent from production_context.previous_shot_props — if it does, keep "
         "production_context.previous_shot_blocking.axis verbatim and preserve those characters' screen left/right "
-        "side order and facing. Whenever the new scene turns/closes an object, grabs a new prop, or changes angle, "
-        "open on a cut (match_on_action, establishing_reset or time_or_space_jump)."
+        "side order and facing. Whenever the new scene resets/re-positions a held object, grabs a new prop, or "
+        "changes angle, open on a cut (match_on_action, establishing_reset or time_or_space_jump)."
     )
     translation = (
         "production_context.translation is the work's own English rendering of the frozen style and of the "

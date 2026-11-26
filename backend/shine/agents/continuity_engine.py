@@ -325,6 +325,7 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
     _judge_coverage(verdict, views, beats)
     _judge_dialogue(verdict, views, beats)
     _decide_boundaries(verdict, views, shots, bool(context.get("continuity_predecessor")))
+    _judge_continuation_openings(verdict, views, shots, previous_shot=context.get("previous_shot"))
     _judge_axis(verdict, views, shots, previous_blocking=context.get("previous_blocking"))
     _report_props(verdict, views, shots)
     return verdict
@@ -660,6 +661,152 @@ def _props(shot: dict[str, Any]) -> set[str]:
             for prop in placement.get("props") or [] if str(prop).strip()}
 
 
+_BLADE_SUBJECT_RE = r"(?:rune\s+sword|longsword|sword|blade|weapon|剑|长剑|符文长剑|剑尖|剑身)"
+_BLADE_STATIC_RAISED_RE = re.compile(
+    rf"(?:{_BLADE_SUBJECT_RE}[^.;\n]{{0,40}}\b(?:raised|lifted|held\s+high|angled\s+up|pointed\s+up|upward|elevated)\b|"
+    rf"\b(?:holds?|holding)\b[^.;\n]{{0,30}}{_BLADE_SUBJECT_RE}[^.;\n]{{0,24}}\b(?:high|up|raised|upward)\b|"
+    r"(?:剑已抬起|剑已举起|已举剑|举剑|抬剑|剑身斜指上方|剑尖朝上))",
+    flags=re.IGNORECASE,
+)
+_BLADE_TRANSITION_RAISE_RE = re.compile(
+    rf"(?:\b(?:raises?|lifts?|elevates?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:抬起|举起|拔起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|举剑|抬剑)",
+    flags=re.IGNORECASE,
+)
+_BLADE_STATIC_LOWERED_RE = re.compile(
+    rf"(?:{_BLADE_SUBJECT_RE}[^.;\n]{{0,40}}\b(?:lowered|dipped|dropped|sheathed|holstered|downward|at\s+(?:his|her)\s+side|resting)\b|"
+    r"(?:剑已压低|剑尖压低|剑尖已垂|垂剑|已收剑|剑归鞘))",
+    flags=re.IGNORECASE,
+)
+_BLADE_TRANSITION_LOWER_RE = re.compile(
+    rf"(?:\b(?:dips?|lowers?|drops?|sheathes?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:压低|垂下|放下|收起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|压低剑尖)",
+    flags=re.IGNORECASE,
+)
+
+
+def _blade_pole(text: str, *, allow_transitions: bool = False) -> str | None:
+    """Extract canonical sword/blade vertical pole from prose when unambiguous."""
+    if not text:
+        return None
+    raised = bool(
+        _BLADE_STATIC_RAISED_RE.search(text)
+        or (allow_transitions and _BLADE_TRANSITION_RAISE_RE.search(text))
+    )
+    lowered = bool(
+        _BLADE_STATIC_LOWERED_RE.search(text)
+        or (allow_transitions and _BLADE_TRANSITION_LOWER_RE.search(text))
+    )
+    if raised and not lowered:
+        return "raised"
+    if lowered and not raised:
+        return "lowered"
+    return None
+
+
+def _blocking_posture_text(shot: dict[str, Any]) -> str:
+    placements = (shot.get("blocking") or {}).get("placements") or []
+    return " ".join(
+        str(pl.get("posture") or "")
+        for pl in placements
+        if isinstance(pl, dict) and str(pl.get("posture") or "").strip()
+    )
+
+
+def _closing_blade_pole(shot: dict[str, Any] | None) -> str | None:
+    if not isinstance(shot, dict):
+        return None
+    pole = _blade_pole(str(shot.get("exit_state") or ""), allow_transitions=True)
+    if pole:
+        return pole
+    timeline = [w for w in (shot.get("timeline") or []) if isinstance(w, dict)]
+    if timeline:
+        last_w = sorted(timeline, key=lambda w: float(w.get("start_s") or 0.0))[-1]
+        pole = _blade_pole(str(last_w.get("action") or ""), allow_transitions=True)
+        if pole:
+            return pole
+    return _blade_pole(_blocking_posture_text(shot), allow_transitions=False)
+
+
+def _opening_blade_pole(shot: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Return ``(entry_pole, blocking_pole)`` for a shot's start state."""
+    entry_pole = _blade_pole(str(shot.get("entry_state") or ""), allow_transitions=False)
+    blocking_pole = _blade_pole(_blocking_posture_text(shot), allow_transitions=False)
+    return entry_pole, blocking_pole
+
+
+def check_continuation_opening(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+    *,
+    mode: str,
+    shot_id: str = "",
+) -> list[dict[str, Any]]:
+    """Single verdict checking opening-state continuity on ``last_frame`` joins.
+
+    A ``cut`` shot starts fresh and is never blocked here.  A ``last_frame``
+    shot carries the preceding shot's closing pose as its 0.0s anchor: its
+    ``entry_state`` and opening ``blocking`` must match that closing pose
+    rather than reverting to the opposite pole or anticipating
+    ``timeline[0]``'s transition (which causes H3 to reset and repeat the
+    predecessor's motion).
+    """
+    if str(mode or "").lower() != "last_frame":
+        return []
+    sid = shot_id or str(current.get("id") or "")
+    entry_pole, blocking_pole = _opening_blade_pole(current)
+    prev_pole = _closing_blade_pole(previous)
+
+    if prev_pole:
+        for source_name, open_pole in (("entry_state", entry_pole), ("blocking", blocking_pole)):
+            if open_pole and open_pole != prev_pole:
+                return [{
+                    "code": "CONTINUATION_OPENING_CONFLICT",
+                    "shot_id": sid,
+                    "detail": f"{source_name}_reverses_predecessor",
+                    "previous_state": prev_pole,
+                    "opening_state": open_pole,
+                }]
+
+    timeline = sorted(
+        (w for w in (current.get("timeline") or []) if isinstance(w, dict)),
+        key=lambda w: float(w.get("start_s") or 0.0),
+    )
+    if timeline:
+        first_action = str(timeline[0].get("action") or "")
+        if entry_pole == "lowered" and _BLADE_TRANSITION_LOWER_RE.search(first_action):
+            return [{
+                "code": "CONTINUATION_OPENING_CONFLICT",
+                "shot_id": sid,
+                "detail": "entry_state_anticipates_lower_transition",
+                "opening_state": entry_pole,
+                "first_action": first_action[:120],
+            }]
+        if entry_pole == "raised" and _BLADE_TRANSITION_RAISE_RE.search(first_action):
+            return [{
+                "code": "CONTINUATION_OPENING_CONFLICT",
+                "shot_id": sid,
+                "detail": "entry_state_anticipates_raise_transition",
+                "opening_state": entry_pole,
+                "first_action": first_action[:120],
+            }]
+    return []
+
+
+def _judge_continuation_openings(
+    verdict: BoardVerdict,
+    views: list[ShotView],
+    shots: list[dict[str, Any]],
+    *,
+    previous_shot: dict[str, Any] | None = None,
+) -> None:
+    for view in views:
+        if view.mode != "last_frame":
+            continue
+        prev = shots[view.index - 1] if view.index > 0 else previous_shot
+        verdict.refusals.extend(
+            check_continuation_opening(prev, shots[view.index], mode=view.mode, shot_id=view.id)
+        )
+
+
 # --- What a refusal says ---------------------------------------------------------
 
 #: One plain sentence per refusal, for the person who sees a blocked scene.
@@ -691,6 +838,7 @@ REFUSAL_LABELS = {
     "AXIS_ORDER_FLIPPED": "人物的左右站位跨过了 180° 轴线",
     "AXIS_FACING_REVERSED": "人物的视线背离了对话对象，轴线错位",
     "AXIS_CHANGED_WITHOUT_BREAK": "人物站位在没有转场理由的地方变了",
+    "CONTINUATION_OPENING_CONFLICT": "接拍镜头的起手姿态与上一镜末帧或首个动作自相矛盾，会导致动作重置重复",
     "EXCLUDED_REFERENCE_USED": "镜头把风格图或末帧图当成了参考图",
 }
 
@@ -773,6 +921,11 @@ _REPAIRS = {
     "AXIS_CHANGED_WITHOUT_BREAK": "The previous answer changed blocking.axis at a boundary that cannot carry "
                                   "people to new places ({where}). Keep the label, or change it only at a "
                                   "time_or_space_jump, establishing_reset or match_on_action cut.",
+    "CONTINUATION_OPENING_CONFLICT": "The previous answer contradicted the preceding final frame at shot entry "
+                                     "({where}: previous={previous_state}, opening={opening_state}). For a "
+                                     "continuous_action/emotional_hold shot, entry_state and opening blocking "
+                                     "must start directly from the previous shot's closing posture and held "
+                                     "props without anticipating timeline[0]'s transition or resetting it.",
     "EXCLUDED_REFERENCE_USED": "The previous answer listed a style or last-frame image in asset_ids. Those are "
                                "never shot references: list only character, place and prop masters.",
 }

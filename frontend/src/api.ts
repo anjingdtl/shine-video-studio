@@ -2236,6 +2236,43 @@ export const startDirectorProduction = (
  * ④ 素材一次交接：确定性请求身份，断连重放不重复出图
  * ------------------------------------------------------------------------- */
 
+export type ShotBindingOtherShot = {
+  shot_id: string;
+  shot_name: string;
+  shot_number: number | null;
+  revision: number;
+  asset_id: string;
+  asset_filename: string;
+  protected_reason: string | null;
+};
+
+export type RequirementShotBinding = {
+  status: 'BOUND_ALL' | 'BOUND_PARTIAL' | 'LIBRARY_ONLY' | 'UNBOUND' | 'NO_SHOTS';
+  current_asset_id: string | null;
+  target_shot_count: number;
+  bound_to_current_count: number;
+  bound_to_current_shot_ids: string[];
+  other_asset_shots: ShotBindingOtherShot[];
+  unbound_shot_ids: string[];
+};
+
+export type MaterialPreferences = {
+  character_sheet_mode: boolean;
+  effective_character_sheet_mode: boolean;
+  character_sheet_lora_ready: boolean;
+};
+
+export type AdoptionReport = {
+  rebound_count: number;
+  total_plan_rebound_count?: number;
+  rebound_shot_ids: string[];
+  already_bound_shot_ids: string[];
+  protected_shots: Array<{ shot_id: string; shot_name: string; reason: string }>;
+  target_shot_ids: string[];
+  library_only: boolean;
+  shot_binding?: RequirementShotBinding | null;
+};
+
 export type DirectorMaterialRequirement = {
   requirement_id: string;
   family: string;
@@ -2254,6 +2291,7 @@ export type DirectorMaterialRequirement = {
   used_shot_count: number;
   used_episodes: string[];
   matched_master: { asset_id: string; sha256: string | null } | null;
+  shot_binding?: RequirementShotBinding | null;
   status: string;
   strategy?: string | null;
 };
@@ -2262,6 +2300,7 @@ export type DirectorMaterialsView = {
   plan_revision_id: string | null;
   expected_snapshot: string | null;
   requirements: DirectorMaterialRequirement[];
+  preferences?: MaterialPreferences | null;
   capacity?: {
     profile_id: string | null; profile_name: string | null; mode: string | null;
     subjects: number; pictures: number; videos: number; audios: number;
@@ -2276,6 +2315,12 @@ export const fetchDirectorRequirements = (projectId: string, episodeIds?: string
   const query = episodeIds && episodeIds.length ? `?episode_ids=${encodeURIComponent(episodeIds.join(','))}` : '';
   return api<DirectorMaterialsView>(`/projects/${projectId}/director/materials/requirements${query}`);
 };
+
+export const updateMaterialPreferences = (projectId: string, characterSheetMode: boolean) =>
+  api<MaterialPreferences>(
+    `/projects/${projectId}/material-preparation/preferences`,
+    json('PUT', { character_sheet_mode: characterSheetMode }),
+  );
 
 export type DirectorMaterialCommitResult = {
   confirmation: {
@@ -2345,13 +2390,63 @@ export const lockProjectAsset = async (assetId: string) => {
 export const promoteMaterialCandidate = async (candidateId: string, isMock: boolean) => {
   const grant = await api<{ grant_id: string; snapshot: string }>('/preparation/approval-grants',
     json('POST', { action: 'promote', target_id: candidateId }));
-  return api<{ formal_asset_id?: string; asset_id?: string }>(
+  return api<{ formal_asset_id?: string; asset_id?: string; payload?: { adoption?: AdoptionReport } }>(
     `/candidate-assets/${candidateId}/promote`,
     json('POST', {
       grant_id: grant.grant_id, snapshot: grant.snapshot, offline: isMock,
       evidence: '导演模式素材准备页人工选用并晋升素材候选。',
     }));
 };
+
+export type AdoptionPreviewResponse = {
+  project_id: string;
+  project_asset_id: string;
+  library_version_id?: string | null;
+  asset_sha256: string;
+  shot_count: number;
+  shots: Array<{
+    shot_id: string;
+    shot_name: string;
+    revision: number;
+    already_bound: boolean;
+    current_binding_count: number;
+    use_as: string;
+    will_bump_revision: boolean;
+    confirmed_package_id: string | null;
+    requires_shot_revision?: boolean;
+    replaces_asset_id?: string | null;
+    replaces_asset_filename?: string | null;
+    conflict: string | null;
+    action: string | null;
+  }>;
+  blocked: Array<Record<string, unknown>>;
+};
+
+export const previewShotAdoption = (body: {
+  project_id: string;
+  project_asset_id: string;
+  shot_ids?: string[];
+  role?: string;
+  entity_id?: string;
+  allow_revise_frozen?: boolean;
+}) => api<AdoptionPreviewResponse>('/asset-center/adoptions/preview', json('POST', body));
+
+export const applyShotAdoption = (body: {
+  project_id: string;
+  project_asset_id: string;
+  shot_ids: string[];
+  role?: string;
+  entity_id?: string;
+  allow_revise_frozen?: boolean;
+  expected_shot_revisions: Record<string, number>;
+  idempotency_key: string;
+  confirmed: boolean;
+}) => api<{
+  adoption_id: string;
+  adopted_count: number;
+  reused_count: number;
+  shots: Array<{ shot_id: string; status: string; from_revision?: number; to_revision?: number }>;
+}>('/asset-center/adoptions', json('POST', body));
 
 export type WorkflowKind = 'director7' | 'manual4';
 

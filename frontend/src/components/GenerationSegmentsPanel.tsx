@@ -193,12 +193,12 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint, fixedE
           <p>{segment.story_beat}</p>
           {segment.editorial_cuts?.length > 0 && <small>段内剪辑范围：{segment.editorial_cuts.map((cut) => `${cut.beat_id ?? '剪辑点'} @ ${cut.start_s ?? 0}s`).join('、')}（整体重拍）</small>}
         </details>
-        {segment.replacement_job_id && segment.replacement_status
-          && ['QUEUED', 'SUBMITTING', 'RUNNING', 'QC_PENDING', 'REPAIR_PENDING'].includes(segment.replacement_status) && (
+        {(segment.replacement_job_id || segment.replacement_status)
+          && ['QUEUED', 'SUBMITTING', 'RUNNING', 'QC_PENDING', 'REPAIR_PENDING'].includes(segment.replacement_status ?? '') && (
           <div className="segment-progress" role="progressbar" aria-valuenow={segment.replacement_progress ?? 0}
             aria-valuemin={0} aria-valuemax={100} aria-label={`重拍第 ${segment.position} 镜进度`}>
             <div className="segment-progress-head">
-              <span>重拍 · {SEGMENT_STATUS[segment.replacement_status] ?? segment.replacement_status}</span>
+              <span>重拍 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}</span>
               <b>{segment.replacement_progress ?? 0}%</b>
             </div>
             <div className="run-progress-bar"><i style={{ width: `${segment.replacement_progress ?? 0}%` }} className="is-working" /></div>
@@ -211,8 +211,9 @@ export default function GenerationSegmentsPanel({ projectId, fingerprint, fixedE
             title="逐项人工审片：身份、服装、场景、运镜、风格、对白、声音、口型、连续性"
             onClick={() => setReviewJobId(segment.job_id)}>分项审片</button>}
         </div>
-        {segment.replacement_job_id && <small className="segment-note">
+        {(segment.replacement_job_id || segment.replacement_status) && <small className="segment-note">
           新版本 · {SEGMENT_STATUS[segment.replacement_status ?? ''] ?? segment.replacement_status}
+          {!segment.replacement_job_id && '（等待前序完成并创建重拍任务）'}
           {segment.replacement_status === 'PASSED' && segment.can_select_replacement && ' · 点「选为当前装配版本」生效'}
         </small>}
         {segment.blocker && <small className="segment-note">当前不能重复排拍：{segment.replacement_job_id ? '新版本等待完成或选用' : '当前版本未通过、仍在执行或需要核对，请先查看制作进度'}（{segment.blocker}）</small>}

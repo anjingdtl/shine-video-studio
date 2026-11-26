@@ -9,7 +9,7 @@
  *  不再把用户引去素材中心。素材中心是平行的素材管理模块，不串进生产环节。 */
 import { useCallback, useEffect, useState } from 'react';
 import { Check, RefreshCw } from 'lucide-react';
-import { API, ApiError, api, promoteMaterialCandidate } from '../api';
+import { API, ApiError, api, promoteMaterialCandidate, type AdoptionReport, type RequirementShotBinding } from '../api';
 
 type CandidateInfo = {
   candidate_id: string;
@@ -18,6 +18,7 @@ type CandidateInfo = {
   is_mock: boolean;
   formal_asset_id: string | null;
   attempt_no: number;
+  adoption?: AdoptionReport | null;
 };
 
 type CharacterSheetProgressInfo = {
@@ -53,6 +54,7 @@ export type AdoptedMaster = {
   entity_id: string | null;
   family: string | null;
   asset_id: string;
+  shotBinding?: RequirementShotBinding | null;
 };
 
 const ITEM_LABEL: Record<string, string> = {
@@ -123,8 +125,21 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
     if (promoting) return;
     setPromoting(candidate.candidate_id); setPromoError(''); setPromoNote('');
     try {
-      await promoteMaterialCandidate(candidate.candidate_id, candidate.is_mock);
-      setPromoNote('已晋升为主素材，并回绑到需要它的镜头。');
+      const response = await promoteMaterialCandidate(candidate.candidate_id, candidate.is_mock);
+      const adoption = response?.payload?.adoption;
+      if (adoption && adoption.library_only) {
+        const protectedList = adoption.protected_shots.map((s) => s.shot_name).join('、');
+        setPromoNote(
+          `新图已进入作品素材库（回绑 0 镜）：${protectedList || '当前镜头'} 因处于已确认导演包或已通过状态仍在使用旧图；如需替换请在下方点「按修订换图」。`,
+        );
+      } else if (adoption && adoption.protected_shots.length > 0) {
+        const protectedList = adoption.protected_shots.map((s) => s.shot_name).join('、');
+        setPromoNote(
+          `已晋升为主素材并回绑 ${adoption.rebound_count} 镜；以下受保护镜头仍在使用旧图：${protectedList}。`,
+        );
+      } else {
+        setPromoNote('已晋升为主素材，并回绑到需要它的镜头。');
+      }
       onPromoted?.();
       await load();
     } catch (error) {
@@ -226,15 +241,29 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
             onClick={() => void promote(candidate)}>
             {promoting === candidate.candidate_id ? '晋升中…' : '选用并晋升'}</button>
         </figure>)}
-        {masters.map((master) => <figure className="mgp-candidate" key={`${master.requirement_id}-${master.asset_id}`}>
+        {masters.map((master) => {
+          const sb = master.shotBinding;
+          const isLibraryOnly = sb?.status === 'LIBRARY_ONLY';
+          const isPartial = sb?.status === 'BOUND_PARTIAL';
+          const captionText = isLibraryOnly
+            ? `已入库（镜头仍用旧图 0/${sb?.target_shot_count ?? 0}）`
+            : isPartial
+              ? `部分镜头已绑定（${sb?.bound_to_current_count ?? 0}/${sb?.target_shot_count ?? 0}）`
+              : sb && sb.target_shot_count > 0
+                ? `已采用（${sb.bound_to_current_count}/${sb.target_shot_count} 镜）`
+                : '已采用';
+          return <figure className="mgp-candidate" key={`${master.requirement_id}-${master.asset_id}`}>
           <img src={`${API}/assets/${master.asset_id}/thumbnail`}
-            alt={`${master.entity_id ?? '素材'} 已采用`} loading="lazy" />
+            alt={`${master.entity_id ?? '素材'} ${captionText}`} loading="lazy" />
           <span className="mgp-candidate-entity">{FAMILY_LABEL[master.family ?? ''] ?? master.family} · {master.entity_id ?? '素材'}</span>
-          <figcaption className="ok"><Check size={11} /> 已采用</figcaption>
+          <figcaption className={isLibraryOnly || isPartial ? 'warn' : 'ok'}>
+            {!isLibraryOnly && !isPartial && <Check size={11} />} {captionText}
+          </figcaption>
           {onUnadopt && <button type="button" className="btn-text" disabled={!!promoting}
             onClick={() => void unadopt(master.requirement_id)}>
             {promoting === `unadopt:${master.requirement_id}` ? '取消中…' : '取消采用'}</button>}
-        </figure>)}
+        </figure>;
+        })}
       </div>
     </div>}
     {shown.map((run) => {

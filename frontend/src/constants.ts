@@ -310,6 +310,7 @@ export const auditEventLabels: Record<string, string> = {
   MATERIAL_SCENE_PREPARED: '素材场景已备好', MATERIAL_SCENE_AUTO_RETRY: '素材拆解已安排重试',
   MATERIAL_IMAGE_WORKER_LOST: '素材出图后台服务丢失',
   MATERIAL_MASTER_SELECTED: '选择素材主条目', MATERIAL_MASTER_ARCHIVED: '归档素材主条目',
+  MATERIAL_PREFERENCES_UPDATED: '更新素材生成偏好',
   LIBRARY_ASSET_CREATED: '创建素材库素材', LIBRARY_VERSION_PROMOTED: '素材版本转正',
   LIBRARY_RIGHTS_APPROVED: '批准素材版权',
   LIBRARY_CHARACTER_SHEET_STEP_RECONCILED: '角色定妆照单步已对账（未完不拼版）',

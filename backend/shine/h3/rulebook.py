@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -17,8 +18,10 @@ from shine.h3.compiler import (
     BASE_SECTION_ORDER,
     COMPILER_VERSION,
     LEGACY_ANCHORED_COMPILER_VERSION,
+    LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     LEGACY_PRE_ANCHOR_COMPILER_VERSION,
     LEGACY_PRE_SANITIZE_COMPILER_VERSION,
+    LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     LEGACY_SEMANTIC_VERSIONS,
     LEGACY_TIMELINE_COMPILER_VERSION,
     REF_RULE_SHA256,
@@ -68,24 +71,114 @@ def _compiled_matches_request(compiled, request: RenderRequest) -> bool:
     )
 
 
-def recompile_for_provenance(request: RenderRequest):
+@dataclass(frozen=True)
+class HistoricalReplayEvidence:
+    """Explicit database-backed provenance for historically mislabelled 2.1.0 requests.
+
+    Some historical production runs (e.g. an 8-shot run created while 2.2.0
+    fact-scoping code was already active under a 2.1.0 compiler label) are
+    pinned in SQLite as ``shine-h3-compiler/2.1.0`` while their frozen prompt
+    and sections match ``shine-h3-compiler/2.2.0``.  Compatibility replay is
+    permitted ONLY when verified frozen-snapshot + graph-hash + real non-mock
+    attempt evidence is presented; new jobs or synthetic/tampered requests
+    never qualify.
+    """
+
+    job_id: str
+    attempt_id: str
+    provider_job_id: str
+    prompt_graph_sha256: str
+    frozen_snapshot_present: bool
+    is_mock: bool = False
+
+    def is_verified(self) -> bool:
+        return (
+            bool(self.job_id)
+            and bool(self.attempt_id)
+            and bool(self.provider_job_id)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", self.prompt_graph_sha256 or ""))
+            and self.frozen_snapshot_present
+            and not self.is_mock
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "attempt_id": self.attempt_id,
+            "provider_job_id": self.provider_job_id,
+            "prompt_graph_sha256": self.prompt_graph_sha256,
+            "frozen_snapshot_present": self.frozen_snapshot_present,
+            "is_mock": self.is_mock,
+            "verified": self.is_verified(),
+        }
+
+
+def historical_replay_evidence(db: Session, job: Any) -> HistoricalReplayEvidence | None:
+    """Build verified ``HistoricalReplayEvidence`` from a real persisted Job ledger row."""
+    from shine.models import JobAttempt, MediaArtifact
+
+    if job is None or (getattr(job, "provider", "") or "").lower() == "mock":
+        return None
+    req = getattr(job, "request", None) or {}
+    if not isinstance(req, dict):
+        return None
+    frozen_snapshot_present = bool(
+        req.get("style_version_id")
+        and req.get("style_hash")
+        and req.get("rulepack_id")
+        and req.get("rulepack_hash")
+        and req.get("shot_revision") is not None
+        and req.get("prompt_sha256")
+    )
+    attempts = list(getattr(job, "attempts", None) or [])
+    if not attempts and getattr(job, "id", None):
+        from sqlalchemy import select
+
+        attempts = list(
+            db.scalars(
+                select(JobAttempt)
+                .where(JobAttempt.job_id == job.id)
+                .order_by(JobAttempt.attempt_no.desc())
+            ).all()
+        )
+    chosen = next(
+        (
+            a
+            for a in sorted(attempts, key=lambda item: item.attempt_no, reverse=True)
+            if (getattr(a, "provider_job_id", None) or "").strip()
+            and re.fullmatch(r"[0-9a-f]{64}", (getattr(a, "prompt_graph_sha256", None) or "").strip())
+        ),
+        None,
+    )
+    if chosen is None:
+        return None
+    artifact = db.get(MediaArtifact, job.artifact_id) if getattr(job, "artifact_id", None) else None
+    is_mock = bool(artifact is not None and getattr(artifact, "is_mock", False))
+    evidence = HistoricalReplayEvidence(
+        job_id=str(job.id),
+        attempt_id=str(chosen.id),
+        provider_job_id=str(chosen.provider_job_id).strip(),
+        prompt_graph_sha256=str(chosen.prompt_graph_sha256).strip(),
+        frozen_snapshot_present=frozen_snapshot_present,
+        is_mock=is_mock,
+    )
+    return evidence if evidence.is_verified() else None
+
+
+def recompile_for_provenance(
+    request: RenderRequest,
+    *,
+    historical_evidence: HistoricalReplayEvidence | None = None,
+):
     """The single compiler replays a stored request at its pinned version.
 
-    Two released versions are historically ambiguous, each because behaviour
-    changed under it without a version bump:
-
-    * ``1.3.0`` holds both the pre-anchoring and the anchored bytes (the
-      silent-shot sanitizer, the language-world anchor and the subject
-      appearance wording changed under it).
-    * ``1.4.0`` holds both the pre-sanitizing and the sanitizing bytes (the
-      dialogue sanitizer, the silent-shot style sanitizer and the silent-shot
-      environment sanitizer were added under it).
-
-    The canonical replay is the current behaviour of that version; when it does
-    not reproduce the frozen bytes exactly, the replay-only identity of the
-    earlier bytes is tried.  Acceptance requires an exact byte match to one of
-    the pinned historical variants, so a tampered prompt matches neither and is
-    still refused.  No stored hash or snapshot is ever rewritten.
+    Two released versions are historically ambiguous because behaviour changed
+    under them without a version bump (``1.3.0`` / ``1.4.0``).  In addition,
+    historically mislabelled ``2.1.0`` jobs backed by verified real execution
+    evidence (frozen snapshot + 64-hex ``prompt_graph_sha256`` + real non-mock
+    attempt) are permitted a bounded, auditable replay against ``2.2.0``
+    without rewriting stored bytes or tags.  New jobs or unverified/tampered
+    requests still require an exact match to their recorded version.
 
     Returns ``(compiled, replayed_variant)``; ``replayed_variant`` is ``None``
     when the canonical pinned version matched, else the replay identity that did.
@@ -118,11 +211,20 @@ def recompile_for_provenance(request: RenderRequest):
         )
     if _compiled_matches_request(compiled, request):
         return compiled, None
-    replay_variant = {
+    replay_candidates: list[str] = []
+    same_version_variant = {
         LEGACY_ANCHORED_COMPILER_VERSION: LEGACY_PRE_ANCHOR_COMPILER_VERSION,
         LEGACY_TIMELINE_COMPILER_VERSION: LEGACY_PRE_SANITIZE_COMPILER_VERSION,
     }.get(pinned)
-    if replay_variant:
+    if same_version_variant:
+        replay_candidates.append(same_version_variant)
+    if (
+        pinned == LEGACY_ANCHORED_TOKENS_COMPILER_VERSION
+        and historical_evidence is not None
+        and historical_evidence.is_verified()
+    ):
+        replay_candidates.append(LEGACY_SCOPED_FACTS_COMPILER_VERSION)
+    for replay_variant in replay_candidates:
         replay = compiler.compile(compiler_version=replay_variant, **kwargs)
         if strategy_loras:
             from shine.foundation.h3 import apply_style_lora_triggers
@@ -466,7 +568,13 @@ class H3RulebookRegistry:
             violations=violations, warnings=warnings,
         )
 
-    def validate(self, request: RenderRequest, pack: RulePack) -> RuleValidationReport:
+    def validate(
+        self,
+        request: RenderRequest,
+        pack: RulePack,
+        *,
+        historical_evidence: HistoricalReplayEvidence | None = None,
+    ) -> RuleValidationReport:
         if request.manual_prompt:
             return self.validate_manual(request, pack)
         self.verify_pack(pack)
@@ -490,15 +598,31 @@ class H3RulebookRegistry:
         if request.rulepack_id != pack.id or request.rulepack_hash != pack.sha256:
             reject("SHINE_PROVENANCE", "rulepack_hash", "Request rule pin does not match the project lock")
         warnings: list[RuleViolation] = []
+        replayed_variant: str | None = None
         try:
             # The single compiler is also the verifier: arbitrary agent strings cannot be submitted.
-            compiled, replayed_variant = recompile_for_provenance(request)
+            compiled, replayed_variant = recompile_for_provenance(
+                request, historical_evidence=historical_evidence
+            )
             if (
                 not _compiled_matches_request(compiled, request)
                 or request.rule_version != RULE_VERSION
                 or request.prompt_skill_hash != SKILL_SHA256
             ):
                 reject("SHINE_PROVENANCE", "compiled_prompt", "Prompt differs from the deterministic compiler output")
+            elif replayed_variant == LEGACY_SCOPED_FACTS_COMPILER_VERSION and historical_evidence is not None:
+                warnings.append(self._warning_violation(pack, {
+                    "rule_id": "SHINE_PROVENANCE",
+                    "field": "compiler_version",
+                    "message": (
+                        f"HISTORICAL_COMPILER_VERSION_MISMATCH: recorded={request.compiler_version}, "
+                        f"matched={replayed_variant}, prompt_sha256={request.prompt_sha256}, "
+                        f"job_id={historical_evidence.job_id}, attempt_id={historical_evidence.attempt_id}, "
+                        f"provider_job_id={historical_evidence.provider_job_id}, "
+                        f"prompt_graph_sha256={historical_evidence.prompt_graph_sha256}. "
+                        "Stored compiler tag and prompt bytes kept unmodified."
+                    ),
+                }))
             elif replayed_variant:
                 warnings.append(self._warning_violation(pack, {
                     "rule_id": "SHINE_PROVENANCE",
@@ -549,3 +673,30 @@ class H3RulebookRegistry:
             rulepack_id=pack.id, rulepack_hash=pack.sha256, passed=not violations,
             violations=violations, warnings=warnings,
         )
+
+
+def verify_request_provenance(
+    request: RenderRequest,
+    pack: RulePack,
+    *,
+    historical_evidence: HistoricalReplayEvidence | None = None,
+) -> dict[str, Any]:
+    """Auditable single-entry provenance verification summary for one RenderRequest."""
+    registry = H3RulebookRegistry()
+    report = registry.validate(request, pack, historical_evidence=historical_evidence)
+    compiled, variant = recompile_for_provenance(request, historical_evidence=historical_evidence)
+    matched_version = variant or compiled.compiler_version
+    return {
+        "passed": report.passed,
+        "recorded_compiler_version": request.compiler_version,
+        "matched_compiler_version": matched_version,
+        "historical_compat_applied": bool(variant == LEGACY_SCOPED_FACTS_COMPILER_VERSION),
+        "replayed_variant": variant,
+        "recorded_prompt_sha256": request.prompt_sha256,
+        "recompiled_prompt_sha256": compiled.prompt_sha256,
+        "prompt_matches": compiled.prompt == request.compiled_prompt,
+        "sections_match": compiled.sections == request.compiled_prompt_sections,
+        "evidence": historical_evidence.as_dict() if historical_evidence is not None else None,
+        "violations": [item.model_dump(mode="json") for item in report.violations],
+        "warnings": [item.model_dump(mode="json") for item in report.warnings],
+    }

@@ -36,11 +36,15 @@ import {
   resendUnknownFilmTask,
   retryEpisodeStoryboard,
   API,
+  applyShotAdoption,
   fetchDirectorRequirements,
   commitDirectorMaterials,
+  previewShotAdoption,
+  updateMaterialPreferences,
   uploadProjectAsset,
   approveProjectAsset,
   lockProjectAsset,
+  type AdoptionPreviewResponse,
   type DirectorMaterialRequirement,
   type DirectorMaterialsView,
   type EpisodeShotRow,
@@ -1329,13 +1333,26 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   const [progressKey, setProgressKey] = useState(0);
   /** 「从素材中心导入」弹窗当前服务的需求行；点选后走既有分配+采纳执行者。 */
   const [centerPickerRow, setCenterPickerRow] = useState<DirectorMaterialRequirement | null>(null);
+  /** 「按修订换图」弹窗当前服务的需求行与已勾选镜头。 */
+  const [swapTarget, setSwapTarget] = useState<{
+    row: DirectorMaterialRequirement;
+    preview: AdoptionPreviewResponse | null;
+    selectedShots: Record<string, boolean>;
+    error: string;
+    loading: boolean;
+  } | null>(null);
   /** 后台是否有在途出图：据此锁定主操作并给出「生成中」反馈（进度条同一事实）。 */
   const [generating, setGenerating] = useState(false);
   const submitting = useRef(false);
+  const activeProject = useRef(projectId);
+  activeProject.current = projectId;
   const knownMasters = useRef<Record<string, string | null>>({});
 
   const apply = useCallback((body: DirectorMaterialsView) => {
     setView(body);
+    if (body.preferences) {
+      setCharacterSheetMode(Boolean(body.preferences.effective_character_sheet_mode));
+    }
     const prevMasters = knownMasters.current;
     const nextMasters: Record<string, string | null> = {};
     for (const row of body.requirements) {
@@ -1375,7 +1392,81 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     }
   }, [apply, projectId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setCharacterSheetMode(false);
+    setSwapTarget(null);
+    void load();
+  }, [load, projectId]);
+
+  const handleCharacterSheetToggle = useCallback((next: boolean) => {
+    setCharacterSheetMode(next);
+    void updateMaterialPreferences(projectId, next)
+      .then((prefs) => {
+        if (activeProject.current === projectId) {
+          setCharacterSheetMode(Boolean(prefs.effective_character_sheet_mode));
+        }
+      })
+      .catch(() => undefined);
+  }, [projectId]);
+
+  async function openSwapDialog(row: DirectorMaterialRequirement) {
+    const masterId = row.matched_master?.asset_id;
+    const oldShots = row.shot_binding?.other_asset_shots ?? [];
+    if (!masterId || !oldShots.length) return;
+    const defaultSelected = Object.fromEntries(oldShots.map((item) => [item.shot_id, true]));
+    setSwapTarget({ row, preview: null, selectedShots: defaultSelected, error: '', loading: true });
+    try {
+      const preview = await previewShotAdoption({
+        project_id: projectId,
+        project_asset_id: masterId,
+        shot_ids: oldShots.map((item) => item.shot_id),
+        role: row.family,
+        entity_id: row.entity_id ?? undefined,
+        allow_revise_frozen: true,
+      });
+      if (activeProject.current !== projectId) return;
+      setSwapTarget((cur) => cur ? { ...cur, preview, loading: false } : cur);
+    } catch (error) {
+      setSwapTarget((cur) => cur ? { ...cur, error: describeError(error), loading: false } : cur);
+    }
+  }
+
+  async function confirmSwapAdoption() {
+    if (!swapTarget?.preview) return;
+    const chosenIds = Object.entries(swapTarget.selectedShots)
+      .filter(([, checked]) => checked)
+      .map(([sid]) => sid);
+    const usable = swapTarget.preview.shots.filter(
+      (shot) => chosenIds.includes(shot.shot_id) && !shot.conflict && !shot.already_bound,
+    );
+    if (!usable.length) {
+      setSwapTarget((cur) => cur ? { ...cur, error: '请至少选择一个可替换的镜头' } : cur);
+      return;
+    }
+    setSwapTarget((cur) => cur ? { ...cur, loading: true, error: '' } : cur);
+    try {
+      const receipt = await applyShotAdoption({
+        project_id: projectId,
+        project_asset_id: swapTarget.preview.project_asset_id,
+        shot_ids: usable.map((shot) => shot.shot_id),
+        role: swapTarget.row.family,
+        entity_id: swapTarget.row.entity_id ?? undefined,
+        allow_revise_frozen: true,
+        expected_shot_revisions: Object.fromEntries(usable.map((shot) => [shot.shot_id, shot.revision])),
+        idempotency_key: crypto.randomUUID(),
+        confirmed: true,
+      });
+      setSwapTarget(null);
+      setResult(
+        `已修订并替换 ${receipt.adopted_count} 个镜头的绑定（${swapTarget.row.name ?? swapTarget.row.entity_id}）；旧导演包与旧通过成片保留为历史，请到「⑦ 后期成片 / 生成分段」重拍对应镜头并装配新版成片。`,
+      );
+      onMessage?.(`已按修订替换 ${receipt.adopted_count} 个镜头的素材绑定。`);
+      await load();
+      onJourneyRefresh?.();
+    } catch (error) {
+      setSwapTarget((cur) => cur ? { ...cur, error: describeError(error), loading: false } : cur);
+    }
+  }
 
   async function derive() {
     if (submitting.current) return;
@@ -1694,6 +1785,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         .map((row) => ({
           requirement_id: row.requirement_id, entity_id: row.entity_id, family: row.family,
           asset_id: row.matched_master!.asset_id,
+          shotBinding: row.shot_binding ?? null,
         }))}
       onPromoted={() => { void load(); onJourneyRefresh?.(); }}
       onUnadopt={async (requirementId) => {
@@ -1760,7 +1852,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       </div>
       <CharacterSheetToggle
         checked={characterSheetMode}
-        onChange={setCharacterSheetMode}
+        onChange={handleCharacterSheetToggle}
         disabled={busy !== ''}
         onGoSetup={() => {
           if (onGoStage) onGoStage('setup-env');
@@ -1807,11 +1899,40 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             <td className="shot-beat">{(row.description || '—').slice(0, 80)}</td>
             <td>{row.used_shot_count} 镜
               {row.used_episodes.length ? ` · ${row.used_episodes.join('、')}` : ''}</td>
-            <td>{row.matched_master
-              ? <span className="head-chip ok">已匹配，可复用</span>
-              : <span className={`head-chip ${row.critical ? 'warn' : ''}`}>
+            <td>{(() => {
+              const sb = row.shot_binding;
+              if (!row.matched_master) {
+                return <span className={`head-chip ${row.critical ? 'warn' : ''}`}>
                   {row.critical ? '必需，缺' : '可选，缺'}
-                </span>}</td>
+                </span>;
+              }
+              if (sb?.status === 'LIBRARY_ONLY') {
+                return <div className="material-binding-status">
+                  <span className="head-chip warn">
+                    已入库·镜头仍用旧图（0/{sb.target_shot_count}）
+                  </span>
+                  <small className="muted">
+                    仍在用旧图：{sb.other_asset_shots.map((s) => `${s.shot_number ? `第${s.shot_number}镜` : s.shot_name}(${s.asset_id.slice(0, 8)})`).join('、')}
+                  </small>
+                </div>;
+              }
+              if (sb?.status === 'BOUND_PARTIAL') {
+                return <div className="material-binding-status">
+                  <span className="head-chip warn">
+                    部分镜头已绑定（{sb.bound_to_current_count}/{sb.target_shot_count}）
+                  </span>
+                  <small className="muted">
+                    仍用旧图：{sb.other_asset_shots.map((s) => `${s.shot_number ? `第${s.shot_number}镜` : s.shot_name}(${s.asset_id.slice(0, 8)})`).join('、')}
+                  </small>
+                </div>;
+              }
+              if (sb && sb.target_shot_count > 0 && sb.status === 'BOUND_ALL') {
+                return <span className="head-chip ok">
+                  已绑定全部镜头（{sb.bound_to_current_count}/{sb.target_shot_count}）
+                </span>;
+              }
+              return <span className="head-chip ok">已匹配，可复用</span>;
+            })()}</td>
             <td>
               <select value={decisions[row.requirement_id] ?? ''} disabled={busy !== ''}
                 aria-label={`处理方式：${row.name ?? row.entity_id}`}
@@ -1829,6 +1950,11 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
               </select>
             </td>
             <td className="material-row-actions">
+              {row.matched_master && (row.shot_binding?.other_asset_shots?.length ?? 0) > 0 && (
+                <button type="button" className="btn-secondary" disabled={busy !== ''}
+                  title="在保留旧导演包与旧通过成片的前提下，按明确修订将新主素材绑定到选定镜头"
+                  onClick={() => void openSwapDialog(row)}>按修订换图</button>
+              )}
               <button type="button" className="btn-text" disabled={busy !== ''}
                 title="直接编辑这一项出图用的提示词；保存并冻结后，下一次出图原样使用"
                 onClick={() => setPromptTarget(row)}>人工修订</button>
@@ -1880,5 +2006,41 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       onPick={(item) => void importFromCenter(centerPickerRow, item)}
       onClose={() => setCenterPickerRow(null)}
     />}
+
+    {swapTarget && <dialog open className="media-preview-dialog" aria-label={`按修订换图 · ${swapTarget.row.name ?? swapTarget.row.entity_id}`}>
+      <h3>按修订换图 · {swapTarget.row.name ?? swapTarget.row.entity_id}</h3>
+      <p className="run-hint">
+        新素材（{swapTarget.row.matched_master?.asset_id.slice(0, 8)}）已进入作品素材库；由于目标镜头曾冻结在已确认导演包或已有通过成片，默认保护不自动覆盖。勾选要换图的镜头并确认修订（旧导演包与已通过成片保留为历史）：
+      </p>
+      {swapTarget.loading && <p className="material-hint">正在检查镜头绑定与版本…</p>}
+      {swapTarget.error && <p role="alert" className="form-error">{swapTarget.error}</p>}
+      {swapTarget.preview && <ul>
+        {swapTarget.preview.shots.map((shot) => {
+          const other = swapTarget.row.shot_binding?.other_asset_shots.find((o) => o.shot_id === shot.shot_id);
+          return <li key={shot.shot_id}>
+            <label>
+              <input type="checkbox"
+                disabled={swapTarget.loading || !!shot.conflict}
+                checked={!!swapTarget.selectedShots[shot.shot_id]}
+                onChange={(event) => setSwapTarget((cur) => cur ? {
+                  ...cur,
+                  selectedShots: { ...cur.selectedShots, [shot.shot_id]: event.target.checked },
+                } : cur)} />
+              {' '}
+              <b>{other?.shot_number ? `第 ${other.shot_number} 镜` : shot.shot_name}</b>
+              {' '}（v{shot.revision} → v{shot.revision + 1}）
+              {shot.replaces_asset_id && <span className="muted"> · 替换旧图 {shot.replaces_asset_id.slice(0, 8)}（{shot.replaces_asset_filename}）</span>}
+              {shot.conflict && <span className="warn"> · 阻断：{shot.conflict}</span>}
+            </label>
+          </li>;
+        })}
+      </ul>}
+      <div className="segment-card-actions">
+        <button type="button" className="btn-primary" disabled={swapTarget.loading || !swapTarget.preview}
+          onClick={() => void confirmSwapAdoption()}>确认按修订换图</button>
+        <button type="button" className="btn-secondary" disabled={swapTarget.loading}
+          onClick={() => setSwapTarget(null)}>取消</button>
+      </div>
+    </dialog>}
   </section>;
 }

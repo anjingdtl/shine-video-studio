@@ -336,3 +336,118 @@ def test_paused_series_and_unrelated_reconcile_lease_do_not_block_retake_of_pass
         headers=LOCAL,
     )
     assert retake.status_code == 202, retake.text
+
+
+def test_last_frame_deferred_retake_and_run_episode_v2_delivery(api):
+    """Deferred last_frame retake resolves via series item and assembles Episode v2 across run batches."""
+    from shine.media.delivery_models import DeliveryOrder
+    from shine.models import Shot
+    from shine.schemas import ContinuityMode, ShotSpec
+
+    client, factory, project, shots, jobs, _hashes, root = _three(api)
+    with factory.begin() as db:
+        shot1 = db.get(Shot, shots[1]["id"])
+        spec1 = ShotSpec.model_validate(shot1.spec)
+        spec1.continuity = spec1.continuity.model_copy(
+            update={"mode": ContinuityMode.LAST_FRAME, "previous_shot_id": shots[0]["id"], "previous_job_id": None}
+        )
+        shot1.spec = spec1.model_dump(mode="json")
+
+        pkg = DirectorPackageVersion(
+            project_id=project, revision=1, status="CONFIRMED", manifest={"policy": {"batch_shot_limit": 5}},
+            scope_digest="a" * 64, manifest_sha256="b" * 64, policy_hash="c" * 64,
+            episode_count=1, shot_count=3,
+        )
+        db.add(pkg)
+        db.flush()
+        run = ProductionRun(
+            project_id=project, package_id=pkg.id, package_revision=1,
+            manifest_sha256="b" * 64, scope_digest="a" * 64, policy_hash="c" * 64,
+            status="COMPLETED", idempotency_key="run-ep-v2", request_hash="d" * 64,
+        )
+        db.add(run)
+        db.flush()
+        from shine.director.models import DirectorPackageEpisode
+        from shine.director.package import digest_of
+        ep_manifest = {
+            "shots": [
+                {
+                    "shot_id": s["id"], "name": s["name"], "revision": 1,
+                    "spec_sha256": digest_of(s["spec"]),
+                    "continuity_mode": "last_frame" if i == 1 else "cut",
+                    "bindings": [],
+                }
+                for i, s in enumerate(shots)
+            ]
+        }
+        ep_sha = digest_of(ep_manifest)
+        db.add(DirectorPackageEpisode(
+            package_id=pkg.id, project_id=project, episode_id="ep-01", position=0, title="第一集",
+            manifest=ep_manifest, manifest_sha256=ep_sha,
+        ))
+        ep = ProductionRunEpisode(
+            run_id=run.id, project_id=project, episode_id="ep-01", position=0, title="第一集",
+            manifest_sha256=ep_sha, shot_ids=[s["id"] for s in shots], status="DELIVERED",
+        )
+        db.add(ep)
+        db.flush()
+        db.add(ProductionRunBatch(
+            run_id=run.id, episode_row_id=ep.id, episode_id="ep-01",
+            batch_key="ep-01-b01", position=1, input_digest="1" * 64,
+            shot_ids=[s["id"] for s in shots], status="PASSED", series_id=root,
+        ))
+        old_order = DeliveryOrder(
+            project_id=project, series_id=None, scope_kind="episode", scope_id=ep.id,
+            origin="run_episode", version=1, status="DELIVERED", input_digest="old" * 20, shots_digest="old" * 20,
+        )
+        db.add(old_order)
+        db.flush()
+        ep.delivery_order_id = old_order.id
+
+    retake = client.post(
+        f"/api/v1/projects/{project}/generation-segments/{shots[1]['id']}/regenerate",
+        json={"source_job_id": jobs[1]["id"], "expected_shot_revision": 1},
+        headers=LOCAL,
+    )
+    assert retake.status_code == 202, retake.text
+    assert retake.json()["job_id"] is None and retake.json()["pending_job"] is True
+    retake_series_id = retake.json()["series_id"]
+
+    # Simulate Worker creating and passing the deferred replacement job on the retake series.
+    with factory.begin() as db:
+        series = db.get(ProductionSeries, retake_series_id)
+        item = series.items[0]
+        src_job = db.get(Job, jobs[1]["id"])
+        job_row = Job(
+            project_id=project, shot_id=src_job.shot_id, shot_revision=src_job.shot_revision,
+            style_version_id=src_job.style_version_id, request=src_job.request,
+            idempotency_key=f"retake-deferred-{shots[1]['id']}", status="QUEUED",
+            provider="comfyui", workflow_profile_id=src_job.workflow_profile_id,
+        )
+        db.add(job_row)
+        db.flush()
+        _passed(db, job_row)
+        item.job_id = job_row.id
+        item.status = "PASSED"
+        series.current_job_id = job_row.id
+        series.status = "COMPLETED"
+        new_job_id = job_row.id
+
+    segs = client.get(f"/api/v1/projects/{project}/generation-segments").json()["segments"]
+    seg1 = next(s for s in segs if s["shot_id"] == shots[1]["id"])
+    assert seg1["replacement_job_id"] == new_job_id
+    assert seg1["can_select_replacement"] is True
+
+    selected = client.post(
+        f"/api/v1/projects/{project}/generation-segments/{root}/select",
+        json={"source_job_id": jobs[1]["id"], "replacement_job_id": new_job_id},
+        headers=LOCAL,
+    )
+    assert selected.status_code == 202, selected.text
+    assert selected.json()["delivery_version"] == 2
+    with factory() as db:
+        assert db.query(DeliveryOrder).count() == 2
+        v2 = db.query(DeliveryOrder).filter_by(version=2).one()
+        assert v2.origin == "segment_revision"
+        assert v2.scope_kind == "episode"
+

@@ -200,11 +200,34 @@ def material_entity_catalog(project_id: str, db: DBSession):
     return {"catalog": (row.payload_json if row is not None else None)}
 
 
+class MaterialPreferencesBody(APIModel):
+    character_sheet_mode: bool = False
+
+
 @router.get("/projects/{project_id}/material-preparation")
 def material_progress(project_id: str, db: DBSession, settings: SettingsDep):
     from shine.media.output_layout import output_root
 
-    return service.plan_progress(db, project_id, data_dir=output_root(db, settings))
+    return service.plan_progress(db, project_id, data_dir=output_root(db, settings), settings=settings)
+
+
+@router.put("/projects/{project_id}/material-preparation/preferences")
+def update_material_preferences(
+    project_id: str,
+    body: MaterialPreferencesBody,
+    actor: Operator,
+    db: DBSession,
+    settings: SettingsDep,
+):
+    result = service.set_material_preferences(
+        db,
+        project_id,
+        character_sheet_mode=body.character_sheet_mode,
+        actor=actor,
+        settings=settings,
+    )
+    db.commit()
+    return result
 
 
 @router.get("/projects/{project_id}/material-preparation/generation-progress")

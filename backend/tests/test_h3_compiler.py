@@ -1094,7 +1094,7 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     compiler = H3PromptCompiler()
     # 当前版本的哨兵：提升版本号必须是有意为之，并同时保证每个已发布版本的字节不变
     # （见 test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay）。
-    assert COMPILER_VERSION == "shine-h3-compiler/2.2.0"
+    assert COMPILER_VERSION == "shine-h3-compiler/2.3.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1639,14 +1639,38 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     """
     from types import SimpleNamespace
 
-    from shine.h3.compiler import COMPILER_VERSION, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION
-    from shine.h3.rulebook import recompile_for_provenance
+    from shine.h3.compiler import (
+        COMPILER_VERSION,
+        KNOWN_COMPILER_VERSIONS,
+        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+        SKILL_SHA256,
+    )
+    from shine.h3.rulebook import (
+        PACK_ID,
+        HistoricalReplayEvidence,
+        RulePack,
+        builtin_manifest,
+        digest,
+        recompile_for_provenance,
+        verify_request_provenance,
+    )
 
     compiler = H3PromptCompiler()
+    en_style = StyleBible(
+        photography_language="Eye-level medium shot, slow steady push",
+        shot_blocking="Hold eyeline across dialogue",
+        color_palette="Slate cyan shadows with warm torchlight",
+        lighting_tone="Single-side key with deep shadows",
+        lens_texture="Natural shallow depth, light film grain",
+        editing_rhythm="Cut on reaction beat",
+        sound_performance="Natural dialogue with restrained ambience",
+    )
     shot = spec(
-        characters=["艾德里安"],
-        character_tokens={"{{C1}}": "艾德里安", "{{C2}}": "莫瑞甘"},
+        characters=["Adrian"],
+        character_tokens={"{{C1}}": "Adrian", "{{C2}}": "Morrigan"},
         story_beat="{{C1}} strides into the rain-lashed courtyard.",
+        sound={"environment": "rain-lashed stone courtyard", "music_policy": "low_or_none"},
         locked_story_facts=[
             "欧洲中世纪西方暗黑奇幻世界观，禁止现代物件",
             "艾德里安：35岁男性骑士，左颧骨旧剑疤，深墨绿斗篷",
@@ -1663,6 +1687,123 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
         ],
     )
     manifest = [
+        item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="Adrian", role="Adrian").model_copy(
+            update={"asset_role": "character"}
+        ),
+        item("<Picture 2>", ReferenceUse.PICTURE, entity_id="Castle Courtyard").model_copy(
+            update={"asset_role": "scene"}
+        ),
+    ]
+    released = compiler.compile(
+        spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+    )
+    scoped_220 = compiler.compile(
+        spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+    )
+    current_230 = compile_prompt(manifest, shot=shot, style=en_style)
+
+    # Current version is 2.3.0; 2.2.0 keeps its exact released scoping bytes.
+    assert COMPILER_VERSION == "shine-h3-compiler/2.3.0"
+    assert current_230.compiler_version == COMPILER_VERSION
+    assert scoped_220.compiler_version == LEGACY_SCOPED_FACTS_COMPILER_VERSION
+    released_desc = released.sections["detailed_description"]
+    assert "Morrigan: 28-year-old female watcher" in released_desc
+    assert "brass lantern" in released_desc
+    assert "divided into 8 shots" in released_desc
+    assert "Morrigan" not in scoped_220.sections["detailed_description"]
+    assert "brass lantern" not in scoped_220.sections["detailed_description"]
+    assert released.prompt_sha256 != scoped_220.prompt_sha256
+
+    def frozen(compiled, version) -> SimpleNamespace:
+        return SimpleNamespace(
+            compiler_version=version, shot_spec=shot, style_snapshot=en_style, reference_manifest=manifest,
+            generation_mode=compiled.mode, project_language="Chinese", compiled_prompt=compiled.prompt,
+            prompt_sha256=compiled.prompt_sha256, compiled_prompt_sections=compiled.sections,
+            manual_prompt=False, rulepack_id=PACK_ID, rulepack_hash=digest(builtin_manifest()),
+            rule_version=compiled.rule_version, prompt_skill_hash=SKILL_SHA256,
+            style_version_id=shot.style_version_id, style_hash=digest(en_style.model_dump(mode="json")),
+            expected_duration_s=shot.duration_target_s,
+        )
+
+    # A request stored under any released version replays byte-exactly with no fallback variant.
+    for stored, version in (
+        (released, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION),
+        (scoped_220, LEGACY_SCOPED_FACTS_COMPILER_VERSION),
+        (current_230, COMPILER_VERSION),
+    ):
+        replayed, variant = recompile_for_provenance(frozen(stored, version))
+        assert variant is None
+        assert replayed.prompt == stored.prompt
+        assert replayed.prompt_sha256 == stored.prompt_sha256
+
+    # Mislabelled 2.1.0 (with 2.2.0 bytes) fails WITHOUT historical evidence, and fails if mocked or tampered.
+    mislabelled = frozen(scoped_220, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION)
+    replayed, _variant = recompile_for_provenance(mislabelled)
+    assert replayed.prompt != mislabelled.compiled_prompt
+
+    pack = RulePack(id=PACK_ID, manifest=builtin_manifest(), sha256=digest(builtin_manifest()))
+    assert verify_request_provenance(mislabelled, pack)["passed"] is False
+
+    mock_ev = HistoricalReplayEvidence(
+        job_id="j1", attempt_id="a1", provider_job_id="pj1",
+        prompt_graph_sha256="a" * 64, frozen_snapshot_present=True, is_mock=True,
+    )
+    assert verify_request_provenance(mislabelled, pack, historical_evidence=mock_ev)["passed"] is False
+
+    real_ev = HistoricalReplayEvidence(
+        job_id="j1", attempt_id="a1", provider_job_id="pj1",
+        prompt_graph_sha256="a" * 64, frozen_snapshot_present=True, is_mock=False,
+    )
+    verified = verify_request_provenance(mislabelled, pack, historical_evidence=real_ev)
+    assert verified["passed"] is True, verified
+    assert verified["historical_compat_applied"] is True
+    assert verified["recorded_compiler_version"] == LEGACY_ANCHORED_TOKENS_COMPILER_VERSION
+    assert verified["matched_compiler_version"] == LEGACY_SCOPED_FACTS_COMPILER_VERSION
+    assert verified["prompt_matches"] is True and verified["sections_match"] is True
+    assert verified["warnings"][0]["affected_field"] == "compiler_version"
+
+    tampered = SimpleNamespace(**{
+        **mislabelled.__dict__,
+        "compiled_prompt": mislabelled.compiled_prompt + " ",
+    })
+    assert verify_request_provenance(tampered, pack, historical_evidence=real_ev)["passed"] is False
+    assert all(ver in KNOWN_COMPILER_VERSIONS for ver in (
+        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION, COMPILER_VERSION
+    ))
+
+
+def test_230_scoping_counterexamples_and_opening_last_frame_handoff():
+    """2.3.0 blocks appearance-only off-cast bios and English 'and' prop lists, and puts last_frame anchor first."""
+    from shine.h3.compiler import (
+        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+    )
+
+    compiler = H3PromptCompiler()
+    zh_facts = [
+        "时代：中世纪晚期",
+        "基调：阴郁压抑",
+        "艾德里安：35岁男性骑士，深墨绿斗篷",
+        "维伦：灰色粗布法袍，手持黑木权杖",
+        "道具：符文长剑、黄铜提灯",
+    ]
+    en_facts = [
+        "Era: late medieval Europe.",
+        "Tone: grim and oppressive.",
+        "Adrian: 35-year-old male knight in a dark-green cloak.",
+        "Velen: a grey rough-cloth robe, carrying a blackwood staff.",
+        "Props: rune sword and brass lantern.",
+    ]
+    solo_zero_prop = spec(
+        characters=["艾德里安"],
+        character_tokens={"{{C1}}": "艾德里安"},
+        story_beat="{{C1}} pauses beneath the stone arch.",
+        locked_story_facts=zh_facts,
+        prompt_story_facts=en_facts,
+    )
+    m_solo = [
         item("<Subject 1>", ReferenceUse.SUBJECT, entity_id="艾德里安", role="艾德里安").model_copy(
             update={"asset_role": "character"}
         ),
@@ -1670,37 +1811,39 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
             update={"asset_role": "scene"}
         ),
     ]
-    released = compiler.compile(
-        spec=shot, style=STYLE, manifest=manifest, project_language="Chinese",
-        compiler_version=LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
-    )
-    scoped = compile_prompt(manifest, shot=shot)
+    desc_230 = compile_prompt(m_solo, shot=solo_zero_prop).sections["detailed_description"]
+    assert "Era: late medieval Europe." in desc_230
+    assert "Tone: grim and oppressive." in desc_230
+    assert "Adrian: 35-year-old male knight" in desc_230
+    assert "Velen" not in desc_230
+    assert "rune sword" not in desc_230
+    assert "brass lantern" not in desc_230
 
-    # The current version is 2.2.0 and it is the one that scopes.
-    assert COMPILER_VERSION == "shine-h3-compiler/2.2.0"
-    assert scoped.compiler_version == COMPILER_VERSION
-    released_desc = released.sections["detailed_description"]
-    assert "Morrigan: 28-year-old female watcher" in released_desc
-    assert "brass lantern" in released_desc
-    assert "divided into 8 shots" in released_desc
-    assert "Morrigan" not in scoped.sections["detailed_description"]
-    assert "brass lantern" not in scoped.sections["detailed_description"]
-    assert released.prompt_sha256 != scoped.prompt_sha256
+    # Last_frame opening continuity sits at top of [Shot 1]; CUT counterexample emits none.
+    m_cont = [
+        *m_solo,
+        item("<Picture 3>", ReferenceUse.PICTURE, role="continuity_derivative"),
+    ]
+    cont_spec = solo_zero_prop.model_copy(update={
+        "continuity": {"mode": "last_frame", "previous_shot_id": "s6", "previous_job_id": "j6"},
+        "entry_state": "Sword raised across his chest.",
+    })
+    cont_out = compile_prompt(m_cont, shot=cont_spec)
+    cont_desc = cont_out.sections["detailed_description"]
+    assert cont_desc.index("At 0.0s, open seamlessly") < cont_desc.index("It opens on")
+    assert "held prop placement at 0.0s" in cont_out.sections["retention_analysis"]
 
-    def frozen(compiled, version) -> SimpleNamespace:
-        return SimpleNamespace(
-            compiler_version=version, shot_spec=shot, style_snapshot=STYLE, reference_manifest=manifest,
-            generation_mode=compiled.mode, project_language="Chinese", compiled_prompt=compiled.prompt,
-            prompt_sha256=compiled.prompt_sha256, compiled_prompt_sections=compiled.sections,
+    cut_spec = solo_zero_prop.model_copy(update={"continuity": {"mode": "cut"}})
+    cut_desc = compile_prompt(m_solo, shot=cut_spec).sections["detailed_description"]
+    assert "preceding shot's final frame" not in cut_desc
+
+    # Released 2.1.0 and 2.2.0 remain deterministic across repeated compiles.
+    for ver in (LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION):
+        a = compiler.compile(
+            spec=solo_zero_prop, style=STYLE, manifest=m_solo, project_language="Chinese", compiler_version=ver,
         )
+        b = compiler.compile(
+            spec=solo_zero_prop, style=STYLE, manifest=m_solo, project_language="Chinese", compiler_version=ver,
+        )
+        assert a.prompt_sha256 == b.prompt_sha256
 
-    # A request stored under either version replays byte-exactly, with no fallback variant.
-    for stored, version in ((released, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION), (scoped, COMPILER_VERSION)):
-        replayed, variant = recompile_for_provenance(frozen(stored, version))
-        assert variant is None
-        assert replayed.prompt == stored.prompt
-        assert replayed.prompt_sha256 == stored.prompt_sha256
-    # The scoped bytes never existed under the released 2.1.0: labelled as 2.1.0 they do not replay.
-    mislabelled = frozen(scoped, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION)
-    replayed, _variant = recompile_for_provenance(mislabelled)
-    assert replayed.prompt != mislabelled.compiled_prompt

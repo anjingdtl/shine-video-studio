@@ -39,8 +39,24 @@ class SegmentAction(APIModel):
 
 
 def _records(db, project_id, role=ROLE):
-    return list(db.scalars(select(AgentTaskRecord).where(
-        AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == role)))
+    return list(db.scalars(
+        select(AgentTaskRecord)
+        .where(AgentTaskRecord.project_id == project_id, AgentTaskRecord.role_id == role)
+        .order_by(AgentTaskRecord.created_at.desc(), AgentTaskRecord.id.desc())
+    ))
+
+
+def _replacement_job_and_series(db, record):
+    """Resolve replacement job even when deferred (last_frame retake creates job on Worker)."""
+    if not record:
+        return None, None
+    trace = record.trace or {}
+    series = db.get(ProductionSeries, trace["series_id"]) if trace.get("series_id") else None
+    job_id = trace.get("job_id")
+    if not job_id and series is not None and series.items:
+        job_id = series.items[0].job_id or series.current_job_id
+    job = db.get(Job, job_id) if job_id else None
+    return job, series
 
 
 def _root(db, project_id, series_id=None):
@@ -229,7 +245,9 @@ def _segment_row(db, project_id, shot_id, position, *, root=None, episode_positi
     job = db.get(Job, chosen.get(shot_id)) if chosen.get(shot_id) else None
     records = _records(db, project_id)
     replacement = next((r for r in records if job and r.trace.get("source_job_id") == job.id), None)
-    pending = db.get(Job, replacement.trace["job_id"]) if replacement and replacement.trace.get("job_id") else None
+    pending, pending_series = _replacement_job_and_series(db, replacement)
+    if replacement and pending is not None and pending.id == job.id:
+        replacement, pending, pending_series = None, None, None
     attempt = max(job.attempts, key=lambda a: a.attempt_no, default=None) if job else None
     spec = job.request.get("shot_spec", {}) if job else (shot.spec if shot else {})
     reason = _blocker(db, job, shot) if job else ("GENERATION_NOT_STARTED" if shot else "SHOT_NOT_FOUND")
@@ -270,7 +288,11 @@ def _segment_row(db, project_id, shot_id, position, *, root=None, episode_positi
         "can_regenerate": reason is None,
         "dependent_job_ids": _impact(db, job.id) if job else [],
         "replacement_job_id": pending.id if pending else None,
-        "replacement_status": pending.status if pending else None,
+        "replacement_series_id": pending_series.id if replacement and pending_series else None,
+        "replacement_status": (
+            pending.status if pending
+            else (pending_series.status if replacement and pending_series else None)
+        ),
         # 重拍进度读既有 attempt 台账，不另建状态；页面据此画进度条。
         "replacement_progress": (max(pending.attempts, key=lambda a: a.attempt_no).progress
                                  if pending and pending.attempts else None),
@@ -450,8 +472,17 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
     if prior:
         return {**prior.trace, "replayed": True}
     replacement = db.get(Job, body.replacement_job_id)
-    recorded = next((r for r in _records(db, project_id) if r.trace.get("source_job_id") == body.source_job_id
-                     and r.trace.get("job_id") == body.replacement_job_id), None)
+    recorded = next(
+        (
+            r for r in _records(db, project_id)
+            if r.trace.get("source_job_id") == body.source_job_id
+            and (
+                (rep_job := _replacement_job_and_series(db, r)[0]) is not None
+                and rep_job.id == body.replacement_job_id
+            )
+        ),
+        None,
+    )
     from shine.media.output_layout import output_root_for_request
 
     data_dir = output_root_for_request(request, db)
@@ -484,8 +515,41 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
         else:
             db.add(AppSetting(key=key, value=chosen))
         ready = all(accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items)
+        batch = db.scalar(select(ProductionRunBatch).where(ProductionRunBatch.series_id == root.id))
         assembly_id = None
-        if ready:
+        delivery_order_id = None
+        delivery_version = None
+        delivery_run_id = None
+        if batch is not None:
+            run = db.get(ProductionRun, batch.run_id)
+            episode = db.get(ProductionRunEpisode, batch.episode_row_id)
+            if run is not None and episode is not None:
+                from shine.media.delivery_models import DeliveryOrder
+                from shine.production.runner import _ensure_episode_delivery, episode_current_jobs
+
+                current_jobs = episode_current_jobs(db, run, episode)
+                ready = all(
+                    accepted_job(db, current_jobs.get(sid), data_dir)
+                    for sid in (episode.shot_ids or [])
+                )
+                if root.status == "NEEDS_REVIEW" and all(
+                    accepted_job(db, db.get(Job, chosen.get(i.shot_id)), data_dir) for i in root.items
+                ):
+                    for original in root.items:
+                        original.job_id = chosen[original.shot_id]
+                        original.status = "PASSED"
+                        original.failure_code = None
+                if ready:
+                    order_id, created = _ensure_episode_delivery(db, run, episode)
+                    if order_id:
+                        order = db.get(DeliveryOrder, order_id)
+                        if order is not None:
+                            if created:
+                                order.origin = "segment_revision"
+                            delivery_order_id = order.id
+                            delivery_version = order.version
+                            delivery_run_id = run.id
+        elif ready:
             # A run-owned root that waits for the human (NEEDS_REVIEW) is
             # resolved by the explicit complete selection: point its items at
             # the chosen takes so the existing resume/reconcile executors can
@@ -514,9 +578,19 @@ def select_replacement(project_id: str, series_id: str, body: SelectSegment, act
                 order.origin = "segment_revision"
                 order.version = 2 + sum(r.trace.get("root_series_id") == root.id
                                         for r in _records(db, project_id, ASSEMBLY_ROLE))
+                delivery_order_id = order.id
+                delivery_version = order.version
             assembly_id = assembled.id
-        payload = {"series_id": assembly_id, "root_series_id": root.id, "selection": chosen,
-                   "invalidated_job_ids": affected, "assembly_pending_review": not ready}
+        payload = {
+            "series_id": assembly_id,
+            "root_series_id": root.id,
+            "selection": chosen,
+            "invalidated_job_ids": affected,
+            "assembly_pending_review": not ready,
+            **({"delivery_order_id": delivery_order_id, "delivery_version": delivery_version}
+               if delivery_order_id else {}),
+            **({"run_id": delivery_run_id} if delivery_run_id else {}),
+        }
         _record(db, project_id, ASSEMBLY_ROLE, identity, payload)
         add_audit(db, actor, "GENERATION_ASSEMBLY_VERSION_SELECTED", "production_series", root.id,
                   payload, project_id=project_id)

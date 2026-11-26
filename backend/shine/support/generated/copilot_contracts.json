@@ -3420,7 +3420,7 @@
   ],
   "digests": {
     "api_contract": "5dfe9252e08980c1d1e6267bdc65930f1cbff59f426211cd3516e50b327a84bd",
-    "api_schema": "e5c335d0a6f894544cea33f2b16fb374f1097fd861e628965b870edf2afe810c",
+    "api_schema": "6040f0953f504146f9243df250b080584190d497199ff70055e68043ad66960d",
     "contracts": "df39378a030ad6be7c2db48671e4b7d80a423f9825d6d984d9a887e7defeac85"
   },
   "discovered": [
@@ -6266,6 +6266,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "PUT /api/v1/projects/{}/director/storyboard/shots/{}/subtitles",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "PUT /api/v1/projects/{}/material-preparation/preferences",
       "status": "DISCOVERED"
     },
     {

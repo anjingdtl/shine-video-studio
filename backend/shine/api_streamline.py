@@ -977,7 +977,7 @@ def unfreeze_material_requirement_prompt(project_id: str, requirement_id: str,
 
 
 @router.get("/projects/{project_id}/director/materials/requirements")
-def director_material_requirements(project_id: str, db: DBSession,
+def director_material_requirements(project_id: str, db: DBSession, settings: SettingsDep,
                                    episode_ids: str | None = None) -> dict:
     """The current requirement list with its real use, without re-deriving it.
 
@@ -986,12 +986,15 @@ def director_material_requirements(project_id: str, db: DBSession,
     """
     from shine.comfyops.models import AssetRequirement
     from shine.comfyops.preproduction import current_material_plan
+    from shine.materialprep import service
     from shine.materialprep.service import confirmation_snapshot_hash
 
     require_project(db, project_id)
     plan = current_material_plan(db, project_id)
+    preferences = service.get_material_preferences(db, project_id, settings=settings)
     if plan is None:
-        return {"plan_revision_id": None, "expected_snapshot": None, "requirements": []}
+        return {"plan_revision_id": None, "expected_snapshot": None,
+                "requirements": [], "preferences": preferences}
     rows = db.scalars(select(AssetRequirement).where(
         AssetRequirement.plan_id == plan.id,
         AssetRequirement.project_id == project_id,
@@ -1009,6 +1012,7 @@ def director_material_requirements(project_id: str, db: DBSession,
         # status update the moment an upload is adopted.
         matched_id = payload.get("bound_asset_id") or payload.get("matched_master_id")
         manual_prompt = dict(payload.get("manual_prompt") or {})
+        used_shot_ids = list(payload.get("used_shot_ids") or [])
         requirements.append({
             "requirement_id": row.id,
             "family": payload.get("family"),
@@ -1025,18 +1029,27 @@ def director_material_requirements(project_id: str, db: DBSession,
                 "frozen_at": manual_prompt.get("frozen_at"),
             } if manual_prompt.get("prompt") else None),
             "variants": list(payload.get("variants") or []),
-            "used_shot_ids": list(payload.get("used_shot_ids") or []),
-            "used_shot_count": len(payload.get("used_shot_ids") or []),
+            "used_shot_ids": used_shot_ids,
+            "used_shot_count": len(used_shot_ids),
             "used_episodes": used_episodes,
             "matched_master": ({"asset_id": matched_id,
                                 "sha256": payload.get("bound_asset_sha256")}
                                if matched_id else None),
+            "shot_binding": service.project_requirement_shot_bindings(
+                db,
+                project_id,
+                family=payload.get("family"),
+                entity_id=payload.get("entity_id"),
+                current_asset_id=matched_id,
+                shot_ids=used_shot_ids,
+            ),
             "status": "matched" if matched_id else "missing",
         })
     return {
         "plan_revision_id": plan.id,
         "expected_snapshot": confirmation_snapshot_hash(plan),
         "requirements": requirements,
+        "preferences": preferences,
     }
 
 

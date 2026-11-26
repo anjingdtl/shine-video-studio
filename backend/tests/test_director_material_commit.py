@@ -911,3 +911,109 @@ def test_post_placement_commit_and_bind_match_parenthetical_character_names(api)
     assert bad.json()["detail"] == "ASSET_IDENTITY_MISMATCH"
     assert ShotBindingInput(asset_id=master_b["id"], use_as="subject").asset_id == master_b["id"]
 
+
+def test_promote_reports_library_only_when_shots_are_frozen_and_projects_truthful_bindings(api):
+    """D12: promoting a new asset for a frozen/passed shot must report rebound=0 / library_only."""
+    from shine.comfy.workflow import graph_hash
+    from shine.comfyops.models import AssetRequirement, CandidateAsset, PreProductionPlan
+    from shine.director.models import DirectorPackageEpisode, DirectorPackageVersion
+    from shine.materialprep.models import MaterialItem, MaterialRun
+    from shine.models import Job
+    from tests.conftest import PNG, approve_lock, create_project, create_shot, freeze_style, upload_asset
+
+    client, factory, settings = api
+    project = create_project(client, "D12回绑诚实性")
+    style = freeze_style(client, project)
+    old_scene = upload_asset(client, project, content=PNG + b"-old-scene", filename="old.png",
+                             role="scene", entity_id="圣殿残垣祭坛")
+    approve_lock(client, old_scene["id"])
+    shot = create_shot(client, project, style["id"], title="第8镜",
+                       asset_ids=[old_scene["id"]],
+                       bindings=[{"asset_id": old_scene["id"], "use_as": "picture", "role": None, "ordinal": 0}])
+
+    new_bytes = PNG + b"-new-sanctuary-candidate"
+    new_sha = graph_hash({"bytes": new_bytes.hex()})  # replaced below with real file sha
+    import hashlib
+    new_sha = hashlib.sha256(new_bytes).hexdigest()
+    cand_rel = "uploads/cand-sanctuary.png"
+    cand_abs = settings.data_dir / cand_rel
+    cand_abs.parent.mkdir(parents=True, exist_ok=True)
+    cand_abs.write_bytes(new_bytes)
+
+    with factory.begin() as db:
+        plan = PreProductionPlan(
+            project_id=project, purpose="asset_preparation", status="CONFIRMED",
+            payload={"confirmation": {"confirmation_id": "c1", "confirmation_hash": "h1"}},
+            sha256=graph_hash({"p": 1}),
+        )
+        db.add(plan)
+        db.flush()
+        req = AssetRequirement(
+            project_id=project, plan_id=plan.id, status="CONFIRMED",
+            payload={"family": "scene", "entity_id": "圣殿残垣祭坛", "used_shot_ids": [shot["id"]],
+                     "used_episodes": ["ep-01"], "strategy": "reuse_master", "bound_asset_id": old_scene["id"]},
+            sha256=graph_hash({"r": 1}),
+        )
+        db.add(req)
+        db.flush()
+        pkg = DirectorPackageVersion(
+            project_id=project, revision=1, status="CONFIRMED", manifest={},
+            scope_digest="a" * 64, manifest_sha256="b" * 64, policy_hash="c" * 64,
+            episode_count=1, shot_count=1,
+        )
+        db.add(pkg)
+        db.flush()
+        db.add(DirectorPackageEpisode(
+            package_id=pkg.id, project_id=project, episode_id="ep-01", position=0, title="ep-01",
+            manifest={"shots": [{"shot_id": shot["id"]}]}, manifest_sha256="d" * 64,
+        ))
+        mrun = MaterialRun(
+            project_id=project, plan_id=plan.id, confirmation_id="c1", confirmation_hash="h1",
+            idempotency_key="mr-d12", request_hash="r" * 64, mode="real", status="COMPLETED",
+            payload={}, sha256="m" * 64,
+        )
+        db.add(mrun)
+        db.flush()
+        item = MaterialItem(
+            run_id=mrun.id, project_id=project, requirement_id=req.id, generation_revision=1,
+            status="CANDIDATE_READY", payload={}, sha256="i" * 64,
+        )
+        db.add(item)
+        db.flush()
+        cand = CandidateAsset(
+            project_id=project, status="READY_FOR_REVIEW",
+            payload={
+                "kind": "image", "family": "scene", "entity_id": "圣殿残垣祭坛",
+                "filename": "06-new.png", "content_type": "image/png",
+                "storage_path": cand_rel, "content_sha256": new_sha, "byte_size": len(new_bytes),
+                "provenance": {"item_id": item.id, "is_mock": False, "renderer_owned": True},
+                "rights_id": None,
+                "qc": {"technical": "pass"},
+            },
+            sha256=graph_hash({"cand": new_sha}),
+        )
+        db.add(cand)
+        db.flush()
+        cand_id, _ = cand.id, Job  # keep import clean
+
+    grant = client.post("/api/v1/preparation/approval-grants",
+                        json={"action": "promote", "target_id": cand_id}, headers=LOCAL).json()
+    promoted = client.post(f"/api/v1/candidate-assets/{cand_id}/promote", headers=LOCAL, json={
+        "grant_id": grant["grant_id"], "snapshot": grant["snapshot"], "offline": False,
+        "evidence": "D12 library promote verification",
+    })
+    assert promoted.status_code == 200, promoted.text
+    adoption = promoted.json()["payload"]["adoption"]
+    assert adoption["rebound_count"] == 0
+    assert adoption["library_only"] is True
+    assert adoption["protected_shots"][0]["shot_id"] == shot["id"]
+    assert adoption["protected_shots"][0]["reason"] == "SHOT_IN_CONFIRMED_PACKAGE"
+
+    reqs = client.get(f"/api/v1/projects/{project}/director/materials/requirements").json()["requirements"]
+    sb = reqs[0]["shot_binding"]
+    assert sb["status"] == "LIBRARY_ONLY"
+    assert sb["bound_to_current_count"] == 0
+    assert sb["other_asset_shots"][0]["shot_id"] == shot["id"]
+    assert sb["other_asset_shots"][0]["asset_id"] == old_scene["id"]
+
+

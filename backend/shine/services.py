@@ -1390,6 +1390,22 @@ def make_render_request(
         self_review_scope=body.self_review_scope,
         basic_review_resolution=body.basic_review_resolution,
     )
+    if not resolution.manual:
+        from shine.h3.compiler import COMPILER_VERSION as _ACTIVE_COMPILER_VERSION
+
+        if (
+            render_request.compiler_version != _ACTIVE_COMPILER_VERSION
+            or compiled.compiler_version != _ACTIVE_COMPILER_VERSION
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "COMPILER_VERSION_MISMATCH",
+                    "message": "新任务的编译器版本标签必须与当前编译器实际产物一致。",
+                    "expected": _ACTIVE_COMPILER_VERSION,
+                    "actual": render_request.compiler_version,
+                },
+            )
     # V1.1 projects explicitly freeze their rule pack. Legacy jobs retain the
     # original pinned compiler and are never silently enrolled in a new policy.
     if pack:
