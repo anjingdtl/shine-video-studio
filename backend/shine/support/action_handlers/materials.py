@@ -176,6 +176,8 @@ def _generate_target_facts(db, settings, params: dict[str, Any], project_id: str
     conf = state.get("confirmation") or {}
     return {
         "project_id": pid,
+        "plan_revision_id": state.get("plan_revision_id"),
+        "expected_snapshot": state.get("expected_snapshot"),
         "confirmation_id": conf.get("confirmation_id"),
         "confirmation_hash": conf.get("confirmation_hash"),
         "requirement_ids": sorted(params.get("requirement_ids") or []),
@@ -191,7 +193,9 @@ def _generate_preflight(db, settings, params: dict[str, Any], common: dict[str, 
     state = plan_progress(db, pid, data_dir=output_root(db, settings), settings=settings)
     conf = state.get("confirmation") or {}
     if not conf.get("confirmation_id"):
-        raise ActionInvalid("项目素材清单还未确认，请先确认需要生成的素材需求。")
+        if not state.get("plan_revision_id"):
+            raise ActionBlocked("MATERIAL_PLAN_NOT_DERIVED", "请先从已确认的分镜推导素材清单。")
+        _material_commit_body(state, params)
     return {
         **common,
         "summary": f"为选中的 {len(params.get('requirement_ids') or [])} 项素材需求排队生图批次。",
@@ -205,8 +209,7 @@ def _generate_preflight(db, settings, params: dict[str, Any], common: dict[str, 
 
 
 def _generate_execute(db, settings, session_factory, row, params, declaration, spec, actor, gateway) -> None:
-    from shine.comfyops.loras import StyleLoraError, freeze_image_lora_style
-    from shine.materialprep.service import create_batch, plan_progress
+    from shine.materialprep.service import plan_progress
     from shine.media.output_layout import output_root
 
     pid = str(row.project_id or "")
@@ -214,8 +217,56 @@ def _generate_execute(db, settings, session_factory, row, params, declaration, s
     conf = state.get("confirmation") or {}
     cid = str(params.get("confirmation_id") or conf.get("confirmation_id") or "")
     chash = str(params.get("confirmation_hash") or conf.get("confirmation_hash") or "")
-    if not cid or not chash:
-        raise ActionBlocked("MATERIAL_PLAN_NOT_CONFIRMED", "项目素材需求尚未确认。")
+    if not conf.get("confirmation_id"):
+        from shine.api_streamline import commit_director_materials
+
+        try:
+            committed = commit_director_materials(pid, _material_commit_body(state, params), actor, db, settings)
+        except HTTPException as exc:
+            raise blocked_from_executor(exc) from exc
+        res = committed.get("batch")
+        if not res:
+            raise ActionBlocked("MATERIAL_NOTHING_TO_GENERATE", "所选素材已进入原生成队列，请先回读进度。")
+    else:
+        res = _queue_confirmed_batch(db, settings, row, params, cid, chash, state)
+    row.original_task_id = str(res.get("run_id") or "") or None
+    row.status = "DELEGATED"
+    row.verification = {
+        "outcome": "PENDING",
+        "executor": spec.executor,
+        "authority": "GET /api/v1/projects/{project_id}/material-preparation/generation-progress",
+        "run_id": row.original_task_id,
+        "run_status": res.get("status"),
+        "item_count": len(res.get("items") or []),
+        "checked_at": utcnow().isoformat(),
+    }
+
+
+def _material_commit_body(state, params):
+    from shine.api_streamline import MaterialCommitBody, MaterialDecisionBody
+
+    if any(params.get(key) for key in ("confirmation_id", "confirmation_hash", "rights_id", "seeds")):
+        raise ActionBlocked("MATERIAL_PLAN_NOT_CONFIRMED", "清单尚未确认，不能使用指定的确认或种子参数。")
+    selected = list(dict.fromkeys(params.get("requirement_ids") or []))
+    known = {item["requirement_id"]: item for item in state.get("requirements") or []}
+    if not selected or any(requirement_id not in known for requirement_id in selected):
+        raise ActionBlocked("MATERIAL_REQUIREMENT_NOT_FOUND", "所选需求需来自当前素材清单。")
+    sheet = params.get("character_sheet_mode")
+    if sheet is None:
+        sheet = (state.get("preferences") or {}).get("character_sheet_mode")
+    return MaterialCommitBody(
+        plan_revision_id=state["plan_revision_id"], expected_snapshot=state["expected_snapshot"],
+        decisions=[MaterialDecisionBody(requirement_id=requirement_id, strategy="generate",
+                                        entity_id=known[requirement_id]["entity_id"]) for requirement_id in selected],
+        character_sheet_mode=bool(sheet),
+        style_preset=params.get("style_preset"), style_loras=params.get("style_loras") or [],
+    )
+
+
+def _queue_confirmed_batch(db, settings, row, params, cid, chash, state):
+    from shine.comfyops.loras import StyleLoraError, freeze_image_lora_style
+    from shine.materialprep.service import create_batch
+
     image_style: dict[str, Any] = {}
     if params.get("style_preset") or params.get("style_loras"):
         try:
@@ -226,8 +277,8 @@ def _generate_execute(db, settings, session_factory, row, params, declaration, s
     if csm is None:
         csm = bool((state.get("preferences") or {}).get("character_sheet_mode"))
     try:
-        res = create_batch(
-            db, pid,
+        return create_batch(
+            db, row.project_id,
             confirmation_id=cid,
             confirmation_hash=chash,
             requirement_ids=list(params.get("requirement_ids") or []),
@@ -240,17 +291,6 @@ def _generate_execute(db, settings, session_factory, row, params, declaration, s
         )
     except HTTPException as exc:
         raise blocked_from_executor(exc) from exc
-    row.original_task_id = str(res.get("run_id") or "") or None
-    row.status = "DELEGATED"
-    row.verification = {
-        "outcome": "PENDING",
-        "executor": spec.executor,
-        "authority": "GET /api/v1/projects/{project_id}/material-preparation/generation-progress",
-        "run_id": row.original_task_id,
-        "run_status": res.get("status"),
-        "item_count": len(res.get("items") or []),
-        "checked_at": utcnow().isoformat(),
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -361,7 +401,13 @@ def _promote_execute(db, settings, session_factory, row, params, declaration, sp
     cid = str(params.get("candidate_id") or "")
     try:
         res = promote_material_candidate(
-            db, settings, project_id=pid, candidate_id=cid, actor=actor, offline=bool(params.get("offline"))
+            db,
+            settings,
+            project_id=pid,
+            candidate_id=cid,
+            actor=actor,
+            offline=bool(params.get("offline")),
+            evidence=str(params.get("evidence") or "copilot_confirmed"),
         )
     except HTTPException as exc:
         raise blocked_from_executor(exc) from exc

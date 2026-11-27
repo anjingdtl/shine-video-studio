@@ -123,6 +123,58 @@ describe('task grant card', () => {
     expect(screen.getByText(/以下能力当前不可由 AI 执行/)).toBeTruthy();
   });
 
+  it('shows the recommended budget and re-previews changes to the review checkbox', async () => {
+    const s = stub([{
+      method: 'POST', pattern: /\/support\/task-grants\/preview$/,
+      respond: (_url, init) => {
+        const selected = JSON.parse(String(init?.body));
+        const full = selected.budget_preset === 'full_production';
+        return jsonResponse(preview({
+          capability_groups: ['inspect', 'materials', 'production', 'test'],
+          budget_preset: selected.budget_preset,
+          pause_before_production: selected.pause_before_production,
+          limits: { max_gpu_minutes: full ? 360 : 90, max_llm_tool_calls: full ? 180 : 60 },
+        }));
+      },
+    }]);
+    render(<TaskGrantCard sessionId="s1" projectId="p1" objective="把这一集拍完并交付"
+      initialBudgetPreset="full_production" />);
+    expect(await screen.findByText('最长 GPU 时间：360 分钟')).toBeTruthy();
+    expect(screen.getByText('最多工具调用：180 次')).toBeTruthy();
+    expect(screen.getByText(/授权有效期至/)).toBeTruthy();
+    const preset = screen.getByRole('combobox', { name: '预算档位' }) as HTMLSelectElement;
+    expect(preset.value).toBe('full_production');
+    fireEvent.change(preset, { target: { value: 'standard' } });
+    expect(await screen.findByText('最长 GPU 时间：90 分钟')).toBeTruthy();
+    const checkpoint = screen.getByRole('checkbox', { name: '素材审片检查点' }) as HTMLInputElement;
+    expect(checkpoint.checked).toBe(true);
+    fireEvent.click(checkpoint);
+    await waitFor(() => expect(s.calls.at(-1)?.body).toMatchObject({
+      budget_preset: 'standard', pause_before_production: false,
+    }));
+  });
+
+  it('shows the current review candidates and resumes with the displayed digest', async () => {
+    const s = stub([
+      { method: 'POST', pattern: /\/support\/task-grants\/grant-abc\/run$/, respond: () => jsonResponse({ status: 'RUNNING' }) },
+      { method: 'GET', pattern: /\/support\/task-grants\/grant-abc$/, respond: () => jsonResponse(grant({ status: 'RUNNING' })) },
+    ]);
+    render(<TaskGrantCard sessionId="s1" objective="将本片拍完" initialGrant={grant({
+      status: 'PAUSED_USER_DECISION', paused_reason: 'MATERIAL_REVIEW_REQUIRED',
+      material_review: { digest: 'f'.repeat(64), generating: false, candidates: [
+        { candidate_id: 'char-one', name: '宁岚', family: 'character', generation_revision: 2 },
+        { candidate_id: 'scene-one', name: '回廊', family: 'scene', generation_revision: 1 },
+      ] },
+    })} />);
+    expect(screen.getByRole('heading', { name: '素材待审片' })).toBeTruthy();
+    expect(screen.getByRole('link', { name: /角色 · 宁岚/ }).getAttribute('href')).toBe('/api/v1/candidate-assets/char-one/media');
+    expect(screen.getByRole('link', { name: '前往素材准备' }).getAttribute('href')).toBe('#d/materials');
+    fireEvent.click(screen.getByRole('button', { name: '继续推进拍片' }));
+    await waitFor(() => expect(s.calls[0].body).toMatchObject({
+      session_id: 's1', material_review_digest: 'f'.repeat(64), run_in_background: true,
+    }));
+  });
+
   it('shows technical details only when asked', async () => {
     stub([
       { method: 'POST', pattern: /\/support\/task-grants\/preview$/, respond: () => jsonResponse(preview()) },

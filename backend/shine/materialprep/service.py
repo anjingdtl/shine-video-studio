@@ -2037,7 +2037,7 @@ def promote_material_candidate(
     evidence: str = "copilot_confirmed",
 ) -> dict[str, Any]:
     """Promote an approved material CandidateAsset to a project Asset master."""
-    from shine.api_preparation import Decision
+    from shine.api_preparation import Decision, public
     from shine.comfyops import approval, assets
     from shine.comfyops.models import CandidateAsset
 
@@ -2055,7 +2055,7 @@ def promote_material_candidate(
     )
     assets.promote(db, settings, row, actor, decision, offline=bool(offline))
     db.flush()
-    return assets.public(row)
+    return public(row)
 
 
 def regenerate_material_requirement(
@@ -2137,7 +2137,7 @@ def validate_image_runtime_setup(
     actor: str = "local-user",
 ) -> dict[str, Any]:
     """Queue small-sample image runtime validation through the single validation executor."""
-    from shine.comfyops import image_runtime as runtime
+    from shine.materialprep import runtime
 
     project = require_project(db, project_id)
     if rights_id:

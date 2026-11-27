@@ -740,7 +740,6 @@ def publish_validated_renderer(db, settings, *, previous_identity: dict, rendere
         settings,
         instance_id=str(renderer.get("instance_id") or ""),
         port=int(renderer.get("port") or 0),
-        recipe_sha256=graph_hash(renderer),
     )
 
 

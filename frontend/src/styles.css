@@ -2758,6 +2758,12 @@ fieldset.binding-list{max-height:360px;overflow-y:auto;padding-right:4px;scrollb
 .copilot-grant-loading{display:flex;align-items:center;gap:6px;margin:7px 0 0;font-size:var(--fs-caption);color:var(--muted)}
 .copilot-grant-toggles{display:flex;flex-direction:column;gap:4px;margin:4px 0 6px}
 .copilot-grant-toggles label{display:flex;align-items:center;gap:6px;font-size:var(--fs-caption);color:var(--ink-2);cursor:pointer}
+.copilot-grant-budget{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.copilot-grant-budget span{white-space:nowrap}
+.copilot-grant-text-consent{display:flex;align-items:flex-start;gap:6px;margin:8px 0}
+.copilot-grant-material-review ul{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;padding:0;list-style:none}
+.copilot-grant-material-review li a{display:grid;gap:4px;overflow-wrap:anywhere}
+.copilot-grant-material-review img{width:100%;aspect-ratio:4/3;object-fit:contain;border:1px solid var(--border);border-radius:4px}
 .copilot-health-banner{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 10px;border-radius:8px;border:1px solid var(--sand-line,var(--line));background:var(--sand-bg,rgba(255,255,255,.04));font-size:var(--fs-caption);color:var(--ink)}
 .copilot-health-panel{display:flex;flex-direction:column;gap:8px}
 .copilot-health-head{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:var(--fs-caption);color:var(--ink-2)}

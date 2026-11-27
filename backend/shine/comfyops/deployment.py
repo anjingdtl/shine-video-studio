@@ -1144,7 +1144,6 @@ def generate_configuration(db, settings: Settings, project_id: str | None, *,
         settings,
         instance_id=instance.id,
         port=int(payload["port"]),
-        recipe_sha256=graph_hash(renderer),
     )
     env_updates: dict = {}
     env_written: list = []

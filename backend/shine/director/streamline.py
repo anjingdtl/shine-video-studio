@@ -419,6 +419,73 @@ def storyboard_book_preview(db, project_id: str, plan_payload: dict[str, Any]) -
     }
 
 
+def create_storyboard_book(
+    db, project_id: str, *, episode_count: int, target_seconds: int,
+    tolerance_seconds: int, max_shot_seconds: float | None, actor: str,
+):
+    """Persist the editable episode plan for the director page and Copilot."""
+    from shine.api_director import _confirmed_outline, _outline_sections, _section_plan_problems
+    from shine.director.contracts import derive_episode_plan_by_count, digest_of
+    from shine.director.models import DirectorEpisodePlan
+
+    require_project(db, project_id)
+    outline = _confirmed_outline(db, project_id)
+    if outline is None:
+        raise HTTPException(422, {"code": "SCRIPT_OUTLINE_NOT_CONFIRMED",
+                                  "message": "先确认大纲，再生成分镜书"})
+    sections = _outline_sections(outline)
+    if not sections:
+        raise HTTPException(422, "SCRIPT_OUTLINE_HAS_NO_SECTIONS")
+    source_meta: dict[str, Any] = {
+        "outline_artifact_id": outline.id,
+        "outline_sha256": outline.sha256,
+    }
+    if max_shot_seconds is not None:
+        source_meta["max_shot_seconds"] = float(max_shot_seconds)
+    try:
+        payload = derive_episode_plan_by_count(
+            sections, episode_count=episode_count,
+            target_seconds=target_seconds, tolerance_seconds=tolerance_seconds,
+            source=source_meta,
+        )
+    except ValueError as exc:
+        code = str(exc)
+        if code == "EPISODE_COUNT_EXCEEDS_SECTIONS":
+            raise HTTPException(422, {
+                "code": code,
+                "message": (
+                    f"当前已确认大纲共 {len(sections)} 个场次/章节，每集至少需要 1 个场次，"
+                    f"无法划分为 {episode_count} 集；请将集数设为不超过 {len(sections)}，"
+                    "或在剧本中补充「第N场」标题后重新提取大纲。"
+                ),
+                "problems": [code],
+            }) from exc
+        raise HTTPException(422, {"code": "EPISODE_PLAN_INVALID", "problems": [code[:400]]}) from exc
+    problems = _section_plan_problems(db, project_id, payload)
+    if problems:
+        raise HTTPException(422, {"code": "EPISODE_PLAN_COVERAGE_INVALID", "problems": problems})
+    previous = db.scalars(select(DirectorEpisodePlan).where(
+        DirectorEpisodePlan.project_id == project_id)).all()
+
+    row = DirectorEpisodePlan(
+        project_id=project_id, version=max((p.version for p in previous), default=0) + 1,
+        status="DRAFT", target_seconds=payload.target_seconds,
+        tolerance_seconds=payload.tolerance_seconds,
+        payload=payload.model_dump(mode="json"),
+        sha256=digest_of(payload.model_dump(mode="json")),
+        source="script_sections_by_count", created_by=actor,
+    )
+    db.add(row)
+    db.flush()
+    add_audit(db, actor, "STORYBOARD_BOOK_GENERATED", "director_episode_plan", row.id,
+              {"version": row.version, "episode_count": episode_count,
+               "target_seconds": target_seconds,
+               **({"max_shot_seconds": float(max_shot_seconds)}
+                  if max_shot_seconds is not None else {})},
+              project_id=project_id)
+    return row
+
+
 def latest_storyboard_book(db, project_id: str) -> dict[str, Any] | None:
     """Return the latest active storyboard book (newest draft ahead of confirmed, or confirmed)."""
     from shine.director.models import DirectorEpisodePlan

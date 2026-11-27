@@ -426,11 +426,14 @@ def align_bound_recipe(
     *,
     instance_id: str,
     port: int,
-    recipe_sha256: str,
 ) -> bool:
     """Keep an already-bound image runtime on this installation aligned with its shared recipe."""
-    if not instance_id or not recipe_sha256:
+    from shine.comfyops.image_renderer import image_recipe_state
+
+    recipe = image_recipe_state(settings)
+    if recipe["state"] != "READY" or recipe.get("instance_id") != instance_id or recipe.get("port") != port:
         return False
+    recipe_sha256 = recipe["recipe_sha256"]
     config = load_config(settings)
     if not config.base_url or config.instance_id != instance_id:
         return False

@@ -25,7 +25,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from shine.copilot import task_grant as grant_contract
-from shine.copilot.contracts import canonical, digest
+from shine.copilot.contracts import digest
 from shine.models import new_id, utcnow
 from shine.support.models import SupportDelegation, SupportSession
 
@@ -50,43 +50,6 @@ def _row_grant(row: SupportDelegation) -> dict[str, Any] | None:
     payload = row.payload if isinstance(row.payload, dict) else {}
     grant = payload.get("grant")
     return dict(grant) if isinstance(grant, dict) else None
-
-
-def _delegation_key(
-    *,
-    session_id: str,
-    actor: str,
-    objective_digest: str,
-    groups: Iterable[str],
-    limits: dict[str, int],
-    project_ids: list[str],
-    installation_ids: list[str],
-    generation: int,
-) -> str:
-    """Identity of *this* authorization, not of the running task.
-
-    ``generation`` is the count of already terminal grants for the same
-    identity: after a task really finished (or was revoked/expired), asking for
-    the same objective again is a new authorization, while a replay of the same
-    click stays the same one.
-    """
-    return (
-        "grant:"
-        + digest(
-            canonical(
-                {
-                    "session_id": session_id,
-                    "actor": actor,
-                    "objective_digest": objective_digest,
-                    "groups": sorted(groups),
-                    "limits": limits,
-                    "project_ids": sorted(project_ids),
-                    "installation_ids": sorted(installation_ids),
-                    "generation": generation,
-                }
-            )
-        )[:88]
-    )
 
 
 def _existing_generation(db, *, session_id: str, actor: str, objective_digest: str) -> int:
@@ -161,6 +124,11 @@ def create(
     allowed_resource_roots: list[str] | None = None,
     validity: timedelta | None = None,
     expires_at: datetime | None = None,
+    budget_preset: str = grant_contract.DEFAULT_BUDGET_PRESET,
+    pause_before_production: bool = True,
+    script_text: str | None = None,
+    text_consent_scope: dict | None = None,
+    gateway=None,
     expected_digest: str | None = None,
 ) -> tuple[GrantRow, bool]:
     """Create the one authorization of this objective, or return the live one.
@@ -169,36 +137,10 @@ def create(
     which is exactly the behaviour GRANT-01 requires: one click, one grant, one
     installation plan.
     """
-    normalized_groups = grant_contract.normalize_groups(groups)
-    normalized_limits = grant_contract.normalize_limits(limits)
     projects = [str(item) for item in (project_ids if project_ids is not None
                                        else ([session.project_id] if session.project_id else []))]
     installations = [str(item) for item in (installation_ids or [])]
     roots = [str(item) for item in (allowed_resource_roots or [])]
-
-    generation = _existing_generation(
-        db, session_id=session.id, actor=actor,
-        objective_digest=grant_contract.objective_digest(objective),
-    )
-    key = _delegation_key(
-        session_id=session.id,
-        actor=actor,
-        objective_digest=grant_contract.objective_digest(objective),
-        groups=normalized_groups,
-        limits=normalized_limits,
-        project_ids=projects,
-        installation_ids=installations,
-        generation=generation,
-    )
-    existing = db.scalar(
-        select(SupportDelegation).where(SupportDelegation.authorization_key == key)
-    )
-    if existing is not None:
-        grant = _row_grant(existing)
-        if grant is not None:
-            live = grant_contract.grant_status(grant, now=utcnow())
-            if live not in grant_contract.TERMINAL_STATUSES:
-                return GrantRow(row=existing, grant=grant), False
 
     created_at = utcnow()
     grant_id = "grant-" + new_id().replace("-", "")[:24]
@@ -210,11 +152,15 @@ def create(
         project_ids=projects,
         installation_ids=installations,
         allowed_resource_roots=roots,
-        groups=normalized_groups,
-        limits=normalized_limits,
+        groups=groups,
+        limits=limits,
         created_at=created_at,
         validity=validity,
         expires_at=expires_at,
+        budget_preset=budget_preset,
+        pause_before_production=pause_before_production,
+        script_text=script_text,
+        text_consent_scope=text_consent_scope,
     )
     if expected_digest is not None and grant["grant_digest"] != expected_digest:
         # The boundary the person previewed is not the boundary this request
@@ -224,6 +170,17 @@ def create(
             "授权范围与你预览时不一致，请重新预览后再确认。",
             details={"expected": expected_digest, "actual": grant["grant_digest"]},
         )
+    generation = _existing_generation(
+        db, session_id=session.id, actor=actor, objective_digest=grant["objective_digest"],
+    )
+    key = "grant:" + digest([grant["grant_digest"], generation])
+    existing = db.scalar(
+        select(SupportDelegation).where(SupportDelegation.authorization_key == key)
+    )
+    if existing is not None:
+        existing_grant = _row_grant(existing)
+        if existing_grant is not None:
+            return GrantRow(row=existing, grant=existing_grant), False
     grant["status"] = "AUTHORIZED"
     grant["created_at"] = created_at.replace(microsecond=0).isoformat()
     grant["usage"] = {key_name: 0 for key_name in grant_contract.DEFAULT_LIMITS}
@@ -255,6 +212,17 @@ def create(
         expires_at=grant_contract.parse_iso(grant["validity"]["expires_at"]),
         budget_version=0,
     )
+    if text_consent_scope and text_consent_scope.get("document_id"):
+        from shine.materialprep import text_consent
+        from shine.models import ProjectDocument
+
+        document = db.get(ProjectDocument, text_consent_scope["document_id"])
+        if document is None or document.project_id not in projects:
+            raise grant_contract.GrantError("GRANT_TEXT_SCOPE_CHANGED", "授权预览中的原文已变化，请重新预览。")
+        try:
+            text_consent.apply_grant_scope(db, gateway, document, text_consent_scope)
+        except text_consent.TextConsentRequired as exc:
+            raise grant_contract.GrantError("GRANT_TEXT_SCOPE_CHANGED", "文本模型路由已变化，请重新预览。") from exc
     db.add(row)
     try:
         db.commit()
@@ -300,7 +268,8 @@ def _write_payload(
 
 
 def set_status(
-    db, grant_id: str, status: str, *, reason: str | None = None
+    db, grant_id: str, status: str, *, reason: str | None = None,
+    material_review_digest: str | None = None,
 ) -> GrantRow:
     """Move the envelope by name.  Never touches an original executor task."""
     for _ in range(CAS_ATTEMPTS):
@@ -319,6 +288,21 @@ def set_status(
                 "GRANT_TERMINAL", "这次授权已经结束，不能再改成执行中。",
                 details={"status": current},
             )
+        if current == "PAUSED_USER_DECISION" and status == "RUNNING":
+            from shine.copilot.material_review import REVIEW_REQUIRED, candidate_snapshot
+
+            if grant.get("paused_reason") == REVIEW_REQUIRED:
+                review = candidate_snapshot(db, grant)
+                if review is None or review["generating"] or review["digest"] != material_review_digest:
+                    raise grant_contract.GrantError(
+                        "MATERIAL_REVIEW_CHANGED", "素材清单已更新，请核对当前候选图后再继续拍片。",
+                    )
+                grant["reviewed_materials"] = {
+                    **(grant.get("reviewed_materials") or {}),
+                    **{item["candidate_id"]: item["content_sha256"] for item in review["candidates"]},
+                }
+            if grant.get("loop"):
+                grant["loop"] = {**loop_state(grant), "no_progress": 0, "last_block_code": None}
         grant["status"] = status
         if reason:
             grant["paused_reason"] = reason
@@ -612,6 +596,26 @@ LOOP_LEASE_SECONDS = 120
 def loop_state(grant: dict[str, Any]) -> dict[str, Any]:
     state = grant.get("loop")
     return dict(state) if isinstance(state, dict) else {}
+
+
+def public_state(db, loaded: GrantRow) -> dict[str, Any]:
+    from shine.copilot.material_review import REVIEW_REQUIRED, candidate_snapshot
+
+    state = loaded.public()
+    loop = loop_state(loaded.grant)
+    return {
+        **state,
+        "steps": loop.get("steps") or [],
+        "pending_action_id": loop.get("pending_action_id"),
+        "sub_actions": sub_action_public(loaded.grant),
+        "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
+        "objective_verification": (loaded.row.payload or {}).get("objective_verification"),
+        "material_review": (
+            candidate_snapshot(db, loaded.grant)
+            if state["status"] == "PAUSED_USER_DECISION" and state["paused_reason"] == REVIEW_REQUIRED
+            else None
+        ),
+    }
 
 
 def claim_loop(

@@ -434,6 +434,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         description="复用导演包与 Run 引擎；相同选择返回同一运行，不另建生产队列。",
         params=_sorted_params(
             _P("episode_ids", type="string_list", max_length=32),
+            _P("output", type="object", required=False),
             _P("project_id", binding="path", max_length=120),
             _P("strategy", type="object", required=False),
             _P("workflow_profile_id", required=False, max_length=36),
@@ -457,6 +458,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         rollback_policy="可暂停/取消未提交镜头；已出片保留。",
         page="导演模式",
         examples=("检查当前 H3 配置，然后帮我开始生成第一集",),
+        contract_revision=3,
         note="不替用户确认风格、主资产或审片。",
     ),
     CapabilityDeclaration(
@@ -550,7 +552,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         note="不覆盖已确认稿。",
     ),
     # ------------------------------------------------------------------
-    # V4 Domain 1..5 full-chain project write actions (+23 => 39 total)
+    # V4 Domain 1..5 full-chain project write actions
     # ------------------------------------------------------------------
     CapabilityDeclaration(
         action_id="image_runtime_validate",
@@ -616,6 +618,38 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         page="导演模式",
         examples=("确认当前故事大纲",),
         note="沿用 confirm_outline_director。",
+    ),
+    CapabilityDeclaration(
+        action_id="storyboard_book_generate",
+        feature_id="director-journey",
+        module="director",
+        label="从已确认大纲生成分镜书",
+        description="按集数、每集目标和单镜时长生成分镜书草稿。短片两镜可选择 1 集、10 秒目标和 5 秒单镜上限。",
+        params=_sorted_params(
+            _P("project_id", binding="path", max_length=36),
+            _P("episode_count", type="integer"),
+            _P("target_seconds", type="integer", required=False),
+            _P("tolerance_seconds", type="integer", required=False),
+            _P("max_shot_seconds", type="number", required=False),
+        ),
+        api_route="POST /api/v1/projects/{project_id}/director/storyboard-book",
+        request_schema="shine.api_streamline:StoryboardBookBody",
+        response_schema=None,
+        executor="shine.director.streamline.create_storyboard_book",
+        authority="GET /api/v1/projects/{project_id}/director/storyboard-book",
+        permission_tier="EXECUTE_GUARDED",
+        project_scope="PROJECT",
+        preconditions=("当前原文的大纲已确认",),
+        confirmation_policy="显示集数和时长，确认后生成草稿。",
+        occupancy_gate="NONE",
+        gpu=False,
+        paid=False,
+        cost_note="只生成本地分镜书草稿。",
+        idempotency_policy="同一底稿、设置和授权回读原分镜书。",
+        readback_contract="GET /api/v1/projects/{project_id}/director/storyboard-book。",
+        rollback_policy="草稿可调整，保留已确认的版本。",
+        page="导演模式",
+        examples=("按已确认大纲生成一集约十秒的分镜书",),
     ),
     CapabilityDeclaration(
         action_id="storyboard_book_confirm",
@@ -861,11 +895,12 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         module="materialprep",
         label="晋升并锁定候选素材为主资产",
         description="将已过质检的候选素材（CandidateAsset）晋升为本项目主资产（Asset）。",
+        contract_revision=3,
         params=_sorted_params(
             _P("project_id", binding="executor", required=True, max_length=36),
             _P("candidate_id", binding="executor", required=True, max_length=64),
-            _P("offline", type="boolean", required=False),
-            _P("evidence", required=False, max_length=400),
+            _P("offline", binding="executor", type="boolean", required=False),
+            _P("evidence", binding="executor", required=False, max_length=400),
         ),
         api_route="POST /api/v1/candidate-assets/{identity}/promote",
         request_schema="shine.api_preparation:Decision",

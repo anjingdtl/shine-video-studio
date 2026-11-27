@@ -203,6 +203,16 @@ def _document_import_execute(db, settings, session_factory, row, params, declara
         raise ActionBlocked("SCRIPT_PARSE_FAILED", f"原文无法解析（{exc.code}）。") from exc
     except HTTPException as exc:
         raise blocked_from_executor(exc) from exc
+    if created and row.grant_id:
+        from shine.materialprep import text_consent
+        from shine.support import grants
+
+        scope = grants.load(db, row.grant_id).grant.get("text_consent_scope")
+        if scope and not scope.get("document_id"):
+            try:
+                text_consent.apply_grant_scope(db, gateway, document, scope)
+            except text_consent.TextConsentRequired as exc:
+                raise ActionBlocked("GRANT_TEXT_SCOPE_CHANGED", "本次授权与当前原文或文本模型不一致。") from exc
     row.original_task_id = document.id
     row.status = "SUCCEEDED"
     row.verification = {
@@ -481,8 +491,49 @@ def _outline_confirm_execute(db, settings, session_factory, row, params, declara
 
 
 # ---------------------------------------------------------------------------
-# storyboard_book_confirm (NEW)
+# Storyboard book draft and confirmation
 # ---------------------------------------------------------------------------
+
+
+def _book_draft_target_facts(db, settings, params, project_id):
+    from shine.api_director import _confirmed_outline
+
+    outline = _confirmed_outline(db, str(project_id or params.get("project_id") or ""))
+    if outline is None:
+        return {}, "SCRIPT_OUTLINE_NOT_CONFIRMED"
+    return {"outline_id": outline.id, "outline_sha256": outline.sha256}, None
+
+
+def _book_draft_preflight(db, settings, params, common):
+    return {
+        **common,
+        "summary": f"生成 {params['episode_count']} 集的分镜书草稿，每集目标 {params['target_seconds']} 秒。",
+        "episode_count": params["episode_count"],
+        "target_seconds": params["target_seconds"],
+        "tolerance_seconds": params["tolerance_seconds"],
+        "max_shot_seconds": params["max_shot_seconds"],
+    }
+
+
+def _book_draft_execute(db, settings, session_factory, row, params, declaration, spec, actor, gateway):
+    from shine.api_streamline import StoryboardBookBody
+    from shine.director.streamline import create_storyboard_book
+
+    body = StoryboardBookBody.model_validate(model_payload(declaration, params))
+    try:
+        plan = create_storyboard_book(db, str(row.project_id), actor=actor, **body.model_dump())
+    except HTTPException as exc:
+        raise blocked_from_executor(exc) from exc
+    row.original_task_id = plan.id
+    row.status = "SUCCEEDED"
+    row.verification = {
+        "outcome": "VERIFIED",
+        "executor": spec.executor,
+        "authority": "GET /api/v1/projects/{project_id}/director/storyboard-book",
+        "plan_version": plan.version,
+        "plan_sha256": plan.sha256,
+        "checked_at": utcnow().isoformat(),
+    }
 
 
 def _book_confirm_target_facts(db, settings, params: dict[str, Any], project_id: str | None) -> tuple[dict[str, Any], str | None]:
@@ -944,6 +995,9 @@ register_handler("document_import_text", ActionHandler(target_facts=_document_im
 register_handler("document_switch_basis", ActionHandler(target_facts=_document_switch_target_facts, preflight=_document_switch_preflight, execute=_document_switch_execute))
 register_handler("story_outline_generate", ActionHandler(target_facts=_outline_gen_target_facts, preflight=_outline_gen_preflight, execute=_outline_gen_execute, readback=_outline_gen_readback))
 register_handler("story_outline_confirm", ActionHandler(target_facts=_outline_confirm_target_facts, preflight=_outline_confirm_preflight, execute=_outline_confirm_execute))
+register_handler("storyboard_book_generate", ActionHandler(
+    target_facts=_book_draft_target_facts, preflight=_book_draft_preflight, execute=_book_draft_execute,
+))
 register_handler("storyboard_book_confirm", ActionHandler(target_facts=_book_confirm_target_facts, preflight=_book_confirm_preflight, execute=_book_confirm_execute))
 register_handler("literary_scripts_generate", ActionHandler(target_facts=_literary_target_facts, preflight=_literary_preflight, execute=_literary_execute, readback=_literary_readback))
 register_handler("storyboard_generate", ActionHandler(target_facts=_storyboard_gen_target_facts, preflight=_storyboard_gen_preflight, execute=_storyboard_gen_execute, readback=_storyboard_gen_readback))

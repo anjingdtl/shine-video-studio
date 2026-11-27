@@ -26,10 +26,13 @@ prompt:
 """
 from __future__ import annotations
 
+import json
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from shine.copilot import task_grant as grant_contract
+from shine.copilot.material_review import GENERATION_ACTIONS, REVIEW_REQUIRED, candidate_snapshot
 from shine.llm.base import LLMError, LLMNotConfigured
 from shine.llm.tool_calls import (
     FALLBACK_SCHEMA,
@@ -140,6 +143,9 @@ def _state_summary(
         "objective": objective,
         "grant_status": grant_contract.grant_status(grant, now=utcnow()),
         "remaining_budget": grant_contract.remaining(grant),
+        "script_text_bound": grant.get("script_text") is not None,
+        "text_consent_scope_confirmed": bool(grant.get("text_consent_scope")),
+        "reviewed_material_candidate_ids": list(grant.get("reviewed_materials") or {}),
         # The REAL ids inside the frozen scope: a model that cannot see them
         # invents slugs ("shine-h3") and is refused by SCOPE_EXCEEDED.
         "scope": {
@@ -307,6 +313,7 @@ def _run_bounded(
     from shine.support import actions as action_service
 
     config = limits or LoopLimits()
+    burst_started = time.monotonic()
     spec_by_name = {spec.name: spec for spec in tools}
     steps: list[dict[str, Any]] = []
     no_progress = 0
@@ -321,6 +328,21 @@ def _run_bounded(
         if grant_contract.capability_allowed(loaded.grant, name)
     )
     usable_tools = [spec_by_name[name] for name in granted_capabilities]
+    if loaded.grant.get("script_text") is not None:
+        # The write boundary injects the exact authorized text. The model only chooses the action.
+        usable_tools = [
+            ToolSpec(
+                name=spec.name,
+                description=f"{spec.description} 原文已绑定到用户授权，无需传入 text。",
+                parameters={
+                    **spec.parameters,
+                    "properties": {key: value for key, value in spec.parameters["properties"].items()
+                                   if key != "text"},
+                    "required": [key for key in spec.parameters.get("required", []) if key != "text"],
+                },
+            ) if spec.name == "document_import_text" else spec
+            for spec in usable_tools
+        ]
     # Read-only investigation is offered whenever the grant may read at all;
     # it never creates a SupportAction and never starts a renderer.
     if (loaded.grant.get("permissions") or {}).get("read_project"):
@@ -377,8 +399,17 @@ def _run_bounded(
 
     def finish(result: LoopResult) -> LoopResult:
         _persist(db, grant_id, snapshot_state())
+        if result.stop_reason == REVIEW_REQUIRED:
+            grant_service.pause(db, grant_id, "PAUSED_USER_DECISION", reason=REVIEW_REQUIRED)
         grant_service.release_loop(db, grant_id)
         return result
+
+    def pause_for_review() -> LoopResult:
+        return finish(LoopResult(
+            status="PAUSED_USER_DECISION", stop_reason=REVIEW_REQUIRED,
+            final="素材已准备好，请查看候选图，确认后继续拍片。",
+            steps=steps, llm=llm_info,
+        ))
 
     for _step_index in range(config.max_steps):
         loaded = grant_service.load(db, grant_id)
@@ -391,23 +422,6 @@ def _run_bounded(
                 steps=steps,
                 llm=llm_info,
             ))
-        try:
-            grant_service.assert_tool_call_budget(loaded.grant)
-        except grant_contract.GrantError as exc:
-            return finish(LoopResult(
-                status="PAUSED_BUDGET", stop_reason=exc.code,
-                final=exc.message, steps=steps, llm=llm_info,
-            ))
-        try:
-            elapsed = int((utcnow() - grant_contract.parse_iso(started_at)).total_seconds())
-        except (ValueError, TypeError):
-            elapsed = 0
-        if elapsed > config.max_wall_seconds:
-            return finish(LoopResult(
-                status="PAUSED_BUDGET", stop_reason="WALL_CLOCK_EXHAUSTED",
-                final="本次自动执行已达到时间上限，已停止。", steps=steps, llm=llm_info,
-            ))
-
         # --- a delegated original task is waited on by READBACK, not by a new
         # model turn and never by resubmission ---
         if pending_action_id:
@@ -462,7 +476,7 @@ def _run_bounded(
                         "outcome": receipt["observed_facts"].get("verification_outcome"),
                         "error_code": receipt.get("error_code"),
                         "message": receipt.get("message"),
-                        "action_id": pending_action_id,
+                        "action_id": receipt["action_id"],
                         "original_task_id": receipt.get("original_task_id"),
                         "satisfied": False,
                         "reused": True,
@@ -489,7 +503,7 @@ def _run_bounded(
                     "outcome": receipt["observed_facts"].get("verification_outcome"),
                     "error_code": receipt.get("error_code"),
                     "message": receipt.get("message"),
-                    "action_id": pending_action_id,
+                    "action_id": receipt["action_id"],
                     "original_task_id": receipt.get("original_task_id"),
                     "satisfied": _satisfied(receipt),
                     "reused": True,
@@ -499,13 +513,31 @@ def _run_bounded(
                 {"role": "user",
                  "content": "原任务最新回执（只读回读）：" + _receipt_text(receipt)}
             )
-            pending_action_id = None
             no_progress = 0
             last_block_code = None
+            if readback.get("capability_id") in GENERATION_ACTIONS and _satisfied(receipt):
+                review = candidate_snapshot(db, loaded.grant)
+                if review and review["candidates"]:
+                    return pause_for_review()
             if live_status == "WAITING_EXECUTOR":
                 grant_service.set_status(db, grant_id, "RUNNING")
             _persist(db, grant_id, snapshot_state())
             continue
+
+        try:
+            grant_service.assert_tool_call_budget(loaded.grant)
+            created_at = loaded.grant.get("created_at") or started_at
+            grant_service.assert_runtime_budget(loaded.grant, started_at=grant_contract.parse_iso(created_at))
+        except grant_contract.GrantError as exc:
+            return finish(LoopResult(
+                status="PAUSED_BUDGET", stop_reason=exc.code,
+                final=exc.message, steps=steps, llm=llm_info,
+            ))
+        if time.monotonic() - burst_started > config.max_wall_seconds:
+            return finish(LoopResult(
+                status="RUNNING", stop_reason="WALL_CLOCK_EXHAUSTED",
+                final="本轮执行已让出，后台将从同一授权继续。", steps=steps, llm=llm_info,
+            ))
 
         if live_status == "WAITING_EXECUTOR":
             grant_service.set_status(db, grant_id, "RUNNING")
@@ -547,6 +579,8 @@ def _run_bounded(
 
         if not turn.wants_tools:
             final_text = turn.text or ""
+            if final_text:
+                messages.append({"role": "assistant", "content": final_text[:600]})
             # The model stopped.  Whether the task *is* done is the server's
             # call, from the ORIGINAL authorities for each milestone the
             # objective requires — not from one satisfied sub-action.
@@ -598,6 +632,15 @@ def _run_bounded(
                     verification=verification,
                 ))
             missing_labels = "、".join(verification["missing"]) or "未知里程碑"
+            if no_progress < config.max_no_progress - 1:
+                no_progress += 1
+                messages.append({
+                    "role": "user",
+                    "content": f"授权目标还有这些里程碑未完成：{missing_labels}。"
+                               "请按授权目标继续调用工具，直到取得这些里程碑的回执或查到具体阻滞。",
+                })
+                _persist(db, grant_id, snapshot_state())
+                continue
             return finish(LoopResult(
                 status="PAUSED_USER_DECISION",
                 stop_reason="OBJECTIVE_NOT_VERIFIED",
@@ -612,7 +655,7 @@ def _run_bounded(
             ))
 
         call = turn.tool_calls[0]
-        tool_call_id = f"{grant_id}:{len(steps) + 1}:{call.id}"[:96]
+        tool_call_id = f"{grant_id}:{llm_info['turns']}:{call.id}"[:96]
 
         # --- read-only investigation: no SupportAction, no executor ---
         if read_tools.is_read_tool(call.name):
@@ -657,6 +700,9 @@ def _run_bounded(
 
         if call.name not in spec_by_name:
             # A tool the model invented is a refusal, not an attempt.
+            grant_service.record_tool_call(
+                db, grant_id, tool_call_id=tool_call_id, capability_id=call.name, status="REFUSED",
+            )
             steps.append(
                 {
                     "capability_id": call.name,
@@ -696,6 +742,12 @@ def _run_bounded(
             app=app,
             gateway=gateway,
         )
+        grant_service.record_tool_call(
+            db, grant_id, tool_call_id=tool_call_id, capability_id=call.name,
+            status=str(receipt["status"]), action_id=receipt.get("action_id"),
+        )
+        if receipt.get("error_code") == REVIEW_REQUIRED:
+            return pause_for_review()
         outcome = str((receipt.get("observed_facts") or {}).get("verification_outcome") or "")
         steps.append(
             {
@@ -726,6 +778,12 @@ def _run_bounded(
             ))
 
         code = receipt.get("error_code")
+        if code == "GRANT_BUDGET_EXCEEDED":
+            return finish(LoopResult(
+                status="PAUSED_BUDGET", stop_reason=code,
+                final=str(receipt.get("message") or "本次授权预算不足。"), steps=steps, llm=llm_info,
+                usage=grant_contract.usage_of(grant_service.load(db, grant_id).grant),
+            ))
         if not _satisfied(receipt):
             if code and code == last_block_code:
                 no_progress += 1
@@ -796,7 +854,6 @@ def _expected_from(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _receipt_text(receipt: dict[str, Any]) -> str:
     facts = receipt.get("observed_facts") or {}
-    import json
 
     return json.dumps(
         {
@@ -828,6 +885,20 @@ def _copilot_system_prompt() -> str:
         "弄清事实，再决定写操作；已交给后台的任务用 read_original_task 回读，不要重复提交。\n"
         "8. 工具参数里的 project_id / installation_id 必须使用状态摘要 scope 里给出的真实 ID；"
         "没有给出就不要传，绝不编造简称。\n"
+        "9. 若状态摘要有 reviewed_material_candidate_ids，优先使用这些已人工确认的候选图继续晋升。\n"
+        "10. 拍摄交付按导演进度继续：导入原文 → 生成并确认大纲 → storyboard_book_generate 生成分镜书 → "
+        "storyboard_book_confirm 确认方案和用户授权的风格 → storyboard_generate 按集生成镜头 → "
+        "storyboard_confirm 确认镜头 → 推导素材 → 生图及晋升 → production_start → 回读真实成片。"
+        "只有明确要求旧文学流水线时才直接用 literary_scripts_generate；导演分镜已负责其文本准备。"
+        "用户要求无对白时，确认分镜书的 style 用 dialogue_ratio_percent=0 和 narration_level=none。"
+        "从素材台账取齐本次拍摄所需角色、场景和道具的需求 ID，再用 material_generate 提交一批。"
+        "先用 inspect_literary_and_story 取原文与产物 ID，用 inspect_project_overview 取分集 ID。"
+        "如果授权摘要 script_text_bound 为 true 且项目没有原文，立即用 document_import_text 导入授权原文，"
+        "无须重写文本。素材运行核验放在生图之前，运行服务核验放在对应的 GPU 动作之前，"
+        "服务未就绪时可以继续已获授权的文本准备。"
+        "任一回执中的 next_available_actions 只描述那一个任务，不是本次授权允许的工具清单。"
+        "导入、冻结或提交原任务都只是中间步骤。已经明确授权的操作应继续使用工具，"
+        "检查点与所有原业务校验由服务端裁决。\n"
     )
 
 
@@ -877,7 +948,10 @@ def _next_turn(
                 db,
                 "support_agent",
                 system=system,
-                messages=_native_messages(messages),
+                messages=[*_native_messages(messages), {
+                    "role": "user",
+                    "content": "本机授权与步骤事实：" + json.dumps(state, ensure_ascii=False, default=str),
+                }],
                 tools=tools,
                 options={"max_completion_tokens": max_completion_tokens},
             )
@@ -896,7 +970,7 @@ def _next_turn(
             db,
             "support_agent",
             system=system + "\n\n" + fallback_system_prompt(tools),
-            user=fallback_user_prompt(state),
+            user=fallback_user_prompt({**state, "recent_messages": messages[-6:]}),
             schema=FALLBACK_SCHEMA,
             budget={"completion_cap": max_completion_tokens},
         )

@@ -48,9 +48,9 @@ def test_tool_registry_has_no_shell_or_source_write_capability():
 
     names = {name for name in ACTION_SPECS}
     declared = {row.action_id for row in declarations.WRITE_ACTIONS}
-    # V4 extends the whitelist with full-chain project operations (39 total),
+    # V4 extends the whitelist with full-chain project operations (40 total),
     # every one delegating to an existing executor with zero shell/source/git/HTTP.
-    assert len(declared) == 39
+    assert len(declared) == 40
     assert names == declared
     assert "acceptance_status" not in names
     with pytest.raises(ToolDenied):

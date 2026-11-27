@@ -265,6 +265,8 @@ def _value_for(row: CapabilityDeclaration, spec: ParamSpec, value: Any) -> Any:
         first = exc.errors()[0]
         raise ParamError(f"{spec.name}: {first.get('msg') or '不符合原请求模型'}") from exc
     dumped = _adapter_for(field).dump_python(validated, mode="json")
+    if spec.type == "string_list":
+        return _generic_value(spec, dumped)
     if spec.enum and dumped not in spec.enum:
         raise ParamError(f"{spec.name} 必须是 {', '.join(str(item) for item in spec.enum)} 之一。")
     return dumped

@@ -15,6 +15,33 @@ def fingerprint(profile):
     return digest(text_provider_snapshot(profile))
 
 
+def configured_roles(db, gateway):
+    from shine.director.pipeline import BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE
+
+    for role in ("scriptwriter", "producer", "director", "cinematographer",
+                 "continuity_supervisor", "editor", BIBLE_RUN_ROLE, SCENE_SCRIPT_RUN_ROLE):
+        try:
+            yield role, gateway.profile_for_role(db, role)
+        except LLMError:
+            yield role, None
+
+
+def apply_grant_scope(db, gateway, document, scope):
+    """Record the same document/role decisions as the existing consent form."""
+    if document.sha256 != scope["document_sha256"]:
+        raise TextConsentRequired("The document no longer matches the confirmed text scope")
+    profiles = dict(configured_roles(db, gateway))
+    for item in scope["roles"]:
+        profile = profiles.get(item["role"])
+        if profile is None or fingerprint(profile) != item["fingerprint"]:
+            raise TextConsentRequired("A text route no longer matches the confirmed scope")
+    for item in scope["roles"]:
+        role = item["role"]
+        profile = profiles[role]
+        if not allowed(db, document.project_id, document, role, profile):
+            decide(db, document.project_id, document, role, profile, True)
+
+
 def identity(project_id, document, role, profile):
     return digest({"project": project_id, "document": document.id, "hash": document.sha256,
                    "role": role, "provider": fingerprint(profile)})

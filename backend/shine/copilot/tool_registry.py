@@ -37,6 +37,7 @@ AUTONOMOUS_CAPABILITIES: tuple[str, ...] = (
     "document_switch_basis",
     "story_outline_generate",
     "story_outline_confirm",
+    "storyboard_book_generate",
     "storyboard_book_confirm",
     "literary_scripts_generate",
     "storyboard_generate",
@@ -87,9 +88,12 @@ def _json_schema_for(row) -> dict[str, Any]:
             entry["items"] = {"type": "object" if field.get("type") == "list" else "string"}
         enum = list(field.get("enum") or [])
         if enum:
-            entry["enum"] = enum
-        if field.get("max_length") is not None and kind == "string":
-            entry["maxLength"] = int(field["max_length"])
+            (entry["items"] if kind == "array" else entry)["enum"] = enum
+        size_keyword = {"array": "Items", "string": "Length"}.get(kind)
+        if size_keyword:
+            for bound in ("min", "max"):
+                if field.get(f"{bound}_length") is not None:
+                    entry[f"{bound}{size_keyword}"] = int(field[f"{bound}_length"])
         if field.get("minimum") is not None and kind in {"integer", "number"}:
             entry["minimum"] = field["minimum"]
         if field.get("maximum") is not None and kind in {"integer", "number"}:

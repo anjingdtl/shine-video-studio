@@ -636,7 +636,9 @@ def test_production_start_binds_the_original_run_and_reports_real_status(api, mo
     monkeypatch.setattr("shine.director.overview.build_overview", fake_overview)
     calls: list[dict] = []
 
-    def fake_start(db, project, *, settings, episode_ids, workflow_profile_id=None, strategy=None, actor="local-user"):
+    def fake_start(
+        db, project, *, settings, episode_ids, workflow_profile_id=None, strategy=None, output=None, actor="local-user"
+    ):
         calls.append({"episode_ids": episode_ids, "strategy": strategy})
         return {
             "package_id": "pkg-1",

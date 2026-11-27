@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from datetime import timedelta
 from typing import Any
 
@@ -163,18 +164,19 @@ def _target_capabilities(row: SupportAction) -> list[str]:
 
 
 def _capability_evidence(db, settings, row: SupportAction) -> dict[str, Any]:
-    from shine.comfyops.setup_summary import summarize_setup
+    from shine.comfyops.setup_summary import summary
 
-    summary = summarize_setup(db, settings)
-    reports = summary.get("capabilities") or {}
+    snapshot = summary(db, settings, project_id=row.project_id, discovered=[])
+    reports = snapshot.get("capabilities") or {}
     evidence: dict[str, Any] = {}
     for cap in _target_capabilities(row):
         report = reports.get(cap) or {}
+        facts = report.get("facts") or {}
         evidence[cap] = {
             "state": report.get("state") or "UNKNOWN",
-            "production_ready": bool(report.get("production_ready")),
-            "files_verified": bool(report.get("files_verified")),
-            "instance_bound": bool(report.get("instance_bound")),
+            "production_ready": bool(facts.get("PRODUCTION_READY")),
+            "files_verified": bool(facts.get("FILES_VERIFIED")),
+            "instance_bound": bool(facts.get("INSTANCE_BOUND")),
             "missing_count": len(report.get("missing_files") or []),
             "unknown_count": len(report.get("unknown_files") or []),
             "blockers": list(report.get("blockers") or [])[:5],
@@ -753,6 +755,7 @@ def approve_action(
         db.commit()
         raise exc from caught
     except Exception as exc:  # noqa: BLE001
+        db.rollback()
         row = db.get(SupportAction, action_id) or row
         row.status = "FAILED"
         row.last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
@@ -840,13 +843,21 @@ _COUNT_COSTS: dict[str, dict[str, int]] = {
 }
 
 
-def _grant_cost(kind: str, preview: dict[str, Any]) -> dict[str, int]:
+def _grant_cost(kind: str, preview: dict[str, Any], settings) -> dict[str, int]:
     cost: dict[str, int] = {}
     download_bytes = preview.get("download_bytes")
     if isinstance(download_bytes, int) and download_bytes > 0:
         cost["max_download_bytes"] = download_bytes
         cost["max_disk_write_bytes"] = download_bytes
     cost.update(_COUNT_COSTS.get(kind, {}))
+    if preview.get("will_start_gpu"):
+        if kind in {"production_start", "shot_rerender"}:
+            units = max(1, int(preview.get("shot_count") or 0))
+            minutes_per_unit = math.ceil(settings.comfy_render_timeout_seconds / 60)
+        else:
+            units = max(1, len(preview.get("requirement_ids") or preview.get("families") or []))
+            minutes_per_unit = 10  # Planning allowance for one image or runtime verification.
+        cost["max_gpu_minutes"] = units * minutes_per_unit
     return cost
 
 
@@ -872,6 +883,7 @@ def execute_under_grant(
 ) -> dict[str, Any]:
     """Execute one reviewed capability inside an already authorized task grant."""
     from shine.copilot import task_grant as grant_contract
+    from shine.copilot.material_review import REVIEW_BOUNDARY_ACTIONS, REVIEW_REQUIRED, candidate_snapshot
     from shine.support import grants as grant_service
     from shine.support.tools import ToolTier
 
@@ -930,6 +942,12 @@ def execute_under_grant(
             if loaded.grant.get("created_at")
             else None,
         )
+        if capability_id in REVIEW_BOUNDARY_ACTIONS:
+            review = candidate_snapshot(db, loaded.grant)
+            if review and (review["candidates"] or review["generating"]):
+                raise ActionBlocked(REVIEW_REQUIRED, "请先查看素材候选图，然后继续推进拍片。")
+        if capability_id == "document_import_text" and loaded.grant.get("script_text") is not None:
+            params = {**params, "text": loaded.grant["script_text"]}
 
         identity = grant_contract.child_key(
             grant_id,
@@ -963,7 +981,21 @@ def execute_under_grant(
             return _grant_receipt(db, settings, row, receipt, reused=True) | {
                 "observed_facts": {**reuse, "reused_existing_action": True},
             }
-        cost = _grant_cost(capability_id, prepared.get("preview") or {})
+        preview = prepared.get("preview") or {}
+        if (
+            capability_id == "setup_repair"
+            and (int(preview.get("download_bytes") or 0) > 0 or bool(preview.get("missing_components")))
+            and not (loaded.grant.get("permissions") or {}).get("download_models")
+        ):
+            raise grant_contract.GrantError(
+                "GRANT_PERMISSION_NOT_GRANTED",
+                "本次授权未开启下载权限，不能下载缺失文件或组件。",
+                details={
+                    "capability_id": capability_id,
+                    "download_bytes": int(preview.get("download_bytes") or 0),
+                },
+            )
+        cost = _grant_cost(capability_id, preview, settings)
 
         if row.status in {"SUCCEEDED", "DELEGATED", "EXECUTED"}:
             _bind_grant(db, row, grant_id, tool_call_id, identity)
@@ -1171,6 +1203,7 @@ def read_under_grant(db, settings, *, action_id: str, grant_id: str) -> dict[str
     return {
         "status": str(public.get("status") or row.status),
         "action_id": row.id,
+        "capability_id": row.kind,
         "original_task_id": row.original_task_id,
         "observed_facts": {
             "action_status": row.status,

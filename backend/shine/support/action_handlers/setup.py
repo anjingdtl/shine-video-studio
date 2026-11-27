@@ -767,7 +767,7 @@ def _web_search_execute(db, settings, session_factory, row, params, declaration,
 
 
 def _image_validate_target_facts(db, settings, params: dict[str, Any], project_id: str | None) -> tuple[dict[str, Any], str | None]:
-    from shine.comfyops import image_runtime as runtime
+    from shine.materialprep import runtime
     from shine.models import Project
 
     pid = str(project_id or params.get("project_id") or "")
@@ -783,21 +783,22 @@ def _image_validate_target_facts(db, settings, params: dict[str, Any], project_i
 
 
 def _image_validate_preflight(db, settings, params: dict[str, Any], common: dict[str, Any]) -> dict[str, Any]:
-    from shine.comfyops import image_runtime as runtime
+    from shine.materialprep import runtime
 
     config = runtime.load_config(settings)
     occupancy = common["occupancy"]
     not_bound = not config.instance_id or not config.base_url
+    families = list(params.get("families") or ["character", "scene", "prop"])
     return {
         **common,
-        "summary": "提交三合一最小生图验证批次，通过真实渲染证明本地 Qwen-Image-2.1 能力就绪。",
-        "families": list(params.get("families") or ["character", "scene", "prop"]),
+        "summary": f"使用本地 Qwen-Image-2.1 生成 {len(families)} 个验证小样。",
+        "families": families,
         "instance_id": config.instance_id,
         "blocked": bool(occupancy["busy"] or not_bound),
         "blocked_code": occupancy["code"] if occupancy["busy"] else ("IMAGE_RUNTIME_NOT_BOUND" if not_bound else None),
         "will_start_gpu": True,
         "will_modify_user_comfyui": False,
-        "authorization_summary": "确认后按原队列提交验证小样；通过后即解锁项目素材生图与定妆照能力。",
+        "authorization_summary": "确认后交给原素材队列，按实际渲染结果回读验证。",
     }
 
 

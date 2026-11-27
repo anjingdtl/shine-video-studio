@@ -187,6 +187,9 @@ def _scope_project(arguments: dict[str, Any], *, grant: dict[str, Any] | None,
     """
     project_id = str(arguments.get("project_id") or "") or None
     if grant is not None:
+        scoped = (grant.get("scope") or {}).get("project_ids") or []
+        if not project_id and len(scoped) == 1:
+            project_id = scoped[0]
         if project_id:
             grant_contract.assert_project_scope(grant, project_id=project_id, capability_id="read")
         return project_id
@@ -654,6 +657,7 @@ def _inspect_materials_and_loras(db, settings, arguments, *, grant, scope_projec
     from shine.comfyops.models import AssetRequirement, StyleLoraAsset
     from shine.materialprep.service import (
         evaluate_materials,
+        generation_progress,
         get_material_preferences,
         project_requirement_shot_bindings,
     )
@@ -669,6 +673,13 @@ def _inspect_materials_and_loras(db, settings, arguments, *, grant, scope_projec
         select(AssetRequirement).where(AssetRequirement.project_id == project.id)
     ).all())
     plan_ids = {row.plan_id for row in requirements}
+    candidates = [
+        {"candidate_id": candidate["candidate_id"], "requirement_id": item["requirement_id"],
+         "family": item["family"], "entity_id": item["entity_id"], "generation_revision": item["generation_revision"]}
+        for run in generation_progress(db, project.id)["runs"]
+        for item in run["items"] for candidate in item["candidates"]
+        if candidate["status"] == "READY_FOR_REVIEW"
+    ]
     bindings = []
     for row in (judged.get("requirements") or [])[:MAX_ROWS]:
         requirement = next((item for item in requirements if item.id == row.get("requirement_id")), None)
@@ -709,6 +720,7 @@ def _inspect_materials_and_loras(db, settings, arguments, *, grant, scope_projec
         "inspect_materials_and_loras",
         {
             "project_id": project.id,
+            "candidate_images": candidates[:MAX_ROWS],
             "materials_ready": judged.get("materials_ready"),
             "reason": judged.get("reason"),
             "missing_count": len(judged.get("missing") or []),
@@ -970,6 +982,7 @@ def _read_recent_audit_events(db, settings, arguments, *, grant, scope_project_i
 
 
 def _read_original_task(db, settings, arguments, *, grant, scope_project_id):
+    from shine.support.action_handlers import ActionBlocked, ActionUnknown
     from shine.support.actions import read_under_grant
 
     action_id = str(arguments.get("action_id") or "")
@@ -977,10 +990,13 @@ def _read_original_task(db, settings, arguments, *, grant, scope_project_id):
         raise grant_contract.GrantError(
             "INTENT_PARAMS_MALFORMED", "read_original_task 需要 action_id。"
         )
-    result = read_under_grant(
-        db, settings, action_id=action_id,
-        grant_id=str((grant or {}).get("grant_id") or ""),
-    )
+    try:
+        result = read_under_grant(
+            db, settings, action_id=action_id,
+            grant_id=str((grant or {}).get("grant_id") or ""),
+        )
+    except (ActionUnknown, ActionBlocked) as exc:
+        raise grant_contract.GrantError(exc.code, exc.message, details=exc.details) from exc
     return {
         **_bounded_receipt("read_original_task", result.get("observed_facts") or {},
                            authority=str(result.get("authority") or "")),

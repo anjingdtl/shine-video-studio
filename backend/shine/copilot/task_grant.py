@@ -83,6 +83,7 @@ CAPABILITY_PERMISSIONS: dict[str, str] = {
     "document_switch_basis": "manage_project_literary",
     "story_outline_generate": "manage_project_literary",
     "story_outline_confirm": "manage_project_literary",
+    "storyboard_book_generate": "manage_project_literary",
     "storyboard_book_confirm": "manage_project_literary",
     "literary_scripts_generate": "manage_project_literary",
     "storyboard_generate": "manage_project_literary",
@@ -157,6 +158,18 @@ DEFAULT_LIMITS: dict[str, int] = {
     "max_paid_api_cost_minor_units": 0,
     "max_llm_tool_calls": 60,
     "max_total_runtime_seconds": 43_200,
+}
+
+DEFAULT_BUDGET_PRESET = "standard"
+BUDGET_PRESETS: dict[str, dict[str, int]] = {
+    DEFAULT_BUDGET_PRESET: DEFAULT_LIMITS,
+    "full_production": {
+        **DEFAULT_LIMITS,
+        "max_gpu_minutes": 360,
+        "max_llm_tool_calls": 180,
+        "max_test_inference_jobs": 8,
+        "max_total_runtime_seconds": 86_400,
+    },
 }
 
 #: Upper bounds a person may raise a budget to.  Beyond these the request is a
@@ -267,10 +280,24 @@ def permissions_for_groups(groups: Iterable[str]) -> dict[str, bool]:
     return granted
 
 
-def normalize_limits(raw: dict[str, Any] | None) -> dict[str, int]:
-    """Accept only known keys, clamp to the ceiling, refuse nonsense."""
-    merged = dict(DEFAULT_LIMITS)
-    for key, value in (raw or {}).items():
+def normalize_budget_preset(value: object) -> str:
+    if not isinstance(value, str) or value not in BUDGET_PRESETS:
+        raise GrantError("UNKNOWN_BUDGET_PRESET", "无法识别授权预算档位。")
+    return value
+
+
+def normalize_production_pause(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise GrantError("INVALID_MATERIAL_REVIEW_OPTION", "素材审片检查点必须明确为开启或关闭。")
+    return value
+
+
+def normalize_limits(
+    raw: dict[str, Any] | None, *, budget_preset: str = DEFAULT_BUDGET_PRESET,
+) -> dict[str, int]:
+    """Use the preset as defaults and reject any override outside the ceilings."""
+    merged = {**BUDGET_PRESETS[normalize_budget_preset(budget_preset)], **(raw or {})}
+    for key, value in merged.items():
         if key not in DEFAULT_LIMITS:
             raise GrantError(
                 "UNKNOWN_LIMIT",
@@ -291,7 +318,6 @@ def normalize_limits(raw: dict[str, Any] | None) -> dict[str, int]:
                 f"预算项 {key} 超过系统允许的上限。",
                 details={"limit": key, "ceiling": LIMIT_CEILINGS[key]},
             )
-        merged[key] = value
     return merged
 
 
@@ -306,9 +332,18 @@ def permission_for_capability(capability_id: str) -> str:
     return permission
 
 
-def capability_allowed(grant: dict[str, Any], capability_id: str) -> bool:
+def _capability_allowed_permissions(capability_id: str) -> tuple[str, ...]:
     permission = permission_for_capability(capability_id)
-    return bool((grant.get("permissions") or {}).get(permission))
+    if str(capability_id) == "setup_repair":
+        # Zero-download local recipe alignment uses runtime permission; actual
+        # file downloads remain gated by download_models + max_download_bytes.
+        return (permission, "configure_managed_runtime")
+    return (permission,)
+
+
+def capability_allowed(grant: dict[str, Any], capability_id: str) -> bool:
+    permissions = grant.get("permissions") or {}
+    return any(bool(permissions.get(item)) for item in _capability_allowed_permissions(capability_id))
 
 
 def compute_grant_digest(grant: dict[str, Any]) -> str:
@@ -340,6 +375,10 @@ def compute_grant_digest(grant: dict[str, Any]) -> str:
         },
         "frozen_capability_contracts": grant.get("frozen_capability_contracts"),
     }
+    # Existing authorized rows keep their original digest after upgrading.
+    for key in ("budget_preset", "pause_before_production", "script_text", "text_consent_scope"):
+        if key in grant:
+            material[key] = grant[key]
     return digest(material)
 
 
@@ -373,8 +412,8 @@ def capabilities_for_groups(groups: Iterable[str]) -> list[str]:
     }
     return sorted(
         capability_id
-        for capability_id, permission in CAPABILITY_PERMISSIONS.items()
-        if permission in allowed
+        for capability_id in CAPABILITY_PERMISSIONS
+        if any(perm in allowed for perm in _capability_allowed_permissions(capability_id))
     )
 
 
@@ -392,6 +431,10 @@ def build_proposed_grant(
     created_at: datetime,
     validity: timedelta | None = None,
     expires_at: datetime | None = None,
+    budget_preset: str = DEFAULT_BUDGET_PRESET,
+    pause_before_production: bool = True,
+    script_text: str | None = None,
+    text_consent_scope: dict | None = None,
 ) -> dict[str, Any]:
     """Assemble the server-generated grant body.  No field is client-supplied."""
     normalized_groups = normalize_groups(groups)
@@ -423,7 +466,9 @@ def build_proposed_grant(
         },
         "permissions": permissions_for_groups(normalized_groups),
         "supply_chain": dict(SUPPLY_CHAIN),
-        "limits": normalize_limits(limits),
+        "budget_preset": normalize_budget_preset(budget_preset),
+        "limits": normalize_limits(limits, budget_preset=budget_preset),
+        "pause_before_production": normalize_production_pause(pause_before_production),
         "validity": {
             "expires_at": frozen_expiry.replace(microsecond=0).isoformat(),
             "single_task_only": True,
@@ -433,6 +478,10 @@ def build_proposed_grant(
             capabilities_for_groups(normalized_groups)
         ),
     }
+    if script_text is not None:
+        grant["script_text"] = script_text
+    if text_consent_scope is not None:
+        grant["text_consent_scope"] = text_consent_scope
     grant["grant_digest"] = compute_grant_digest(grant)
     return grant
 
@@ -672,8 +721,10 @@ def grant_public(grant: dict[str, Any], *, now: datetime) -> dict[str, Any]:
         ),
         "scope": grant.get("scope"),
         "permissions": grant.get("permissions"),
+        "budget_preset": grant.get("budget_preset", DEFAULT_BUDGET_PRESET),
         "limits": grant.get("limits"),
         "remaining": remaining(grant),
+        "pause_before_production": grant.get("pause_before_production", False),
         "validity": grant.get("validity"),
         "grant_digest": grant.get("grant_digest"),
         "paused_reason": grant.get("paused_reason"),

@@ -8,11 +8,12 @@ Git patch, or submits an Issue/PR.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StrictBool
 from sqlalchemy import select
 
 from shine.api_common import DBSession, app_settings, llm_gateway
@@ -827,7 +828,11 @@ class TaskGrantPreviewRequest(BaseModel):
     project_id: str | None = Field(default=None, max_length=36)
     installation_id: str | None = Field(default=None, max_length=96)
     capability_groups: list[str] = Field(default_factory=list, max_length=16)
+    budget_preset: str = "standard"
     limits: dict = Field(default_factory=dict)
+    pause_before_production: StrictBool = True
+    script_text: str | None = Field(default=None, min_length=1, max_length=4000)
+    allow_remote_text: StrictBool = False
     validity_hours: int = Field(default=24, ge=1, le=168)
     allow_gpu: bool | None = None
     allow_download: bool | None = None
@@ -848,6 +853,8 @@ class TaskGrantRunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     session_id: str = Field(min_length=1, max_length=36)
     max_steps: int = Field(default=12, ge=1, le=40)
+    material_review_digest: str | None = Field(default=None, min_length=64, max_length=64)
+    run_in_background: bool = False
 
 
 def _grant_draft(session) -> dict:
@@ -925,6 +932,30 @@ def _risk_list(groups: list[str]) -> list[str]:
     return list(dict.fromkeys(risks))
 
 
+def _grant_text_preview(db, gateway, project, script_text: str | None) -> dict | None:
+    from shine.materialprep import text_consent
+    from shine.models import ProjectDocument
+    from shine.security import is_loopback_url
+
+    document = db.get(ProjectDocument, project.current_document_id) if project.current_document_id else None
+    if script_text is None and document is None:
+        return None
+    document_hash = hashlib.sha256(script_text.encode("utf-8")).hexdigest() if script_text is not None else document.sha256
+    pinned = document if document is not None and document.sha256 == document_hash else None
+    roles = [
+        {"role": role, "provider": profile.name, "model": profile.model,
+         "fingerprint": text_consent.fingerprint(profile)}
+        for role, profile in text_consent.configured_roles(db, gateway)
+        if profile is not None and profile.kind != "mock" and not is_loopback_url(profile.base_url)
+    ]
+    return {
+        "document_id": pinned.id if pinned else None,
+        "document_name": pinned.filename if pinned else "本次对话提供的剧本",
+        "document_sha256": document_hash,
+        "roles": roles,
+    } if roles else None
+
+
 @router.post("/task-grants/preview")
 def support_task_grant_preview(
     body: TaskGrantPreviewRequest,
@@ -937,10 +968,11 @@ def support_task_grant_preview(
 
     session = _require_session(db, body.session_id)
     project_id = body.project_id or session.project_id
+    project = None
     if project_id:
         from shine.services import require_project
 
-        require_project(db, project_id)
+        project = require_project(db, project_id)
     raw_groups = list(
         body.capability_groups
         or (
@@ -949,19 +981,27 @@ def support_task_grant_preview(
             else list(grant_contract.DEFAULT_GROUPS)
         )
     )
-    raw_limits = dict(body.limits or {})
-    if body.allow_gpu is False:
-        raw_groups = [group for group in raw_groups if group != "test"]
-        raw_limits["max_test_inference_jobs"] = 0
-        raw_limits["max_gpu_minutes"] = 0
-    if body.allow_download is False:
-        raw_groups = [group for group in raw_groups if group not in {"resources", "nodes"}]
-        raw_limits["max_download_bytes"] = 0
     try:
         groups = grant_contract.normalize_groups(raw_groups)
-        limits = grant_contract.normalize_limits(raw_limits or None)
+        limits = grant_contract.normalize_limits(body.limits, budget_preset=body.budget_preset)
     except grant_contract.GrantError as exc:
         raise _http(exc.code, exc.message) from exc
+    if body.allow_gpu is True and "test" not in groups and (
+        body.budget_preset == "full_production"
+        or bool({"materials", "production", "runtime"} & set(groups))
+    ):
+        groups = grant_contract.normalize_groups([*groups, "test"])
+    if body.allow_gpu is False:
+        groups = [group for group in groups if group != "test"]
+        limits.update(max_test_inference_jobs=0, max_gpu_minutes=0)
+    if body.allow_download is False:
+        groups = [group for group in groups if group not in {"resources", "nodes"}]
+        limits["max_download_bytes"] = 0
+    groups = groups or ["inspect"]
+    script_text = body.script_text if project and "literary" in groups else None
+    text_preview = _grant_text_preview(db, gateway, project, script_text) if project and "literary" in groups else None
+    if body.allow_remote_text and text_preview is None:
+        raise _http("GRANT_TEXT_SCOPE_UNAVAILABLE", "没有可确认的剧本文字和云端文本模型。", status=409)
 
     installation = _resolve_installation(db, settings, body.installation_id)
     capabilities = grant_contract.capabilities_for_groups(groups)
@@ -1015,6 +1055,10 @@ def support_task_grant_preview(
             limits=limits,
             created_at=now,
             validity=_timedelta(hours=body.validity_hours),
+            budget_preset=body.budget_preset,
+            pause_before_production=body.pause_before_production,
+            script_text=script_text,
+            text_consent_scope=text_preview if body.allow_remote_text else None,
         )
     except grant_contract.GrantError as exc:
         raise _http(exc.code, exc.message) from exc
@@ -1026,7 +1070,11 @@ def support_task_grant_preview(
         "objective": proposed["objective"],
         "objective_digest": proposed["objective_digest"],
         "groups": groups,
+        "budget_preset": proposed["budget_preset"],
         "limits": proposed["limits"],
+        "pause_before_production": proposed["pause_before_production"],
+        "script_text": script_text,
+        "text_consent_scope": proposed.get("text_consent_scope"),
         "project_ids": proposed["scope"]["project_ids"],
         "installation_ids": proposed["scope"]["installation_ids"],
         "allowed_resource_roots": proposed["scope"]["allowed_resource_roots"],
@@ -1052,7 +1100,10 @@ def support_task_grant_preview(
         "capabilities": capabilities,
         "blocked_capabilities": blocked,
         "permissions": proposed["permissions"],
+        "budget_preset": proposed["budget_preset"],
         "limits": proposed["limits"],
+        "pause_before_production": proposed["pause_before_production"],
+        "text_consent": text_preview,
         "risks": _risk_list(groups),
         "installation": installation,
         "model": model_info,
@@ -1113,6 +1164,11 @@ def support_task_grant_authorize(
             installation_ids=list(draft["installation_ids"]),
             allowed_resource_roots=list(draft["allowed_resource_roots"]),
             expires_at=grant_contract.parse_iso(draft["expires_at"]),
+            budget_preset=draft.get("budget_preset", grant_contract.DEFAULT_BUDGET_PRESET),
+            pause_before_production=draft.get("pause_before_production", True),
+            script_text=draft.get("script_text"),
+            text_consent_scope=draft.get("text_consent_scope"),
+            gateway=gateway,
             expected_digest=body.grant_digest,
         )
     except grant_contract.GrantError as exc:
@@ -1130,7 +1186,9 @@ def support_task_grant_authorize(
         "grant_digest": loaded.grant.get("grant_digest"),
         "created": bool(created),
         "objective": loaded.grant.get("objective"),
+        "budget_preset": loaded.grant.get("budget_preset"),
         "limits": loaded.grant.get("limits"),
+        "pause_before_production": loaded.grant.get("pause_before_production"),
         "execution": None,
     }
     from shine.services import add_audit
@@ -1152,7 +1210,7 @@ def support_task_grant_authorize(
     )
     db.commit()
 
-    if body.run:
+    if body.run and result["status"] in grant_contract.AUTHORIZED_STATUSES:
         result["execution"] = _run_grant(
             db, settings, gateway, session=session, grant_id=loaded.id, max_steps=12
         )
@@ -1161,18 +1219,15 @@ def support_task_grant_authorize(
 
 @router.get("/task-grants/{grant_id}")
 def support_task_grant_get(grant_id: str, db: DBSession):
-    from shine.copilot import task_grant as grant_contract
+    from shine.copilot.task_grant import GrantError
     from shine.support import grants as grant_service
 
     try:
         loaded = grant_service.load(db, grant_id)
-    except grant_contract.GrantError as exc:
+    except GrantError as exc:
         raise _http(exc.code, exc.message, status=404) from exc
     return {
-        **grant_contract.grant_public(loaded.grant, now=utcnow()),
-        "sub_actions": grant_service.sub_action_public(loaded.grant),
-        "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
-        "objective_verification": (loaded.row.payload or {}).get("objective_verification"),
+        **grant_service.public_state(db, loaded),
         "not_allowed": [
             "修改源码",
             "执行任意命令",
@@ -1233,13 +1288,13 @@ def support_task_grant_run(
     except grant_contract.GrantError as exc:
         raise _http(exc.code, exc.message, status=404) from exc
     return _run_grant(
-        db, settings, gateway, session=session, grant_id=grant_id, max_steps=body.max_steps
+        db, settings, gateway, session=session, grant_id=grant_id, max_steps=body.max_steps,
+        material_review_digest=body.material_review_digest, run_in_background=body.run_in_background,
     )
 
 
 @router.get("/sessions/{session_id}/task-grant")
 def support_session_task_grant(session_id: str, db: DBSession):
-    from shine.copilot import task_grant as grant_contract
     from shine.support import grants as grant_service
 
     session = _require_session(db, session_id)
@@ -1247,17 +1302,15 @@ def support_session_task_grant(session_id: str, db: DBSession):
     if loaded is None:
         return {"grant": None, "preview": _grant_draft(session) or None}
     return {
-        "grant": {
-            **grant_contract.grant_public(loaded.grant, now=utcnow()),
-            "sub_actions": grant_service.sub_action_public(loaded.grant),
-            "recent_tool_calls": (loaded.grant.get("tool_calls") or [])[-12:],
-            "objective_verification": (loaded.row.payload or {}).get("objective_verification"),
-        },
+        "grant": grant_service.public_state(db, loaded),
         "preview": None,
     }
 
 
-def _run_grant(db, settings, gateway, *, session, grant_id: str, max_steps: int) -> dict:
+def _run_grant(
+    db, settings, gateway, *, session, grant_id: str, max_steps: int,
+    material_review_digest: str | None = None, run_in_background: bool = False,
+) -> dict:
     """Advance the durable loop and translate its outcome into grant state.
 
     The driver lease makes a repeated click reconnect to the SAME execution:
@@ -1272,21 +1325,32 @@ def _run_grant(db, settings, gateway, *, session, grant_id: str, max_steps: int)
     from shine.support import grants as grant_service
 
     loaded = grant_service.load(db, grant_id)
+    try:
+        grant_contract.assert_identity(loaded.grant, actor=session.actor, session_id=session.id)
+    except grant_contract.GrantError as exc:
+        raise _http(exc.code, exc.message, status=409) from exc
     live = grant_contract.grant_status(loaded.grant, now=utcnow())
     if live == "PAUSED_USER_DECISION":
         # An explicit click on "继续推进" IS the user's decision the pause asked
         # for. Only this pause is resumable by a click; scope/contract/unknown/
         # budget pauses need their own reconciliation and stay refused.
-        grant_service.set_status(db, grant_id, "RUNNING", reason="用户点击继续推进")
+        try:
+            loaded = grant_service.set_status(
+                db, grant_id, "RUNNING", material_review_digest=material_review_digest,
+            )
+        except grant_contract.GrantError as exc:
+            raise _http(exc.code, exc.message, status=409) from exc
         from shine.services import add_audit
 
         add_audit(
             db, session.actor, "SUPPORT_TASK_GRANT_RESUMED", "support_delegation",
-            loaded.row.id, {"grant_id": grant_id, "from": "PAUSED_USER_DECISION"},
+            loaded.row.id, {"grant_id": grant_id, "from": live,
+                            "material_review_digest": material_review_digest},
             project_id=session.project_id,
         )
         db.commit()
-        loaded = grant_service.load(db, grant_id)
+    if run_in_background:
+        return grant_service.public_state(db, loaded)
     tools = tool_registry.grant_tool_specs(loaded.grant)
     try:
         outcome = tool_loop.advance(

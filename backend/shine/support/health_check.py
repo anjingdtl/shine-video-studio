@@ -384,7 +384,7 @@ def _tasks(db, *, project_id: str | None) -> dict[str, Any]:
     )
 
 
-def _gpu(db) -> dict[str, Any]:
+def _gpu(db, settings=None) -> dict[str, Any]:
     from shine.support.occupancy import resource_occupancy
 
     items: list[dict[str, Any]] = []
@@ -443,10 +443,16 @@ def _gpu(db) -> dict[str, Any]:
         workers = list(db.scalars(select(WorkerInstance)).all())
     except Exception:  # noqa: BLE001
         workers = []
-    live_workers = [row for row in workers if str(row.status) in {"running", "idle", "starting"}]
-    if workers and not live_workers:
-        items.append(_item("WORKER_OFFLINE", "后台 Worker 未运行", status="BLOCKED",
-                           detail="制作任务不会继续推进", jump=JUMP_SETUP))
+    if workers:
+        if settings is not None:
+            from shine.comfyops.service_validation import _worker_online
+
+            worker_live = _worker_online(db, settings)
+        else:
+            worker_live = any(str(row.status) != "stopped" for row in workers)
+        if not worker_live:
+            items.append(_item("WORKER_OFFLINE", "后台 Worker 未运行", status="BLOCKED",
+                               detail="制作任务不会继续推进", jump=JUMP_SETUP))
     return _group(
         "gpu", status=_worst(items), items=items, jump=JUMP_SETUP,
         summary=str(occupancy.get("label") or ""),
@@ -476,7 +482,7 @@ def build_health_check(
         jump=JUMP_MATERIALS, summary="未选定项目",
     ))
     groups.append(_tasks(db, project_id=project_id))
-    groups.append(_gpu(db))
+    groups.append(_gpu(db, settings))
     blockers = [
         {**row, "group": group["key"], "group_label": group["label"]}
         for group in groups for row in group["items"] if row["status"] == "BLOCKED"

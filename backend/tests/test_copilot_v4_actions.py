@@ -105,9 +105,9 @@ def _seed_shot_with_style(factory, project_id: str, *, dialogue_end_s: float = 5
     return style_id, shot_id
 
 
-def test_v4_39_actions_declared_registered_and_redlines_intact():
+def test_v4_actions_declared_registered_and_redlines_intact():
     write_ids = {row.action_id for row in decl.WRITE_ACTIONS}
-    assert len(decl.WRITE_ACTIONS) == 39
+    assert len(decl.WRITE_ACTIONS) == 40
     assert write_ids == set(action_handlers.REGISTRY)
     assert write_ids <= set(grant_contract.CAPABILITY_PERMISSIONS)
     assert write_ids <= set(tool_registry.AUTONOMOUS_CAPABILITIES)

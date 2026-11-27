@@ -2020,6 +2020,109 @@
     {
       "body": {
         "fields": {
+          "episode_count": {
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "max_shot_seconds": {
+            "default": 10.0,
+            "type": "number"
+          },
+          "target_seconds": {
+            "default": 60,
+            "maximum": 3600.0,
+            "minimum": 8.0,
+            "type": "integer"
+          },
+          "tolerance_seconds": {
+            "default": 15,
+            "maximum": 900.0,
+            "minimum": 0.0,
+            "type": "integer"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "episode_count"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "episode_count": {
+              "maximum": 200.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "max_shot_seconds": {
+              "anyOf": [
+                {
+                  "maximum": 10.0,
+                  "minimum": 4.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": 10.0
+            },
+            "target_seconds": {
+              "default": 60,
+              "maximum": 3600.0,
+              "minimum": 8.0,
+              "type": "integer"
+            },
+            "tolerance_seconds": {
+              "default": 15,
+              "maximum": 900.0,
+              "minimum": 0.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "episode_count"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "944cd3cfa268e61b4ce798af5582da28c683084688f9c35f20827842b0f49b3e"
+      },
+      "operation": "POST /api/v1/projects/{}/director/storyboard-book",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
           "acknowledge_deviation": {
             "default": false,
             "type": "boolean"
@@ -5742,8 +5845,8 @@
       "authority": "GET /api/v1/production-runs/{run_id}",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示集数、工作流/策略与 GPU 影响，确认后开拍。",
-      "contract_digest": "07adb95b9847ad45af9a3c0cadefce634fa4e74720913db32261adf10216b51f",
-      "contract_revision": 2,
+      "contract_digest": "3c329a6e69602717622b2affb89ec8bb54f7dbf228c497ea421fee6c9096f188",
+      "contract_revision": 3,
       "description": "复用导演包与 Run 引擎；相同选择返回同一运行，不另建生产队列。",
       "dispatch": "production_start",
       "examples": [
@@ -5781,6 +5884,18 @@
           "type": "string_list"
         },
         {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "output",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:ShootBody",
+          "type": "object"
+        },
+        {
           "binding": "path",
           "enum": [],
           "max_length": 120,
@@ -5816,6 +5931,7 @@
       ],
       "params": [
         "episode_ids",
+        "output",
         "project_id",
         "strategy",
         "workflow_profile_id"
@@ -6282,6 +6398,129 @@
       "response_schema": null,
       "reversible": "NO",
       "rollback_policy": "可生成新版大纲后重新确认。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "storyboard_book_generate",
+      "api_contract_digest": "7235df2d3712d8046a141cb01f900c28fd34f52bf83501449d7046db618a26c3",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director/storyboard-book",
+        "GET /api/v1/projects/{}/director/storyboard-book"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director/storyboard-book",
+      "authority": "GET /api/v1/projects/{project_id}/director/storyboard-book",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示集数和时长，确认后生成草稿。",
+      "contract_digest": "46a477fe76cd42ef5d3c4228436c96232912959443a7234ba600b7d2b21c09c4",
+      "contract_revision": 2,
+      "description": "按集数、每集目标和单镜时长生成分镜书草稿。短片两镜可选择 1 集、10 秒目标和 5 秒单镜上限。",
+      "dispatch": "storyboard_book_generate",
+      "examples": [
+        "按已确认大纲生成一集约十秒的分镜书"
+      ],
+      "executor": "shine.director.streamline.create_storyboard_book",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [],
+      "gpu": false,
+      "idempotency_policy": "同一底稿、设置和授权回读原分镜书。",
+      "introduced_version": "2.2.0",
+      "label": "从已确认大纲生成分镜书",
+      "module": "director",
+      "note": "按集数、每集目标和单镜时长生成分镜书草稿。短片两镜可选择 1 集、10 秒目标和 5 秒单镜上限。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": null,
+          "maximum": 200,
+          "minimum": 1,
+          "name": "episode_count",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_streamline:StoryboardBookBody",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": 10.0,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "maximum": 10.0,
+          "minimum": 4.0,
+          "name": "max_shot_seconds",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookBody",
+          "type": "number"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": 60,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "maximum": 3600,
+          "minimum": 8,
+          "name": "target_seconds",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookBody",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": 15,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "maximum": 900,
+          "minimum": 0,
+          "name": "tolerance_seconds",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookBody",
+          "type": "integer"
+        }
+      ],
+      "params": [
+        "episode_count",
+        "max_shot_seconds",
+        "project_id",
+        "target_seconds",
+        "tolerance_seconds"
+      ],
+      "preconditions": [
+        "当前原文的大纲已确认"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/director/storyboard-book",
+      "readback_contract": "GET /api/v1/projects/{project_id}/director/storyboard-book。",
+      "request_schema": "shine.api_streamline:StoryboardBookBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只生成本地分镜书草稿。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "草稿可调整，保留已确认的版本。",
       "scope": "PROJECT",
       "status": "GUARDED",
       "tier": "EXECUTE_GUARDED"
@@ -7127,8 +7366,8 @@
       "authority": "GET /api/v1/projects/{project_id}/assets",
       "availability": "AVAILABLE",
       "confirmation_policy": "确认后晋升并锁定主资产。",
-      "contract_digest": "e0e123a6e78bfa8b717906a9f78a3bcbd2b548f143418a8861a50819b91579a4",
-      "contract_revision": 2,
+      "contract_digest": "a47ac8528a69fa0b0a31602c88ca15acdba66433f20c5d7bb4da41d23511cb6b",
+      "contract_revision": 3,
       "description": "将已过质检的候选素材（CandidateAsset）晋升为本项目主资产（Asset）。",
       "dispatch": "material_promote",
       "examples": [
@@ -7162,28 +7401,21 @@
           "type": "string"
         },
         {
-          "binding": "body",
-          "default": null,
+          "binding": "executor",
           "enum": [],
-          "has_default": false,
-          "max_length": 2000,
-          "min_length": 5,
+          "max_length": 400,
           "name": "evidence",
-          "nullable": false,
-          "required": true,
-          "source": "shine.api_preparation:Decision",
+          "required": false,
+          "source": "declaration",
           "type": "string"
         },
         {
-          "binding": "body",
-          "default": true,
+          "binding": "executor",
           "enum": [],
-          "has_default": true,
           "max_length": null,
           "name": "offline",
-          "nullable": false,
           "required": false,
-          "source": "shine.api_preparation:Decision",
+          "source": "declaration",
           "type": "boolean"
         },
         {
@@ -8909,9 +9141,9 @@
     }
   ],
   "digests": {
-    "api_contract": "547211732ff7cb7bae39c4922e401316ff18dfc0ac50f52aed6168d21de8df9b",
-    "api_schema": "6fffd497752f45d3416f60779c3dca6459bebac594a0394b4f403f4c15cfd2a2",
-    "contracts": "6a2228733291fb59286b087853f303b8e7f241cdec631a5242dfd6eb300e1212"
+    "api_contract": "cb08b2675f60c65922876ef5e5e99c9f36f0df54a2b7f25d5fba24fc29eb4558",
+    "api_schema": "f13e88b0360f7acf07059ea40f8c741749d22999ee3598e993386102fdd960dd",
+    "contracts": "d86cfb56bcbd6b145f018cecb06fafdbd804b32f263dec5104fadb45396750de"
   },
   "discovered": [
     {
@@ -10718,12 +10950,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/director/outline/revision",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director/storyboard-book",
       "status": "DISCOVERED"
     },
     {

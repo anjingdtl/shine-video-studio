@@ -293,9 +293,10 @@ describe('素材就绪后主操作进入下一步（journey 单一裁决）', ()
     </StageRailProvider>);
     await screen.findByText('沈砚');
     const rail = screen.getByLabelText('本阶段操作');
-    expect(within(rail).getByRole('button', { name: '确认并进入下一步' })).toBeInTheDocument();
+    const advanceButton = await within(rail).findByRole('button', { name: '确认并进入下一步' });
+    expect(advanceButton).toBeInTheDocument();
     expect(within(rail).getByRole('button', { name: '重新生成素材' })).toBeInTheDocument();
-    await userEvent.setup().click(within(rail).getByRole('button', { name: '确认并进入下一步' }));
+    await userEvent.setup().click(advanceButton);
     await waitFor(() => expect(advance).toHaveBeenCalledTimes(1));
   });
 

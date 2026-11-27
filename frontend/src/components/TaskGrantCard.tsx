@@ -10,9 +10,21 @@
  */
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle, CheckCircle2, ChevronDown, Loader2, ShieldCheck, Square } from 'lucide-react';
-import { api } from '../api';
+import { API, api } from '../api';
 
 export type GrantLimits = Record<string, number>;
+export type BudgetPreset = 'standard' | 'full_production';
+
+type MaterialReview = {
+  digest: string;
+  generating: boolean;
+  candidates: Array<{
+    candidate_id: string;
+    family: string;
+    name: string;
+    generation_revision: number;
+  }>;
+};
 
 export type GrantPreview = {
   preview_id: string;
@@ -24,7 +36,14 @@ export type GrantPreview = {
   capability_groups: string[];
   capabilities: string[];
   blocked_capabilities: Array<{ capability_id: string; state: string; notice?: string }>;
+  budget_preset?: BudgetPreset;
   limits: GrantLimits;
+  pause_before_production?: boolean;
+  text_consent?: {
+    document_name: string;
+    document_sha256: string;
+    roles: Array<{ provider: string; model: string }>;
+  } | null;
   risks: string[];
   selection_required?: string[];
   installation?: {
@@ -84,6 +103,10 @@ export type TaskGrant = {
   validity?: { expires_at?: string };
   grant_digest?: string;
   paused_reason?: string | null;
+  budget_preset?: BudgetPreset;
+  pause_before_production?: boolean;
+  material_review?: MaterialReview | null;
+  steps?: GrantStep[];
   sub_actions?: GrantSubAction[];
   recent_tool_calls?: Array<Record<string, unknown>>;
 };
@@ -117,7 +140,21 @@ const LIMIT_LABELS: Array<[string, string, (value: number) => string]> = [
   ['max_test_inference_jobs', '最多小样任务', (v) => `${v} 个`],
   ['max_gpu_minutes', '最长 GPU 时间', (v) => `${v} 分钟`],
   ['max_llm_tool_calls', '最多工具调用', (v) => `${v} 次`],
+  ['max_total_runtime_seconds', '总运行时限', (v) => `${Math.round(v / 36) / 100} 小时`],
 ];
+
+const BUDGET_LABELS: Record<BudgetPreset, string> = {
+  standard: '标准',
+  full_production: '全链路拍片',
+};
+
+const MATERIAL_FAMILIES: Record<string, string> = { character: '角色', scene: '场景', prop: '道具' };
+
+function formatExpiry(value: string | undefined): string {
+  if (!value) return '—';
+  const time = new Date(/(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`);
+  return Number.isNaN(time.getTime()) ? value : time.toLocaleString('zh-CN', { hour12: false });
+}
 
 export function formatBytes(value: number | undefined): string {
   if (!value || value <= 0) return '0 B';
@@ -167,6 +204,9 @@ type Props = {
   objective: string;
   /** Optional explicit groups proposed by AI (or narrowed by caller). */
   initialCapabilityGroups?: string[] | null;
+  initialBudgetPreset?: BudgetPreset;
+  initialPauseBeforeProduction?: boolean;
+  scriptText?: string;
   /** A grant already authorized for this session: the card reconnects to it
    *  (same task, same budget) instead of previewing a second authorization. */
   initialGrant?: TaskGrant | null;
@@ -178,7 +218,10 @@ const ACTIVE_STATUSES = new Set(['AUTHORIZED', 'RUNNING', 'WAITING_EXECUTOR', 'V
 /** A pause that asked for the user's decision is resumable by an explicit click. */
 const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, 'PAUSED_USER_DECISION']);
 
-export function TaskGrantCard({ sessionId, projectId, objective, initialCapabilityGroups, initialGrant, onClose, onFinished }: Props) {
+export function TaskGrantCard({
+  sessionId, projectId, objective, initialCapabilityGroups, initialGrant,
+  initialBudgetPreset = 'standard', initialPauseBeforeProduction = true, scriptText, onClose, onFinished,
+}: Props) {
   const [preview, setPreview] = useState<GrantPreview | null>(null);
   const [grant, setGrant] = useState<TaskGrant | null>(initialGrant || null);
   const [execution, setExecution] = useState<GrantExecution | null>(null);
@@ -190,6 +233,9 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
   const [selectedInstallation, setSelectedInstallation] = useState<string | null>(null);
   const [allowGpu, setAllowGpu] = useState(true);
   const [allowDownload, setAllowDownload] = useState(true);
+  const [budgetPreset, setBudgetPreset] = useState(initialBudgetPreset);
+  const [pauseBeforeProduction, setPauseBeforeProduction] = useState(initialPauseBeforeProduction);
+  const [allowRemoteText, setAllowRemoteText] = useState(false);
 
   const requestedGroups = useMemo(
     () => (
@@ -216,6 +262,10 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
           project_id: projectId || null,
           installation_id: selectedInstallation || undefined,
           capability_groups: requestedGroups,
+          budget_preset: budgetPreset,
+          pause_before_production: pauseBeforeProduction,
+          script_text: scriptText,
+          allow_remote_text: allowRemoteText,
           allow_gpu: allowGpu,
           allow_download: allowDownload,
         }),
@@ -226,7 +276,8 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
     } finally {
       setPreviewing(false);
     }
-  }, [sessionId, projectId, objective, selectedInstallation, initialGrant, requestedGroups, allowGpu, allowDownload]);
+  }, [sessionId, projectId, objective, selectedInstallation, initialGrant, requestedGroups,
+    allowGpu, allowDownload, budgetPreset, pauseBeforeProduction, scriptText, allowRemoteText]);
 
   useEffect(() => {
     void loadPreview();
@@ -236,8 +287,10 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
   // the API never forks the task, and progress made by the Worker is visible.
   const grantId = grant?.grant_id;
   const grantStatus = grant?.status;
+  const materialReview = grant?.material_review;
+  const awaitingMaterialReview = grant?.paused_reason === 'MATERIAL_REVIEW_REQUIRED';
   useEffect(() => {
-    if (!grantId || !grantStatus || !ACTIVE_STATUSES.has(grantStatus)) return undefined;
+    if (!grantId || !grantStatus || (!ACTIVE_STATUSES.has(grantStatus) && !awaitingMaterialReview)) return undefined;
     const timer = window.setInterval(async () => {
       try {
         const detail = await api<TaskGrant>(`/support/task-grants/${grantId}`);
@@ -248,7 +301,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
       }
     }, 5000);
     return () => window.clearInterval(timer);
-  }, [grantId, grantStatus, onFinished]);
+  }, [grantId, grantStatus, awaitingMaterialReview, onFinished]);
 
   const continueRun = useCallback(async () => {
     if (!grant) return;
@@ -258,9 +311,13 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
       const body = await api<GrantExecution>(`/support/task-grants/${grant.grant_id}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, max_steps: 12 }),
+        body: JSON.stringify({
+          session_id: sessionId,
+          max_steps: 12,
+          ...(materialReview ? { material_review_digest: materialReview.digest, run_in_background: true } : {}),
+        }),
       });
-      setExecution(body);
+      setExecution(materialReview ? null : body);
       const detail = await api<TaskGrant>(`/support/task-grants/${grant.grant_id}`);
       setGrant(detail);
       onFinished?.(detail);
@@ -269,16 +326,14 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
     } finally {
       setContinuing(false);
     }
-  }, [grant, sessionId, onFinished]);
+  }, [grant, sessionId, onFinished, materialReview]);
 
   const authorize = useCallback(async () => {
     if (!preview) return;
     setAuthorizing(true);
     setError(null);
     try {
-      // The click ends here: the grant is created first, then the bounded run
-      // is requested.  Splitting the two keeps the authorization durable even
-      // if the run request itself times out - the person can simply resume.
+      // The resident Worker picks up the durable grant as soon as it exists.
       const created = await api<{ grant_id: string }>('/support/task-grants/authorize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -290,14 +345,6 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
           run: false,
         }),
       });
-      const early = await api<TaskGrant>(`/support/task-grants/${created.grant_id}`);
-      setGrant(early);
-      const body = await api<GrantExecution>(`/support/task-grants/${created.grant_id}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, max_steps: 12 }),
-      });
-      setExecution(body);
       const detail = await api<TaskGrant>(`/support/task-grants/${created.grant_id}`);
       setGrant(detail);
       onFinished?.(detail);
@@ -329,22 +376,23 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
     }
   }, [grant, refresh]);
 
+  const steps = grant?.steps || execution?.steps;
   const stage = useMemo(
     () =>
       stageOf({
         previewing,
         authorized: Boolean(grant),
         status: grant?.status,
-        steps: execution?.steps,
+        steps,
       }),
-    [previewing, grant, execution],
+    [previewing, grant, steps],
   );
 
   const limits = preview?.limits || grant?.limits || {};
   const limitRows = LIMIT_LABELS.filter(([key]) => typeof limits[key] === 'number');
 
   return (
-    <section className="copilot-grant" data-stage={stage.key} aria-label="本次任务授权">
+    <section className="copilot-grant" data-stage={stage.key} data-grant-status={grantStatus} aria-label="本次任务授权">
       <header className="copilot-grant-head">
         <span className={`copilot-grant-stage tone-${stage.tone}`}>
           {stage.tone === 'busy' ? <Loader2 size={14} className="spin" aria-hidden /> : null}
@@ -369,6 +417,22 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
 
       {!grant && preview ? (
         <div className="copilot-grant-body">
+          <label className="copilot-grant-budget">
+            <span>预算档位</span>
+            <select value={budgetPreset} disabled={previewing || authorizing}
+              onChange={(event) => setBudgetPreset(event.target.value as BudgetPreset)}>
+              {Object.entries(BUDGET_LABELS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
+            </select>
+          </label>
+          {limitRows.length ? (
+            <ul className="copilot-grant-primary-limits">
+              <li>授权有效期至 {formatExpiry(preview.expires_at)}</li>
+              {limitRows.filter(([key]) => key === 'max_gpu_minutes' || key === 'max_llm_tool_calls').map(([key, label, format]) => (
+                <li key={key}>{label}：{format(Number(limits[key]))}</li>
+              ))}
+              {limits.max_gpu_minutes > 0 ? <li>GPU 按排队任务的计划用量估算</li> : null}
+            </ul>
+          ) : null}
           <h4>安全开关</h4>
           <div className="copilot-grant-toggles">
             <label>
@@ -389,7 +453,29 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
               />
               <span>允许下载模型 / 安装受控节点包</span>
             </label>
+            {requestedGroups.includes('production') ? (
+              <label>
+                <input type="checkbox" checked={pauseBeforeProduction} disabled={previewing || authorizing}
+                  onChange={(event) => setPauseBeforeProduction(event.target.checked)} />
+                <span>素材审片检查点</span>
+              </label>
+            ) : null}
           </div>
+          {scriptText ? (
+            <details>
+              <summary>查看本次导入的剧本</summary>
+              <pre className="copilot-proposal-params">{scriptText}</pre>
+            </details>
+          ) : null}
+          {preview.text_consent ? (
+            <label className="copilot-grant-text-consent">
+              <input type="checkbox" checked={allowRemoteText} disabled={previewing || authorizing}
+                onChange={(event) => setAllowRemoteText(event.target.checked)} />
+              <span>允许将「{preview.text_consent.document_name}」发送给 {Array.from(new Set(
+                preview.text_consent.roles.map(({ provider, model }) => `${provider} / ${model}`),
+              )).join('、')}，用于剧本和分镜处理</span>
+            </label>
+          ) : null}
           <h4>授权后 AI 会自动做的事</h4>
           <ul>
             {preview.capability_groups.map((group) => (
@@ -440,7 +526,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
             <>
               <h4>资源上限</h4>
               <ul>
-                {limitRows.map(([key, label, format]) => (
+                {limitRows.filter(([key]) => key !== 'max_gpu_minutes' && key !== 'max_llm_tool_calls').map(([key, label, format]) => (
                   <li key={key}>
                     {label}：{format(Number(limits[key]))}
                   </li>
@@ -480,7 +566,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
           <button
             type="button"
             className="primary copilot-grant-authorize"
-            disabled={!preview.can_authorize || authorizing}
+            disabled={!preview.can_authorize || previewing || authorizing || Boolean(error)}
             onClick={() => void authorize()}
           >
             {authorizing ? <Loader2 size={16} className="spin" aria-hidden /> : <ShieldCheck size={16} aria-hidden />}
@@ -493,14 +579,34 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
         <div className="copilot-grant-body">
           <p className="copilot-grant-status">
             {grant.status_label || grant.status}
-            {grant.paused_reason ? `（${grant.paused_reason}）` : ''}
+            {grant.paused_reason && !awaitingMaterialReview ? `（${grant.paused_reason}）` : ''}
           </p>
+
+          {materialReview ? (
+            <div className="copilot-grant-material-review">
+              <h4>素材待审片</h4>
+              <p>{materialReview.generating ? '新版素材正在生成。' : '确认角色和场景后，继续推进拍片。'}</p>
+              <ul>
+                {materialReview.candidates.map((item) => (
+                  <li key={item.candidate_id}>
+                    <a href={`${API}/candidate-assets/${encodeURIComponent(item.candidate_id)}/media`}
+                      target="_blank" rel="noreferrer">
+                      <img src={`${API}/candidate-assets/${encodeURIComponent(item.candidate_id)}/thumbnail`}
+                        alt="" loading="lazy" />
+                      <span>{MATERIAL_FAMILIES[item.family] || item.family} · {item.name} · v{item.generation_revision}</span>
+                    </a>
+                  </li>
+                ))}
+              </ul>
+              <a href="#d/materials">前往素材准备</a>
+            </div>
+          ) : null}
 
           {execution?.final ? <p className="copilot-grant-final">{execution.final}</p> : null}
 
-          {execution?.steps?.length ? (
+          {steps?.length ? (
             <ol className="copilot-grant-steps">
-              {execution.steps.map((step, index) => (
+              {steps.slice(-6).map((step, index) => (
                 <li key={`${step.capability_id}-${index}`} data-satisfied={step.satisfied ? 'true' : 'false'}>
                   <span>{step.capability_id}</span>
                   <em>{step.satisfied ? '已取得原任务回执' : step.error_code || step.status}</em>
@@ -511,8 +617,10 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
 
           <div className="copilot-grant-actions">
             {grant && RESUMABLE_STATUSES.has(grant.status) ? (
-              <button type="button" className="link" disabled={continuing} onClick={() => void continueRun()}>
-                {continuing ? <Loader2 size={12} className="spin" aria-hidden /> : null} 继续推进
+              <button type="button" className={materialReview ? 'primary' : 'link'}
+                disabled={continuing || materialReview?.generating} onClick={() => void continueRun()}>
+                {continuing ? <Loader2 size={12} className="spin" aria-hidden /> : null}
+                {materialReview ? '继续推进拍片' : '继续推进'}
               </button>
             ) : null}
             <button type="button" className="link" onClick={() => void refresh()}>
@@ -534,7 +642,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialCapabili
                 <dt>授权摘要</dt>
                 <dd>{grant.grant_digest}</dd>
                 <dt>有效期至</dt>
-                <dd>{grant.validity?.expires_at || '—'}</dd>
+                <dd>{formatExpiry(grant.validity?.expires_at)}</dd>
               </dl>
               {grant.sub_actions?.length ? (
                 <>

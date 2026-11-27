@@ -154,68 +154,7 @@ def get_storyboard_book(project_id: str, db: DBSession) -> dict[str, Any] | None
 @router.post("/projects/{project_id}/director/storyboard-book", status_code=201)
 def generate_storyboard_book(project_id: str, body: StoryboardBookBody, actor: Operator,
                              db: DBSession) -> dict:
-    from shine.api_director import _confirmed_outline, _outline_sections, _section_plan_problems
-    from shine.director.contracts import derive_episode_plan_by_count
-    from shine.director.models import DirectorEpisodePlan
-
-    require_project(db, project_id)
-    outline = _confirmed_outline(db, project_id)
-    if outline is None:
-        raise HTTPException(422, {"code": "SCRIPT_OUTLINE_NOT_CONFIRMED",
-                                  "message": "先确认大纲，再生成分镜书"})
-    sections = _outline_sections(outline)
-    if not sections:
-        raise HTTPException(422, "SCRIPT_OUTLINE_HAS_NO_SECTIONS")
-    source_meta: dict[str, Any] = {
-        "outline_artifact_id": outline.id,
-        "outline_sha256": outline.sha256,
-    }
-    if body.max_shot_seconds is not None:
-        source_meta["max_shot_seconds"] = float(body.max_shot_seconds)
-    try:
-        payload = derive_episode_plan_by_count(
-            sections, episode_count=body.episode_count,
-            target_seconds=body.target_seconds, tolerance_seconds=body.tolerance_seconds,
-            source=source_meta,
-        )
-    except ValueError as exc:
-        code = str(exc)
-        if code == "EPISODE_COUNT_EXCEEDS_SECTIONS":
-            raise HTTPException(422, {
-                "code": code,
-                "message": (
-                    f"当前已确认大纲共 {len(sections)} 个场次/章节，每集至少需要 1 个场次，"
-                    f"无法划分为 {body.episode_count} 集；请将集数设为不超过 {len(sections)}，"
-                    "或在剧本中补充「第N场」标题后重新提取大纲。"
-                ),
-                "problems": [code],
-            }) from exc
-        raise HTTPException(422, {"code": "EPISODE_PLAN_INVALID", "problems": [code[:400]]}) from exc
-    problems = _section_plan_problems(db, project_id, payload)
-    if problems:
-        raise HTTPException(422, {"code": "EPISODE_PLAN_COVERAGE_INVALID", "problems": problems})
-    previous = db.scalars(select(DirectorEpisodePlan).where(
-        DirectorEpisodePlan.project_id == project_id)).all()
-    from shine.director.contracts import digest_of
-
-    row = DirectorEpisodePlan(
-        project_id=project_id, version=max((p.version for p in previous), default=0) + 1,
-        status="DRAFT", target_seconds=payload.target_seconds,
-        tolerance_seconds=payload.tolerance_seconds,
-        payload=payload.model_dump(mode="json"),
-        sha256=digest_of(payload.model_dump(mode="json")),
-        source="script_sections_by_count", created_by=actor,
-    )
-    db.add(row)
-    db.flush()
-    from shine.services import add_audit
-
-    add_audit(db, actor, "STORYBOARD_BOOK_GENERATED", "director_episode_plan", row.id,
-              {"version": row.version, "episode_count": body.episode_count,
-               "target_seconds": body.target_seconds,
-               **({"max_shot_seconds": float(body.max_shot_seconds)}
-                  if body.max_shot_seconds is not None else {})},
-              project_id=project_id)
+    row = streamline.create_storyboard_book(db, project_id, actor=actor, **body.model_dump())
     db.commit()
     db.refresh(row)
     return {"plan_version": row.version, "plan_sha256": row.sha256,

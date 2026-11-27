@@ -22,9 +22,8 @@ from typing import Any
 
 from shine.llm.base import LLMFormatError
 
-#: A tool description is bounded: a menu larger than this cannot be reviewed by
-#: a person, and an unbounded menu invites the model to invent names.
-MAX_TOOLS = 24
+#: The largest V4 grant offers both the reviewed write actions and investigation tools.
+MAX_TOOLS = 64
 MAX_TOOL_DESCRIPTION = 600
 
 

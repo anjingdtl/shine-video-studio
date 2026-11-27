@@ -251,6 +251,7 @@ def plan_step_for(next_action_kind: str) -> dict[str, str]:
         "PREPARE_MATERIALS": {"ai_action": None, "status": "HUMAN_REQUIRED", "tier": "HUMAN_REQUIRED"},
         "CONFIRM_EPISODE_SHOTS": {"ai_action": None, "status": "HUMAN_REQUIRED", "tier": "HUMAN_REQUIRED"},
         "CONFIRM_BOOK": {"ai_action": None, "status": "HUMAN_REQUIRED", "tier": "HUMAN_REQUIRED"},
+        "GENERATE_BOOK": {"ai_action": "storyboard_book_generate", "status": "COVERED", "tier": "EXECUTE_GUARDED"},
         "IMPORT_SCRIPT": {"ai_action": "document_import_text", "status": "COVERED", "tier": "PREVIEW"},
         "REVIEW_EPISODE": {"ai_action": None, "status": "HUMAN_REQUIRED", "tier": "HUMAN_REQUIRED"},
         "WAIT": {"ai_action": None, "status": "READ_ONLY", "tier": "READ"},

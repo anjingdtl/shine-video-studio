@@ -11,7 +11,7 @@ import {
   subscribeCopilotProfile,
   type CopilotProfile,
 } from '../copilotProfile';
-import { TaskGrantCard, type TaskGrant } from './TaskGrantCard';
+import { TaskGrantCard, type BudgetPreset, type TaskGrant } from './TaskGrantCard';
 
 type Fact = { key: string; value: string; source: string };
 
@@ -134,6 +134,9 @@ type ProjectGrantProposal = {
   project_id?: string | null;
   valid: boolean;
   error?: string | null;
+  budget_preset?: BudgetPreset;
+  pause_before_production?: boolean;
+  script_text?: string;
 };
 
 type ProposalCard = ActionProposal | ProjectGrantProposal;
@@ -349,6 +352,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   //: The objective and optional explicit capability groups of the task grant on screen.
   const [taskObjective, setTaskObjective] = useState<string | null>(null);
   const [taskGroups, setTaskGroups] = useState<string[] | null>(null);
+  const [taskPolicy, setTaskPolicy] = useState<ProjectGrantProposal | null>(null);
   //: A grant already authorized for this session: reopening the panel
   //: reconnects to the SAME task instead of previewing a second one.
   const [restoredGrant, setRestoredGrant] = useState<TaskGrant | null>(null);
@@ -619,8 +623,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
 
   /** The first natural-language objective (or an AI-proposed project grant) enters
    *  the one-click grant flow directly; a session is created on demand if needed. */
-  const startTaskObjective = async (explicitObjective?: string, explicitGroups?: string[]) => {
-    const objective = (explicitObjective ?? draft).trim();
+  const startTaskObjective = async (proposal?: ProjectGrantProposal) => {
+    const objective = (proposal?.objective ?? draft).trim();
     if (objective.length < 4 || busy) return;
     try {
       if (!sessionRef.current) {
@@ -640,7 +644,8 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         applySession(created.session);
         window.localStorage.setItem(sessionKey(active.projectId, fault), created.session.id);
       }
-      setTaskGroups(explicitGroups && explicitGroups.length ? explicitGroups : null);
+      setTaskGroups(proposal?.capability_groups?.length ? proposal.capability_groups : null);
+      setTaskPolicy(proposal || null);
       setTaskObjective(objective);
     } catch (err) {
       setError(err instanceof Error ? err.message : '无法创建会话。');
@@ -958,7 +963,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                     type="button"
                     className="copilot-action"
                     disabled={!card.valid || busy}
-                    onClick={() => void startTaskObjective(card.objective, card.capability_groups)}
+                    onClick={() => void startTaskObjective(card)}
                   >
                     <ShieldCheck size={13} aria-hidden="true" />开启本项目自主执行授权
                   </button>
@@ -1303,12 +1308,16 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
 
             {taskObjective && session ? (
               <TaskGrantCard
+                key={`${session.id}:${taskObjective}:${taskPolicy?.budget_preset}:${taskPolicy?.pause_before_production}`}
                 sessionId={session.id}
                 projectId={projectId || null}
                 objective={taskObjective}
                 initialCapabilityGroups={taskGroups}
+                initialBudgetPreset={taskPolicy?.budget_preset}
+                initialPauseBeforeProduction={taskPolicy?.pause_before_production}
+                scriptText={taskPolicy?.script_text}
                 initialGrant={restoredGrant}
-                onClose={() => { setTaskObjective(null); setTaskGroups(null); }}
+                onClose={() => { setTaskObjective(null); setTaskGroups(null); setTaskPolicy(null); }}
               />
             ) : null}
           </div>

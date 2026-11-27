@@ -435,6 +435,7 @@ def _production_start_target_facts(db, settings, params: dict[str, Any], project
             key=lambda item: str(item["id"]),
         ),
         "strategy_sha256": strategy_sha,
+        "output": params.get("output"),
         "workflow_profile": profile_facts,
         "frozen_style_version_id": project.frozen_style_version_id,
     }, None
@@ -466,6 +467,7 @@ def _production_start_preflight(db, settings, params: dict[str, Any], common: di
         "summary": "把选中的集交给既有导演包与 Run 引擎开始真实拍摄；相同选择只会得到同一次运行。",
         "missing_components": [],
         "download_bytes": 0,
+        "shot_count": sum(int((row.get("shots") or {}).get("landed_count") or 0) for row in selected),
         "episodes": [
             {
                 "episode_id": row["episode_id"],
@@ -481,6 +483,7 @@ def _production_start_preflight(db, settings, params: dict[str, Any], common: di
         "blocked_code": occupancy["code"] if occupancy["busy"] else ("EPISODE_NOT_SHOOTABLE" if blocked_episodes else None),
         "blocked_episodes": blocked_episodes,
         "strategy": params.get("strategy"),
+        "output": params.get("output"),
         "workflow_profile_id": params.get("workflow_profile_id"),
         "will_start_gpu": True,
         "will_modify_user_comfyui": True,
