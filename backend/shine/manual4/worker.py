@@ -797,6 +797,7 @@ def _execute_single_job(
                     for item in raw_style_loras
                 )
 
+        guide_slot = (len(img_items) + 1) if prev_video_rel is not None else None
         if video_stub is not None:
             stub_img_count = len(img_items) + (1 if prev_video_rel is not None else 0)
             stub_decision = decide_low_vram_attention(
@@ -806,6 +807,7 @@ def _execute_single_job(
                 image_count=stub_img_count,
                 audio_count=len(aud_items),
                 video_count=len(vid_items),
+                guide_frame_count=1 if guide_slot is not None else 0,
                 threshold=low_vram_threshold,
             )
             compiled = compile_h3_ref2va_graph(
@@ -815,6 +817,7 @@ def _execute_single_job(
                 image_count=stub_img_count,
                 audio_count=len(aud_items),
                 video_count=len(vid_items),
+                first_frame_guide_slot=guide_slot,
                 object_info=object_info,
                 low_vram_attention=stub_decision.enabled,
                 low_vram_decision=stub_decision,
@@ -949,6 +952,7 @@ def _execute_single_job(
                 ffmpeg_path=(getattr(settings, "ffmpeg_path", "ffmpeg") if settings else None) or "ffmpeg",
                 low_vram_attention_token_threshold=low_vram_threshold,
                 retry_on_oom_with_low_vram=oom_retry_enabled,
+                first_frame_guide_slot=guide_slot,
                 style_loras=resolved_loras,
             )
             render_timeout_s = float(

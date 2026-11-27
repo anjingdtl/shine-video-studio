@@ -213,6 +213,7 @@ def build_episode_edl(
     """The ordered edit decision list of one episode, from real passed takes."""
     from shine.media.artifacts import safe_asset_path
     from shine.media.probe import probe_file
+    from shine.media.seam import apply_seam_analysis_to_edl
 
     episode = db.get(ProductionRunEpisode, order.scope_id or "")
     if episode is None or episode.project_id != order.project_id:
@@ -235,6 +236,8 @@ def build_episode_edl(
 
     cuts = {cut["shot_id"]: cut for cut in (episode.post_contract or {}).get("cuts", [])}
     clips: list[dict[str, Any]] = []
+    paths_by_artifact_id: dict[str, Path] = {}
+    fps_by_artifact_id: dict[str, float] = {}
     for position, shot_id in enumerate(episode.shot_ids):
         job = passed[shot_id]
         attempts = list(job.attempts)
@@ -263,6 +266,9 @@ def build_episode_edl(
         if info.duration_s is None:
             raise DeliveryBlock("EPISODE_SOURCE_DURATION_UNKNOWN")
         duration = round(info.duration_s, 3)
+        paths_by_artifact_id[artifact.id] = path
+        if info.fps is not None:
+            fps_by_artifact_id[artifact.id] = float(info.fps)
         cut = cuts.get(shot_id)
         if cut is not None:
             # A confirmed cut must fit the real take: the contract is checked
@@ -288,6 +294,14 @@ def build_episode_edl(
         )
     if not clips:
         raise DeliveryBlock("EPISODE_EMPTY_EDIT")
+    seam_report = apply_seam_analysis_to_edl(
+        clips,
+        jobs_by_id={passed[sid].id: passed[sid] for sid in episode.shot_ids},
+        paths_by_artifact_id=paths_by_artifact_id,
+        fps_by_artifact_id=fps_by_artifact_id,
+        locked_shot_ids=set(cuts),
+        ffmpeg_path=ffmpeg_path,
+    )
     rules = {
         "rules_version": EPISODE_RULES_VERSION,
         "order": "production_run_episodes.shot_ids",
@@ -301,6 +315,7 @@ def build_episode_edl(
              if shot is not None],
             target_seconds=episode.planned_seconds),
         "edited_seconds": round(sum(clip["out_s"] - clip["in_s"] for clip in clips), 3),
+        **({"seam_report": seam_report} if seam_report else {}),
     }
     return {"schema_version": "1.1", "clips": clips}, "run_episode_plan", rules
 
@@ -402,7 +417,39 @@ def suggest_episode_cuts(
                 reasons.append(f"末句后静默 {round(tail_margin, 2)}s，建议裁到末句后 {SUGGEST_TAIL_BUFFER_S}s")
             reasons.append(f"保留全部台词 {round(first_start, 2)}–{round(last_end, 2)}s")
         else:
-            reasons.append("无台词：不凭画面猜测裁剪，整条保留，交由人工看镜决定")
+            prev_shot_id = episode.shot_ids[position - 1] if position > 0 else None
+            prev_job = passed.get(prev_shot_id) if prev_shot_id else None
+            prev_art = (
+                (relay_artifact_for_job(db, prev_job.id) or (db.get(MediaArtifact, prev_job.artifact_id) if prev_job.artifact_id else None))
+                if prev_job is not None
+                else None
+            )
+            prev_path = safe_asset_path(asset_root, prev_art.storage_path) if prev_art else None
+            shot_cont_mode = str((((shot.spec or {}) if shot is not None else {}).get("continuity") or {}).get("mode") or "cut").lower()
+            seam_note = None
+            if shot_cont_mode == "last_frame" and prev_path is not None and prev_path.is_file():
+                from shine.media.seam import analyze_continuity_seam
+
+                seam = analyze_continuity_seam(
+                    prev_path,
+                    path,
+                    boundary_index=position,
+                    prev_shot_id=prev_shot_id,
+                    curr_shot_id=shot_id,
+                    continuity_mode=shot_cont_mode,
+                    curr_duration_s=duration,
+                    curr_fps=float(info.fps or 24.0),
+                    ffmpeg_path=ffmpeg_path,
+                )
+                if seam.status == "measured" and seam.recommended_in_s > 0.0:
+                    in_s = seam.recommended_in_s
+                    confidence = "verified" if seam.trim_reason == "dedupe_anchored_opening_frame" else "uncertain"
+                    seam_note = (
+                        f"无台词：接缝存在 {seam.trimmed_frames} 帧首帧重复，建议从 {in_s:.3f}s 起剪"
+                        if seam.trim_reason == "dedupe_anchored_opening_frame"
+                        else f"无台词：接缝检测到 {in_s:.3f}s 向前回溯，建议裁剪接缝重播段"
+                    )
+            reasons.append(seam_note or "无台词：不凭画面猜测裁剪，整条保留，交由人工看镜决定")
         # A suggestion must stay legal: keep dialogue, fit the take, min span.
         if lines:
             in_s = min(in_s, float(lines[0].get("start_s", 0)))

@@ -213,10 +213,13 @@ def build_auto_edl(
     """
     from shine.media.artifacts import safe_asset_path
     from shine.media.probe import probe_file
+    from shine.media.seam import apply_seam_analysis_to_edl
 
     intent, rules = _edit_intent(db, series)
     intent_source = "frozen_edit_intent" if intent else "default_cut_rules"
     clips = []
+    paths_by_artifact_id: dict[str, Path] = {}
+    fps_by_artifact_id: dict[str, float] = {}
     jobs = _delivery_jobs(db, series)
     prefix_count = len(jobs) - len(series.items)
     if prefix_count:
@@ -241,6 +244,9 @@ def build_auto_edl(
         info = probe_file(path, ffprobe_path=ffprobe_path, ffmpeg_path=ffmpeg_path)
         if info.duration_s is None:
             raise DeliveryBlock("DELIVERY_SOURCE_DURATION_UNKNOWN")
+        paths_by_artifact_id[artifact.id] = path
+        if info.fps is not None:
+            fps_by_artifact_id[artifact.id] = float(info.fps)
         clips.append(
             {
                 "job_id": job.id,
@@ -266,6 +272,15 @@ def build_auto_edl(
                 f" (planned {plan.get('planned_duration_s')}s, {plan.get('transition')});"
                 " real passed take"
             )
+    seam_report = apply_seam_analysis_to_edl(
+        clips,
+        jobs_by_id={job.id: job for job in jobs},
+        paths_by_artifact_id=paths_by_artifact_id,
+        fps_by_artifact_id=fps_by_artifact_id,
+        ffmpeg_path=ffmpeg_path,
+    )
+    if seam_report:
+        rules = {**rules, "seam_report": seam_report}
     return {"schema_version": "1.1", "clips": clips}, intent_source, rules
 
 

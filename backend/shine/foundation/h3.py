@@ -41,6 +41,7 @@ from shine.comfy.graph_compiler import (
     compile_ref2va_workflow,
     is_low_vram_guard_variant,
     low_vram_attention_form_of_graph,
+    resolve_frozen_graph_execution_form,
     resolve_frozen_graph_form,
     validate_style_lora_trigger_word,
 )
@@ -133,6 +134,7 @@ class H3ExecutionRequest:
     low_vram_attention_token_threshold: int = DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD
     force_low_vram_attention: bool | None = None
     retry_on_oom_with_low_vram: bool = True
+    first_frame_guide_slot: int | None = None
     style_loras: tuple[StyleLoraSpec, ...] = ()
 
 
@@ -185,11 +187,36 @@ def render_reference_counts(manifest: Iterable) -> ReferenceCounts:
     }
 
 
+def continuity_first_frame_guide_slot(manifest: Iterable, continuity_mode: str | None) -> int | None:
+    """Return the 1-based image slot to wire into ``MiniMaxH3AddGuide(frame_idx=0)``.
+
+    Only active for ``last_frame`` shots carrying a real continuity frame;
+    returns ``None`` for ``cut`` or non-frame continuity modes.
+    """
+    if str(continuity_mode or "").strip().lower() != "last_frame":
+        return None
+    image_slot = 0
+    for item in manifest or ():
+        if isinstance(item, dict):
+            raw_use = item.get("use_as")
+            role = item.get("role") or item.get("role_label")
+        else:
+            raw_use = getattr(item, "use_as", None)
+            role = getattr(item, "role", None) or getattr(item, "role_label", None)
+        use_as = str(getattr(raw_use, "value", raw_use) or "").lower()
+        if use_as in {"subject", "picture", "image"}:
+            image_slot += 1
+            if role in {"continuity_derivative", "last_frame_continuity"}:
+                return image_slot
+    return None
+
+
 def compile_h3_ref2va_graph(
     *,
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
     variant_id: str = INT8_VARIANT_ID,
     accelerator_id: str = "pdd8",
     second_pass: SecondPassSpec | None = None,
@@ -208,6 +235,7 @@ def compile_h3_ref2va_graph(
             image_count=image_count,
             audio_count=audio_count,
             video_count=video_count,
+            first_frame_guide_slot=first_frame_guide_slot,
             object_info=object_info,
             low_vram_attention=low_vram_attention,
             low_vram_decision=low_vram_decision,
@@ -352,6 +380,7 @@ class ComfyH3Executor:
             image_count=len(images),
             audio_count=len(audios),
             video_count=len(videos),
+            guide_frame_count=1 if request.first_frame_guide_slot is not None else 0,
             threshold=request.low_vram_attention_token_threshold,
             force_low_vram_attention=request.force_low_vram_attention,
             video_ref_duration_s=avg_video_ref_duration,
@@ -360,6 +389,7 @@ class ComfyH3Executor:
             image_count=len(images),
             audio_count=len(audios),
             video_count=len(videos),
+            first_frame_guide_slot=request.first_frame_guide_slot,
             variant_id=request.variant_id,
             accelerator_id=request.accelerator_id,
             second_pass=request.second_pass,
@@ -516,6 +546,7 @@ class ComfyH3Executor:
                             image_count=len(images),
                             audio_count=len(audios),
                             video_count=len(videos),
+                            guide_frame_count=1 if request.first_frame_guide_slot is not None else 0,
                             threshold=request.low_vram_attention_token_threshold,
                             force_low_vram_attention=True,
                             video_ref_duration_s=avg_video_ref_duration,
@@ -524,6 +555,7 @@ class ComfyH3Executor:
                             image_count=len(images),
                             audio_count=len(audios),
                             video_count=len(videos),
+                            first_frame_guide_slot=request.first_frame_guide_slot,
                             variant_id=request.variant_id,
                             accelerator_id=request.accelerator_id,
                             second_pass=request.second_pass,
@@ -639,6 +671,7 @@ __all__ = [
     "apply_style_lora_triggers",
     "canonical_h3_language",
     "compile_h3_ref2va_graph",
+    "continuity_first_frame_guide_slot",
     "decide_low_vram_attention",
     "enforce_h3_render_audio_contract",
     "ensure_h3_execution_prompt_contract",
@@ -658,6 +691,7 @@ __all__ = [
     "low_vram_attention_form_of_graph",
     "low_vram_threshold_from_env",
     "reconcile_submission",
+    "resolve_frozen_graph_execution_form",
     "resolve_frozen_graph_form",
     "sanitize_h3_dialogue_text",
     "validate_style_lora_trigger_word",

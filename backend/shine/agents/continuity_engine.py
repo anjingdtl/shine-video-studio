@@ -542,6 +542,7 @@ def _judge_dialogue(verdict: BoardVerdict, views: list[ShotView], beats: dict[st
 def _decide_boundaries(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]],
                        has_predecessor: bool) -> None:
     """The mode of every boundary, from the director's stated reason."""
+    consecutive_last_frame = 0
     for view in views:
         motivation = str(shots[view.index].get("transition_motivation") or "")
         continues = motivation in CONTINUE_MOTIVATIONS
@@ -564,6 +565,16 @@ def _decide_boundaries(verdict: BoardVerdict, views: list[ShotView], shots: list
             continues = False
         view.mode, view.motivation = ("last_frame" if continues else "cut"), motivation
         verdict.boundaries.append({"shot_id": view.id, "mode": view.mode, "motivation": motivation})
+        if view.mode == "last_frame":
+            consecutive_last_frame += 1
+            if consecutive_last_frame >= 3:
+                verdict.warnings.append({
+                    "code": "CONTINUATION_CHAIN_LONG",
+                    "shot_id": view.id,
+                    "consecutive_last_frame": consecutive_last_frame,
+                })
+        else:
+            consecutive_last_frame = 0
 
 
 def _placed(shot: dict[str, Any]) -> list[tuple[str, int, str]]:
@@ -681,6 +692,23 @@ _BLADE_TRANSITION_LOWER_RE = re.compile(
     rf"(?:\b(?:dips?|lowers?|drops?|sheathes?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:压低|垂下|放下|收起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|压低剑尖)",
     flags=re.IGNORECASE,
 )
+_LIGHT_EXTINGUISHED_RE = re.compile(
+    r"(?:\b(?:light|sunlight|dusk|glow|sunset)\s+(?:has\s+|is\s+)?(?:gone|faded|vanished|died|withdrawn)\b"
+    r"|\b(?:falls?|sinks?|darkens?)\s+(?:into|to)\s+(?:full|deep|complete|blue-grey|cool)?\s*(?:dark|darkness|shadow)\b"
+    r"|\b(?:fully\s+(?:dark|shadowed)|completely\s+dark|corridor\s+dimmed|room\s+darkened)\b)",
+    flags=re.IGNORECASE,
+)
+_LIGHT_REAPPEAR_RE = re.compile(
+    r"(?:\b(?:sliver|ray|beam|shaft|edge|glow)\b[^.;\n]{0,36}\b(?:creeps?|slides?|touches?|reaches?|widens?|returns?|strikes?|illuminates?)\b"
+    r"|\b(?:light|dusk|sunlight)\b[^.;\n]{0,24}\b(?:creeps?|slides?|widens?|returns?|brightens?|illuminates?|touches?)\b"
+    r"|\bwidens\s+across\b)",
+    flags=re.IGNORECASE,
+)
+_NEW_PRACTICAL_LIGHT_RE = re.compile(
+    r"\b(?:turns?\s+on|switches?\s+on|flips?\s+on|ignites?|strikes?\s+(?:a\s+)?match|opens?\s+(?:the\s+)?door|"
+    r"raises?\s+(?:a|the)\s+(?:lantern|lamp|candle|torch|flashlight))\b",
+    flags=re.IGNORECASE,
+)
 
 
 def _blade_pole(text: str, *, allow_transitions: bool = False) -> str | None:
@@ -788,6 +816,21 @@ def check_continuation_opening(
                 "opening_state": entry_pole,
                 "first_action": first_action[:120],
             }]
+
+    if isinstance(previous, dict):
+        prev_exit = str(previous.get("exit_state") or "")
+        if _LIGHT_EXTINGUISHED_RE.search(prev_exit):
+            first_action = str(timeline[0].get("action") or "") if timeline else ""
+            vis = str(current.get("visual_description") or current.get("visual") or "")
+            opening_text = f"{first_action} {vis}".strip()
+            if _LIGHT_REAPPEAR_RE.search(opening_text) and not _NEW_PRACTICAL_LIGHT_RE.search(opening_text):
+                return [{
+                    "code": "CONTINUATION_OPENING_CONFLICT",
+                    "shot_id": sid,
+                    "detail": "lighting_rewinds_predecessor",
+                    "previous_state": prev_exit[:120],
+                    "opening_state": (first_action or vis)[:120],
+                }]
     return []
 
 

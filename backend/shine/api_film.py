@@ -728,7 +728,14 @@ def apply_camera(project_id: str, artifact_id: str, body: ApplyCamera, db: DBSes
                     "continuity_predecessor": bool(predecessor),
                     "registered_locations": reg_locs,
                     "character_tokens": board.get("character_tokens") or {},
-                    **({"previous_blocking": (earlier.spec or {}).get("blocking")} if earlier is not None else {}),
+                    **(
+                        {
+                            "previous_blocking": (earlier.spec or {}).get("blocking"),
+                            "previous_shot": earlier.spec,
+                        }
+                        if earlier is not None
+                        else {}
+                    ),
                 },
             )
             if not verdict.accepted:

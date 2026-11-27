@@ -2754,11 +2754,12 @@ def _run_comfy_job(
             H3ExecutionError,
             StyleLoraError,
             compile_h3_ref2va_graph,
+            continuity_first_frame_guide_slot,
             decide_low_vram_attention,
             evaluate_style_lora_selection,
             is_low_vram_guard_variant,
             render_reference_counts,
-            resolve_frozen_graph_form,
+            resolve_frozen_graph_execution_form,
         )
         from shine.strategy import GenerationStrategy
 
@@ -2815,10 +2816,12 @@ def _run_comfy_job(
                         object_info=live_object_info,
                     )
             ref_counts = render_reference_counts(manifest)
+            guide_slot = continuity_first_frame_guide_slot(manifest, request.shot_spec.continuity.mode.value)
             low_vram_decision = decide_low_vram_attention(
                 width=request.output_width,
                 height=request.output_height,
                 duration_s=request.expected_duration_s,
+                guide_frame_count=1 if guide_slot is not None else 0,
                 threshold=settings.h3_low_vram_attention_token_threshold,
                 force_low_vram_attention=True if is_oom_fallback_attempt else None,
                 **ref_counts,
@@ -2826,26 +2829,29 @@ def _run_comfy_job(
             # The frozen request is the authority for the graph it demands.  One
             # shot has two legal graphs (MiniMaxLowVRAMAttention mounted or not);
             # a request frozen before the high-watermark gate (or pre-v3 LoRA
-            # migration) keeps rendering exactly as it was frozen.
-            resolved_form = resolve_frozen_graph_form(
+            # migration / pre-guide upgrade) keeps rendering exactly as it was frozen.
+            resolved_form = resolve_frozen_graph_execution_form(
                 request.workflow_profile_hash,
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                first_frame_guide_slot=guide_slot,
                 style_loras=resolved_loras,
                 **ref_counts,
             )
             if resolved_form is None and frozen_specs and resolved_loras != frozen_specs:
-                resolved_form = resolve_frozen_graph_form(
+                resolved_form = resolve_frozen_graph_execution_form(
                     request.workflow_profile_hash,
                     variant_id=strategy.model_variant_id,
                     accelerator_id=strategy.accelerator_id,
                     second_pass=strategy.second_pass_spec(),
+                    first_frame_guide_slot=guide_slot,
                     style_loras=frozen_specs,
                     **ref_counts,
                 )
             frozen_form = resolved_form[0] if resolved_form is not None else None
             legacy_realism_lora = resolved_form[1] if resolved_form is not None else False
+            effective_guide_slot = resolved_form[2] if resolved_form is not None else guide_slot
             if (not is_oom_fallback_attempt and frozen_form is not None
                     and frozen_form != low_vram_decision.enabled):
                 low_vram_decision = replace(
@@ -2854,6 +2860,7 @@ def _run_comfy_job(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                first_frame_guide_slot=effective_guide_slot,
                 object_info=live_object_info,
                 low_vram_attention=low_vram_decision.enabled,
                 low_vram_decision=low_vram_decision,
@@ -2873,6 +2880,7 @@ def _run_comfy_job(
                     variant_id=strategy.model_variant_id,
                     accelerator_id=strategy.accelerator_id,
                     second_pass=strategy.second_pass_spec(),
+                    first_frame_guide_slot=effective_guide_slot,
                     object_info=live_object_info,
                     low_vram_attention=low_vram_decision.enabled,
                     low_vram_decision=low_vram_decision,
@@ -2888,6 +2896,7 @@ def _run_comfy_job(
                         variant_id=strategy.model_variant_id,
                         accelerator_id=strategy.accelerator_id,
                         second_pass=strategy.second_pass_spec(),
+                        first_frame_guide_slot=effective_guide_slot,
                         style_loras=frozen_specs,
                         **ref_counts,
                     )
@@ -2898,6 +2907,7 @@ def _run_comfy_job(
                     variant_id=strategy.model_variant_id,
                     accelerator_id=strategy.accelerator_id,
                     second_pass=strategy.second_pass_spec(),
+                    first_frame_guide_slot=effective_guide_slot,
                     style_loras=resolved_loras,
                     **ref_counts,
                 )

@@ -368,3 +368,50 @@ def test_p1_preserves_the_archived_recipe_and_graph_identities():
             _legacy_realism_lora=legacy,
         )
         assert (compiled.graph_sha256, compiled.recipe_sha256) == (graph_sha, recipe_sha)
+
+
+def test_first_frame_guide_slot_wires_add_guide_node_and_preserves_legacy_hashes():
+    from shine.comfy.graph_compiler import resolve_frozen_graph_execution_form
+
+    plain = compile_ref2va_workflow(image_count=3)
+    guided = compile_ref2va_workflow(image_count=3, first_frame_guide_slot=3)
+    assert "32" not in plain.graph
+    assert guided.graph["32"] == {
+        "class_type": "MiniMaxH3AddGuide",
+        "inputs": {
+            "positive": ["31", 0],
+            "vae": ["21", 0],
+            "latent": ["31", 1],
+            "image": ["42", 0],
+            "frame_idx": 0,
+        },
+    }
+    assert guided.graph["50"]["inputs"]["conditioning"] == ["32", 0]
+    assert "first_frame_guide_continuity" in guided.model_identity["continuity_modes"]
+    assert guided.model_identity["first_frame_guide_slot"] == 3
+    assert guided.graph_sha256 != plain.graph_sha256
+    assert guided.recipe_sha256 != plain.recipe_sha256
+    assert "MiniMaxH3AddGuide" in guided.required_nodes
+    checked = compile_ref2va_workflow(
+        image_count=3,
+        first_frame_guide_slot=3,
+        object_info=_fake_object_info(guided.graph),
+    )
+    assert checked.validated_against == {"missing_nodes": [], "missing_inputs": []}
+
+    # Second pass handoff consumes node 32 conditioning too.
+    sp = compile_ref2va_workflow(image_count=3, first_frame_guide_slot=3, second_pass=SecondPassSpec())
+    assert sp.graph["50"]["inputs"]["conditioning"] == ["32", 0]
+    assert sp.graph["63"]["inputs"]["positive"] == ["32", 0]
+
+    # Legacy and guided frozen requests both resolve deterministically.
+    assert resolve_frozen_graph_execution_form(
+        guided.graph_sha256, image_count=3, first_frame_guide_slot=3
+    ) == (True, False, 3)
+    assert resolve_frozen_graph_execution_form(
+        plain.graph_sha256, image_count=3, first_frame_guide_slot=3
+    ) == (True, False, None)
+
+    with pytest.raises(GraphCompileError) as bad:
+        compile_ref2va_workflow(image_count=2, first_frame_guide_slot=3)
+    assert bad.value.code == "FIRST_FRAME_GUIDE_SLOT_INVALID"

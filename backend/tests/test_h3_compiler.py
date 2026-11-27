@@ -1094,7 +1094,7 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     compiler = H3PromptCompiler()
     # 当前版本的哨兵：提升版本号必须是有意为之，并同时保证每个已发布版本的字节不变
     # （见 test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay）。
-    assert COMPILER_VERSION == "shine-h3-compiler/2.3.0"
+    assert COMPILER_VERSION == "shine-h3-compiler/2.4.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1643,6 +1643,7 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
         COMPILER_VERSION,
         KNOWN_COMPILER_VERSIONS,
         LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_HANDOFF_V23_COMPILER_VERSION,
         LEGACY_SCOPED_FACTS_COMPILER_VERSION,
         SKILL_SHA256,
     )
@@ -1702,12 +1703,17 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
         spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
         compiler_version=LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     )
-    current_230 = compile_prompt(manifest, shot=shot, style=en_style)
+    handoff_230 = compiler.compile(
+        spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_HANDOFF_V23_COMPILER_VERSION,
+    )
+    current_240 = compile_prompt(manifest, shot=shot, style=en_style)
 
-    # Current version is 2.3.0; 2.2.0 keeps its exact released scoping bytes.
-    assert COMPILER_VERSION == "shine-h3-compiler/2.3.0"
-    assert current_230.compiler_version == COMPILER_VERSION
+    # Current version is 2.4.0; 2.2.0 and 2.3.0 keep their exact released bytes.
+    assert COMPILER_VERSION == "shine-h3-compiler/2.4.0"
+    assert current_240.compiler_version == COMPILER_VERSION
     assert scoped_220.compiler_version == LEGACY_SCOPED_FACTS_COMPILER_VERSION
+    assert handoff_230.compiler_version == LEGACY_HANDOFF_V23_COMPILER_VERSION
     released_desc = released.sections["detailed_description"]
     assert "Morrigan: 28-year-old female watcher" in released_desc
     assert "brass lantern" in released_desc
@@ -1731,7 +1737,8 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     for stored, version in (
         (released, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION),
         (scoped_220, LEGACY_SCOPED_FACTS_COMPILER_VERSION),
-        (current_230, COMPILER_VERSION),
+        (handoff_230, LEGACY_HANDOFF_V23_COMPILER_VERSION),
+        (current_240, COMPILER_VERSION),
     ):
         replayed, variant = recompile_for_provenance(frozen(stored, version))
         assert variant is None
@@ -1770,14 +1777,16 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     })
     assert verify_request_provenance(tampered, pack, historical_evidence=real_ev)["passed"] is False
     assert all(ver in KNOWN_COMPILER_VERSIONS for ver in (
-        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION, COMPILER_VERSION
+        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+        LEGACY_HANDOFF_V23_COMPILER_VERSION, COMPILER_VERSION,
     ))
 
 
 def test_230_scoping_counterexamples_and_opening_last_frame_handoff():
-    """2.3.0 blocks appearance-only off-cast bios and English 'and' prop lists, and puts last_frame anchor first."""
+    """2.3.0+ blocks appearance-only off-cast bios and English 'and' prop lists, and puts last_frame anchor first."""
     from shine.h3.compiler import (
         LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_HANDOFF_V23_COMPILER_VERSION,
         LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     )
 
@@ -1811,15 +1820,15 @@ def test_230_scoping_counterexamples_and_opening_last_frame_handoff():
             update={"asset_role": "scene"}
         ),
     ]
-    desc_230 = compile_prompt(m_solo, shot=solo_zero_prop).sections["detailed_description"]
-    assert "Era: late medieval Europe." in desc_230
-    assert "Tone: grim and oppressive." in desc_230
-    assert "Adrian: 35-year-old male knight" in desc_230
-    assert "Velen" not in desc_230
-    assert "rune sword" not in desc_230
-    assert "brass lantern" not in desc_230
+    desc_240 = compile_prompt(m_solo, shot=solo_zero_prop).sections["detailed_description"]
+    assert "Era: late medieval Europe." in desc_240
+    assert "Tone: grim and oppressive." in desc_240
+    assert "Adrian: 35-year-old male knight" in desc_240
+    assert "Velen" not in desc_240
+    assert "rune sword" not in desc_240
+    assert "brass lantern" not in desc_240
 
-    # Last_frame opening continuity sits at top of [Shot 1]; CUT counterexample emits none.
+    # 2.3.0 keeps its released opening phrase; 2.4.0 anchors exposure/color & downgrades scene plate.
     m_cont = [
         *m_solo,
         item("<Picture 3>", ReferenceUse.PICTURE, role="continuity_derivative"),
@@ -1828,17 +1837,32 @@ def test_230_scoping_counterexamples_and_opening_last_frame_handoff():
         "continuity": {"mode": "last_frame", "previous_shot_id": "s6", "previous_job_id": "j6"},
         "entry_state": "Sword raised across his chest.",
     })
-    cont_out = compile_prompt(m_cont, shot=cont_spec)
-    cont_desc = cont_out.sections["detailed_description"]
-    assert cont_desc.index("At 0.0s, open seamlessly") < cont_desc.index("It opens on")
-    assert "held prop placement at 0.0s" in cont_out.sections["retention_analysis"]
+    cont_230 = compiler.compile(
+        spec=cont_spec, style=STYLE, manifest=m_cont, project_language="Chinese",
+        compiler_version=LEGACY_HANDOFF_V23_COMPILER_VERSION,
+    )
+    desc_230 = cont_230.sections["detailed_description"]
+    assert desc_230.index("At 0.0s, open seamlessly") < desc_230.index("It opens on")
+    assert "held prop placement at 0.0s" in cont_230.sections["retention_analysis"]
+
+    cont_240 = compile_prompt(m_cont, shot=cont_spec)
+    desc_240_cont = cont_240.sections["detailed_description"]
+    assert desc_240_cont.index("At 0.0s, continue directly from <Picture 3>") < desc_240_cont.index("It opens on")
+    assert "without overriding the lighting, exposure or color temperature" in cont_240.sections["subject_definitions"]
+    assert "identical color grading, white balance, exposure" in desc_240_cont
+    assert "without rewinding, replaying earlier motion, or resetting the lighting" in desc_240_cont
+    assert "opening continuity anchor): fully_preserved" in cont_240.sections["retention_analysis"]
 
     cut_spec = solo_zero_prop.model_copy(update={"continuity": {"mode": "cut"}})
     cut_desc = compile_prompt(m_solo, shot=cut_spec).sections["detailed_description"]
     assert "preceding shot's final frame" not in cut_desc
 
-    # Released 2.1.0 and 2.2.0 remain deterministic across repeated compiles.
-    for ver in (LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION):
+    # Released 2.1.0, 2.2.0 and 2.3.0 remain deterministic across repeated compiles.
+    for ver in (
+        LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+        LEGACY_HANDOFF_V23_COMPILER_VERSION,
+    ):
         a = compiler.compile(
             spec=solo_zero_prop, style=STYLE, manifest=m_solo, project_language="Chinese", compiler_version=ver,
         )

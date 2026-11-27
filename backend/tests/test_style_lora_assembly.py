@@ -509,6 +509,14 @@ def _setup_mock_comfy_with_loras(server: FakeComfyServer, lora_names: list[str])
             image_count=1, accelerator_id=acc, low_vram_attention=True, style_loras=specs
         ).graph
         server.extra_object_info.update(_object_info_from_graph(sample_graph, lora_names))
+        guided_graph = compile_h3_ref2va_graph(
+            image_count=2,
+            accelerator_id=acc,
+            low_vram_attention=True,
+            first_frame_guide_slot=2,
+            style_loras=specs,
+        ).graph
+        server.extra_object_info.update(_object_info_from_graph(guided_graph, lora_names))
     server.output_bytes = make_test_video_bytes(duration_s=5.0)
 
 
@@ -803,6 +811,7 @@ def test_four_stage_e2e_dual_lora_lowvram_trigger_and_continuity(tmp_path, monke
             )
             assert out2 in {"PASSED", "FAILED"}
             assert len(server.submitted_prompts) == 2
+            assert server.submitted_prompts[1]["prompt"]["32"]["class_type"] == "MiniMaxH3AddGuide"
 
             with m4_factory.begin() as m4_db:
                 j1 = m4_db.get(M4Job, created.json()["run"]["jobs"][0]["id"])

@@ -574,6 +574,7 @@ def _build_snapshot_payload(
             same_episode_prev or (idx == 0 and resolved_first_prev_id is not None)
         )
         extra_last_frame = 1 if has_continuity_source else 0
+        guide_slot = (img_count + 1) if has_continuity_source else None
         try:
             compiled = compile_m4_ref2va_workflow(
                 variant_id=variant_id,
@@ -584,6 +585,7 @@ def _build_snapshot_payload(
                 image_count=img_count + extra_last_frame,
                 audio_count=aud_count,
                 video_count=vid_count,
+                first_frame_guide_slot=guide_slot,
                 style_loras=resolved_loras,
             )
         except M4GraphCompileError as exc:

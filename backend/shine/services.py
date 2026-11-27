@@ -1302,6 +1302,7 @@ def make_render_request(
             GraphCompileError,
             H3ExecutionError,
             compile_h3_ref2va_graph,
+            continuity_first_frame_guide_slot,
             decide_low_vram_attention,
             low_vram_threshold_from_env,
             render_reference_counts,
@@ -1309,6 +1310,7 @@ def make_render_request(
         from shine.strategy import shot_reference_capability_blockers
 
         counts = render_reference_counts(manifest)
+        guide_slot = continuity_first_frame_guide_slot(manifest, spec.continuity.mode.value)
         ref_blockers = shot_reference_capability_blockers(
             db,
             settings,
@@ -1330,6 +1332,7 @@ def make_render_request(
             width=body.output.width if body.output else None,
             height=body.output.height if body.output else None,
             duration_s=spec.duration_target_s,
+            guide_frame_count=1 if guide_slot is not None else 0,
             threshold=low_vram_threshold,
             **counts,
         )
@@ -1338,6 +1341,7 @@ def make_render_request(
                 variant_id=strategy.model_variant_id,
                 accelerator_id=strategy.accelerator_id,
                 second_pass=strategy.second_pass_spec(),
+                first_frame_guide_slot=guide_slot,
                 low_vram_attention=low_vram_decision.enabled,
                 low_vram_decision=low_vram_decision,
                 style_loras=resolved_loras,

@@ -463,3 +463,80 @@ def test_last_frame_opening_conflict_is_refused_and_cut_counterexample_stays_all
     assert cut_verdict.accepted, cut_verdict.refusals
 
 
+def test_last_frame_lighting_rewind_is_refused_and_chain_warning_emitted():
+    """Extinguished light cannot be rewound back onto subject across a last_frame boundary without a practical lamp."""
+    prev_dark = first_of(
+        placements=[placement(ZHOU, "right_fg", "three_quarter_right")],
+    )
+    prev_dark["exit_state"] = f"{ZHOU} stands motionless at the window, the light gone from her face, corridor dimmed."
+
+    rewinding_cont = {
+        **SECOND_SHOT,
+        "transition_motivation": "emotional_hold",
+        "blocking": {"axis": "counter", "placements": [
+            placement(ZHOU, "right_fg", "three_quarter_right"),
+            placement(GUEST, "left_fg", "facing_right"),
+        ]},
+        "entry_state": f"{ZHOU} stands at the window, light gone from her face, corridor dimmed.",
+        "timeline": [{
+            "start_s": 0.0, "end_s": 4.0,
+            "action": f"The last dusk sliver creeps along the sill and widens across {ZHOU}'s brow.",
+            "expression": "Steady.", "camera": "Static.",
+        }],
+    }
+    bad = engine.review_scene_board(
+        board(first_of(), SECOND_SHOT, rewinding_cont),
+        SCENE,
+        {**CONTEXT, "continuity_predecessor": True, "previous_shot": prev_dark},
+    )
+    # Only SECOND_SHOT's closing state governs rewinding_cont (prev_dark was before FIRST_SHOT).
+    assert bad.accepted or "CONTINUATION_OPENING_CONFLICT" not in codes(bad)
+
+    # Cross-scene first shot DOES catch lighting rewind when S1 continues from previous_shot.
+    cross_bad = engine.review_scene_board(
+        board(
+            {**first_of(), "transition_motivation": "emotional_hold",
+             "timeline": [{
+                 "start_s": 0.0, "end_s": 4.0,
+                 "action": f"The last dusk sliver slides across {ZHOU}'s face again.",
+                 "expression": "Steady.", "camera": "Static.",
+             }]},
+            SECOND_SHOT,
+            LAST_SHOT,
+        ),
+        SCENE,
+        {**CONTEXT, "continuity_predecessor": True, "previous_shot": prev_dark},
+    )
+    assert any(r.get("detail") == "lighting_rewinds_predecessor" for r in cross_bad.refusals)
+
+    # Intentional practical lamp lighting is NOT refused.
+    lamp_ok = engine.review_scene_board(
+        board(
+            {**first_of(), "transition_motivation": "continuous_action",
+             "timeline": [{
+                 "start_s": 0.0, "end_s": 4.0,
+                 "action": f"{ZHOU} turns on the brass lamp so a warm glow illuminates his face.",
+                 "expression": "Steady.", "camera": "Static.",
+             }]},
+            SECOND_SHOT,
+            LAST_SHOT,
+        ),
+        SCENE,
+        {**CONTEXT, "continuity_predecessor": True, "previous_shot": prev_dark},
+    )
+    assert lamp_ok.accepted, lamp_ok.refusals
+
+    # Three consecutive last_frame boundaries inside a scene emit CONTINUATION_CHAIN_LONG warning.
+    chain_verdict = engine.review_scene_board(
+        board(
+            {**first_of(), "transition_motivation": "emotional_hold"},
+            {**SECOND_SHOT, "transition_motivation": "continuous_action"},
+            {**LAST_SHOT, "transition_motivation": "emotional_hold"},
+        ),
+        SCENE,
+        {**CONTEXT, "continuity_predecessor": True, "previous_shot": {**prev_dark, "exit_state": "Stands calm."}},
+    )
+    assert any(w.get("code") == "CONTINUATION_CHAIN_LONG" for w in chain_verdict.warnings)
+
+
+

@@ -217,9 +217,12 @@ class DeliveryAssembler:
         crf: int,
         has_audio: bool,
     ) -> None:
-        command = [self.ffmpeg_path, "-nostdin", "-y", "-ss", f"{clip.in_s:.3f}", "-i", str(source)]
+        command = [self.ffmpeg_path, "-nostdin", "-y", "-i", str(source)]
         if not has_audio:
             command += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        if clip.in_s > 0:
+            # Post-input seek keeps sub-second / single-frame seam trims frame-accurate.
+            command += ["-ss", f"{clip.in_s:.3f}"]
         command += [
             "-t",
             f"{clip.duration_s:.3f}",

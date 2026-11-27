@@ -1495,6 +1495,27 @@ def verified_production_context(db, project_id, source_text, supplied, *, requir
             prev_exit = str(prev_spec.get("exit_state") or "").strip()
             if prev_exit:
                 context["previous_shot_exit_state"] = prev_exit[:300]
+            prev_cam = prev_spec.get("camera") if isinstance(prev_spec.get("camera"), dict) else {}
+            prev_env = prev_spec.get("environment") if isinstance(prev_spec.get("environment"), dict) else {}
+            prev_cam_light = str(prev_cam.get("lighting") or "").strip()
+            prev_env_light = str(prev_env.get("light") or "").strip()
+            combined_lighting = " | ".join(part for part in (prev_cam_light, prev_env_light) if part)
+            if combined_lighting:
+                context["previous_shot_lighting"] = combined_lighting[:300]
+            context["previous_shot"] = {
+                "id": prev_shot.id,
+                "location": str(prev_spec.get("location") or prev_spec.get("location_id") or ""),
+                "exit_state": prev_exit,
+                "blocking": prev_blocking if isinstance(prev_blocking, dict) else {},
+                "timeline": list(prev_spec.get("timeline") or []),
+                "camera": {
+                    "lighting": prev_cam_light,
+                    "shot_size": str(prev_cam.get("shot_size") or ""),
+                },
+                "environment": {
+                    "light": prev_env_light,
+                },
+            }
     if plan is not None:
         context["plan_sha256"] = plan.sha256
     if supplied.get("previous_scene_artifact_id"):

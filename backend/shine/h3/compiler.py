@@ -88,7 +88,13 @@ LEGACY_SCOPED_FACTS_COMPILER_VERSION = "shine-h3-compiler/2.2.0"
 # tightens per-shot story-fact scoping for appearance-only off-cast bios and
 # English ``and``-joined prop inventories.  All pre-2.3.0 versions keep their
 # exact released bytes.
-COMPILER_VERSION = "shine-h3-compiler/2.3.0"
+LEGACY_HANDOFF_V23_COMPILER_VERSION = "shine-h3-compiler/2.3.0"
+# 2.4.0 aligns last_frame shots with physical MiniMaxH3AddGuide(frame_idx=0):
+# downgrades the empty scene plate to architectural/spatial geometry only so it
+# never overrides the preceding final frame's lighting, exposure, or color
+# temperature, and instructs strict forward motion without rewinding.  CUT shots
+# remain byte-identical to 2.3.0, and <=2.3.0 historical requests keep their bytes.
+COMPILER_VERSION = "shine-h3-compiler/2.4.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -100,6 +106,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_THIN_SHELL_COMPILER_VERSION,
     LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+    LEGACY_HANDOFF_V23_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -132,6 +139,11 @@ LEGACY_210_VERSIONS = (
 LEGACY_220_VERSIONS = (
     *LEGACY_210_VERSIONS,
     LEGACY_SCOPED_FACTS_COMPILER_VERSION,
+)
+#: Versions that keep the 2.3.0 soft scene-lighting & continuity wording.
+LEGACY_230_VERSIONS = (
+    *LEGACY_220_VERSIONS,
+    LEGACY_HANDOFF_V23_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -203,6 +215,9 @@ class _Context:
     #: 2.3.0+: opening last_frame continuity sits at top of [Shot 1] and fact scoping
     #: catches appearance-only off-cast bios and English ``and``-joined props.
     handoff_v23: bool = False
+    #: 2.4.0+: on last_frame shots, downgrade scene plate to architecture-only
+    #: and anchor color/exposure/forward-time progression on continuity_derivative.
+    continuity_color_v24: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -661,18 +676,34 @@ def _continuity_mode(continuity: Any) -> tuple[ContinuityMode | None, str | None
     return mode, (str(prev_id) if prev_id else None)
 
 
+def _has_last_frame_continuity(ctx: _Context) -> bool:
+    mode, prev_shot_id = _continuity_mode(ctx.spec.continuity)
+    if mode != ContinuityMode.LAST_FRAME:
+        return False
+    return bool(prev_shot_id) or any(ref.role == "continuity_derivative" for ref in ctx.manifest)
+
+
 def _continuity_sentences(ctx: _Context) -> list[str]:
     """How the shot joins the one before it, from the derivative it was given.
 
     Every pre-2.3.0 version keeps its historical wording; 2.3.0+ places
     soft ``last_frame`` opening continuity at the top of ``[Shot 1]`` and
     anchors 0.0s posture and held props so actions from the previous shot
-    are not reset or repeated.
+    are not reset or repeated; 2.4.0+ additionally locks white balance,
+    exposure, color grading, and strict forward motion without rewinding.
     """
     mode, prev_shot_id = _continuity_mode(ctx.spec.continuity)
     continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
     if continuation:
         if mode == ContinuityMode.LAST_FRAME:
+            if ctx.continuity_color_v24:
+                return [
+                    f"At 0.0s, continue directly from {continuation.label} (the preceding shot's final frame) "
+                    "with identical color grading, white balance, exposure, shadow depth, framing, character "
+                    "posture, gaze direction, and held prop placement; advance strictly forward in time from "
+                    f"the final instant of {continuation.label} without rewinding, replaying earlier motion, or "
+                    "resetting the lighting."
+                ]
             if ctx.handoff_v23:
                 return [
                     f"At 0.0s, open seamlessly from the closing framing, character positions, posture, "
@@ -694,6 +725,13 @@ def _continuity_sentences(ctx: _Context) -> list[str]:
             ]
         return []
     if mode == ContinuityMode.LAST_FRAME and prev_shot_id:
+        if ctx.continuity_color_v24:
+            return [
+                "At 0.0s, continue directly from the approved final frame of shot "
+                f"{prev_shot_id} with identical color grading, white balance, exposure, shadow depth, "
+                "framing, posture, gaze direction, and held prop placement; advance strictly forward in "
+                "time without rewinding, replaying earlier motion, or resetting the lighting."
+            ]
         if ctx.handoff_v23:
             return [
                 f"At 0.0s, the opening framing, posture, gaze direction, and held prop placement continue "
@@ -1378,20 +1416,35 @@ def _subject_definitions(ctx: _Context) -> str:
             )
             subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
+            last_frame_cont = ctx.continuity_color_v24 and _has_last_frame_continuity(ctx)
             if item.frame_role:
                 lines.append(f"{item.label} is the {item.frame_role.value} reference for [Shot 1].")
             elif ctx.anchored_v21 and item.role == "continuity_derivative":
-                lines.append(f"{item.label} is the preceding-shot final-frame continuity reference for [Shot 1].")
+                if last_frame_cont:
+                    lines.append(
+                        f"{item.label} is the preceding-shot final-frame anchor for [Shot 1] at 0.0s, "
+                        "establishing the exact opening framing, exposure, white balance, color grading "
+                        "and shadow depth."
+                    )
+                else:
+                    lines.append(f"{item.label} is the preceding-shot final-frame continuity reference for [Shot 1].")
             elif ctx.anchored_v21 and item.asset_role == "prop":
                 lines.append(
                     f"{item.label} is a prop appearance reference for [Shot 1]; "
                     "keep this object's design and details consistent when shown."
                 )
             elif ctx.anchored_v21 and item.asset_role == "scene":
-                lines.append(
-                    f"{item.label} is the empty environment and lighting reference for [Shot 1]; "
-                    "use it for the setting, architecture and atmosphere only."
-                )
+                if last_frame_cont:
+                    lines.append(
+                        f"{item.label} is the architectural and spatial layout reference for [Shot 1]; "
+                        "use it for room geometry and materials only, without overriding the lighting, "
+                        "exposure or color temperature of the preceding shot's final frame."
+                    )
+                else:
+                    lines.append(
+                        f"{item.label} is the empty environment and lighting reference for [Shot 1]; "
+                        "use it for the setting, architecture and atmosphere only."
+                    )
             else:
                 lines.append(f"{item.label} is the composition reference for [Shot 1].")
         elif item.use_as == ReferenceUse.VIDEO:
@@ -1519,6 +1572,7 @@ def _retention(ctx: _Context) -> str:
             )
             subject_index += 1
         elif item.use_as == ReferenceUse.PICTURE:
+            last_frame_cont = ctx.continuity_color_v24 and _has_last_frame_continuity(ctx)
             if ctx.legacy_semantics:
                 lines.append(f"{item.label} ([Shot 1] frame): {marker} - the approved frame composition is retained.")
             elif item.frame_role:
@@ -1528,7 +1582,14 @@ def _retention(ctx: _Context) -> str:
                 )
             elif ctx.anchored_v21 and item.role == "continuity_derivative":
                 mode, _ = _continuity_mode(ctx.spec.continuity)
-                if ctx.handoff_v23 and mode == ContinuityMode.LAST_FRAME:
+                if last_frame_cont and mode == ContinuityMode.LAST_FRAME:
+                    lines.append(
+                        f"{item.label} ([Shot 1] opening continuity anchor): fully_preserved - "
+                        "locks the 0.0s framing, exposure, color temperature, white balance, character posture "
+                        "and held prop placement from the preceding shot's final frame, then advances "
+                        "smoothly forward in time."
+                    )
+                elif ctx.handoff_v23 and mode == ContinuityMode.LAST_FRAME:
                     lines.append(
                         f"{item.label} ([Shot 1] continuity reference): partially_preserved - "
                         "guides the opening framing, lighting, character posture and held prop placement at 0.0s "
@@ -1545,10 +1606,17 @@ def _retention(ctx: _Context) -> str:
                     "the prop keeps its reference appearance whenever visible."
                 )
             elif ctx.anchored_v21 and item.asset_role == "scene":
-                lines.append(
-                    f"{item.label} ([Shot 1] environment reference): partially_preserved - "
-                    "guides the setting, architecture and lighting while the action proceeds."
-                )
+                if last_frame_cont:
+                    lines.append(
+                        f"{item.label} ([Shot 1] architectural reference): partially_preserved - "
+                        "guides the setting geometry and materials only while preserving the current scene's "
+                        "lighting and color grade."
+                    )
+                else:
+                    lines.append(
+                        f"{item.label} ([Shot 1] environment reference): partially_preserved - "
+                        "guides the setting, architecture and lighting while the action proceeds."
+                    )
             else:
                 if ctx.thin_shell:
                     lines.append(
@@ -1630,6 +1698,7 @@ class H3PromptCompiler:
         anchored_v21 = compiler_version not in LEGACY_200_VERSIONS
         scoped_facts = compiler_version not in LEGACY_210_VERSIONS
         handoff_v23 = compiler_version not in LEGACY_220_VERSIONS
+        continuity_color_v24 = compiler_version not in LEGACY_230_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1660,6 +1729,7 @@ class H3PromptCompiler:
             anchored_v21=anchored_v21,
             scoped_facts=scoped_facts,
             handoff_v23=handoff_v23,
+            continuity_color_v24=continuity_color_v24,
         )
         if language_fallback:
             ctx.warnings.append(

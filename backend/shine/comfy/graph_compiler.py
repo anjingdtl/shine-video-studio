@@ -506,6 +506,7 @@ def compile_ref2va_workflow(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
     object_info: dict[str, Any] | None = None,
     low_vram_attention: bool | None = None,
     low_vram_decision: LowVramAttentionDecision | None = None,
@@ -561,6 +562,15 @@ def compile_ref2va_workflow(
             f"参考素材总数超过官方上限 {TOTAL_REFERENCE_LIMIT}。",
             {"total": image_count + audio_count + video_count, "limit": TOTAL_REFERENCE_LIMIT},
         )
+    guide_slot: int | None = None
+    if first_frame_guide_slot is not None:
+        guide_slot = int(first_frame_guide_slot)
+        if guide_slot < 1 or guide_slot > image_count:
+            raise GraphCompileError(
+                "FIRST_FRAME_GUIDE_SLOT_INVALID",
+                f"连续性首帧引导槽位 {guide_slot} 超出图片参考范围 1..{image_count}。",
+                {"first_frame_guide_slot": guide_slot, "image_count": image_count},
+            )
     if second_pass is not None:
         if not 0.0 < float(second_pass.denoise) <= 1.0:
             raise GraphCompileError(
@@ -684,10 +694,24 @@ def compile_ref2va_workflow(
         },
     }
 
+    positive_cond_ref = ["31", 0]
+    if guide_slot is not None:
+        graph["32"] = {
+            "class_type": "MiniMaxH3AddGuide",
+            "inputs": {
+                "positive": ["31", 0],
+                "vae": ["21", 0],
+                "latent": ["31", 1],
+                "image": [str(40 + guide_slot - 1), 0],
+                "frame_idx": 0,
+            },
+        }
+        positive_cond_ref = ["32", 0]
+
     graph.update({
         "50": {
             "class_type": "BasicGuider",
-            "inputs": {"model": guider_model_input, "conditioning": ["31", 0]},
+            "inputs": {"model": guider_model_input, "conditioning": list(positive_cond_ref)},
         },
         "51": {"class_type": "RandomNoise", "inputs": {"noise_seed": 77}},
         "52": {"class_type": "KSamplerSelect", "inputs": {"sampler_name": "euler"}},
@@ -765,7 +789,7 @@ def compile_ref2va_workflow(
                     "sampler": ["52", 0],
                     "sigmas": ["61", 0],
                     "model": ["62", 0],
-                    "positive": ["31", 0],
+                    "positive": list(positive_cond_ref),
                     "model_name": LATENT_UPSCALER,
                     "mode": "scale by multiplier",
                     "scale": float(second_pass.latent_scale),
@@ -834,6 +858,8 @@ def compile_ref2va_workflow(
         ]
     if video_count:
         recipe_payload["video_count"] = video_count
+    if guide_slot is not None:
+        recipe_payload["first_frame_guide_slot"] = guide_slot
     if candidate_digest:
         recipe_payload["variant_recipe_sha256"] = candidate_digest
     recipe_sha256 = graph_hash(recipe_payload)
@@ -849,6 +875,11 @@ def compile_ref2va_workflow(
         if candidate
         else ("dynamic-compiler-v1" if _legacy_realism_lora else "dynamic-compiler-v3")
     )
+    continuity_modes = ["soft_reference_continuity"]
+    if guide_slot is not None:
+        continuity_modes.append("first_frame_guide_continuity")
+    if video_count:
+        continuity_modes.append("video_reference_continuity")
     model_identity = {
         "model_family": "MiniMax-H3",
         "generation_mode": "Ref2VA",
@@ -858,11 +889,8 @@ def compile_ref2va_workflow(
         "second_pass": bool(second_pass),
         "graph_version": graph_version,
         "source": "per_shot_compiled_recipe",
-        "continuity_modes": (
-            ["soft_reference_continuity", "video_reference_continuity"]
-            if video_count
-            else ["soft_reference_continuity"]
-        ),
+        "continuity_modes": continuity_modes,
+        **({"first_frame_guide_slot": guide_slot} if guide_slot is not None else {}),
         "reference_slots": sorted(k for k in parameter_map if k.startswith("reference_")),
         "media_transfer_families": sorted(media_transfers),
         "dynamic_autogrow": True,
@@ -894,7 +922,7 @@ def compile_ref2va_workflow(
     )
 
 
-def resolve_frozen_graph_form(
+def resolve_frozen_graph_execution_form(
     frozen_graph_sha256: str | None,
     *,
     variant_id: str = INT8_VARIANT_ID,
@@ -903,15 +931,10 @@ def resolve_frozen_graph_form(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
     style_loras: Sequence[StyleLoraSpec] = (),
-) -> tuple[bool, bool] | None:
-    """Resolve ``(low_vram_attention, legacy_realism_lora)`` for a frozen graph hash.
-
-    Checks the current v3/v2 forms for ``style_loras`` first; when ``style_loras``
-    is empty on the INT8 baseline, falls back to the pre-v3 legacy form
-    (single ``LEGACY_REALISM_LORA @ 0.65``) so in-flight historical requests
-    keep rendering cleanly across the upgrade.
-    """
+) -> tuple[bool, bool, int | None] | None:
+    """Resolve ``(low_vram_attention, legacy_realism_lora, guide_slot)`` for a frozen hash."""
     if not frozen_graph_sha256:
         return None
     normalized_loras = tuple(style_loras or ())
@@ -924,21 +947,65 @@ def resolve_frozen_graph_form(
         "video_count": video_count,
         "style_loras": normalized_loras,
     }
-    for form in (True, False):
-        if compile_ref2va_workflow(low_vram_attention=form, **identity).graph_sha256 == frozen_graph_sha256:
-            return (form, False)
-    if not normalized_loras and (variant_id or INT8_VARIANT_ID) != W6A8_VARIANT_ID:
+    guide_candidates = (first_frame_guide_slot, None) if first_frame_guide_slot is not None else (None,)
+    for candidate_guide in guide_candidates:
         for form in (True, False):
             if (
                 compile_ref2va_workflow(
                     low_vram_attention=form,
-                    _legacy_realism_lora=True,
+                    first_frame_guide_slot=candidate_guide,
                     **identity,
                 ).graph_sha256
                 == frozen_graph_sha256
             ):
-                return (form, True)
+                return (form, False, candidate_guide)
+    if not normalized_loras and (variant_id or INT8_VARIANT_ID) != W6A8_VARIANT_ID:
+        for candidate_guide in guide_candidates:
+            for form in (True, False):
+                if (
+                    compile_ref2va_workflow(
+                        low_vram_attention=form,
+                        first_frame_guide_slot=candidate_guide,
+                        _legacy_realism_lora=True,
+                        **identity,
+                    ).graph_sha256
+                    == frozen_graph_sha256
+                ):
+                    return (form, True, candidate_guide)
     return None
+
+
+def resolve_frozen_graph_form(
+    frozen_graph_sha256: str | None,
+    *,
+    variant_id: str = INT8_VARIANT_ID,
+    accelerator_id: str = "pdd8",
+    second_pass: SecondPassSpec | None = None,
+    image_count: int,
+    audio_count: int = 0,
+    video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
+    style_loras: Sequence[StyleLoraSpec] = (),
+) -> tuple[bool, bool] | None:
+    """Resolve ``(low_vram_attention, legacy_realism_lora)`` for a frozen graph hash.
+
+    Checks the current v3/v2 forms for ``style_loras`` first; when ``style_loras``
+    is empty on the INT8 baseline, falls back to the pre-v3 legacy form
+    (single ``LEGACY_REALISM_LORA @ 0.65``) so in-flight historical requests
+    keep rendering cleanly across the upgrade.
+    """
+    resolved = resolve_frozen_graph_execution_form(
+        frozen_graph_sha256,
+        variant_id=variant_id,
+        accelerator_id=accelerator_id,
+        second_pass=second_pass,
+        image_count=image_count,
+        audio_count=audio_count,
+        video_count=video_count,
+        first_frame_guide_slot=first_frame_guide_slot,
+        style_loras=style_loras,
+    )
+    return (resolved[0], resolved[1]) if resolved is not None else None
 
 
 def low_vram_attention_form_of_graph(
@@ -950,6 +1017,7 @@ def low_vram_attention_form_of_graph(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
     style_loras: Sequence[StyleLoraSpec] = (),
 ) -> bool | None:
     """Name which ``MiniMaxLowVRAMAttention`` form a frozen graph hash is.
@@ -969,6 +1037,7 @@ def low_vram_attention_form_of_graph(
         image_count=image_count,
         audio_count=audio_count,
         video_count=video_count,
+        first_frame_guide_slot=first_frame_guide_slot,
         style_loras=style_loras,
     )
     return resolved[0] if resolved is not None else None
@@ -984,6 +1053,7 @@ def is_low_vram_guard_variant(
     image_count: int,
     audio_count: int = 0,
     video_count: int = 0,
+    first_frame_guide_slot: int | None = None,
     style_loras: Sequence[StyleLoraSpec] = (),
 ) -> bool:
     """Verify ``actual_graph_sha256`` is the exact LowVRAM-enabled variant of this shot."""
@@ -991,8 +1061,9 @@ def is_low_vram_guard_variant(
         return False
     normalized_loras = tuple(style_loras or ())
     legacy_mode = False
+    effective_guide_slot = first_frame_guide_slot
     if expected_graph_sha256 is not None:
-        resolved = resolve_frozen_graph_form(
+        resolved = resolve_frozen_graph_execution_form(
             expected_graph_sha256,
             variant_id=variant_id,
             accelerator_id=accelerator_id,
@@ -1000,11 +1071,13 @@ def is_low_vram_guard_variant(
             image_count=image_count,
             audio_count=audio_count,
             video_count=video_count,
+            first_frame_guide_slot=first_frame_guide_slot,
             style_loras=normalized_loras,
         )
         if resolved is None:
             return False
         legacy_mode = resolved[1]
+        effective_guide_slot = resolved[2]
     guarded = compile_ref2va_workflow(
         variant_id=variant_id,
         accelerator_id=accelerator_id,
@@ -1012,6 +1085,7 @@ def is_low_vram_guard_variant(
         image_count=image_count,
         audio_count=audio_count,
         video_count=video_count,
+        first_frame_guide_slot=effective_guide_slot,
         low_vram_attention=True,
         style_loras=normalized_loras,
         _legacy_realism_lora=legacy_mode,
@@ -1026,6 +1100,7 @@ def is_low_vram_guard_variant(
             image_count=image_count,
             audio_count=audio_count,
             video_count=video_count,
+            first_frame_guide_slot=effective_guide_slot,
             low_vram_attention=False,
             style_loras=normalized_loras,
             _legacy_realism_lora=legacy_mode,

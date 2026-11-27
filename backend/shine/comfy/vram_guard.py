@@ -99,6 +99,7 @@ def estimate_h3_attention_tokens(
     image_count: int = 1,
     audio_count: int = 0,
     video_count: int = 0,
+    guide_frame_count: int = 0,
     video_ref_duration_s: float = DEFAULT_VIDEO_REF_DURATION_S,
     text_tokens: int = DEFAULT_TEXT_CONDITION_TOKENS,
     tokens_per_audio_ref: int = DEFAULT_TOKENS_PER_AUDIO_REF,
@@ -128,6 +129,7 @@ def estimate_h3_attention_tokens(
 
     video_tokens = latent_frames * tokens_per_latent_frame
     image_ref_tokens = max(0, int(image_count)) * tokens_per_latent_frame
+    guide_tokens = max(0, int(guide_frame_count)) * tokens_per_latent_frame
 
     if int(video_count) > 0:
         ref_frames = align_h3_frame_count(video_ref_duration_s, fps=fps)
@@ -142,7 +144,7 @@ def estimate_h3_attention_tokens(
         + target_audio_tokens
         + max(0, int(audio_count)) * max(0, int(tokens_per_audio_ref))
     )
-    total_tokens = video_tokens + image_ref_tokens + video_ref_tokens + audio_and_text_tokens
+    total_tokens = video_tokens + image_ref_tokens + guide_tokens + video_ref_tokens + audio_and_text_tokens
     return H3TokenEstimate(
         aligned_frames=aligned_frames,
         latent_frames=latent_frames,
@@ -163,6 +165,7 @@ def decide_low_vram_attention(
     image_count: int = 1,
     audio_count: int = 0,
     video_count: int = 0,
+    guide_frame_count: int = 0,
     threshold: int = DEFAULT_LOW_VRAM_ATTENTION_TOKEN_THRESHOLD,
     force_low_vram_attention: bool | None = None,
     video_ref_duration_s: float = DEFAULT_VIDEO_REF_DURATION_S,
@@ -178,6 +181,7 @@ def decide_low_vram_attention(
             image_count=image_count,
             audio_count=audio_count,
             video_count=video_count,
+            guide_frame_count=guide_frame_count,
             video_ref_duration_s=video_ref_duration_s,
         )
         if has_geometry
