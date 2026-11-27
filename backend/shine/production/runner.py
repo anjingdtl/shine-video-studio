@@ -2241,3 +2241,70 @@ def run_events(db: Session, run_id: str, *, limit: int = 50, after_id: int = 0) 
         }
         for row in reversed(rows)
     ]
+
+
+def reconcile_production_task(
+    session_factory,
+    db: Session,
+    *,
+    project_id: str | None = None,
+    run_id: str | None = None,
+    material_run_id: str | None = None,
+    expected_state_version: int | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Reconcile a production run or material batch without blind resubmission."""
+    if run_id:
+        run = db.get(ProductionRun, run_id)
+        if run is None:
+            raise HTTPException(404, "PRODUCTION_RUN_NOT_FOUND")
+        if project_id and run.project_id != project_id:
+            raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
+        result = reconcile_run(session_factory, run_id, worker_id=actor)
+        db.expire_all()
+        updated = db.get(ProductionRun, run_id)
+        return {
+            "kind": "production_run",
+            "run_id": run_id,
+            "status": updated.status if updated else "GONE",
+            "reconcile": result,
+        }
+    if material_run_id:
+        from shine.materialprep import service as mat_service
+        from shine.materialprep.models import MaterialRun
+
+        mrun = db.get(MaterialRun, material_run_id)
+        if mrun is None:
+            raise HTTPException(404, "MATERIAL_RUN_NOT_FOUND")
+        if project_id and mrun.project_id != project_id:
+            raise HTTPException(409, "CROSS_PROJECT_REFERENCE")
+        ver = expected_state_version if expected_state_version is not None else int(mrun.state_version or 0)
+        res = mat_service.reconcile_run(db, material_run_id, ver)
+        return {"kind": "material_run", "material_run_id": material_run_id, **res}
+    raise HTTPException(422, "RECONCILE_TARGET_REQUIRED")
+
+
+def recover_stale_run(
+    session_factory,
+    db: Session,
+    *,
+    project_id: str,
+    run_id: str,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Reconcile a stale/paused production run and resume only proven pre-submit work."""
+    run = db.get(ProductionRun, run_id)
+    if run is None or run.project_id != project_id:
+        raise HTTPException(404, "PRODUCTION_RUN_NOT_FOUND")
+    reconcile_result = reconcile_run(session_factory, run_id, worker_id=actor)
+    db.expire_all()
+    run = db.get(ProductionRun, run_id)
+    resumed_status = run.status if run else "GONE"
+    if run is not None and run.status in {"PAUSED", "NEEDS_REVIEW"}:
+        resumed_status = resume_run(session_factory, run_id, actor=actor)
+        db.expire_all()
+    return {
+        "run_id": run_id,
+        "status": resumed_status,
+        "reconcile": reconcile_result,
+    }

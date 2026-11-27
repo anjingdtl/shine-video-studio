@@ -831,6 +831,30 @@ def _copilot_system_prompt() -> str:
     )
 
 
+def next_turn(
+    db,
+    gateway,
+    *,
+    system: str,
+    messages: list[dict[str, Any]],
+    tools: list[ToolSpec],
+    state: dict[str, Any],
+    llm_info: dict[str, Any],
+    max_completion_tokens: int,
+) -> ToolTurn | None:
+    """One model turn, shared by the grant loop and the chat investigator.
+
+    Native tool calling when the provider offers it, the validated structured
+    intent otherwise.  ``state`` is what the fallback transport sees as the
+    server-fact summary, so a caller that relies on the fallback must put its
+    accumulated evidence there.
+    """
+    return _next_turn(
+        db, gateway, system=system, messages=messages, tools=tools, state=state,
+        llm_info=llm_info, max_completion_tokens=max_completion_tokens,
+    )
+
+
 def _next_turn(
     db,
     gateway,

@@ -554,7 +554,6 @@ def build_bundle(
     }
     declared_actions = {
         "POST /api/v1/support/actions/preview",
-        "POST /api/v1/support/plans/delegate",
     }
     discovered = [
         {

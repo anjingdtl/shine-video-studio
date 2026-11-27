@@ -72,28 +72,71 @@ export function actionPayload(
   return { params, scopeProjectId };
 }
 
-type PlanStep = {
-  order: number;
-  title: string;
-  capability_id: string | null;
-  state: 'READY' | 'READ_ONLY' | 'BLOCKED' | 'HUMAN_REQUIRED' | 'NOT_SUPPORTED';
-  state_label: string;
-  evidence?: string[];
-  reason?: string;
-  action?: { kind: string; params: Record<string, unknown> } | null;
-  readback?: string;
+type HealthCheckItem = {
+  code: string;
+  label: string;
+  status: 'OK' | 'WARNING' | 'BLOCKED' | string;
+  detail?: string;
+  jump?: string | null;
+  error_code?: string | null;
+  entity_type?: string | null;
+  entity_id?: string | null;
 };
 
-type CopilotPlan = {
-  intent: string;
-  summary: string;
-  plan_id?: string;
-  plan_hash?: string;
-  steps: PlanStep[];
-  requires_input: string[];
-  notice: string;
-  bounded: boolean;
+type HealthCheckGroup = {
+  key: string;
+  label: string;
+  status: 'OK' | 'WARNING' | 'BLOCKED' | string;
+  summary?: string;
+  jump?: string | null;
+  items: HealthCheckItem[];
 };
+
+type HealthCheckResponse = {
+  generated_at: string;
+  project_id: string | null;
+  project_title?: string | null;
+  summary: { blocking: number; warnings: number; status: string };
+  groups: HealthCheckGroup[];
+  blockers: Array<HealthCheckItem & { group?: string; group_label?: string }>;
+  read_only: boolean;
+};
+
+type ReadToolTraceItem = {
+  tool: string;
+  arguments?: Record<string, unknown>;
+  status: string;
+  error_code?: string | null;
+  elapsed_ms?: number;
+  ids?: Record<string, string[]>;
+  authority?: string | null;
+};
+
+type ActionProposal = {
+  type: 'action';
+  action_id: string;
+  label: string;
+  params: Record<string, unknown>;
+  reason?: string;
+  summary?: string;
+  valid: boolean;
+  error?: string | null;
+  tier?: string;
+  gpu?: boolean;
+  paid?: boolean;
+};
+
+type ProjectGrantProposal = {
+  type: 'project_grant';
+  objective: string;
+  capability_groups: string[];
+  reason?: string;
+  project_id?: string | null;
+  valid: boolean;
+  error?: string | null;
+};
+
+type ProposalCard = ActionProposal | ProjectGrantProposal;
 
 type KnowledgeCitation = {
   title: string;
@@ -137,11 +180,16 @@ type CopilotMessage = {
   payload: {
     diagnosis?: Diagnosis;
     tool_trace?: { tool: string; status: string }[];
-    llm?: { status: string };
+    read_tools?: ReadToolTraceItem[];
+    proposals?: ProposalCard[];
+    action_id?: string;
+    action_kind?: string;
+    status?: string;
+    verification?: { outcome?: string; authority?: string; mode?: string };
+    last_error?: string | null;
+    llm?: { status: string; used?: boolean; model?: string | null };
     intent?: string | null;
-    plan?: CopilotPlan | null;
     project_knowledge?: KnowledgeAnswer | null;
-    plan_error?: string | null;
   };
   created_at: string;
 };
@@ -296,17 +344,14 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
   const [showEvidence, setShowEvidence] = useState<Record<string, boolean>>({});
   const [capabilities, setCapabilities] = useState<Record<string, CapabilityInfo>>({});
   const [buildInfo, setBuildInfo] = useState<BuildInfo | null>(null);
-  const [planInputs, setPlanInputs] = useState<Record<string, Record<string, string>>>({});
-  const [approvedSteps, setApprovedSteps] = useState<Record<string, number[]>>({});
-  const [allowGpu, setAllowGpu] = useState<Record<string, boolean>>({});
-  const [delegation, setDelegation] = useState<Record<string, unknown> | null>(null);
-  //: The objective of the one task-level authorization currently on screen.
-  //: Non-null means the person asked for the "one click, let it work" flow.
+  const [healthCheck, setHealthCheck] = useState<HealthCheckResponse | null>(null);
+  const [healthExpanded, setHealthExpanded] = useState(false);
+  //: The objective and optional explicit capability groups of the task grant on screen.
   const [taskObjective, setTaskObjective] = useState<string | null>(null);
+  const [taskGroups, setTaskGroups] = useState<string[] | null>(null);
   //: A grant already authorized for this session: reopening the panel
   //: reconnects to the SAME task instead of previewing a second one.
   const [restoredGrant, setRestoredGrant] = useState<TaskGrant | null>(null);
-  const [delegating, setDelegating] = useState(false);
   const [panelSize, setPanelSize] = useState<{ width: number; height: number }>(() => readPanelSize());
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -400,10 +445,17 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
       if (ctx.attemptId) params.set('attempt_id', ctx.attemptId);
       if (ctx.taskId) params.set('task_id', ctx.taskId);
       if (ctx.errorCode) params.set('error_code', ctx.errorCode);
-      const data = await api<ContextResponse>(`/support/context?${params.toString()}`);
+      const hcParams = new URLSearchParams();
+      if (ctx.projectId) hcParams.set('project_id', ctx.projectId);
+      const hcUrl = hcParams.toString() ? `/support/health-check?${hcParams.toString()}` : '/support/health-check';
+      const [data, hc] = await Promise.all([
+        api<ContextResponse>(`/support/context?${params.toString()}`),
+        api<HealthCheckResponse>(hcUrl).catch(() => null),
+      ]);
       setContext(data);
       setSuggestions(data.suggested_questions);
       setWebEnabled(data.web_search_enabled);
+      setHealthCheck(hc);
     } catch (err) {
       setError(err instanceof Error ? err.message : '无法读取本机环境状态。');
     }
@@ -565,10 +617,10 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     }
   };
 
-  /** The first natural-language objective can enter the one-click grant flow
-   *  directly: a session is created on demand (no diagnosis turn is bought). */
-  const startTaskObjective = async () => {
-    const objective = draft.trim();
+  /** The first natural-language objective (or an AI-proposed project grant) enters
+   *  the one-click grant flow directly; a session is created on demand if needed. */
+  const startTaskObjective = async (explicitObjective?: string, explicitGroups?: string[]) => {
+    const objective = (explicitObjective ?? draft).trim();
     if (objective.length < 4 || busy) return;
     try {
       if (!sessionRef.current) {
@@ -588,6 +640,7 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
         applySession(created.session);
         window.localStorage.setItem(sessionKey(active.projectId, fault), created.session.id);
       }
+      setTaskGroups(explicitGroups && explicitGroups.length ? explicitGroups : null);
       setTaskObjective(objective);
     } catch (err) {
       setError(err instanceof Error ? err.message : '无法创建会话。');
@@ -641,6 +694,14 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
             }`
             : '授权动作已交给原有执行器；结果仍需以权威裁决复核。',
       );
+      if (sessionRef.current) {
+        try {
+          const refreshed = await api<CopilotSession>(`/support/sessions/${sessionRef.current.id}`);
+          applySession(refreshed);
+        } catch {
+          // Receipt reload is best-effort for live backend sessions.
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : '授权执行没有完成。');
     } finally {
@@ -721,6 +782,9 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     applySession(null);
     setPreview(null);
     setReport(null);
+    setTaskObjective(null);
+    setTaskGroups(null);
+    setRestoredGrant(null);
     setError('');
     setNotice('');
     void loadContext();
@@ -728,6 +792,62 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
 
   const verdict = context?.snapshot?.setup?.verdict || session?.context?.snapshot?.setup?.verdict;
   const messages = session?.messages || [];
+  const llmConfigured = (() => {
+    const runtimeLlm = context?.snapshot?.runtime?.llm;
+    if (runtimeLlm && typeof runtimeLlm.configured === 'boolean') return runtimeLlm.configured;
+    const hcNeedsLlm = (healthCheck?.groups || []).some((group) =>
+      (group.items || []).some((item) => item.code === 'COPILOT_LLM_REQUIRED'),
+    );
+    if (hcNeedsLlm) return false;
+    return true;
+  })();
+
+  const jumpTo = (hashTarget: string | null | undefined) => {
+    if (!hashTarget) return;
+    window.location.hash = hashTarget;
+  };
+
+  const renderHealthGroups = () => {
+    if (!healthCheck) return null;
+    return (
+      <div className="copilot-health-panel" aria-label="项目体检面板">
+        <div className="copilot-health-head">
+          <span>
+            {healthCheck.project_title ? `项目「${healthCheck.project_title}」 · ` : ''}
+            阻断 {healthCheck.summary.blocking} · 警告 {healthCheck.summary.warnings}
+          </span>
+          <button type="button" className="copilot-link" onClick={() => void loadContext()}>
+            <RefreshCw size={12} aria-hidden="true" />重新体检
+          </button>
+        </div>
+        {healthCheck.groups.map((group) => (
+          <div key={group.key} className="copilot-health-group">
+            <div className="copilot-health-group-head">
+              <b>{group.label}</b>
+              <span className={`copilot-health-badge status-${String(group.status || 'OK').toLowerCase()}`}>
+                {group.status === 'BLOCKED' ? '阻断' : group.status === 'WARNING' ? '提示' : '正常'}
+              </span>
+            </div>
+            <ul className="copilot-health-items">
+              {group.items.map((item, idx) => (
+                <li key={`${group.key}-${item.code}-${idx}`} className="copilot-health-item">
+                  <div>
+                    <span>{item.label}</span>
+                    {item.detail ? <small>{item.detail}</small> : null}
+                  </div>
+                  {item.jump ? (
+                    <button type="button" className="copilot-link" onClick={() => jumpTo(item.jump)}>
+                      前往处理
+                    </button>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    );
+  };
 
   const renderDiagnosis = (message: CopilotMessage) => {
     const diagnosis = message.payload?.diagnosis;
@@ -786,227 +906,101 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
     );
   };
 
-  const delegatePlan = async (message: CopilotMessage) => {
-    if (!session || delegating) return;
-    const plan = message.payload?.plan;
-    const steps = plan?.steps || [];
-    const autoOrders = steps.filter((step) => step.state === 'READY' && step.action).map((step) => step.order);
-    const selected = approvedSteps[message.id] ?? autoOrders;
-    if (!selected.length) {
-      setError('请先勾选要纳入本次授权的步骤。');
-      return;
-    }
-    setDelegating(true);
-    setError('');
-    try {
-      const result = await api<{ delegation: Record<string, unknown> }>('/support/plans/delegate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          session_id: session.id,
-          plan_id: plan?.plan_id,
-          plan_hash: plan?.plan_hash,
-          approved_orders: selected,
-          budget: { max_episodes: 1, max_gpu_actions: allowGpu[message.id] ? 1 : 0 },
-          confirm: true,
-        }),
-      });
-      setDelegation(result.delegation);
-      setNotice('已按你勾选的范围委托；每一步仍由原执行器完成。');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '委托没有开始。');
-    } finally {
-      setDelegating(false);
-    }
-  };
-
-  const refreshDelegation = async () => {
-    if (!session) return;
-    try {
-      const result = await api<{ delegation: Record<string, unknown> }>(
-        `/support/sessions/${session.id}/delegation/refresh`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ session_id: session.id }),
-        },
-      );
-      setDelegation(result.delegation);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '无法读取委托进度。');
-    }
-  };
-
-  const cancelDelegation = async () => {
-    if (!session) return;
-    try {
-      const result = await api<{ delegation: Record<string, unknown> }>(
-        `/support/sessions/${session.id}/delegation/cancel`,
-        { method: 'POST' },
-      );
-      setDelegation(result.delegation);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '无法取消委托。');
-    }
-  };
-
-  const renderPlan = (message: CopilotMessage) => {
-    const plan = message.payload?.plan;
-    if (!plan || !plan.steps?.length) return null;
-    const inputs = planInputs[message.id] || {};
-    const autoOrders = plan.steps.filter((step) => step.state === 'READY' && step.action).map((step) => step.order);
-    const selected = approvedSteps[message.id] ?? autoOrders;
-    const editable = (step: PlanStep) =>
-      Boolean(step.action) && step.state === 'HUMAN_REQUIRED'
-      && ((step.action!.kind === 'document_import_text')
-        || (step.action!.kind === 'project_create' && !step.action!.params?.title));
-    const mergedParams = (step: PlanStep) => ({
-      ...(step.action?.params || {}),
-      ...Object.fromEntries(Object.entries(inputs).filter(([, value]) => value.trim())),
-    });
-    const readyToPreview = (step: PlanStep) => {
-      if (step.action?.kind === 'document_import_text') return Boolean((inputs.text || '').trim());
-      if (step.action?.kind === 'project_create') {
-        return Boolean((inputs.title || String(step.action.params?.title || '')).trim());
-      }
-      return true;
-    };
-    const hasGpu = plan.steps.some((step) => step.action?.kind === 'production_start');
+  const renderReadToolsTrace = (message: CopilotMessage) => {
+    const readTools = message.payload?.read_tools || [];
+    if (!readTools.length) return null;
     return (
-      <div className="copilot-plan" aria-label="操作计划">
-        <div className="copilot-plan-head">
-          <b>操作计划</b>
-          <span>{plan.summary}</span>
-        </div>
-        <ol className="copilot-plan-steps">
-          {plan.steps.map((step) => (
-            <li key={`${message.id}-${step.order}`}>
-              <span className={`copilot-chip plan-${step.state.toLowerCase()}`}>{step.state_label}</span>
-              <b>{step.title}</b>
-              {step.reason && <small>{step.reason}</small>}
-              {step.evidence && step.evidence.length > 0 && <em>{step.evidence.slice(0, 2).join(' · ')}</em>}
-              {step.action?.kind === 'project_create' && (step.state !== 'READY' || !step.action.params?.title) && (
-                <label className="copilot-plan-input">
-                  项目名称
-                  <input
-                    type="text"
-                    value={inputs.title ?? ''}
-                    placeholder="例如：雾港回声"
-                    onChange={(event) => setPlanInputs((prev) => ({
-                      ...prev,
-                      [message.id]: { ...(prev[message.id] || {}), title: event.target.value },
-                    }))}
-                  />
-                </label>
-              )}
-              {step.action?.kind === 'document_import_text' && (
-                <div className="copilot-plan-input">
-                  <label>
-                    原文文本
-                    <textarea
-                      value={inputs.text ?? ''}
-                      placeholder="粘贴你自己的原文；模型不会重写或补写正文。"
-                      onChange={(event) => setPlanInputs((prev) => ({
-                        ...prev,
-                        [message.id]: { ...(prev[message.id] || {}), text: event.target.value },
-                      }))}
-                    />
-                  </label>
-                  <label>
-                    或选择本地文件
-                    <input
-                      type="file"
-                      accept=".txt,.md,.docx"
-                      onChange={(event) => {
-                        const file = event.target.files?.[0];
-                        if (!file) return;
-                        if (file.size > 20 * 1024 * 1024) {
-                          setError('文件超过 20MB，请在导演页使用正式上传。');
-                          return;
-                        }
-                        const reader = new FileReader();
-                        reader.onload = () => {
-                          setPlanInputs((prev) => ({
-                            ...prev,
-                            [message.id]: {
-                              ...(prev[message.id] || {}),
-                              text: String(reader.result || ''),
-                              filename: file.name,
-                            },
-                          }));
-                        };
-                        reader.readAsText(file);
-                      }}
-                    />
-                  </label>
+      <details className="copilot-trace" aria-label="AI 查证过程">
+        <summary>AI 查证过程（{readTools.length} 步只读工具）</summary>
+        <ul className="copilot-trace-list">
+          {readTools.map((step, index) => {
+            const idEntries = step.ids
+              ? Object.entries(step.ids).filter(([, vals]) => Array.isArray(vals) && vals.length > 0)
+              : [];
+            return (
+              <li key={`${message.id}-rt-${index}`}>
+                <code>{step.tool}</code>
+                <span className={step.status === 'OK' ? 'ok' : 'warn'}>{step.status}</span>
+                {typeof step.elapsed_ms === 'number' ? <small>{step.elapsed_ms} ms</small> : null}
+                {idEntries.length > 0 ? (
+                  <small>
+                    {idEntries.map(([k, vals]) => `${k}=${vals.slice(0, 3).join(',')}`).join(' ')}
+                  </small>
+                ) : null}
+              </li>
+            );
+          })}
+        </ul>
+      </details>
+    );
+  };
+
+  const renderProposals = (message: CopilotMessage) => {
+    const proposals = message.payload?.proposals || [];
+    if (!proposals.length) return null;
+    return (
+      <div className="copilot-proposals" aria-label="AI 操作建议卡片">
+        {proposals.map((card, index) => {
+          if (card.type === 'project_grant') {
+            return (
+              <div key={`${message.id}-pg-${index}`} className="copilot-proposal-card">
+                <div className="copilot-proposal-head">
+                  <b>项目自主执行授权建议</b>
+                  <span className="copilot-chip">多步授权</span>
                 </div>
-              )}
-              {step.action && (step.state === 'READY' || editable(step)) && (
-                <div className="copilot-plan-actions">
-                  {step.state === 'READY' && (
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(step.order)}
-                        onChange={(event) => setApprovedSteps((prev) => ({
-                          ...prev,
-                          [message.id]: event.target.checked
-                            ? [...new Set([...(prev[message.id] ?? autoOrders), step.order])]
-                            : (prev[message.id] ?? autoOrders).filter((order) => order !== step.order),
-                        }))}
-                      />
-                      纳入本次授权
-                    </label>
-                  )}
+                <p>{card.objective}</p>
+                {card.reason ? <small>{card.reason}</small> : null}
+                {!card.valid && card.error ? (
+                  <small className="danger">校验未通过：{card.error}</small>
+                ) : null}
+                <div className="copilot-actions">
                   <button
                     type="button"
-                    className="copilot-link"
-                    disabled={!readyToPreview(step)}
-                    onClick={() => void previewAction({
-                      kind: step.action!.kind,
-                      label: step.title,
-                      reason: step.reason || '来自只读计划；仍需预览并确认。',
-                      requires_authorization: true,
-                      params: mergedParams(step),
-                    })}
+                    className="copilot-action"
+                    disabled={!card.valid || busy}
+                    onClick={() => void startTaskObjective(card.objective, card.capability_groups)}
                   >
-                    预览这一步
+                    <ShieldCheck size={13} aria-hidden="true" />开启本项目自主执行授权
                   </button>
                 </div>
-              )}
-            </li>
-          ))}
-        </ol>
-        {hasGpu && (
-          <label className="copilot-plan-actions">
-            <input
-              type="checkbox"
-              checked={Boolean(allowGpu[message.id])}
-              onChange={(event) => setAllowGpu((prev) => ({ ...prev, [message.id]: event.target.checked }))}
-            />
-            允许本次委托执行会占用 GPU 的步骤（仍受原生产门禁约束）
-          </label>
-        )}
-        <div className="copilot-plan-actions">
-          <button type="button" className="copilot-action" disabled={delegating} onClick={() => void delegatePlan(message)}>
-            {delegating ? <Loader2 size={14} className="spin" /> : <ShieldCheck size={14} />}
-            授权并推进已勾选步骤
-          </button>
-        </div>
-        {delegation && (
-          <div className="copilot-delegation" aria-label="委托进度">
-            <b>委托状态：{String(delegation.status || '')}</b>
-            {Array.isArray(delegation.steps) && (delegation.steps as { title?: string; state?: string; message?: string }[]).map((step, index) => (
-              <small key={index}>{step.title || `步骤 ${index + 1}`}：{step.state}{step.message ? `（${step.message}）` : ''}</small>
-            ))}
-            {delegation.stop_reason ? <small>停止原因：{String(delegation.stop_reason)}</small> : null}
-            <div className="copilot-plan-actions">
-              <button type="button" className="copilot-link" onClick={() => void refreshDelegation()}>刷新进度</button>
-              <button type="button" className="copilot-link" onClick={() => void cancelDelegation()}>取消未提交步骤</button>
+              </div>
+            );
+          }
+          return (
+            <div key={`${message.id}-act-${index}`} className="copilot-proposal-card">
+              <div className="copilot-proposal-head">
+                <b>{card.label || card.action_id}</b>
+                <span className="copilot-chip">
+                  {card.gpu ? '占用 GPU' : '无 GPU'} · 单步操作
+                </span>
+              </div>
+              {card.summary ? <p>{card.summary}</p> : null}
+              {card.reason ? <small>{card.reason}</small> : null}
+              {card.params && Object.keys(card.params).length > 0 ? (
+                <pre className="copilot-proposal-params">{JSON.stringify(card.params, null, 2)}</pre>
+              ) : null}
+              {!card.valid && card.error ? (
+                <small className="danger">参数校验未通过：{card.error}</small>
+              ) : null}
+              <div className="copilot-actions">
+                <button
+                  type="button"
+                  className="copilot-action"
+                  disabled={!card.valid || busy}
+                  onClick={() => void previewAction({
+                    kind: card.action_id,
+                    label: card.label || card.action_id,
+                    reason: card.reason || card.summary || 'AI 建议的单步操作；仍需预览并确认。',
+                    requires_authorization: true,
+                    params: card.params || {},
+                  })}
+                >
+                  <Wrench size={13} aria-hidden="true" />预览并确认执行
+                </button>
+              </div>
             </div>
-          </div>
-        )}
-        <p className="copilot-authorization">{plan.notice}</p>
+          );
+        })}
       </div>
     );
   };
@@ -1078,10 +1072,10 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
             <div>
               <b><Sparkles size={14} aria-hidden="true" /> SHINE {nickname}</b>
               <span>
-                {pageLabel} · 只读诊断
-                {context?.snapshot?.runtime?.llm?.configured
+                {pageLabel} · {llmConfigured ? '只读查证与受控操作' : '项目体检模式'}
+                {llmConfigured && context?.snapshot?.runtime?.llm?.configured
                   ? ` · 已接入 ${context.snapshot.runtime.llm.provider || context.snapshot.runtime.llm.model}`
-                  : ' · 离线规则模式'}
+                  : ''}
                 {faultLabel(fault) ? ` · 已绑定 ${faultLabel(fault)}` : ''}
               </span>
             </div>
@@ -1111,6 +1105,20 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
               {verdict?.label || verdict?.mode || '正在读取本机状态'}
             </span>
             <span className="copilot-code">{verdict?.code || '无错误码'}</span>
+            {llmConfigured && healthCheck && (
+              <button
+                type="button"
+                className={`copilot-health-badge status-${String(healthCheck.summary.status || 'OK').toLowerCase()}`}
+                aria-expanded={healthExpanded}
+                onClick={() => setHealthExpanded((value) => !value)}
+              >
+                {healthCheck.summary.blocking > 0
+                  ? `体检阻断 ${healthCheck.summary.blocking}`
+                  : healthCheck.summary.warnings > 0
+                    ? `体检提示 ${healthCheck.summary.warnings}`
+                    : '项目体检健康'}
+              </button>
+            )}
             <button type="button" className="copilot-icon small" aria-label="刷新本机状态" onClick={() => void loadContext()}>
               <RefreshCw size={12} />
             </button>
@@ -1123,46 +1131,72 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                 {buildInfo.user_notice || buildInfo.notice || '无法确认 AI 管家的知识版本。'}
               </p>
             )}
-            {!session && !busy && (
+            {!llmConfigured && (
+              <>
+                <div className="copilot-health-banner" role="status">
+                  <span>配置文本模型后开启 AI 管家对话与自主项目操作</span>
+                  <button type="button" className="copilot-link" onClick={() => jumpTo('#d/advanced')}>
+                    配置文本模型
+                  </button>
+                </div>
+                {renderHealthGroups()}
+              </>
+            )}
+            {llmConfigured && healthExpanded && renderHealthGroups()}
+            {llmConfigured && !session && !busy && (
               <div className="copilot-intro">
-                <p>我能读懂这台电脑上的真实环境与任务记录，帮你判断下一步。</p>
+                <p>我能读懂这台电脑上的真实环境与项目记录，帮你判断下一步。</p>
                 <ul>
-                  <li>有诊断权：只读取既有的裁决、日志与资源回执。</li>
-                  <li>有受控修复权：先预览，再由你明确授权。</li>
+                  <li>有查证权：自动调用只读工具核对镜头、素材、工作流与裁决。</li>
+                  <li>有受控执行权：单步操作卡片或项目授权确认后再执行。</li>
                   <li><b>没有代码修改权</b>：不改源码、不跑命令、不建 Git 补丁。</li>
                 </ul>
               </div>
             )}
 
-            {messages.map((message) => (
+            {llmConfigured && messages.map((message) => (
               message.role === 'user' ? (
                 <div key={message.id} className="copilot-user">{message.content}</div>
+              ) : message.kind === 'action_receipt' ? (
+                <article
+                  key={message.id}
+                  className={`copilot-receipt ${message.payload?.status === 'SUCCEEDED' ? 'ok' : 'failed'}`}
+                >
+                  <b>执行回执 · {ACTION_STATUS_LABELS[String(message.payload?.status || '')] || String(message.payload?.status || '')}</b>
+                  <pre>{message.content}</pre>
+                  {message.payload?.verification?.authority ? (
+                    <small>权威核对：{message.payload.verification.authority}</small>
+                  ) : null}
+                </article>
               ) : (
                 <article key={message.id} className="copilot-answer">
                   <pre>{message.content}</pre>
+                  {renderReadToolsTrace(message)}
                   {renderKnowledge(message)}
-                  {renderPlan(message)}
+                  {renderProposals(message)}
                   {renderDiagnosis(message)}
-                  <div className="copilot-tools">
-                    {(message.payload?.tool_trace || []).map((tool) => (
-                      <span key={tool.tool} className={tool.status === 'OK' ? 'ok' : 'warn'}>
-                        {tool.tool === 'read_setup_verdict' ? '唯一裁决'
-                          : tool.tool === 'read_comfy_runtime' ? '运行合同'
-                            : tool.tool === 'read_task_failure' ? '任务失败事实'
-                              : tool.tool === 'read_quality_gates' ? '质检门'
-                                : tool.tool === 'read_workflow_contract' ? '工作流合同'
-                                  : tool.tool === 'read_installation_receipts' ? '安装回执'
-                                    : tool.tool === 'read_gpu_occupancy' ? 'GPU 占用'
-                                      : tool.tool === 'read_resource_inventory' ? '资源清单'
-                                        : tool.tool === 'search_local_knowledge' ? '本地知识库'
-                                          : tool.tool === 'search_project_knowledge' ? '项目百科'
-                                            : tool.tool === 'search_official_docs' ? '官方摘要'
-                                              : tool.tool === 'read_project_journey' ? '项目旅程'
-                                                : tool.tool === 'search_official_web' ? '官方参考'
-                                                  : '本页面事实'}
-                      </span>
-                    ))}
-                  </div>
+                  {(message.payload?.tool_trace || []).length > 0 && !(message.payload?.read_tools || []).length && (
+                    <div className="copilot-tools">
+                      {(message.payload?.tool_trace || []).map((tool) => (
+                        <span key={tool.tool} className={tool.status === 'OK' ? 'ok' : 'warn'}>
+                          {tool.tool === 'read_setup_verdict' ? '唯一裁决'
+                            : tool.tool === 'read_comfy_runtime' ? '运行合同'
+                              : tool.tool === 'read_task_failure' ? '任务失败事实'
+                                : tool.tool === 'read_quality_gates' ? '质检门'
+                                  : tool.tool === 'read_workflow_contract' ? '工作流合同'
+                                    : tool.tool === 'read_installation_receipts' ? '安装回执'
+                                      : tool.tool === 'read_gpu_occupancy' ? 'GPU 占用'
+                                        : tool.tool === 'read_resource_inventory' ? '资源清单'
+                                          : tool.tool === 'search_local_knowledge' ? '本地知识库'
+                                            : tool.tool === 'search_project_knowledge' ? '项目百科'
+                                              : tool.tool === 'search_official_docs' ? '官方摘要'
+                                                : tool.tool === 'read_project_journey' ? '项目旅程'
+                                                  : tool.tool === 'search_official_web' ? '官方参考'
+                                                    : '本页面事实'}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                 </article>
               )
             ))}
@@ -1272,57 +1306,60 @@ export function ShineCopilot({ pageId, pageLabel, projectId, jobId, errorCode, n
                 sessionId={session.id}
                 projectId={projectId || null}
                 objective={taskObjective}
+                initialCapabilityGroups={taskGroups}
                 initialGrant={restoredGrant}
-                onClose={() => setTaskObjective(null)}
+                onClose={() => { setTaskObjective(null); setTaskGroups(null); }}
               />
             ) : null}
           </div>
 
-          <div className="copilot-compose">
-            {!session && suggestions.length > 0 && (
-              <div className="copilot-suggestions">
-                {suggestions.slice(0, 3).map((question) => (
-                  <button key={question} type="button" onClick={() => void ask(question)} disabled={busy}>
-                    {question}
+          {llmConfigured && (
+            <div className="copilot-compose">
+              {!session && suggestions.length > 0 && (
+                <div className="copilot-suggestions">
+                  {suggestions.slice(0, 3).map((question) => (
+                    <button key={question} type="button" onClick={() => void ask(question)} disabled={busy}>
+                      {question}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {draft.trim().length >= 4 && !taskObjective && (
+                <div className="copilot-suggestions">
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void startTaskObjective()}
+                    title="AI 先展示一次授权范围，你点一次授权后它自动完成后续步骤"
+                  >
+                    一次授权，让 AI 自动完成这件事
                   </button>
-                ))}
-              </div>
-            )}
-            {draft.trim().length >= 4 && !taskObjective && (
-              <div className="copilot-suggestions">
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void startTaskObjective()}
-                  title="AI 先展示一次授权范围，你点一次授权后它自动完成后续步骤"
-                >
-                  一次授权，让 AI 自动完成这件事
+                </div>
+              )}
+              <div className="copilot-input-row">
+                <textarea
+                  ref={inputRef}
+                  value={draft}
+                  maxLength={MAX_INPUT}
+                  rows={2}
+                  placeholder="向我提问项目问题，或让我核对镜头与素材…"
+                  aria-label="向 AI 管家提问"
+                  onChange={(event) => setDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      void ask(draft);
+                    }
+                  }}
+                />
+                <button type="button" className="copilot-send" aria-label="发送" disabled={busy || !draft.trim()}
+                  onClick={() => void ask(draft)}>
+                  {busy ? <Loader2 size={15} className="copilot-spin" /> : <Send size={15} />}
                 </button>
               </div>
-            )}
-            <div className="copilot-input-row">
-              <textarea
-                ref={inputRef}
-                value={draft}
-                maxLength={MAX_INPUT}
-                rows={2}
-                placeholder="问我这台电脑出了什么问题…"
-                aria-label="向 AI 管家提问"
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === 'Enter' && !event.shiftKey) {
-                    event.preventDefault();
-                    void ask(draft);
-                  }
-                }}
-              />
-              <button type="button" className="copilot-send" aria-label="发送" disabled={busy || !draft.trim()}
-                onClick={() => void ask(draft)}>
-                {busy ? <Loader2 size={15} className="copilot-spin" /> : <Send size={15} />}
-              </button>
+              <p className="copilot-foot"><ShieldCheck size={11} aria-hidden="true" />只读查证 · 改动需确认 · 绝不修改源码</p>
             </div>
-            <p className="copilot-foot"><ShieldCheck size={11} aria-hidden="true" />只读诊断 · 修复需预览并授权 · 绝不修改源码</p>
-          </div>
+          )}
         </section>
       )}
     </>

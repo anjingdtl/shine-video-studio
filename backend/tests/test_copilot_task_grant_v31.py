@@ -444,6 +444,8 @@ def test_authorize_requires_the_previewed_digest(studio):
     client, _, _, _ = studio
     from tests.conftest import create_project
 
+    # V4: a session opened with a question needs a text model (409 otherwise).
+    _configure_text_model(client)
     project_id = create_project(client, "授权摘要")
     session = _session(client, project_id)
     preview = client.post(
@@ -475,6 +477,8 @@ def test_authorize_requires_explicit_confirm(studio):
     client, _, _, _ = studio
     from tests.conftest import create_project
 
+    # V4: a session opened with a question needs a text model (409 otherwise).
+    _configure_text_model(client)
     project_id = create_project(client, "授权确认")
     session = _session(client, project_id)
     preview = client.post(

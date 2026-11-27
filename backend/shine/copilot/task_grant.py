@@ -39,6 +39,9 @@ PERMISSION_KEYS: tuple[str, ...] = (
     "manage_user_workflow_profiles",
     "configure_managed_runtime",
     "control_owned_processes",
+    "manage_project_literary",
+    "manage_project_materials",
+    "manage_project_production",
     "run_test_inference",
     "delete_user_assets",
     "modify_source_code",
@@ -63,18 +66,50 @@ PERMANENTLY_FORBIDDEN: frozenset[str] = frozenset(
 #: records that the person accepted third-party executable code; the ``nodes``
 #: group grants both.
 CAPABILITY_PERMISSIONS: dict[str, str] = {
-    # existing reviewed capabilities
+    # Setup & runtime
     "setup_repair": "download_models",
     "setup_reconcile": "verify_existing_files",
-    "managed_release": "control_owned_processes",
-    "workflow_user_copy": "manage_user_workflow_profiles",
-    # V3.1 additions
     "resource_install_plan": "download_models",
+    "managed_release": "control_owned_processes",
+    "support_web_search_update": "read_project",
+    "image_runtime_validate": "run_test_inference",
+    # Workflows
+    "workflow_user_copy": "manage_user_workflow_profiles",
     "workflow_graph_register": "manage_user_workflow_profiles",
-    # A budget-bounded real shoot through the ONE production entry (director
-    # package + Run engine + GPU lease). The "test" group authorizes it; the
-    # original gates (style frozen, plan confirmed, package ready) still apply.
+    # Project, documents & literary
+    "project_create": "manage_project_literary",
+    "project_settings_update": "manage_project_literary",
+    "document_import_text": "manage_project_literary",
+    "document_switch_basis": "manage_project_literary",
+    "story_outline_generate": "manage_project_literary",
+    "story_outline_confirm": "manage_project_literary",
+    "storyboard_book_confirm": "manage_project_literary",
+    "literary_scripts_generate": "manage_project_literary",
+    "storyboard_generate": "manage_project_literary",
+    "storyboard_confirm": "manage_project_literary",
+    "shot_revise": "manage_project_literary",
+    # Materials & Asset Center & LoRAs
+    "material_derive": "manage_project_materials",
+    "material_preferences_update": "manage_project_materials",
+    "material_generate": "run_test_inference",
+    "material_regenerate": "run_test_inference",
+    "material_promote": "manage_project_materials",
+    "shot_swap_material_binding": "manage_project_materials",
+    "asset_center_image_generate": "run_test_inference",
+    "asset_center_character_sheet_generate": "run_test_inference",
+    "asset_center_version_promote": "manage_project_materials",
+    "asset_center_assign_to_project": "manage_project_materials",
+    "lora_import_local": "manage_project_materials",
+    "lora_update": "manage_project_materials",
+    "lora_delete": "manage_project_materials",
+    # Package, production, retake, delivery & recovery
+    "director_package_create": "manage_project_production",
     "production_start": "run_test_inference",
+    "production_control": "manage_project_production",
+    "shot_rerender": "run_test_inference",
+    "episode_delivery_assemble": "manage_project_production",
+    "task_reconcile": "manage_project_production",
+    "stale_run_recover": "manage_project_production",
 }
 
 #: Capability -> capability group the preview asks the person to confirm.  The
@@ -86,6 +121,9 @@ GROUP_PERMISSIONS: dict[str, tuple[str, ...]] = {
     "nodes": ("install_reviewed_node_packages", "download_models"),
     "workflows": ("manage_user_workflow_profiles",),
     "runtime": ("configure_managed_runtime", "control_owned_processes"),
+    "literary": ("manage_project_literary",),
+    "materials": ("manage_project_materials",),
+    "production": ("manage_project_production",),
     "test": ("run_test_inference",),
 }
 
@@ -93,6 +131,16 @@ DEFAULT_GROUPS: tuple[str, ...] = (
     "inspect",
     "resources",
     "nodes",
+    "workflows",
+    "runtime",
+    "test",
+)
+
+PROJECT_AUTONOMOUS_GROUPS: tuple[str, ...] = (
+    "inspect",
+    "literary",
+    "materials",
+    "production",
     "workflows",
     "runtime",
     "test",

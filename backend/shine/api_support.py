@@ -23,12 +23,11 @@ from shine.support import actions as action_service
 from shine.support import agent as agent_service
 from shine.support import capability_catalog, official_docs, project_knowledge
 from shine.support import contracts as contract_registry
-from shine.support import delegation as delegation_service
 from shine.support import parameters as parameter_service
-from shine.support import planner as planner_service
 from shine.support import reports as report_service
 from shine.support.context import build_evidence_snapshot
 from shine.support.diagnostics import diagnose_snapshot, suggested_questions
+from shine.support.health_check import build_health_check
 from shine.support.knowledge import local_version_facts, search_local, search_official_web
 from shine.support.memory import profile as memory_profile
 from shine.support.models import SupportAction, SupportReport
@@ -37,6 +36,10 @@ from shine.support.tools import ToolDenied, read_tool_names
 router = APIRouter(prefix="/api/v1/support", tags=["ai-copilot"])
 SettingsDep = Annotated[Settings, Depends(app_settings)]
 GatewayDep = Annotated[object, Depends(llm_gateway)]
+
+#: Where the person configures the copilot's text model.
+LLM_SETUP_HINT = "配置文本模型后开启 AI 管家对话与自主项目操作（高级设置 → 文本模型 / 角色路由）。"
+LLM_SETUP_HREF = "#d/advanced"
 
 
 class SessionCreate(BaseModel):
@@ -75,14 +78,6 @@ class ActionPreviewRequest(BaseModel):
     project_id: str | None = Field(default=None, max_length=36)
 
 
-class PlanPreviewRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    request: str = Field(min_length=1, max_length=4000)
-    project_id: str | None = Field(default=None, max_length=36)
-    episode_ids: list[str] = Field(default_factory=list, max_length=32)
-    session_id: str | None = Field(default=None, max_length=36)
-
-
 class ParameterPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     target: str = Field(min_length=1, max_length=120)
@@ -104,23 +99,6 @@ class ActionApproveRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     preview_hash: str = Field(min_length=16, max_length=64)
     confirm: bool = False
-
-
-class PlanDelegateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: str = Field(min_length=1, max_length=36)
-    #: The exact plan the person previewed.  A button rendered for an older
-    #: plan must never authorize the newest one.
-    plan_id: str | None = Field(default=None, max_length=48)
-    plan_hash: str | None = Field(default=None, max_length=64)
-    approved_orders: list[int] = Field(min_length=1, max_length=8)
-    budget: dict = Field(default_factory=dict)
-    confirm: bool = False
-
-
-class PlanDelegateAction(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    session_id: str = Field(min_length=1, max_length=36)
 
 
 class ReportCreate(BaseModel):
@@ -149,15 +127,30 @@ def _http(code: str, message: str, status: int = 400) -> HTTPException:
     return HTTPException(status_code=status, detail={"code": code, "message": message})
 
 
-def _identify_plan(plan: dict, episode_ids: list[str]) -> dict:
-    return planner_service.identify_plan(plan, episode_ids)
-
-
 def _require_session(db, session_id: str):
     row = agent_service.get_session(db, session_id)
     if row is None:
         raise _http("SESSION_NOT_FOUND", "AI 管家会话不存在或已被清理。", 404)
     return row
+
+
+def _llm_required() -> HTTPException:
+    return HTTPException(
+        status_code=409,
+        detail={"code": "COPILOT_LLM_REQUIRED", "message": LLM_SETUP_HINT, "href": LLM_SETUP_HREF},
+    )
+
+
+def _require_llm(db, gateway) -> dict:
+    """V4: no conversation without a configured text model.
+
+    The refusal is named and carries the configuration entry; nothing is
+    stored and no template reply is composed.
+    """
+    status = agent_service.llm_status(db, gateway)
+    if not status.get("configured"):
+        raise _llm_required()
+    return status
 
 
 def _schedule_memory_extraction(
@@ -281,127 +274,27 @@ def support_build(request: Request):
     return identity
 
 
-@router.post("/plans/preview")
-def support_plan_preview(
-    body: PlanPreviewRequest,
-    actor: Operator,
-    settings: SettingsDep,
-    db: DBSession,
-):
-    """Bounded read-only plan; no executor is called here."""
-    session = _require_session(db, body.session_id) if body.session_id else None
-    project_id = body.project_id or (session.project_id if session is not None else None)
-    try:
-        plan = planner_service.build_plan(
-            db,
-            settings,
-            request=body.request,
-            project_id=project_id,
-            episode_ids=body.episode_ids or None,
-        )
-    except ValueError as exc:
-        raise _http(str(exc), "计划缺少项目或分集范围。", 400) from exc
-    if plan is None:
-        raise _http(
-            "NO_PLAN",
-            "这句话没有匹配到可执行计划；可以直接提问，管家会先诊断或检索项目百科。",
-            409,
-        )
-    identified = _identify_plan(plan, list(body.episode_ids or []))
-    if session is not None:
-        # Only the read-only plan, its immutable identity and the person's
-        # explicit scope are stored; delegation walks this list later and still
-        # previews every step.
-        session.context_json = {
-            **(session.context_json or {}),
-            "last_plan": {**identified, "stored_at": utcnow().isoformat()},
-        }
-        db.commit()
-    return {
-        "plan": identified,
-        "capabilities": {
-            "version": capability_catalog.CATALOG_VERSION,
-            "coverage": capability_catalog.catalog_payload()["matrix_totals"],
-        },
-        "notice": "计划是只读建议；每个可执行步骤仍要预览并明确确认。",
-    }
-
-
-@router.post("/plans/delegate")
-def support_plan_delegate(
-    body: PlanDelegateRequest,
-    request: Request,
-    actor: Operator,
+@router.get("/health-check")
+def support_health_check(
     settings: SettingsDep,
     db: DBSession,
     gateway: GatewayDep,
+    project_id: str | None = None,
 ):
-    if not body.confirm:
-        raise _http("CONFIRMATION_REQUIRED", "必须明确确认授权范围后才会推进计划。", 400)
-    session = _require_session(db, body.session_id)
-    try:
-        payload = delegation_service.create(
-            db,
-            settings,
-            request.app.state.session_factory,
-            session=session,
-            plan_id=body.plan_id,
-            plan_hash=body.plan_hash,
-            approved_orders=list(body.approved_orders),
-            budget=body.budget,
-            actor=actor,
-            gateway=gateway,
-            app=request.app,
-        )
-    except delegation_service.DelegationError as exc:
-        raise _http(exc.code, exc.message, 409) from exc
-    db.commit()
-    return {"delegation": payload}
+    """The one deterministic project health check (V4).
 
+    Read-only, side-effect free and shared by the no-LLM copilot card and the
+    LLM copilot's summary badge.  Every dimension reads the same authority the
+    original pages read; nothing here is a second verdict.
+    """
+    if project_id is not None:
+        project_id = project_id.strip() or None
+    if project_id:
+        from shine.services import require_project
 
-@router.get("/sessions/{session_id}/delegation")
-def support_delegation_get(session_id: str, db: DBSession):
-    session = _require_session(db, session_id)
-    payload = delegation_service.get(db, session)
-    if payload is None:
-        raise _http("DELEGATION_NOT_FOUND", "当前会话还没有委托。", 404)
-    return {"delegation": payload}
-
-
-@router.post("/sessions/{session_id}/delegation/refresh")
-def support_delegation_refresh(
-    session_id: str,
-    body: PlanDelegateAction,
-    request: Request,
-    actor: Operator,
-    settings: SettingsDep,
-    db: DBSession,
-    gateway: GatewayDep,
-):
-    session = _require_session(db, session_id)
-    payload = delegation_service.refresh(
-        db,
-        settings,
-        request.app.state.session_factory,
-        session=session,
-        actor=actor,
-        gateway=gateway,
-        app=request.app,
-    )
-    db.commit()
-    return {"delegation": payload}
-
-
-@router.post("/sessions/{session_id}/delegation/cancel")
-def support_delegation_cancel(session_id: str, db: DBSession):
-    session = _require_session(db, session_id)
-    try:
-        payload = delegation_service.cancel(db=db, session=session)
-    except delegation_service.DelegationError as exc:
-        raise _http(exc.code, exc.message, 409) from exc
-    db.commit()
-    return {"delegation": payload}
-
+        require_project(db, project_id)
+    llm = agent_service.llm_status(db, gateway)
+    return build_health_check(db, settings, project_id=project_id, llm_ready=bool(llm.get("configured")))
 
 @router.get("/parameters/contracts")
 def support_parameter_contracts(db: DBSession, project_id: str | None = None):
@@ -494,6 +387,48 @@ def support_parameter_confirm(
     except action_service.ActionBlocked as exc:
         raise _http(exc.code, exc.message, 423) from exc
     return {"action": action, "reused": reused}
+
+
+def _append_action_receipt_message(db, action: dict, reused: bool) -> None:
+    if reused or not action.get("session_id"):
+        return
+    from shine.models import new_id
+    from shine.support.models import SupportMessage, SupportSession
+
+    session = db.get(SupportSession, str(action["session_id"]))
+    if session is None:
+        return
+    status = str(action.get("status") or "")
+    verif = action.get("verification") or {}
+    task_id = action.get("original_task_id")
+    summary_line = (
+        f"已执行 {action['kind']}（状态：{status}"
+        + (f"，原任务：{task_id}" if task_id else "")
+        + (f"，结果：{verif.get('outcome')}" if verif.get("outcome") else "")
+        + "）。"
+    )
+    msg = SupportMessage(
+        id=new_id(),
+        session_id=session.id,
+        role="assistant",
+        kind="action_receipt",
+        content=summary_line,
+        payload={
+            "action_receipt": {
+                "action_id": action.get("id"),
+                "kind": action.get("kind"),
+                "status": status,
+                "original_task_id": task_id,
+                "verification": verif,
+                "last_error": action.get("last_error"),
+            }
+        },
+        evidence_ids=[],
+        created_at=utcnow(),
+    )
+    db.add(msg)
+    session.updated_at = utcnow()
+    db.commit()
 
 
 @router.get("/context")
@@ -589,8 +524,13 @@ def support_session_create(
         actor=actor,
     )
     payload = agent_service.session_payload(db, session)
+    llm = agent_service.llm_status(db, gateway)
     result = None
     if body.question.strip():
+        if not llm.get("configured"):
+            # The session exists (the health-check view and the grant card
+            # need it); only the conversation turn needs a model.
+            raise _llm_required()
         result = agent_service.handle_message(
             db, settings, session, body.question.strip(), actor=actor, gateway=gateway
         )
@@ -602,6 +542,8 @@ def support_session_create(
         "suggested_questions": suggested_questions(session.page_id),
         "web_search_enabled": agent_service.web_search_enabled(db),
         "capabilities": {"max_steps": 8, "tools": read_tool_names()},
+        "llm": llm,
+        "llm_setup": {"href": LLM_SETUP_HREF, "hint": LLM_SETUP_HINT},
     }
 
 
@@ -623,6 +565,9 @@ def support_session_message(
     gateway: GatewayDep,
 ):
     session = _require_session(db, session_id)
+    # V4: the conversation needs a configured text model.  Nothing is stored
+    # and no template reply is composed; the UI shows the health check instead.
+    _require_llm(db, gateway)
     if any(
         value is not None
         for value in (body.page_id, body.job_id, body.attempt_id, body.task_id, body.error_code)
@@ -723,6 +668,7 @@ def support_action_approve(
         raise _http(exc.code, exc.message, 423) from exc
     except ToolDenied as exc:
         raise _http("ACTION_NOT_PERMITTED", str(exc), 403) from exc
+    _append_action_receipt_message(db, action, reused)
     return {"action": action, "reused": reused}
 
 
@@ -880,9 +826,11 @@ class TaskGrantPreviewRequest(BaseModel):
     objective: str = Field(min_length=2, max_length=2000)
     project_id: str | None = Field(default=None, max_length=36)
     installation_id: str | None = Field(default=None, max_length=96)
-    capability_groups: list[str] = Field(default_factory=list, max_length=8)
+    capability_groups: list[str] = Field(default_factory=list, max_length=16)
     limits: dict = Field(default_factory=dict)
     validity_hours: int = Field(default=24, ge=1, le=168)
+    allow_gpu: bool | None = None
+    allow_download: bool | None = None
 
 
 class TaskGrantAuthorizeRequest(BaseModel):
@@ -968,13 +916,13 @@ def _risk_list(groups: list[str]) -> list[str]:
     if "nodes" in groups:
         # A reviewed, pinned node package still brings executable code.
         risks.append("THIRD_PARTY_CODE")
-    if "workflows" in groups:
+    if "workflows" in groups or "literary" in groups or "materials" in groups or "production" in groups:
         risks.append("USER_DATA_WRITE")
     if "test" in groups:
         risks.append("GPU_TEST")
     if "runtime" in groups:
         risks.append("MANAGED_PROCESS_CONTROL")
-    return risks
+    return list(dict.fromkeys(risks))
 
 
 @router.post("/task-grants/preview")
@@ -993,11 +941,25 @@ def support_task_grant_preview(
         from shine.services import require_project
 
         require_project(db, project_id)
-    try:
-        groups = grant_contract.normalize_groups(
-            body.capability_groups or list(grant_contract.DEFAULT_GROUPS)
+    raw_groups = list(
+        body.capability_groups
+        or (
+            list(grant_contract.PROJECT_AUTONOMOUS_GROUPS)
+            if project_id
+            else list(grant_contract.DEFAULT_GROUPS)
         )
-        limits = grant_contract.normalize_limits({**body.limits} or None)
+    )
+    raw_limits = dict(body.limits or {})
+    if body.allow_gpu is False:
+        raw_groups = [group for group in raw_groups if group != "test"]
+        raw_limits["max_test_inference_jobs"] = 0
+        raw_limits["max_gpu_minutes"] = 0
+    if body.allow_download is False:
+        raw_groups = [group for group in raw_groups if group not in {"resources", "nodes"}]
+        raw_limits["max_download_bytes"] = 0
+    try:
+        groups = grant_contract.normalize_groups(raw_groups)
+        limits = grant_contract.normalize_limits(raw_limits or None)
     except grant_contract.GrantError as exc:
         raise _http(exc.code, exc.message) from exc
 

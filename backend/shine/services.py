@@ -2095,3 +2095,217 @@ def revise_shot_record(
 
 def job_fingerprint(request: dict[str, Any]) -> str:
     return hashlib.sha256(canonical_json(request).encode("utf-8")).hexdigest()
+
+
+def adopt_project_asset_to_shots(
+    db: Session,
+    settings: Any,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    shot_ids: list[str],
+    project_asset_id: str | None = None,
+    library_version_id: str | None = None,
+    role: str | None = None,
+    entity_id: str | None = None,
+    allow_revise_frozen: bool = True,
+    expected_shot_revisions: dict[str, int] | None = None,
+    confirmed: bool = True,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Adopt a project Asset (or library version) into explicit shots (D12 swap)."""
+    from shine.api_asset_center import AdoptionRequest, adopt_into_shots
+
+    revs = dict(expected_shot_revisions or {})
+    for sid in shot_ids:
+        if sid not in revs:
+            shot = db.get(Shot, sid)
+            if shot is None or shot.project_id != project_id:
+                raise HTTPException(404, {"code": "SHOT_NOT_FOUND", "shot_id": sid})
+            revs[sid] = shot.revision
+    body = AdoptionRequest(
+        project_id=project_id,
+        library_version_id=library_version_id,
+        project_asset_id=project_asset_id,
+        shot_ids=shot_ids,
+        role=role,
+        entity_id=entity_id,
+        expected_shot_revisions=revs,
+        idempotency_key=idempotency_key,
+        confirmed=confirmed,
+        allow_revise_frozen=allow_revise_frozen,
+    )
+    return adopt_into_shots(body, actor, settings, db)
+
+
+def queue_asset_center_image_jobs(
+    db: Session,
+    settings: Any,
+    *,
+    idempotency_key: str,
+    mode: str,
+    prompt: str = "",
+    negative_prompt: str = "",
+    category: str = "other",
+    project_id: str | None = None,
+    title: str = "",
+    character_sheet: bool = False,
+    character_sheet_note: str = "",
+    style_preset: str | None = None,
+    style_loras: list[dict[str, Any]] | None = None,
+    candidate_count: int = 1,
+    seed: int | None = None,
+    references: list[dict[str, Any]] | None = None,
+    output: dict[str, Any] | None = None,
+    target_asset_id: str | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Queue asset-center image generation via the single `_queue_image_jobs` executor."""
+    from shine.api_asset_center import ImageJobRequest, _queue_image_jobs
+
+    req = ImageJobRequest(
+        idempotency_key=idempotency_key,
+        title=title,
+        mode=mode,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        references=references or [],
+        output=output or {"width": 1024, "height": 1024},
+        seed=seed,
+        candidate_count=candidate_count,
+        category=category,
+        project_id=project_id,
+        target_asset_id=target_asset_id,
+        character_sheet=character_sheet,
+        character_sheet_note=character_sheet_note,
+        style_preset=style_preset,
+        style_loras=style_loras,
+    )
+    return _queue_image_jobs(req, settings, db)
+
+
+def queue_asset_center_character_sheet(
+    db: Session,
+    settings: Any,
+    *,
+    idempotency_key: str,
+    references: list[dict[str, Any]],
+    character_sheet_note: str = "",
+    category: str = "character",
+    project_id: str | None = None,
+    title: str = "",
+    seed: int | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Queue a 16:9 three-view character sheet generation via asset center."""
+    return queue_asset_center_image_jobs(
+        db,
+        settings,
+        idempotency_key=idempotency_key,
+        mode="I2I",
+        prompt="",
+        category=category,
+        project_id=project_id,
+        title=title,
+        character_sheet=True,
+        character_sheet_note=character_sheet_note,
+        references=references,
+        seed=seed,
+        actor=actor,
+    )
+
+
+def promote_asset_center_version(
+    db: Session,
+    settings: Any,
+    *,
+    version_id: str,
+    evidence: str = "copilot_confirmed",
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Promote an asset-center LibraryVersion through the original promotion executor."""
+    from shine.api_asset_center import LibraryVersion, PromoteVersion, promote_version
+    from shine.asset_center import service as ac_service
+
+    row = db.get(LibraryVersion, version_id)
+    if row is None:
+        raise HTTPException(404, {"code": "LIBRARY_VERSION_NOT_FOUND", "message": "素材版本不存在"})
+    if row.status != "READY_FOR_REVIEW" or row.is_mock:
+        raise HTTPException(
+            409, {"code": "LIBRARY_VERSION_NOT_REVIEWABLE", "message": "技术审核未通过或结果来自模拟执行"}
+        )
+    ac_service.require_version_rights(db, row)
+    issued = ac_service.issue_grant(db, actor, "library_promote", row)
+    body = PromoteVersion(grant_id=issued["grant_id"], snapshot=issued["snapshot"], evidence=evidence)
+    return promote_version(version_id, body, actor, settings, db)
+
+
+def assign_asset_center_version(
+    db: Session,
+    settings: Any,
+    *,
+    project_id: str,
+    library_version_id: str,
+    role: str,
+    idempotency_key: str,
+    entity_id: str | None = None,
+    usage_scope: str = "local",
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Assign a promoted LibraryVersion into a project via the asset-center executor."""
+    from shine.api_asset_center import Assignment, assign_library_version
+
+    body = Assignment(
+        project_id=project_id,
+        library_version_id=library_version_id,
+        role=role,
+        entity_id=entity_id,
+        usage_scope=usage_scope,
+        idempotency_key=idempotency_key,
+        confirmed=True,
+    )
+    return assign_library_version(body, actor, settings, db)
+
+
+def rerender_shot_segment(
+    db: Session,
+    settings: Any,
+    *,
+    project_id: str,
+    shot_id: str,
+    source_job_id: str,
+    expected_shot_revision: int | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Re-render one shot segment via the exact generation-segment executor."""
+    from shine.api_segments import SegmentAction, regenerate
+
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    revision = expected_shot_revision if expected_shot_revision is not None else shot.revision
+
+    class _MinimalRequest:
+        class app:
+            class state:
+                pass
+
+    req = _MinimalRequest()
+    req.app.state.settings = settings
+    body = SegmentAction(source_job_id=source_job_id, expected_shot_revision=revision)
+    if db.in_transaction():
+        db.commit()
+    return regenerate(project_id, shot_id, body, actor, req, db)
+
+
+def assemble_series_delivery(
+    db: Session,
+    *,
+    project_id: str,
+    series_id: str,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Assemble final delivery for a completed series via the delivery executor."""
+    from shine.api_delivery import assemble_completed_series
+
+    return assemble_completed_series(project_id, series_id, actor, db)

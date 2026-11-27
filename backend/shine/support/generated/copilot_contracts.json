@@ -1,6 +1,1250 @@
 {
   "api_contract": [
     {
+      "body": {
+        "fields": {
+          "allow_revise_frozen": {
+            "default": false,
+            "type": "boolean"
+          },
+          "confirmed": {
+            "default": false,
+            "type": "boolean"
+          },
+          "entity_id": {
+            "type": "string"
+          },
+          "expected_shot_revisions": {
+            "type": "object"
+          },
+          "idempotency_key": {
+            "maxLength": 120,
+            "minLength": 1,
+            "type": "string"
+          },
+          "library_version_id": {
+            "type": "string"
+          },
+          "project_asset_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "shot_ids": {
+            "type": "array"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "idempotency_key",
+          "project_asset_id",
+          "project_id"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "allow_revise_frozen": {
+              "default": false,
+              "type": "boolean"
+            },
+            "confirmed": {
+              "default": false,
+              "type": "boolean"
+            },
+            "entity_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expected_shot_revisions": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "idempotency_key": {
+              "maxLength": 120,
+              "minLength": 1,
+              "type": "string"
+            },
+            "library_version_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "project_asset_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "role": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "shot_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "project_id",
+            "project_asset_id",
+            "idempotency_key"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "9bd29880c018b89d8e03a80c9ba267c6b37e44f972ff978ba7e0216b5386fac5"
+      },
+      "operation": "POST /api/v1/asset-center/adoptions",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/asset-center/assets",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "category",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        },
+        {
+          "in": "query",
+          "name": "favorite",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        },
+        {
+          "in": "query",
+          "name": "kind",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        },
+        {
+          "in": "query",
+          "name": "limit",
+          "required": false,
+          "schema": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "summary": {
+            "default": 50,
+            "maximum": 200,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "offset",
+          "required": false,
+          "schema": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "summary": {
+            "default": 0,
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        {
+          "in": "query",
+          "name": "q",
+          "required": false,
+          "schema": {
+            "default": "",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "maxLength": 200,
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "status",
+          "required": false,
+          "schema": {
+            "default": "ACTIVE",
+            "type": "string"
+          },
+          "summary": {
+            "default": "ACTIVE",
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/asset-center/assignments",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "asset_id",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        },
+        {
+          "in": "query",
+          "name": "project_id",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "confirmed": {
+            "default": true,
+            "type": "boolean"
+          },
+          "entity_id": {
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 100,
+            "minLength": 8,
+            "type": "string"
+          },
+          "library_version_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "requirement_context": {
+            "type": "object"
+          },
+          "role": {
+            "enum": [
+              "character",
+              "costume",
+              "scene",
+              "prop",
+              "voice",
+              "dialogue",
+              "sfx",
+              "music",
+              "style_reference",
+              "generic"
+            ],
+            "type": "string"
+          },
+          "usage_scope": {
+            "default": "local",
+            "enum": [
+              "local",
+              "research",
+              "personal",
+              "non_commercial",
+              "commercial"
+            ],
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "idempotency_key",
+          "library_version_id",
+          "project_id",
+          "role"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "confirmed": {
+              "default": true,
+              "type": "boolean"
+            },
+            "entity_id": {
+              "anyOf": [
+                {
+                  "maxLength": 80,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "idempotency_key": {
+              "maxLength": 100,
+              "minLength": 8,
+              "type": "string"
+            },
+            "library_version_id": {
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "requirement_context": {
+              "anyOf": [
+                {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "role": {
+              "enum": [
+                "character",
+                "costume",
+                "scene",
+                "prop",
+                "voice",
+                "dialogue",
+                "sfx",
+                "music",
+                "style_reference",
+                "generic"
+              ],
+              "type": "string"
+            },
+            "usage_scope": {
+              "default": "local",
+              "enum": [
+                "local",
+                "research",
+                "personal",
+                "non_commercial",
+                "commercial"
+              ],
+              "type": "string"
+            }
+          },
+          "required": [
+            "project_id",
+            "library_version_id",
+            "role",
+            "idempotency_key"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "c00d20686a2e0f7d51321a47d14302e7531be47793da5a44f963378ac43031da"
+      },
+      "operation": "POST /api/v1/asset-center/assignments",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "candidate_count": {
+            "default": 1,
+            "maximum": 4.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "category": {
+            "default": "other",
+            "type": "string"
+          },
+          "character_sheet": {
+            "default": false,
+            "type": "boolean"
+          },
+          "character_sheet_note": {
+            "default": "",
+            "maxLength": 600,
+            "type": "string"
+          },
+          "expected_asset_state_version": {
+            "type": "integer"
+          },
+          "idempotency_key": {
+            "maxLength": 80,
+            "minLength": 8,
+            "type": "string"
+          },
+          "mask_media_id": {
+            "type": "string"
+          },
+          "mode": {
+            "enum": [
+              "T2I",
+              "I2I",
+              "INPAINT",
+              "MULTIREF",
+              "WARDROBE",
+              "RGBA"
+            ],
+            "type": "string"
+          },
+          "negative_prompt": {
+            "default": "",
+            "maxLength": 1200,
+            "type": "string"
+          },
+          "output": {
+            "type": "object"
+          },
+          "parent_version_id": {
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "prompt": {
+            "default": "",
+            "maxLength": 8000,
+            "type": "string"
+          },
+          "references": {
+            "maxItems": 10,
+            "type": "array"
+          },
+          "requirement_context": {
+            "type": "object"
+          },
+          "seed": {
+            "type": "integer"
+          },
+          "style_loras": {
+            "maxItems": 3,
+            "type": "array"
+          },
+          "style_preset": {
+            "type": "string"
+          },
+          "target_asset_id": {
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "maxLength": 200,
+            "type": "string"
+          },
+          "transparent": {
+            "default": false,
+            "type": "boolean"
+          },
+          "validation_only": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "idempotency_key",
+          "mode"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "candidate_count": {
+              "default": 1,
+              "maximum": 4.0,
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "category": {
+              "default": "other",
+              "type": "string"
+            },
+            "character_sheet": {
+              "default": false,
+              "type": "boolean"
+            },
+            "character_sheet_note": {
+              "default": "",
+              "maxLength": 600,
+              "type": "string"
+            },
+            "expected_asset_state_version": {
+              "anyOf": [
+                {
+                  "minimum": 1.0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "idempotency_key": {
+              "maxLength": 80,
+              "minLength": 8,
+              "type": "string"
+            },
+            "mask_media_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "mode": {
+              "enum": [
+                "T2I",
+                "I2I",
+                "INPAINT",
+                "MULTIREF",
+                "WARDROBE",
+                "RGBA"
+              ],
+              "type": "string"
+            },
+            "negative_prompt": {
+              "default": "",
+              "maxLength": 1200,
+              "type": "string"
+            },
+            "output": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "parent_version_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "project_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "prompt": {
+              "default": "",
+              "maxLength": 8000,
+              "type": "string"
+            },
+            "references": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "media_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "order": {
+                    "maximum": 9.0,
+                    "minimum": 0.0,
+                    "type": "integer"
+                  },
+                  "role": {
+                    "maxLength": 32,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "version_id": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "order",
+                  "role"
+                ],
+                "type": "object"
+              },
+              "maxItems": 10,
+              "type": "array"
+            },
+            "requirement_context": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "seed": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "style_loras": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "lora_id": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[a-f0-9]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "strength_model": {
+                    "anyOf": [
+                      {
+                        "maximum": 1.5,
+                        "minimum": 0.0,
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "lora_id"
+                ],
+                "type": "object"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "style_preset": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "target_asset_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": {
+              "default": "",
+              "maxLength": 200,
+              "type": "string"
+            },
+            "transparent": {
+              "default": false,
+              "type": "boolean"
+            },
+            "validation_only": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "idempotency_key",
+            "mode"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "d6daf5affef3ed9738cd473aa68a6b8960c1951dd7f514500c94a19e054b3640"
+      },
+      "operation": "POST /api/v1/asset-center/image-jobs",
+      "parameters": [],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/asset-center/image-jobs/{}",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "task_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "evidence": {
+            "default": "",
+            "maxLength": 2000,
+            "type": "string"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "grant_id",
+          "snapshot"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "default": "",
+              "maxLength": 2000,
+              "type": "string"
+            },
+            "grant_id": {
+              "type": "string"
+            },
+            "snapshot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "grant_id",
+            "snapshot"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "c46f7aa9b25eeece3c538b5cf7971deab03d5277bdc3dc8919df919a298adac6"
+      },
+      "operation": "POST /api/v1/asset-center/versions/{}/promote",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "version_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "evidence": {
+            "maxLength": 2000,
+            "minLength": 5,
+            "type": "string"
+          },
+          "grant_id": {
+            "type": "string"
+          },
+          "listened": {
+            "default": false,
+            "type": "boolean"
+          },
+          "offline": {
+            "default": true,
+            "type": "boolean"
+          },
+          "snapshot": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "evidence",
+          "grant_id",
+          "snapshot"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "evidence": {
+              "maxLength": 2000,
+              "minLength": 5,
+              "type": "string"
+            },
+            "grant_id": {
+              "type": "string"
+            },
+            "listened": {
+              "default": false,
+              "type": "boolean"
+            },
+            "offline": {
+              "default": true,
+              "type": "boolean"
+            },
+            "snapshot": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "grant_id",
+            "snapshot",
+            "evidence"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "75273a7604fd751fff86ae068c674c8d368660c65df78dd64ab64a25e7cc954a"
+      },
+      "operation": "POST /api/v1/candidate-assets/{}/promote",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "identity",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/director-packages/{}",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "package_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/loras",
+      "parameters": [
+        {
+          "in": "query",
+          "name": "base_model",
+          "required": false,
+          "schema": {
+            "default": "minimax_h3",
+            "enum": [
+              "minimax_h3",
+              "qwen_image_21"
+            ],
+            "type": "string"
+          },
+          "summary": {
+            "default": "minimax_h3",
+            "enum": [
+              "minimax_h3",
+              "qwen_image_21"
+            ],
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "POST /api/v1/loras/import",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "DELETE /api/v1/loras/{}",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "lora_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "default_strength": {
+            "type": "number"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "negative_trigger_word": {
+            "type": "string"
+          },
+          "trigger_position": {
+            "type": "string"
+          },
+          "trigger_word": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "default_strength": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "display_name": {
+              "anyOf": [
+                {
+                  "maxLength": 160,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "negative_trigger_word": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "trigger_position": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "prefix",
+                    "suffix"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "trigger_word": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "schema_digest": "de9ec3b3d7d0e0e582ac2ebee95658c6fd87d5e303bf6f8122f6ecd4e6db1e56"
+      },
+      "operation": "PATCH /api/v1/loras/{}",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "lora_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
       "body": null,
       "operation": "GET /api/v1/production-runs/{}",
       "parameters": [
@@ -60,6 +1304,41 @@
     {
       "body": null,
       "operation": "POST /api/v1/production-runs/{}/pause",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "run_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "POST /api/v1/production-runs/{}/reconcile",
       "parameters": [
         {
           "in": "header",
@@ -190,6 +1469,353 @@
       "body": null,
       "operation": "GET /api/v1/projects/{}",
       "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/projects/{}/assets",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/projects/{}/deliveries",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "episode_ids": {
+            "type": "array"
+          },
+          "generation_mode": {
+            "type": "string"
+          },
+          "output": {
+            "type": "object"
+          },
+          "policy": {
+            "type": "object"
+          },
+          "workflow_profile_id": {
+            "maxLength": 36,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "workflow_profile_id"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "episode_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "generation_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "T2VA",
+                    "I2VA",
+                    "FL2VA",
+                    "L2VA",
+                    "Ref2VA"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "output": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "policy": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "workflow_profile_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "workflow_profile_id"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "fc6113de2b07033df5cb0d92e1111f163f807c57c3cd482d76e0710287ba9d2a"
+      },
+      "operation": "POST /api/v1/projects/{}/director-packages",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "episode_ids": {
+            "type": "array"
+          }
+        },
+        "required": true,
+        "required_fields": [],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "episode_ids": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "maxItems": 200,
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "schema_digest": "eb1ae7dffc6d95b9607163e946a2c175b316add58ff7bd8e97ea75281aa2d330"
+      },
+      "operation": "POST /api/v1/projects/{}/director/materials/derive",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/projects/{}/director/outline",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "query",
+          "name": "artifact_id",
+          "required": false,
+          "schema": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary": {}
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "artifact_id": {
+            "maxLength": 36,
+            "minLength": 1,
+            "type": "string"
+          },
+          "expected_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "artifact_id",
+          "expected_sha256"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "artifact_id": {
+              "maxLength": 36,
+              "minLength": 1,
+              "type": "string"
+            },
+            "expected_sha256": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            }
+          },
+          "required": [
+            "artifact_id",
+            "expected_sha256"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "8fb52b0bae36c8f91929276ab71a2f501d23e48d30797fb3f43277ad4b3f3fb7"
+      },
+      "operation": "POST /api/v1/projects/{}/director/outline/confirm",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
         {
           "in": "path",
           "name": "project_id",
@@ -370,6 +1996,200 @@
       "security": []
     },
     {
+      "body": null,
+      "operation": "GET /api/v1/projects/{}/director/storyboard-book",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "acknowledge_deviation": {
+            "default": false,
+            "type": "boolean"
+          },
+          "expected_sha256": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "plan_version": {
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "style": {
+            "type": "object"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "expected_sha256",
+          "plan_version"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "acknowledge_deviation": {
+              "default": false,
+              "type": "boolean"
+            },
+            "expected_sha256": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "plan_version": {
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "style": {
+              "anyOf": [
+                {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "plan_version",
+            "expected_sha256"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "e2c4c08ed86b88513cef571e1ca52f68d12315830d462ac6d01d148ac5f0662f"
+      },
+      "operation": "POST /api/v1/projects/{}/director/storyboard-book/confirm",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {},
+        "required": false,
+        "required_fields": [],
+        "schema": {
+          "anyOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "acknowledge_duration_deviation": {
+                  "default": false,
+                  "type": "boolean"
+                },
+                "expected_state_version": {
+                  "anyOf": [
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema_digest": "c0474856d68d8536855552a0bd8380cebd3f38690a372fa487caf37a455b3d3a"
+      },
+      "operation": "POST /api/v1/projects/{}/director/storyboard/episodes/{}/confirm",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "episode_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
       "body": {
         "fields": {
           "plan_version": {
@@ -430,6 +2250,109 @@
       "security": []
     },
     {
+      "body": {
+        "fields": {
+          "continuity_mode": {
+            "type": "string"
+          },
+          "duration_target_s": {
+            "type": "number"
+          },
+          "expected_revision": {
+            "minimum": 1.0,
+            "type": "integer"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "expected_revision"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "continuity_mode": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "cut",
+                    "last_frame"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "duration_target_s": {
+              "anyOf": [
+                {
+                  "maximum": 15.0,
+                  "minimum": 4.0,
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "expected_revision": {
+              "minimum": 1.0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "expected_revision"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "904f150101fc356098c87b44824b5679f614aee55f94075066c42e22840887e4"
+      },
+      "operation": "PATCH /api/v1/projects/{}/director/storyboard/shots/{}",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "shot_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
       "body": null,
       "operation": "GET /api/v1/projects/{}/director/storyboard/state",
       "parameters": [
@@ -464,6 +2387,85 @@
         {
           "in": "path",
           "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "expected_shot_revision": {
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "source_job_id": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "expected_shot_revision",
+          "source_job_id"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "expected_shot_revision": {
+              "minimum": 1.0,
+              "type": "integer"
+            },
+            "source_job_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "source_job_id",
+            "expected_shot_revision"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "c0b9e06c549400721512f77e84e7a726312b8fffbee9d2f359691c2cc000d4c1"
+      },
+      "operation": "POST /api/v1/projects/{}/generation-segments/{}/regenerate",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "shot_id",
           "required": true,
           "schema": {
             "type": "string"
@@ -535,6 +2537,500 @@
     },
     {
       "body": null,
+      "operation": "GET /api/v1/projects/{}/material-preparation",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "character_sheet_mode": {
+            "default": false,
+            "type": "boolean"
+          },
+          "confirmation_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "confirmation_id": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "mode": {
+            "const": "real",
+            "default": "real",
+            "type": "string"
+          },
+          "requirement_ids": {
+            "maxItems": 200,
+            "minItems": 1,
+            "type": "array"
+          },
+          "rights_id": {
+            "type": "string"
+          },
+          "seeds": {
+            "type": "object"
+          },
+          "style_loras": {
+            "maxItems": 3,
+            "type": "array"
+          },
+          "style_preset": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "confirmation_hash",
+          "confirmation_id",
+          "idempotency_key",
+          "requirement_ids"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "character_sheet_mode": {
+              "default": false,
+              "type": "boolean"
+            },
+            "confirmation_hash": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "confirmation_id": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "idempotency_key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "mode": {
+              "const": "real",
+              "default": "real",
+              "type": "string"
+            },
+            "requirement_ids": {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 200,
+              "minItems": 1,
+              "type": "array"
+            },
+            "rights_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "seeds": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "style_loras": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "lora_id": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[a-f0-9]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "strength_model": {
+                    "anyOf": [
+                      {
+                        "maximum": 1.5,
+                        "minimum": 0.0,
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "lora_id"
+                ],
+                "type": "object"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "style_preset": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "confirmation_id",
+            "confirmation_hash",
+            "requirement_ids",
+            "idempotency_key"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "ec3178fffd64f97af8ade8fc2def01399e9724ae5ce3937764d91e77d99a0534"
+      },
+      "operation": "POST /api/v1/projects/{}/material-preparation/generate",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/projects/{}/material-preparation/generation-progress",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "character_sheet_mode": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": true,
+        "required_fields": [],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "character_sheet_mode": {
+              "default": false,
+              "type": "boolean"
+            }
+          },
+          "type": "object"
+        },
+        "schema_digest": "10999efd4506e287eceb96caa11cdd652e0da72d2a3d92e87c6c902495e1f284"
+      },
+      "operation": "PUT /api/v1/projects/{}/material-preparation/preferences",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "brief": {
+            "type": "object"
+          },
+          "character_sheet_mode": {
+            "default": false,
+            "type": "boolean"
+          },
+          "confirmation_hash": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "confirmation_id": {
+            "maxLength": 64,
+            "minLength": 64,
+            "type": "string"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "requirement_id": {
+            "type": "string"
+          },
+          "rights_id": {
+            "type": "string"
+          },
+          "seed": {
+            "default": 0,
+            "minimum": 0.0,
+            "type": "integer"
+          },
+          "style_loras": {
+            "maxItems": 3,
+            "type": "array"
+          },
+          "style_preset": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "brief",
+          "confirmation_hash",
+          "confirmation_id",
+          "idempotency_key",
+          "requirement_id"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "brief": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "character_sheet_mode": {
+              "default": false,
+              "type": "boolean"
+            },
+            "confirmation_hash": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "confirmation_id": {
+              "maxLength": 64,
+              "minLength": 64,
+              "type": "string"
+            },
+            "idempotency_key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "requirement_id": {
+              "type": "string"
+            },
+            "rights_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "seed": {
+              "default": 0,
+              "minimum": 0.0,
+              "type": "integer"
+            },
+            "style_loras": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "lora_id": {
+                    "maxLength": 64,
+                    "minLength": 1,
+                    "type": "string"
+                  },
+                  "sha256": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[a-f0-9]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "strength_model": {
+                    "anyOf": [
+                      {
+                        "maximum": 1.5,
+                        "minimum": 0.0,
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "lora_id"
+                ],
+                "type": "object"
+              },
+              "maxItems": 3,
+              "type": "array"
+            },
+            "style_preset": {
+              "anyOf": [
+                {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "requirement_id",
+            "confirmation_id",
+            "confirmation_hash",
+            "idempotency_key",
+            "brief"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "13d0233aaaaa9cac308ba94f101d862082493823405c4ad20b661ee5fabd2399"
+      },
+      "operation": "POST /api/v1/projects/{}/material-preparation/regenerate",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
       "operation": "GET /api/v1/projects/{}/pipeline/volumes/{}",
       "parameters": [
         {
@@ -584,6 +3080,52 @@
         {
           "in": "path",
           "name": "volume_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "POST /api/v1/projects/{}/production-series/{}/assemble",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        },
+        {
+          "in": "path",
+          "name": "series_id",
           "required": true,
           "schema": {
             "type": "string"
@@ -774,6 +3316,28 @@
     },
     {
       "body": null,
+      "operation": "GET /api/v1/projects/{}/shots",
+      "parameters": [
+        {
+          "in": "path",
+          "name": "project_id",
+          "required": true,
+          "schema": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
       "operation": "GET /api/v1/projects/{}/story-preparation",
       "parameters": [
         {
@@ -935,6 +3499,102 @@
           "summary": {
             "default": false,
             "type": "boolean"
+          }
+        }
+      ],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": null,
+      "operation": "GET /api/v1/setup/image-readiness",
+      "parameters": [],
+      "permission": {
+        "auth_headers": [],
+        "security": []
+      },
+      "security": []
+    },
+    {
+      "body": {
+        "fields": {
+          "families": {
+            "type": "array"
+          },
+          "idempotency_key": {
+            "maxLength": 128,
+            "minLength": 1,
+            "type": "string"
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "rights_id": {
+            "type": "string"
+          }
+        },
+        "required": true,
+        "required_fields": [
+          "idempotency_key",
+          "project_id"
+        ],
+        "schema": {
+          "additionalProperties": false,
+          "properties": {
+            "families": {
+              "items": {
+                "enum": [
+                  "character",
+                  "scene",
+                  "prop"
+                ],
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "idempotency_key": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "project_id": {
+              "type": "string"
+            },
+            "rights_id": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "project_id",
+            "idempotency_key"
+          ],
+          "type": "object"
+        },
+        "schema_digest": "f291abe7c185f4caa55c7d72b54d6fca16a3b84b3498b06e61f3a80a7b026c0c"
+      },
+      "operation": "POST /api/v1/setup/image-runtime/validate",
+      "parameters": [
+        {
+          "in": "header",
+          "name": "authorization",
+          "required": false,
+          "schema": {
+            "default": "",
+            "type": "string"
+          },
+          "summary": {
+            "default": "",
+            "type": "string"
           }
         }
       ],
@@ -3416,24 +6076,2848 @@
       "scope": "PROJECT",
       "status": "GUARDED",
       "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "image_runtime_validate",
+      "api_contract_digest": "ab6f766bfb3aa7a6ca305e56ef6088b929bb44caa40e8abc9d13f3b80871ae24",
+      "api_operations": [
+        "POST /api/v1/setup/image-runtime/validate",
+        "GET /api/v1/setup/image-readiness"
+      ],
+      "api_route": "POST /api/v1/setup/image-runtime/validate",
+      "authority": "GET /api/v1/setup/image-readiness",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认后按原队列提交验证小样。",
+      "contract_digest": "a6c064ead76a2ccb25e46f305bfaa189acbafe7e71d61334a856a2dd085abc59",
+      "contract_revision": 2,
+      "description": "提交三合一最小验证批次，通过真实渲染证明本地 Qwen-Image-2.1 能力就绪。",
+      "dispatch": "image_runtime_validate",
+      "examples": [
+        "跑一次生图能力验证小样"
+      ],
+      "executor": "shine.materialprep.service.validate_image_runtime_setup",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "IMAGE_RUNTIME_BOUND"
+      ],
+      "gpu": true,
+      "idempotency_policy": "同一动作 ID 只提交一次。",
+      "introduced_version": "2.2.0",
+      "label": "验证本地生图能力",
+      "module": "materialprep",
+      "note": "只做能力实证，不篡改环境配置。",
+      "occupancy_gate": "GPU",
+      "page": "生图环境设置",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": [
+            "character",
+            "scene",
+            "prop"
+          ],
+          "enum": [
+            "character",
+            "scene",
+            "prop"
+          ],
+          "has_default": true,
+          "max_length": 3,
+          "name": "families",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:ValidateBody",
+          "type": "string_list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 128,
+          "min_length": 1,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:ValidateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "project_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_material:ValidateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "name": "rights_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_material:ValidateBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "families",
+        "idempotency_key",
+        "project_id",
+        "rights_id"
+      ],
+      "preconditions": [
+        "生图后端实例已绑定"
+      ],
+      "readback": "GET /api/v1/setup/image-readiness",
+      "readback_contract": "GET /api/v1/setup/image-readiness。",
+      "request_schema": "shine.api_material:ValidateBody",
+      "resource_cost": {
+        "gpu": true,
+        "note": "GPU 渲染；小样验证。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "保留验证产物记录。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "story_outline_confirm",
+      "api_contract_digest": "65cee139960a661b8864afb655bd372b232e994a2ec5bf42e48ebb665ba9e931",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director/outline/confirm",
+        "GET /api/v1/projects/{}/director/outline"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director/outline/confirm",
+      "authority": "GET /api/v1/projects/{project_id}/director/outline",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "预览大纲产物 ID，确认后锁定。",
+      "contract_digest": "0eef878ca832e7406c66534907d0fcf4d4c2e18df0560891d8a186ec6ea4b73c",
+      "contract_revision": 2,
+      "description": "确认并锁定当前故事大纲，作为后续分镜书与文学剧本依据。",
+      "dispatch": "story_outline_confirm",
+      "examples": [
+        "确认当前故事大纲"
+      ],
+      "executor": "shine.director.streamline.confirm_outline_director",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "OUTLINE_HASH_MATCH"
+      ],
+      "gpu": false,
+      "idempotency_policy": "同一大纲确认可幂等重放。",
+      "introduced_version": "2.2.0",
+      "label": "确认故事大纲",
+      "module": "director",
+      "note": "沿用 confirm_outline_director。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "min_length": 1,
+          "name": "artifact_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_streamline:OutlineConfirmBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "min_length": 64,
+          "name": "expected_sha256",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:OutlineConfirmBody",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "artifact_id",
+        "expected_sha256",
+        "project_id"
+      ],
+      "preconditions": [
+        "已生成故事大纲"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/director/outline",
+      "readback_contract": "GET /api/v1/projects/{project_id}/director/outline。",
+      "request_schema": "shine.api_streamline:OutlineConfirmBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只写入确认状态。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可生成新版大纲后重新确认。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "storyboard_book_confirm",
+      "api_contract_digest": "eefbd575470a4e9d278a668452b69294c5cedccc98866f54eb61675e9777a315",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director/storyboard-book/confirm",
+        "GET /api/v1/projects/{}/director/storyboard-book"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director/storyboard-book/confirm",
+      "authority": "GET /api/v1/projects/{project_id}/director/storyboard-book",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示分镜书版本号，确认后冻结。",
+      "contract_digest": "ed16c50fff9b08b945932d851c0d95fffb5733cd90252bb9d79c3be31bf156c1",
+      "contract_revision": 2,
+      "description": "确认并锁定分镜书版本与风格（含时长偏差显式确认）。",
+      "dispatch": "storyboard_book_confirm",
+      "examples": [
+        "确认第 1 版分镜书"
+      ],
+      "executor": "shine.director.streamline.confirm_storyboard_book",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "STORYBOARD_BOOK_HASH_MATCH"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按版本号与哈希幂等。",
+      "introduced_version": "2.2.0",
+      "label": "确认分镜书与风格方案",
+      "module": "director",
+      "note": "沿用 confirm_storyboard_book。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "acknowledge_deviation",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookConfirmBody",
+          "type": "boolean"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "min_length": 64,
+          "name": "expected_sha256",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookConfirmBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 10000,
+          "minimum": 1,
+          "name": "plan_version",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_streamline:StoryboardBookConfirmBody",
+          "type": "integer"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "style",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:StoryboardBookConfirmBody",
+          "type": "object"
+        }
+      ],
+      "params": [
+        "acknowledge_deviation",
+        "expected_sha256",
+        "plan_version",
+        "project_id",
+        "style"
+      ],
+      "preconditions": [
+        "分镜书草稿已生成"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/director/storyboard-book",
+      "readback_contract": "GET /api/v1/projects/{project_id}/director/storyboard-book。",
+      "request_schema": "shine.api_streamline:StoryboardBookConfirmBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "无外部调用。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "旧版本冻结记录保留审计。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "storyboard_confirm",
+      "api_contract_digest": "3a9d1ea88f9f1beb805cc4bdffcbe51a1d899132a12b9668c81b6ad4ffa24f89",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director/storyboard/episodes/{}/confirm",
+        "GET /api/v1/projects/{}/director/storyboard/state"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director/storyboard/episodes/{episode_id}/confirm",
+      "authority": "GET /api/v1/projects/{project_id}/director/storyboard/state",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认后锁定本集分镜计划。",
+      "contract_digest": "bc3b00a4aa58efd5d09905a0df2c93949a55bc485a2e292a2ad8cd4827c5cbdf",
+      "contract_revision": 2,
+      "description": "确认指定分集的镜头表定稿并生成权威生产依据。",
+      "dispatch": "storyboard_confirm",
+      "examples": [
+        "确认 ep-1 分镜"
+      ],
+      "executor": "shine.director.streamline.confirm_episode_shots",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "EPISODE_DURATION_DIALOGUE_CHECK"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按分镜内容重放一致。",
+      "introduced_version": "2.2.0",
+      "label": "确认本集分镜定稿",
+      "module": "director",
+      "note": "沿用 confirm_episode_shots。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "acknowledge_duration_deviation",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:EpisodeConfirmBody",
+          "type": "boolean"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 64,
+          "name": "episode_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "acknowledge_duration_deviation",
+        "episode_id",
+        "project_id"
+      ],
+      "preconditions": [
+        "本集分镜已生成且无阻塞问题"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/director/storyboard/state",
+      "readback_contract": "GET /api/v1/projects/{project_id}/director/storyboard/state。",
+      "request_schema": "shine.api_streamline:EpisodeConfirmBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只写分镜确认记录。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可修订单镜后再确认。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "shot_revise",
+      "api_contract_digest": "8759f0db15f80753ee71715bd489d8cc73085c3f0e0131843af2b18b76dd25d8",
+      "api_operations": [
+        "PATCH /api/v1/projects/{}/director/storyboard/shots/{}",
+        "GET /api/v1/projects/{}/shots"
+      ],
+      "api_route": "PATCH /api/v1/projects/{project_id}/director/storyboard/shots/{shot_id}",
+      "authority": "GET /api/v1/projects/{project_id}/shots",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "展示镜头修订差异与版本变化。",
+      "contract_digest": "8eab98e4b4809d66c6f8c43b07c9e05d3302fd59ec79d726772122788781e20b",
+      "contract_revision": 2,
+      "description": "修订单个镜头的成片秒数、连续性模式（CUT/last_frame）或分镜梗概，经过接拍连续性校验。",
+      "dispatch": "shot_revise",
+      "examples": [
+        "把第 8 镜改成 6 秒"
+      ],
+      "executor": "shine.director.streamline.revise_director_shot",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "SHOT_REVISION_MATCH",
+        "SHOT_DURATION_DIALOGUE",
+        "CONTINUATION_OPENING_CHECK"
+      ],
+      "gpu": false,
+      "idempotency_policy": "同动作只执行一次。",
+      "introduced_version": "2.2.0",
+      "label": "修订单镜分镜参数",
+      "module": "director",
+      "note": "经 check_continuation_opening 门禁。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "cut",
+            "last_frame"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "continuity_mode",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:ShotRowEditBody",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "maximum": 15,
+          "minimum": 4,
+          "name": "duration_target_s",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:ShotRowEditBody",
+          "type": "number"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 10000,
+          "minimum": 1,
+          "name": "expected_revision",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_streamline:ShotRowEditBody",
+          "type": "integer"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "shot_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 2000,
+          "name": "story_beat",
+          "required": false,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "continuity_mode",
+        "duration_target_s",
+        "expected_revision",
+        "project_id",
+        "shot_id",
+        "story_beat"
+      ],
+      "preconditions": [
+        "镜头属于当前项目"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/shots",
+      "readback_contract": "GET /api/v1/projects/{project_id}/shots。",
+      "request_schema": "shine.api_streamline:ShotRowEditBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "递增镜头 revision，失效相关下游片段。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "不覆盖历史过片记录。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "material_derive",
+      "api_contract_digest": "e235f0f3a336e9082f769a33f9b88e34e494dc218e4828cc8f99f90a46f90905",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director/materials/derive",
+        "GET /api/v1/projects/{}/material-preparation"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director/materials/derive",
+      "authority": "GET /api/v1/projects/{project_id}/material-preparation",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示待推导分集范围，确认后更新清单。",
+      "contract_digest": "2578d3fe55a11d52054a4068893efc0229701fe274d6f60284ce27896999088b",
+      "contract_revision": 2,
+      "description": "按已确认分镜推导并更新项目素材需求清单，不覆盖已绑定或锁定主资产。",
+      "dispatch": "material_derive",
+      "examples": [
+        "从分镜推导项目素材清单"
+      ],
+      "executor": "shine.director.streamline.derive_shot_materials",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "DIRECTOR_SHOTS_LANDED"
+      ],
+      "gpu": false,
+      "idempotency_policy": "同镜头集合幂等。",
+      "introduced_version": "2.2.0",
+      "label": "从分镜推导项目素材清单",
+      "module": "materialprep",
+      "note": "沿用 derive_shot_materials。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式 / 素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 200,
+          "name": "episode_ids",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_streamline:ShotMaterialsBody",
+          "type": "string_list"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "episode_ids",
+        "project_id"
+      ],
+      "preconditions": [
+        "已有已落地分镜"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/material-preparation",
+      "readback_contract": "GET /api/v1/projects/{project_id}/material-preparation。",
+      "request_schema": "shine.api_streamline:ShotMaterialsBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "数据库计算，无 GPU 开销。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "保留已有主资产绑定。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "material_preferences_update",
+      "api_contract_digest": "d8d87dcc9c92464a82280e22919c7d84e86ba30402e24799081caf0dfc3f5ea8",
+      "api_operations": [
+        "PUT /api/v1/projects/{}/material-preparation/preferences",
+        "GET /api/v1/projects/{}/material-preparation"
+      ],
+      "api_route": "PUT /api/v1/projects/{project_id}/material-preparation/preferences",
+      "authority": "GET /api/v1/projects/{project_id}/material-preparation",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "展示布尔切换前/后状态。",
+      "contract_digest": "03b4129059f5ef971e0749396ee7c9bf5a0990ab4dae26eab59af767a07727e8",
+      "contract_revision": 2,
+      "description": "开启或关闭当前项目的 character_sheet_mode（16:9 五视图定妆照模式）。",
+      "dispatch": "material_preferences_update",
+      "examples": [
+        "开启角色五视图定妆照模式"
+      ],
+      "executor": "shine.materialprep.service.set_material_preferences",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "CHARACTER_SHEET_LORA_GATE"
+      ],
+      "gpu": false,
+      "idempotency_policy": "写入布尔值，可随时切回。",
+      "introduced_version": "2.2.0",
+      "label": "切换项目五视图与素材偏好",
+      "module": "materialprep",
+      "note": "沿用 set_material_preferences。",
+      "occupancy_gate": "NONE",
+      "page": "素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "character_sheet_mode",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_material:MaterialPreferencesBody",
+          "type": "boolean"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "character_sheet_mode",
+        "project_id"
+      ],
+      "preconditions": [
+        "项目存在"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/material-preparation",
+      "readback_contract": "GET /api/v1/projects/{project_id}/material-preparation。",
+      "request_schema": "shine.api_material:MaterialPreferencesBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只写入项目偏好。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "再次切换即可恢复。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "material_generate",
+      "api_contract_digest": "1f6217e30d83e95f7ab8f0094149dec1232d63d77fa2ddac6ce9a85240c6a53e",
+      "api_operations": [
+        "POST /api/v1/projects/{}/material-preparation/generate",
+        "GET /api/v1/projects/{}/material-preparation/generation-progress"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/material-preparation/generate",
+      "authority": "GET /api/v1/projects/{project_id}/material-preparation/generation-progress",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "展示选中需求数量与画风配置，确认后排队生图。",
+      "contract_digest": "76432892bedd7706881feb13587af95faf7cae3c06dae3f910f67b819f315ce0",
+      "contract_revision": 2,
+      "description": "按已确认的素材需求排队真实生图批次，支持 style_preset、style_loras 与五视图模式。",
+      "dispatch": "material_generate",
+      "examples": [
+        "帮我把圣殿场景底图生成出来"
+      ],
+      "executor": "shine.materialprep.service.create_batch",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "MATERIAL_PLAN_CONFIRMED",
+        "RIGHTS_APPROVED",
+        "IMAGE_LORA_VALIDATED"
+      ],
+      "gpu": true,
+      "idempotency_policy": "按 action_id 幂等。",
+      "introduced_version": "2.2.0",
+      "label": "批量生成项目素材候选",
+      "module": "materialprep",
+      "note": "沿用 materialprep.service.create_batch。",
+      "occupancy_gate": "GPU",
+      "page": "素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "character_sheet_mode",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "boolean"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "min_length": 64,
+          "name": "confirmation_hash",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "min_length": 64,
+          "name": "confirmation_id",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 128,
+          "min_length": 1,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 200,
+          "min_length": 1,
+          "name": "requirement_ids",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string_list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "name": "rights_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": {},
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "seeds",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 3,
+          "name": "style_loras",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "min_length": 1,
+          "name": "style_preset",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_material:GenerateBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "character_sheet_mode",
+        "confirmation_hash",
+        "confirmation_id",
+        "idempotency_key",
+        "project_id",
+        "requirement_ids",
+        "rights_id",
+        "seeds",
+        "style_loras",
+        "style_preset"
+      ],
+      "preconditions": [
+        "素材需求清单已确认",
+        "本地生图环境就绪"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/material-preparation/generation-progress",
+      "readback_contract": "GET /api/v1/projects/{project_id}/material-preparation/generation-progress。",
+      "request_schema": "shine.api_material:GenerateBody",
+      "resource_cost": {
+        "gpu": true,
+        "note": "占用 GPU 生图。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "仅产生候选资产，不改主资产。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "material_regenerate",
+      "api_contract_digest": "4b276ec49aad0552e8c64864ee3b492fe715a8aae7e0dc53895e3d8a761ffdc9",
+      "api_operations": [
+        "POST /api/v1/projects/{}/material-preparation/regenerate",
+        "GET /api/v1/projects/{}/material-preparation"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/material-preparation/regenerate",
+      "authority": "GET /api/v1/projects/{project_id}/material-preparation",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认后追加新修订生成。",
+      "contract_digest": "ddc0549e745d7732166bde636579f0b68a2bc80f549804c0042d791232b7716a",
+      "contract_revision": 2,
+      "description": "为单个素材需求追加新版生成修订，保留旧候选图以便对比挑选。",
+      "dispatch": "material_regenerate",
+      "examples": [
+        "重生成圣殿夜晚底图"
+      ],
+      "executor": "shine.materialprep.service.regenerate_material_requirement",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "MATERIAL_REVISION_NOT_IN_FLIGHT"
+      ],
+      "gpu": true,
+      "idempotency_policy": "按 action_id 幂等。",
+      "introduced_version": "2.2.0",
+      "label": "重生成单项项目素材",
+      "module": "materialprep",
+      "note": "沿用 regenerate_material_requirement。",
+      "occupancy_gate": "GPU",
+      "page": "素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "character_sheet_mode",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "boolean"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 64,
+          "name": "requirement_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "name": "rights_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": 0,
+          "enum": [],
+          "has_default": true,
+          "max_length": 2147483647,
+          "minimum": 0,
+          "name": "seed",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 3,
+          "name": "style_loras",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "min_length": 1,
+          "name": "style_preset",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_material:RegenerateBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "character_sheet_mode",
+        "project_id",
+        "requirement_id",
+        "rights_id",
+        "seed",
+        "style_loras",
+        "style_preset"
+      ],
+      "preconditions": [
+        "目标素材需求存在且计划已确认"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/material-preparation",
+      "readback_contract": "GET /api/v1/projects/{project_id}/material-preparation。",
+      "request_schema": "shine.api_material:RegenerateBody",
+      "resource_cost": {
+        "gpu": true,
+        "note": "GPU 渲染新版候选。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "保留所有历史候选。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "material_promote",
+      "api_contract_digest": "d2d8283e22ff34119268566629ba016d00f7124f71cf1c427288b88c6a176fd0",
+      "api_operations": [
+        "POST /api/v1/candidate-assets/{}/promote",
+        "GET /api/v1/projects/{}/assets"
+      ],
+      "api_route": "POST /api/v1/candidate-assets/{identity}/promote",
+      "authority": "GET /api/v1/projects/{project_id}/assets",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认后晋升并锁定主资产。",
+      "contract_digest": "e0e123a6e78bfa8b717906a9f78a3bcbd2b548f143418a8861a50819b91579a4",
+      "contract_revision": 2,
+      "description": "将已过质检的候选素材（CandidateAsset）晋升为本项目主资产（Asset）。",
+      "dispatch": "material_promote",
+      "examples": [
+        "把刚生成的候选底图晋升为主资产"
+      ],
+      "executor": "shine.materialprep.service.promote_material_candidate",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "CANDIDATE_READY",
+        "HASH_VERIFIED",
+        "MOCK_FORBIDDEN_IN_REAL"
+      ],
+      "gpu": false,
+      "idempotency_policy": "同哈希资产不重复写入。",
+      "introduced_version": "2.2.0",
+      "label": "晋升并锁定候选素材为主资产",
+      "module": "materialprep",
+      "note": "沿用 promote_material_candidate 与原 promote 门禁。",
+      "occupancy_gate": "NONE",
+      "page": "素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 64,
+          "name": "candidate_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 2000,
+          "min_length": 5,
+          "name": "evidence",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_preparation:Decision",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": true,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "offline",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_preparation:Decision",
+          "type": "boolean"
+        },
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "candidate_id",
+        "evidence",
+        "offline",
+        "project_id"
+      ],
+      "preconditions": [
+        "候选状态为 READY_FOR_REVIEW"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/assets",
+      "readback_contract": "GET /api/v1/projects/{project_id}/assets。",
+      "request_schema": "shine.api_preparation:Decision",
+      "resource_cost": {
+        "gpu": false,
+        "note": "哈希校验与入库。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "旧主资产仍在库可重新采纳。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "shot_swap_material_binding",
+      "api_contract_digest": "75d786848ca1cacd61b9ebb68cf3b9a9923cf93118c4a5e7af9840f4d53f3cbd",
+      "api_operations": [
+        "POST /api/v1/asset-center/adoptions",
+        "GET /api/v1/projects/{}/shots"
+      ],
+      "api_route": "POST /api/v1/asset-center/adoptions",
+      "authority": "GET /api/v1/projects/{project_id}/shots",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "预览拟替换的镜头列表与旧绑定，确认后执行。",
+      "contract_digest": "ba92a8bf374881aac67f0a06c6efb93e6d8dbc91390950962903ad80660091c2",
+      "contract_revision": 2,
+      "description": "按明确指定的 shot_ids 将主资产采纳并替换绑定（含已冻结导演包镜头），遵循 D12 修订与作废保护。",
+      "dispatch": "shot_swap_material_binding",
+      "examples": [
+        "把第 8 镜的场景底图换成 bca2133a"
+      ],
+      "executor": "shine.services.adopt_project_asset_to_shots",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "ADOPTION_CONFLICTS",
+        "SHOT_REVISION_MATCH",
+        "SHOT_REFERENCE_LIMIT"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按 action_id + 幂等键重放。",
+      "introduced_version": "2.2.0",
+      "label": "D12 镜头绑定换图",
+      "module": "asset_center",
+      "note": "严格复用 adopt_into_shots，不绕过拍摄中锁。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心 / 导演工作台",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "allow_revise_frozen",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "boolean"
+        },
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "confirmed",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "boolean"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 80,
+          "name": "entity_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": {},
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "expected_shot_revisions",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 120,
+          "min_length": 1,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 36,
+          "name": "library_version_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "project_asset_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "project_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "character",
+            "scene",
+            "prop"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "role",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 200,
+          "name": "shot_ids",
+          "nullable": true,
+          "required": true,
+          "source": "shine.api_asset_center:AdoptionRequest",
+          "type": "string_list"
+        }
+      ],
+      "params": [
+        "allow_revise_frozen",
+        "confirmed",
+        "entity_id",
+        "expected_shot_revisions",
+        "idempotency_key",
+        "library_version_id",
+        "project_asset_id",
+        "project_id",
+        "role",
+        "shot_ids"
+      ],
+      "preconditions": [
+        "主资产已锁定且校验未过期",
+        "目标镜头非拍摄中"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/shots",
+      "readback_contract": "GET /api/v1/projects/{project_id}/shots。",
+      "request_schema": "shine.api_asset_center:AdoptionRequest",
+      "resource_cost": {
+        "gpu": false,
+        "note": "递增镜头 revision 并记录作废轨迹。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可再采纳旧资产恢复绑定。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "asset_center_image_generate",
+      "api_contract_digest": "847bac0a8a9391061c816294eb3f5bf1d4e236087f7d0605fd1c137dd79b5fb2",
+      "api_operations": [
+        "POST /api/v1/asset-center/image-jobs",
+        "GET /api/v1/asset-center/image-jobs/{}"
+      ],
+      "api_route": "POST /api/v1/asset-center/image-jobs",
+      "authority": "GET /api/v1/asset-center/image-jobs/{task_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认生图模式、提示词与参考图后提交队列。",
+      "contract_digest": "92fe7d42966154bd86d020e9118387d28c260f6575ce5ab92c002e9cb4fcc002",
+      "contract_revision": 2,
+      "description": "按 T2I/I2I/INPAINT/MULTIREF/WARDROBE/RGBA 模式提交素材中心生图任务，支持画风 LoRA。",
+      "dispatch": "asset_center_image_generate",
+      "examples": [
+        "在素材中心用参考图生成一张新角色立绘"
+      ],
+      "executor": "shine.services.queue_asset_center_image_jobs",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "IMAGE_STYLE_LORA_VALIDATED",
+        "PROMPT_SYNTHESIS_GATE"
+      ],
+      "gpu": true,
+      "idempotency_policy": "按 action_id 幂等。",
+      "introduced_version": "2.2.0",
+      "label": "素材中心提交生图任务",
+      "module": "asset_center",
+      "note": "沿用 _queue_image_jobs。",
+      "occupancy_gate": "GPU",
+      "page": "素材中心",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": 1,
+          "enum": [],
+          "has_default": true,
+          "max_length": 4,
+          "maximum": 4,
+          "minimum": 1,
+          "name": "candidate_count",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": "other",
+          "enum": [
+            "character",
+            "scene",
+            "prop",
+            "costume",
+            "other"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "category",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": false,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "character_sheet",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "boolean"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 600,
+          "name": "character_sheet_note",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 80,
+          "min_length": 8,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "T2I",
+            "I2I",
+            "INPAINT",
+            "MULTIREF",
+            "WARDROBE",
+            "RGBA"
+          ],
+          "has_default": false,
+          "max_length": null,
+          "name": "mode",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 1200,
+          "name": "negative_prompt",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 36,
+          "name": "project_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 8000,
+          "name": "prompt",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 10,
+          "name": "references",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 2147483647,
+          "name": "seed",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 3,
+          "name": "style_loras",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 64,
+          "min_length": 1,
+          "name": "style_preset",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 36,
+          "name": "target_asset_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 200,
+          "name": "title",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "candidate_count",
+        "category",
+        "character_sheet",
+        "character_sheet_note",
+        "idempotency_key",
+        "mode",
+        "negative_prompt",
+        "project_id",
+        "prompt",
+        "references",
+        "seed",
+        "style_loras",
+        "style_preset",
+        "target_asset_id",
+        "title"
+      ],
+      "preconditions": [
+        "生图队列可用"
+      ],
+      "readback": "GET /api/v1/asset-center/image-jobs/{task_id}",
+      "readback_contract": "GET /api/v1/asset-center/image-jobs/{task_id}。",
+      "request_schema": "shine.api_asset_center:ImageJobRequest",
+      "resource_cost": {
+        "gpu": true,
+        "note": "GPU 图像渲染。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "仅产出版本草稿，不直接覆盖主资产。",
+      "scope": "OPTIONAL",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "asset_center_character_sheet_generate",
+      "api_contract_digest": "847bac0a8a9391061c816294eb3f5bf1d4e236087f7d0605fd1c137dd79b5fb2",
+      "api_operations": [
+        "POST /api/v1/asset-center/image-jobs",
+        "GET /api/v1/asset-center/image-jobs/{}"
+      ],
+      "api_route": "POST /api/v1/asset-center/image-jobs",
+      "authority": "GET /api/v1/asset-center/image-jobs/{task_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认参考图与补充描述后生成五视图定妆照。",
+      "contract_digest": "0194aab6fb47183f5c58a239836fe2de60be11eef06c9a6fc60ea93119cff09b",
+      "contract_revision": 2,
+      "description": "从正面参考图通过 I2I 提交 16:9 角色三视图/五视图定妆照（自动挂载多视角 LoRA）。",
+      "dispatch": "asset_center_character_sheet_generate",
+      "examples": [
+        "给这个主角生成一张五视图定妆照"
+      ],
+      "executor": "shine.services.queue_asset_center_character_sheet",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "CHARACTER_SHEET_LORA_READY"
+      ],
+      "gpu": true,
+      "idempotency_policy": "按 action_id 幂等。",
+      "introduced_version": "2.2.0",
+      "label": "素材中心生成五视图定妆照",
+      "module": "asset_center",
+      "note": "自动绑定多视角 LoRA。",
+      "occupancy_gate": "GPU",
+      "page": "素材中心",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": "other",
+          "enum": [
+            "character",
+            "costume"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "category",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 600,
+          "name": "character_sheet_note",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 80,
+          "min_length": 8,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 36,
+          "name": "project_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": [],
+          "enum": [],
+          "has_default": true,
+          "max_length": 10,
+          "name": "references",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 2147483647,
+          "name": "seed",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "integer"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 200,
+          "name": "title",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:ImageJobRequest",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "category",
+        "character_sheet_note",
+        "idempotency_key",
+        "project_id",
+        "references",
+        "seed",
+        "title"
+      ],
+      "preconditions": [
+        "至少有一张参考图",
+        "多视角 LoRA 就绪"
+      ],
+      "readback": "GET /api/v1/asset-center/image-jobs/{task_id}",
+      "readback_contract": "GET /api/v1/asset-center/image-jobs/{task_id}。",
+      "request_schema": "shine.api_asset_center:ImageJobRequest",
+      "resource_cost": {
+        "gpu": true,
+        "note": "GPU 图像渲染（16:9 五视图）。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "生成结果需审看后再晋升。",
+      "scope": "OPTIONAL",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "asset_center_version_promote",
+      "api_contract_digest": "fae633d70e24901e0b1e8cebd2a773d06021512b0c32ffeeb8e8619d10b54eab",
+      "api_operations": [
+        "POST /api/v1/asset-center/versions/{}/promote",
+        "GET /api/v1/asset-center/assets"
+      ],
+      "api_route": "POST /api/v1/asset-center/versions/{version_id}/promote",
+      "authority": "GET /api/v1/asset-center/assets",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认版本号与验证依据后晋升。",
+      "contract_digest": "adf58e1c7aec35e86047f9609581fdcdc59556eb1c4ab6c2760b4af06c12d6b4",
+      "contract_revision": 2,
+      "description": "将素材中心已通过审核且非模拟的 LibraryVersion 晋升为当前选用版本。",
+      "dispatch": "asset_center_version_promote",
+      "examples": [
+        "晋升素材中心版本 ver-123"
+      ],
+      "executor": "shine.services.promote_asset_center_version",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "LIBRARY_VERSION_REVIEWABLE",
+        "RIGHTS_APPROVED",
+        "BYTE_HASH_VERIFIED"
+      ],
+      "gpu": false,
+      "idempotency_policy": "单次签发不可复用。",
+      "introduced_version": "2.2.0",
+      "label": "晋升素材中心版本",
+      "module": "asset_center",
+      "note": "沿用 promote_version。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 2000,
+          "name": "evidence",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:PromoteVersion",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "version_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "evidence",
+        "version_id"
+      ],
+      "preconditions": [
+        "版本状态为 READY_FOR_REVIEW 且非 is_mock"
+      ],
+      "readback": "GET /api/v1/asset-center/assets",
+      "readback_contract": "GET /api/v1/asset-center/assets。",
+      "request_schema": "shine.api_asset_center:PromoteVersion",
+      "resource_cost": {
+        "gpu": false,
+        "note": "字节校验与版本指针更新。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可通过 select-version 切回旧版。",
+      "scope": "MACHINE",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "asset_center_assign_to_project",
+      "api_contract_digest": "fe2a94cbe853156277b597a21a19d1771a0f3ccd555f04ca95974a0599ea2e49",
+      "api_operations": [
+        "POST /api/v1/asset-center/assignments",
+        "GET /api/v1/asset-center/assignments"
+      ],
+      "api_route": "POST /api/v1/asset-center/assignments",
+      "authority": "GET /api/v1/asset-center/assignments",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "预览目标项目与实体槽位后分配。",
+      "contract_digest": "f5d1f250fec079077341145b67996766241570796ae9095f909809c027f9de32",
+      "contract_revision": 2,
+      "description": "把已晋升的素材中心版本登记并绑定到指定项目的对应角色/场景/道具位置。",
+      "dispatch": "asset_center_assign_to_project",
+      "examples": [
+        "把这个版本分配到当前项目的女主角色"
+      ],
+      "executor": "shine.services.assign_asset_center_version",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "RIGHTS_SCOPE_CHECK"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按项目+版本+槽位唯一索引幂等。",
+      "introduced_version": "2.2.0",
+      "label": "分配素材中心版本到项目",
+      "module": "asset_center",
+      "note": "沿用 assign_library_version。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 80,
+          "name": "entity_id",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 100,
+          "min_length": 8,
+          "name": "idempotency_key",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "library_version_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "project_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "character",
+            "costume",
+            "scene",
+            "prop",
+            "voice",
+            "dialogue",
+            "sfx",
+            "music",
+            "style_reference",
+            "generic"
+          ],
+          "has_default": false,
+          "max_length": null,
+          "name": "role",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": "local",
+          "enum": [
+            "local",
+            "research",
+            "personal",
+            "non_commercial",
+            "commercial"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "usage_scope",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_asset_center:Assignment",
+          "type": "enum"
+        }
+      ],
+      "params": [
+        "entity_id",
+        "idempotency_key",
+        "library_version_id",
+        "project_id",
+        "role",
+        "usage_scope"
+      ],
+      "preconditions": [
+        "目标项目与库版本存在"
+      ],
+      "readback": "GET /api/v1/asset-center/assignments",
+      "readback_contract": "GET /api/v1/asset-center/assignments。",
+      "request_schema": "shine.api_asset_center:Assignment",
+      "resource_cost": {
+        "gpu": false,
+        "note": "写入项目资产链接。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "原库资产不变。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "lora_import_local",
+      "api_contract_digest": "ccde09c0017fa23e0fb9c5f6139f0ab02807a5c847a6ebfb5cc747d98a3ca219",
+      "api_operations": [
+        "POST /api/v1/loras/import",
+        "GET /api/v1/loras"
+      ],
+      "api_route": "POST /api/v1/loras/import",
+      "authority": "GET /api/v1/loras",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认本地文件路径与基底模型类型。",
+      "contract_digest": "06513751d02a9a82779b568490953f50c7fca406fb186b3568b621f83d94b955",
+      "contract_revision": 2,
+      "description": "将本地 .safetensors LoRA 文件导入受管 shine_user LoRA 注册表。",
+      "dispatch": "lora_import_local",
+      "examples": [
+        "导入 D:\\loras\\oil.safetensors 作为 Qwen LoRA"
+      ],
+      "executor": "shine.comfyops.loras.import_style_lora",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "SAFETENSORS_HEADER_CHECK",
+        "TRIGGER_WORD_CHECK"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按内容哈希去重。",
+      "introduced_version": "2.2.0",
+      "label": "从本机导入风格 LoRA",
+      "module": "loras",
+      "note": "沿用 import_style_lora。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心 / 风格 LoRA",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": "minimax_h3",
+          "enum": [
+            "minimax_h3",
+            "qwen_image_21"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "base_model",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": 0.65,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "default_strength",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "number"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 160,
+          "name": "display_name",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 1024,
+          "min_length": 1,
+          "name": "local_path",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 300,
+          "name": "negative_trigger_word",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": "suffix",
+          "enum": [
+            "prefix",
+            "suffix"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "trigger_position",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": "",
+          "enum": [],
+          "has_default": true,
+          "max_length": 300,
+          "name": "trigger_word",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_loras:LoraImportJsonBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "base_model",
+        "default_strength",
+        "display_name",
+        "local_path",
+        "negative_trigger_word",
+        "trigger_position",
+        "trigger_word"
+      ],
+      "preconditions": [
+        "源文件为有效的 .safetensors"
+      ],
+      "readback": "GET /api/v1/loras",
+      "readback_contract": "GET /api/v1/loras。",
+      "request_schema": "shine.api_loras:LoraImportJsonBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "复制到受管 LoRA 目录并登记。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可由 lora_delete 删除未使用的导入。",
+      "scope": "MACHINE",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "lora_update",
+      "api_contract_digest": "b99a213388929fbbd3fd89e4268c7b99ad798ea3764eb2426772085a4bce7aec",
+      "api_operations": [
+        "PATCH /api/v1/loras/{}",
+        "GET /api/v1/loras"
+      ],
+      "api_route": "PATCH /api/v1/loras/{lora_id}",
+      "authority": "GET /api/v1/loras",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "显示参数变更摘要后确认。",
+      "contract_digest": "77dbb8216219dbfdfb062d93169d8b6a312262a13a0e507f473bd9ac048184fc",
+      "contract_revision": 2,
+      "description": "更新风格 LoRA 的展示名称、默认强度、触发词与位置。",
+      "dispatch": "lora_update",
+      "examples": [
+        "把 LoRA 默认强度调为 0.7"
+      ],
+      "executor": "shine.comfyops.loras.update_style_lora",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "STRENGTH_BOUNDS",
+        "TRIGGER_WORD_CHECK"
+      ],
+      "gpu": false,
+      "idempotency_policy": "可随时再更新改回。",
+      "introduced_version": "2.2.0",
+      "label": "修改风格 LoRA 元数据",
+      "module": "loras",
+      "note": "沿用 update_style_lora。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心 / 风格 LoRA",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "default_strength",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraPatchBody",
+          "type": "number"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 160,
+          "name": "display_name",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraPatchBody",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 64,
+          "name": "lora_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 300,
+          "name": "negative_trigger_word",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraPatchBody",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "prefix",
+            "suffix"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "trigger_position",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraPatchBody",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 300,
+          "name": "trigger_word",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_loras:LoraPatchBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "default_strength",
+        "display_name",
+        "lora_id",
+        "negative_trigger_word",
+        "trigger_position",
+        "trigger_word"
+      ],
+      "preconditions": [
+        "目标 LoRA 已注册"
+      ],
+      "readback": "GET /api/v1/loras",
+      "readback_contract": "GET /api/v1/loras。",
+      "request_schema": "shine.api_loras:LoraPatchBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只改元数据，不修改权重文件。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "再次修改即可恢复。",
+      "scope": "MACHINE",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "lora_delete",
+      "api_contract_digest": "b45a9342dd059d2f40ad3628e861be7e4db3761ccf7f5737a7423e89187027f9",
+      "api_operations": [
+        "DELETE /api/v1/loras/{}",
+        "GET /api/v1/loras"
+      ],
+      "api_route": "DELETE /api/v1/loras/{lora_id}",
+      "authority": "GET /api/v1/loras",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认待删除 LoRA ID；若正在使用会被直接拒绝。",
+      "contract_digest": "faa40150c6e3fee3988d5e1cea848fb8d4ed7cb79ae9a1e0b1702a9fafa7b938",
+      "contract_revision": 2,
+      "description": "注销并移除未在项目配方或队列中引用的已导入风格 LoRA。",
+      "dispatch": "lora_delete",
+      "examples": [
+        "删掉不用的旧测试 LoRA"
+      ],
+      "executor": "shine.comfyops.loras.delete_style_lora",
+      "executor_bound": true,
+      "feature_id": "asset-center",
+      "gates": [
+        "ENSURE_LORA_NOT_IN_USE"
+      ],
+      "gpu": false,
+      "idempotency_policy": "仅对存在项有效。",
+      "introduced_version": "2.2.0",
+      "label": "删除未使用的风格 LoRA",
+      "module": "loras",
+      "note": "受 _ensure_lora_not_in_use 严格保护。",
+      "occupancy_gate": "NONE",
+      "page": "素材中心 / 风格 LoRA",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 64,
+          "name": "lora_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "lora_id"
+      ],
+      "preconditions": [
+        "LoRA 未被项目风格或渲染队列引用"
+      ],
+      "readback": "GET /api/v1/loras",
+      "readback_contract": "GET /api/v1/loras。",
+      "request_schema": null,
+      "resource_cost": {
+        "gpu": false,
+        "note": "若为导入副本则移除受管副本。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可通过 lora_import_local 重新导入。",
+      "scope": "MACHINE",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "director_package_create",
+      "api_contract_digest": "7e5046dec6e22bc3efd4c8ff53ee4ea1b24945f5fb88272af38ac94a12c9f584",
+      "api_operations": [
+        "POST /api/v1/projects/{}/director-packages",
+        "GET /api/v1/director-packages/{}"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/director-packages",
+      "authority": "GET /api/v1/director-packages/{package_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "预览包含的集数与工作流合同后创建快照。",
+      "contract_digest": "ff92daa730e96a2e31f310aedb2089b9c596a8243ffb27567d539aac7e27ab02",
+      "contract_revision": 2,
+      "description": "按当前确认分镜、主资产绑定与工作流合同生成新导演包快照。",
+      "dispatch": "director_package_create",
+      "examples": [
+        "基于工作流 wf-1 生成新版导演包"
+      ],
+      "executor": "shine.director.package.build_package",
+      "executor_bound": true,
+      "feature_id": "director-journey",
+      "gates": [
+        "STYLE_FROZEN",
+        "REF2VA_MODE_POLICY",
+        "PREPRODUCTION_ENFORCE"
+      ],
+      "gpu": false,
+      "idempotency_policy": "按当前状态生成递增 revision。",
+      "introduced_version": "2.2.0",
+      "label": "生成导演包版本快照",
+      "module": "director",
+      "note": "沿用 build_package 与 Ref2VA 门禁。",
+      "occupancy_gate": "NONE",
+      "page": "导演模式",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": 200,
+          "name": "episode_ids",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_director:PackageBody",
+          "type": "string_list"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [
+            "T2VA",
+            "I2VA",
+            "FL2VA",
+            "L2VA",
+            "Ref2VA"
+          ],
+          "has_default": true,
+          "max_length": null,
+          "name": "generation_mode",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_director:PackageBody",
+          "type": "enum"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "output",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_director:PackageBody",
+          "type": "object"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": true,
+          "max_length": null,
+          "name": "policy",
+          "nullable": true,
+          "required": false,
+          "source": "shine.api_director:PackageBody",
+          "type": "object"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "min_length": 1,
+          "name": "workflow_profile_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_director:PackageBody",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "episode_ids",
+        "generation_mode",
+        "output",
+        "policy",
+        "project_id",
+        "workflow_profile_id"
+      ],
+      "preconditions": [
+        "风格已冻结",
+        "分镜已确认",
+        "目标工作流支持 REF2VA"
+      ],
+      "readback": "GET /api/v1/director-packages/{package_id}",
+      "readback_contract": "GET /api/v1/director-packages/{package_id}。",
+      "request_schema": "shine.api_director:PackageBody",
+      "resource_cost": {
+        "gpu": false,
+        "note": "只固化导演包清单，不启动渲染。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "旧导演包快照保留不可变。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "shot_rerender",
+      "api_contract_digest": "753436e62f5ec3d442efa7654a86147f510a5f1e063f64d0de5b61aee64b045b",
+      "api_operations": [
+        "POST /api/v1/projects/{}/generation-segments/{}/regenerate",
+        "GET /api/v1/projects/{}/shots"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/generation-segments/{shot_id}/regenerate",
+      "authority": "GET /api/v1/projects/{project_id}/shots",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认镜头 ID 与源作业后提交重拍队列。",
+      "contract_digest": "4dbf5f1117cfbf9fd6265e97209b557c4457feb517c3f8c5fdc7d22abbd2a1ba",
+      "contract_revision": 2,
+      "description": "围绕指定镜头与源作业排队单镜重拍任务（自动保护旧已过镜版本与 UNKNOWN 凭据）。",
+      "dispatch": "shot_rerender",
+      "examples": [
+        "重拍第 8 镜"
+      ],
+      "executor": "shine.services.rerender_shot_segment",
+      "executor_bound": true,
+      "feature_id": "production-qc-delivery",
+      "gates": [
+        "SHOT_REVISION_MATCH",
+        "RENDER_BINDINGS_LOCK",
+        "UNKNOWN_NO_RESUBMIT"
+      ],
+      "gpu": true,
+      "idempotency_policy": "按当前镜头修订幂等重放。",
+      "introduced_version": "2.2.0",
+      "label": "按镜重拍视频片段",
+      "module": "production",
+      "note": "沿用 generation-segments/regenerate。",
+      "occupancy_gate": "GPU",
+      "page": "成片与分镜工作台",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 10000,
+          "minimum": 1,
+          "name": "expected_shot_revision",
+          "nullable": false,
+          "required": false,
+          "source": "shine.api_segments:SegmentAction",
+          "type": "integer"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "shot_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "body",
+          "default": null,
+          "enum": [],
+          "has_default": false,
+          "max_length": 36,
+          "name": "source_job_id",
+          "nullable": false,
+          "required": true,
+          "source": "shine.api_segments:SegmentAction",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "expected_shot_revision",
+        "project_id",
+        "shot_id",
+        "source_job_id"
+      ],
+      "preconditions": [
+        "源作业已就绪且镜头未变"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/shots",
+      "readback_contract": "GET /api/v1/projects/{project_id}/shots。",
+      "request_schema": "shine.api_segments:SegmentAction",
+      "resource_cost": {
+        "gpu": true,
+        "note": "GPU H3 重拍。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "不覆盖旧通过片段。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "episode_delivery_assemble",
+      "api_contract_digest": "ae8d58de77cc08996149d5ea29be9b2cabf3f9d403e0c67fe14d09d3299ea1f4",
+      "api_operations": [
+        "POST /api/v1/projects/{}/production-series/{}/assemble",
+        "GET /api/v1/projects/{}/deliveries"
+      ],
+      "api_route": "POST /api/v1/projects/{project_id}/production-series/{series_id}/assemble",
+      "authority": "GET /api/v1/projects/{project_id}/deliveries",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认系列 ID 后创建交付单。",
+      "contract_digest": "38e6645e4ab86c4c3d258dab8d0ad24323eb3881c94f1283525f1e4a973d23b2",
+      "contract_revision": 2,
+      "description": "将已全部拍完并过检的生产序列装配为新的交付单（如 v1/v2）；人工审片签收仍由用户完成。",
+      "dispatch": "episode_delivery_assemble",
+      "examples": [
+        "把已拍完的系列装配出 v2 成片"
+      ],
+      "executor": "shine.services.assemble_series_delivery",
+      "executor_bound": true,
+      "feature_id": "production-qc-delivery",
+      "gates": [
+        "SERIES_COMPLETED",
+        "DELIVERY_PRECONDITIONS"
+      ],
+      "gpu": false,
+      "idempotency_policy": "交由 enqueue_auto_delivery 去重。",
+      "introduced_version": "2.2.0",
+      "label": "装配成片交付单",
+      "module": "delivery",
+      "note": "严禁代签收 acceptance_status。",
+      "occupancy_gate": "NONE",
+      "page": "成片交付",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "series_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "project_id",
+        "series_id"
+      ],
+      "preconditions": [
+        "生产序列状态为 COMPLETED"
+      ],
+      "readback": "GET /api/v1/projects/{project_id}/deliveries",
+      "readback_contract": "GET /api/v1/projects/{project_id}/deliveries。",
+      "request_schema": null,
+      "resource_cost": {
+        "gpu": false,
+        "note": "FFmpeg 合并与解码质检。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "历史交付版本保留，不覆盖已签收版本。",
+      "scope": "PROJECT",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "task_reconcile",
+      "api_contract_digest": "9e9763f2e2fdaf8349d46854a9039d59d9bf816e871e1e4d4def3500d568ee53",
+      "api_operations": [
+        "POST /api/v1/production-runs/{}/reconcile",
+        "GET /api/v1/production-runs/{}"
+      ],
+      "api_route": "POST /api/v1/production-runs/{run_id}/reconcile",
+      "authority": "GET /api/v1/production-runs/{run_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "明确告知只核对已提交凭证，不盲目重跑。",
+      "contract_digest": "007939e57b4465da775c4e645241d4c9bee7e925d1bf6c7cbde1648db750241b",
+      "contract_revision": 2,
+      "description": "对处于 NEEDS_REVIEW/UNKNOWN/中断状态的面片运行或素材批次执行只读对账，绝不盲目重提。",
+      "dispatch": "task_reconcile",
+      "examples": [
+        "对卡在待核对的运行做一次安全对账"
+      ],
+      "executor": "shine.production.runner.reconcile_production_task",
+      "executor_bound": true,
+      "feature_id": "production-qc-delivery",
+      "gates": [
+        "UNKNOWN_NEVER_RESUBMIT"
+      ],
+      "gpu": false,
+      "idempotency_policy": "纯核对可安全重放。",
+      "introduced_version": "2.2.0",
+      "label": "安全对账异常或未知任务",
+      "module": "production",
+      "note": "对 UNKNOWN 任务保持隔离。",
+      "occupancy_gate": "NONE",
+      "page": "运行监控 / 素材准备",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 100000,
+          "name": "expected_state_version",
+          "required": false,
+          "source": "declaration",
+          "type": "integer"
+        },
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 36,
+          "name": "material_run_id",
+          "required": false,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": false,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "run_id",
+          "required": false,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "expected_state_version",
+        "material_run_id",
+        "project_id",
+        "run_id"
+      ],
+      "preconditions": [
+        "指定了 run_id 或 material_run_id"
+      ],
+      "readback": "GET /api/v1/production-runs/{run_id}",
+      "readback_contract": "GET /api/v1/production-runs/{run_id}。",
+      "request_schema": null,
+      "resource_cost": {
+        "gpu": false,
+        "note": "仅数据库与已提交凭证核对。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "无破坏性写入。",
+      "scope": "RUN",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
+    },
+    {
+      "action_id": "stale_run_recover",
+      "api_contract_digest": "9e9763f2e2fdaf8349d46854a9039d59d9bf816e871e1e4d4def3500d568ee53",
+      "api_operations": [
+        "POST /api/v1/production-runs/{}/reconcile",
+        "GET /api/v1/production-runs/{}"
+      ],
+      "api_route": "POST /api/v1/production-runs/{run_id}/reconcile",
+      "authority": "GET /api/v1/production-runs/{run_id}",
+      "availability": "AVAILABLE",
+      "confirmation_policy": "确认 run_id 后先对账再按安全边界恢复。",
+      "contract_digest": "82cc7c69359a260e1d52d05d982de473c16691b7961f0390906a28b5815413a7",
+      "contract_revision": 2,
+      "description": "先安全对账已停滞的生产运行，再恢复已确认尚未外部提交的序列。",
+      "dispatch": "stale_run_recover",
+      "examples": [
+        "恢复刚刚中断的那次拍片任务"
+      ],
+      "executor": "shine.production.runner.recover_stale_run",
+      "executor_bound": true,
+      "feature_id": "production-qc-delivery",
+      "gates": [
+        "UNKNOWN_PRE_SUBMIT_ISOLATION"
+      ],
+      "gpu": false,
+      "idempotency_policy": "恢复状态幂等。",
+      "introduced_version": "2.2.0",
+      "label": "安全对账并恢复中断运行",
+      "module": "production",
+      "note": "UNKNOWN 外部提交绝不重提。",
+      "occupancy_gate": "NONE",
+      "page": "运行监控",
+      "paid": false,
+      "param_contract": [
+        {
+          "binding": "executor",
+          "enum": [],
+          "max_length": 36,
+          "name": "project_id",
+          "required": false,
+          "source": "declaration",
+          "type": "string"
+        },
+        {
+          "binding": "path",
+          "enum": [],
+          "max_length": 36,
+          "name": "run_id",
+          "required": true,
+          "source": "declaration",
+          "type": "string"
+        }
+      ],
+      "params": [
+        "project_id",
+        "run_id"
+      ],
+      "preconditions": [
+        "存在已中断或等待核对的 ProductionRun"
+      ],
+      "readback": "GET /api/v1/production-runs/{run_id}",
+      "readback_contract": "GET /api/v1/production-runs/{run_id}。",
+      "request_schema": null,
+      "resource_cost": {
+        "gpu": false,
+        "note": "仅恢复未外部提交工作。",
+        "paid": false
+      },
+      "response_schema": null,
+      "reversible": "NO",
+      "rollback_policy": "可通过 pause 再次暂停。",
+      "scope": "RUN",
+      "status": "GUARDED",
+      "tier": "EXECUTE_GUARDED"
     }
   ],
   "digests": {
-    "api_contract": "5dfe9252e08980c1d1e6267bdc65930f1cbff59f426211cd3516e50b327a84bd",
-    "api_schema": "6040f0953f504146f9243df250b080584190d497199ff70055e68043ad66960d",
-    "contracts": "df39378a030ad6be7c2db48671e4b7d80a423f9825d6d984d9a887e7defeac85"
+    "api_contract": "547211732ff7cb7bae39c4922e401316ff18dfc0ac50f52aed6168d21de8df9b",
+    "api_schema": "6fffd497752f45d3416f60779c3dca6459bebac594a0394b4f403f4c15cfd2a2",
+    "contracts": "6a2228733291fb59286b087853f303b8e7f241cdec631a5242dfd6eb300e1212"
   },
   "discovered": [
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "DELETE /api/v1/agent-routes/{}",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "DELETE /api/v1/loras/{}",
       "status": "DISCOVERED"
     },
     {
@@ -4585,18 +10069,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "PATCH /api/v1/loras/{}",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "PATCH /api/v1/projects/{}/director/storyboard/shots/{}",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/agent-routes/preview",
       "status": "DISCOVERED"
     },
@@ -4604,12 +10076,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/artifacts/{}/technical-qc",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/asset-center/adoptions",
       "status": "DISCOVERED"
     },
     {
@@ -4640,18 +10106,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/asset-center/assets/{}/versions",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/asset-center/assignments",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/asset-center/image-jobs",
       "status": "DISCOVERED"
     },
     {
@@ -4699,12 +10153,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/asset-center/versions/{}/promote",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/asset-center/versions/{}/qc",
       "status": "DISCOVERED"
     },
@@ -4742,12 +10190,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/assets/{}/lock",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/candidate-assets/{}/promote",
       "status": "DISCOVERED"
     },
     {
@@ -4969,12 +10411,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/loras/import",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/manual4/projects/{}/assets/upload",
       "status": "DISCOVERED"
     },
@@ -5179,12 +10615,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/production-runs/{}/reconcile",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/production-runs/{}/resume",
       "status": "DISCOVERED"
     },
@@ -5269,12 +10699,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director-packages",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/director-style/apply-draft",
       "status": "DISCOVERED"
     },
@@ -5293,18 +10717,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director/materials/derive",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director/outline/confirm",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/director/outline/revision",
       "status": "DISCOVERED"
     },
@@ -5312,18 +10724,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/director/storyboard-book",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director/storyboard-book/confirm",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/director/storyboard/episodes/{}/confirm",
       "status": "DISCOVERED"
     },
     {
@@ -5443,12 +10843,6 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/generation-segments/{}/regenerate",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/generation-segments/{}/select",
       "status": "DISCOVERED"
     },
@@ -5485,19 +10879,7 @@
     {
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/material-preparation/generate",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/material-preparation/merge-character",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/material-preparation/regenerate",
       "status": "DISCOVERED"
     },
     {
@@ -5690,12 +11072,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/projects/{}/production-series",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/projects/{}/production-series/{}/assemble",
       "status": "DISCOVERED"
     },
     {
@@ -5930,12 +11306,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/setup/image-runtime/stop",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "POST /api/v1/setup/image-runtime/validate",
       "status": "DISCOVERED"
     },
     {
@@ -6266,12 +11636,6 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "PUT /api/v1/projects/{}/director/storyboard/shots/{}/subtitles",
-      "status": "DISCOVERED"
-    },
-    {
-      "executable": false,
-      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
-      "route": "PUT /api/v1/projects/{}/material-preparation/preferences",
       "status": "DISCOVERED"
     },
     {

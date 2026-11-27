@@ -90,6 +90,9 @@ export type TaskGrant = {
 
 const GROUP_LABELS: Record<string, string> = {
   inspect: '只读检查本机已有资源',
+  literary: '文戏与分镜操作',
+  materials: '素材准备与换图',
+  production: '导演包、制作控制与交付',
   resources: '下载缺失的模型权重',
   nodes: '安装已审查、固定版本的节点包',
   workflows: '创建并验证用户级工作流',
@@ -162,6 +165,8 @@ type Props = {
   sessionId: string;
   projectId?: string | null;
   objective: string;
+  /** Optional explicit groups proposed by AI (or narrowed by caller). */
+  initialCapabilityGroups?: string[] | null;
   /** A grant already authorized for this session: the card reconnects to it
    *  (same task, same budget) instead of previewing a second authorization. */
   initialGrant?: TaskGrant | null;
@@ -173,7 +178,7 @@ const ACTIVE_STATUSES = new Set(['AUTHORIZED', 'RUNNING', 'WAITING_EXECUTOR', 'V
 /** A pause that asked for the user's decision is resumable by an explicit click. */
 const RESUMABLE_STATUSES = new Set([...ACTIVE_STATUSES, 'PAUSED_USER_DECISION']);
 
-export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, onClose, onFinished }: Props) {
+export function TaskGrantCard({ sessionId, projectId, objective, initialCapabilityGroups, initialGrant, onClose, onFinished }: Props) {
   const [preview, setPreview] = useState<GrantPreview | null>(null);
   const [grant, setGrant] = useState<TaskGrant | null>(initialGrant || null);
   const [execution, setExecution] = useState<GrantExecution | null>(null);
@@ -183,6 +188,19 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, o
   const [error, setError] = useState<string | null>(null);
   const [showDetails, setShowDetails] = useState(false);
   const [selectedInstallation, setSelectedInstallation] = useState<string | null>(null);
+  const [allowGpu, setAllowGpu] = useState(true);
+  const [allowDownload, setAllowDownload] = useState(true);
+
+  const requestedGroups = useMemo(
+    () => (
+      initialCapabilityGroups && initialCapabilityGroups.length > 0
+        ? initialCapabilityGroups
+        : projectId
+          ? ['inspect', 'literary', 'materials', 'production', 'resources', 'nodes', 'workflows', 'runtime', 'test']
+          : ['inspect', 'resources', 'nodes', 'workflows', 'runtime', 'test']
+    ),
+    [initialCapabilityGroups, projectId],
+  );
 
   const loadPreview = useCallback(async () => {
     if (initialGrant) return;  // reconnecting, never a second authorization
@@ -197,7 +215,9 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, o
           objective,
           project_id: projectId || null,
           installation_id: selectedInstallation || undefined,
-          capability_groups: ['inspect', 'resources', 'nodes', 'workflows', 'runtime', 'test'],
+          capability_groups: requestedGroups,
+          allow_gpu: allowGpu,
+          allow_download: allowDownload,
         }),
       });
       setPreview(body);
@@ -206,7 +226,7 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, o
     } finally {
       setPreviewing(false);
     }
-  }, [sessionId, projectId, objective, selectedInstallation, initialGrant]);
+  }, [sessionId, projectId, objective, selectedInstallation, initialGrant, requestedGroups, allowGpu, allowDownload]);
 
   useEffect(() => {
     void loadPreview();
@@ -349,6 +369,27 @@ export function TaskGrantCard({ sessionId, projectId, objective, initialGrant, o
 
       {!grant && preview ? (
         <div className="copilot-grant-body">
+          <h4>安全开关</h4>
+          <div className="copilot-grant-toggles">
+            <label>
+              <input
+                type="checkbox"
+                checked={allowGpu}
+                disabled={previewing || authorizing}
+                onChange={(event) => setAllowGpu(event.target.checked)}
+              />
+              <span>允许调用本机 GPU 动作（生图 / 试拍 / 重拍）</span>
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={allowDownload}
+                disabled={previewing || authorizing}
+                onChange={(event) => setAllowDownload(event.target.checked)}
+              />
+              <span>允许下载模型 / 安装受控节点包</span>
+            </label>
+          </div>
           <h4>授权后 AI 会自动做的事</h4>
           <ul>
             {preview.capability_groups.map((group) => (

@@ -197,6 +197,10 @@ def _generic_value(spec: ParamSpec, value: Any) -> Any:
         if spec.max_length is not None and value > spec.max_length:
             raise ParamError(f"{spec.name} 不能超过 {spec.max_length}。")
         return value
+    if spec.type == "number":
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ParamError(f"{spec.name} 必须是数字。")
+        return float(value)
     if spec.type == "string_list":
         if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
             raise ParamError(f"{spec.name} 必须是字符串列表。")

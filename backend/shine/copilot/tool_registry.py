@@ -26,9 +26,42 @@ AUTONOMOUS_CAPABILITIES: tuple[str, ...] = (
     "setup_reconcile",
     "setup_repair",
     "resource_install_plan",
+    "managed_release",
+    "support_web_search_update",
+    "image_runtime_validate",
     "workflow_graph_register",
     "workflow_user_copy",
+    "project_create",
+    "project_settings_update",
+    "document_import_text",
+    "document_switch_basis",
+    "story_outline_generate",
+    "story_outline_confirm",
+    "storyboard_book_confirm",
+    "literary_scripts_generate",
+    "storyboard_generate",
+    "storyboard_confirm",
+    "shot_revise",
+    "material_derive",
+    "material_preferences_update",
+    "material_generate",
+    "material_regenerate",
+    "material_promote",
+    "shot_swap_material_binding",
+    "asset_center_image_generate",
+    "asset_center_character_sheet_generate",
+    "asset_center_version_promote",
+    "asset_center_assign_to_project",
+    "lora_import_local",
+    "lora_update",
+    "lora_delete",
+    "director_package_create",
     "production_start",
+    "production_control",
+    "shot_rerender",
+    "episode_delivery_assemble",
+    "task_reconcile",
+    "stale_run_recover",
 )
 
 _TYPE_MAP = {
@@ -51,7 +84,7 @@ def _json_schema_for(row) -> dict[str, Any]:
         kind = _TYPE_MAP.get(str(field.get("type")), "string")
         entry: dict[str, Any] = {"type": kind}
         if kind == "array":
-            entry["items"] = {"type": "string"}
+            entry["items"] = {"type": "object" if field.get("type") == "list" else "string"}
         enum = list(field.get("enum") or [])
         if enum:
             entry["enum"] = enum

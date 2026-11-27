@@ -302,38 +302,18 @@ class ShotRowEditBody(APIModel):
 @router.patch("/projects/{project_id}/director/storyboard/shots/{shot_id}")
 def edit_shot_row(project_id: str, shot_id: str, body: ShotRowEditBody, actor: Operator,
                   db: DBSession) -> dict:
-    from shine.models import Shot
-    from shine.schemas import ShotSpec
-    from shine.services import revise_shot_record
-
-    project = require_project(db, project_id)
-    shot = db.get(Shot, shot_id)
-    if shot is None or shot.project_id != project_id:
-        raise HTTPException(404, "SHOT_NOT_FOUND")
-    if shot.revision != body.expected_revision:
-        raise HTTPException(409, {"code": "SHOT_REVISION_CHANGED",
-                                  "message": "镜头已更新，请刷新",
-                                  "current_revision": shot.revision})
-    spec = ShotSpec.model_validate(shot.spec)
-    update: dict[str, Any] = {}
-    if body.duration_target_s is not None:
-        # Every dialogue line must still fit the new editorial length.
-        if any(line.end_s > body.duration_target_s for line in spec.dialogue):
-            raise HTTPException(422, {"code": "SHOT_DURATION_BELOW_DIALOGUE",
-                                      "message": "成片秒数装不下这一镜的台词"})
-        update["duration_target_s"] = body.duration_target_s
-    if body.continuity_mode is not None:
-        # Keep the typed model: a raw dict here would round-trip through the
-        # node's serializer as an unexpected value and lose its field order.
-        from shine.schemas import ContinuityMode
-
-        update["continuity"] = spec.continuity.model_copy(
-            update={"mode": ContinuityMode(body.continuity_mode)})
-    if not update:
-        return {"shot_id": shot.id, "revision": shot.revision, "changed": False}
-    result = revise_shot_record(db, project, shot, spec=spec.model_copy(update=update), actor=actor)
-    db.commit()
-    return {"shot_id": shot.id, "revision": result["revision"], "changed": True}
+    result = streamline.revise_director_shot(
+        db,
+        project_id,
+        shot_id,
+        expected_revision=body.expected_revision,
+        duration_target_s=body.duration_target_s,
+        continuity_mode=body.continuity_mode,
+        actor=actor,
+    )
+    if result.get("changed"):
+        db.commit()
+    return {"shot_id": result["shot_id"], "revision": result["revision"], "changed": result["changed"]}
 
 
 class ShotPromptBody(APIModel):

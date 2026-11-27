@@ -287,7 +287,7 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
       }));
       await loadLlmRoute();
       window.dispatchEvent(new CustomEvent('shine:copilot-llm-updated'));
-      setNotice(copilotProfileId ? 'AI 管家解释模型已保存并立即生效。' : '已切换为纯离线规则诊断模式。');
+      setNotice(copilotProfileId ? 'AI 管家解释模型已保存并立即生效。' : '已清空文本模型；AI 管家将仅展示「项目体检面板」，配置模型后可恢复对话与自主操作。');
       setError('');
     } catch (err) {
       setLlmError(err instanceof Error ? err.message : '模型分配没有保存。');
@@ -543,7 +543,7 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
               setLlmError('');
             }}
           >
-            <option value="">未分配（使用本机离线规则诊断与知识库）</option>
+            <option value="">未分配（仅提供项目体检面板，不开启 AI 对话）</option>
             {llmProfiles.map((row) => (
               <option
                 key={row.id}
@@ -557,7 +557,7 @@ export function CopilotSettingsPage({ projects, projectId }: CopilotSettingsPage
           <small>
             {savedCopilotProfileId
               ? `当前生效：${llmProfiles.find((r) => r.id === savedCopilotProfileId)?.name || '已分配模型'}`
-              : '当前生效：离线规则模式（不消耗 Token）'}
+              : '当前生效：仅项目体检面板（未配置文本模型，不消耗 Token）'}
           </small>
         </label>
         {llmError && <p className="copilot-settings-error" role="alert">{llmError}</p>}

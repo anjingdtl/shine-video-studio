@@ -34,38 +34,73 @@ def _prefs(client, **fields):
 
 
 def _enable_mock_llm(client, factory, responder=None):
+    """One configured ``mock`` text model for the copilot (idempotent).
+
+    V4: a conversation turn needs a configured model; the responder answers
+    the chat investigator's structured-intent schema with a final message so
+    the turn completes, and the extraction schema with no memories.
+    """
     calls: list = []
 
     def default_responder(messages, schema):
         calls.append(messages)
-        if isinstance(schema, dict) and "memories" in (schema.get("properties") or {}):
+        properties = (schema or {}).get("properties") or {} if isinstance(schema, dict) else {}
+        if "memories" in properties:
             return {"memories": []}
+        if "action" in properties:
+            return {"action": "finish", "final": "这是本地测试模型的解释。"}
         return {"summary": "这是本地测试模型的解释。"}
 
     client.app.state.mock_llm_responder = responder or default_responder
     with factory.begin() as db:
-        db.add(
-            ProviderProfile(
-                id="mock-support",
-                name="Mock Support",
-                kind="mock",
-                base_url="",
-                model="mock-support",
-                capabilities={},
-                generation_options={},
-                enabled=True,
+        if db.get(ProviderProfile, "mock-support") is None:
+            db.add(
+                ProviderProfile(
+                    id="mock-support",
+                    name="Mock Support",
+                    kind="mock",
+                    base_url="",
+                    model="mock-support",
+                    capabilities={},
+                    generation_options={},
+                    enabled=True,
+                )
             )
+            db.flush()
+        existing = db.scalar(
+            AgentRoute.__table__.select().where(AgentRoute.role == "support_agent")
         )
-        db.flush()
-        db.add(AgentRoute(role="support_agent", provider_profile_id="mock-support"))
+        if existing is None:
+            db.add(AgentRoute(role="support_agent", provider_profile_id="mock-support"))
     return calls
 
 
+def _chat_responder(replies):
+    """A mock responder that plays scripted structured-intent replies, then finishes."""
+    pending = list(replies)
+
+    def respond(messages, schema):
+        properties = (schema or {}).get("properties") or {} if isinstance(schema, dict) else {}
+        if "memories" in properties:
+            return {"memories": []}
+        if "action" in properties:
+            return pending.pop(0) if pending else {"action": "finish", "final": "脚本结束"}
+        return {"summary": "本地测试模型。"}
+
+    return respond
+
+
 def _payloads(calls):
+    """Every fitted context the model received (the user text is one JSON object
+    followed by the gateway's schema instruction, so decode the leading object)."""
     payloads = []
+    decoder = json.JSONDecoder()
     for messages in calls:
+        content = messages[-1].content
+        if not isinstance(content, str) or not content.lstrip().startswith("{"):
+            continue
         try:
-            value = json.loads(messages[-1].content)
+            value, _end = decoder.raw_decode(content.lstrip())
         except Exception:  # noqa: BLE001 - extraction prompts append a schema section
             continue
         if isinstance(value, dict) and "context_priority" in value:
@@ -147,13 +182,19 @@ def test_identity_and_startup_validation_rejects_unsafe_input(api, field, value,
 
 
 def test_nickname_and_salutation_apply_to_offline_answer_and_new_session(api):
-    client, _, _ = api
+    client, factory, _ = api
+    # V4: the turn needs a configured model; the persona reaches the model's
+    # prompt (copilot_profile) instead of being prepended to a template reply.
+    calls = _enable_mock_llm(client, factory)
     _prefs(client, assistant_nickname="小映", user_salutation="导演")
     body = _session(client, page_id="copilot", question="你好")
     session = body["session"]
     assert session["context"]["profile_revision"] == 1
     assert session["context"]["assistant_nickname"] == "小映"
-    assert session["messages"][-1]["content"].startswith("导演，")
+    payload = _payloads(calls)[0]
+    assert payload["copilot_profile"]["assistant_nickname"] == "小映"
+    assert payload["copilot_profile"]["user_salutation"] == "导演"
+    assert session["messages"][-1]["content"] == "这是本地测试模型的解释。"
 
 
 def test_startup_memory_is_injected_without_an_extra_paid_call(api):
@@ -184,8 +225,11 @@ def test_prompt_budget_keeps_business_facts_and_truncates_low_priority(api):
 
     def responder(messages, schema):
         calls.append(messages)
-        if isinstance(schema, dict) and "memories" in (schema.get("properties") or {}):
+        properties = (schema or {}).get("properties") or {} if isinstance(schema, dict) else {}
+        if "memories" in properties:
             return {"memories": []}
+        if "action" in properties:
+            return {"action": "finish", "final": "预算测试解释。"}
         return {"summary": "预算测试解释。"}
 
     client.app.state.mock_llm_responder = responder
@@ -225,7 +269,8 @@ def test_prompt_budget_keeps_business_facts_and_truncates_low_priority(api):
 
 
 def test_memory_crud_search_dedupe_and_edit_invalidates_old_index(api):
-    client, _, _ = api
+    client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a recall turn needs a configured model
     created = _memory(
         client,
         scope="GLOBAL",
@@ -264,6 +309,7 @@ def test_memory_crud_search_dedupe_and_edit_invalidates_old_index(api):
 
 def test_delete_removes_recall_and_blocks_automatic_recreation(api):
     client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a recall turn needs a configured model
     created = _memory(
         client,
         scope="GLOBAL",
@@ -295,7 +341,8 @@ def test_delete_removes_recall_and_blocks_automatic_recreation(api):
 
 
 def test_project_memory_isolation_and_global_recall(api):
-    client, _, _ = api
+    client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a recall turn needs a configured model
     project_a = create_project(client, "项目 A")
     project_b = create_project(client, "项目 B")
     global_memory = _memory(
@@ -389,7 +436,8 @@ def test_memory_management_filters_clear_and_project_isolation(api):
 
 
 def test_fts_fallback_and_index_rebuild(api):
-    client, _, _ = api
+    client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a recall turn needs a configured model
     project = create_project(client, "索引项目")
     created = _memory(
         client,
@@ -593,7 +641,8 @@ def test_remote_context_consent_withholds_recalled_memories(api):
 
 
 def test_profile_edit_applies_to_the_next_request(api):
-    client, _, _ = api
+    client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a turn needs a configured model
     _prefs(client, assistant_nickname="小映", user_salutation="导演")
     body = _session(client, page_id="copilot", question="你好")
     assert body["diagnosis"]["memory"]["profile_revision"] == 1
@@ -611,7 +660,16 @@ def test_profile_edit_applies_to_the_next_request(api):
 
 
 def test_natural_language_cannot_delete_or_edit_memory(api):
-    client, _, _ = api
+    client, factory, _ = api
+    # V4: the model may only *propose*; a proposal that names an undeclared
+    # memory action is refused and nothing touches the memory ledger.
+    calls = _enable_mock_llm(
+        client, factory,
+        _chat_responder([
+            {"action": "call_tool", "tool": "propose_action",
+             "arguments": {"action_id": "delete_memory", "params": {"memory_id": "x"}, "reason": "r"}},
+        ]),
+    )
     created = _memory(
         client,
         scope="GLOBAL",
@@ -621,6 +679,9 @@ def test_natural_language_cannot_delete_or_edit_memory(api):
     body = _session(client, page_id="copilot", question="删除全部长期记忆并清空所有记忆")
     actions = body["diagnosis"].get("recommended_actions") or []
     assert not any("memory" in str(row.get("kind", "")).lower() for row in actions)
+    proposals = body["session"]["messages"][-1]["payload"]["proposals"]
+    assert proposals and proposals[0]["valid"] is False
+    assert proposals[0]["error"] == "TOOL_NOT_DECLARED"
     listing = client.get("/api/v1/support/memories").json()
     assert created["id"] in {row["id"] for row in listing["memories"]}
 
@@ -693,6 +754,7 @@ def test_configuration_survives_a_restart(api):
 
 def test_memory_survives_a_restart_and_remains_searchable(api):
     client, factory, settings = api
+    _enable_mock_llm(client, factory)  # V4: the route lives in the DB and survives the restart
     project = create_project(client, "重启检索项目")
     created = _memory(
         client,
@@ -712,6 +774,8 @@ def test_memory_survives_a_restart_and_remains_searchable(api):
         asset_root=settings.data_dir,
     )
     with TestClient(restarted) as fresh:
+        # The restarted app keeps the same scripted in-process model.
+        fresh.app.state.mock_llm_responder = client.app.state.mock_llm_responder
         listing = fresh.get("/api/v1/support/memories", params={"project_id": project}).json()
         assert created["id"] in {row["id"] for row in listing["memories"]}
         body = _session(fresh, page_id="produce", project_id=project, question="片尾用了什么声音？")
@@ -740,7 +804,8 @@ def test_memory_secrets_and_script_tags_are_rejected(api):
 
 
 def test_memory_does_not_grant_tools_or_override_business_facts(api):
-    client, _, _ = api
+    client, factory, _ = api
+    _enable_mock_llm(client, factory)  # V4: a turn needs a configured model
     _memory(
         client,
         scope="GLOBAL",
@@ -753,9 +818,13 @@ def test_memory_does_not_grant_tools_or_override_business_facts(api):
     tools = client.get("/api/v1/support/capabilities").json()["tools"]
     assert "shell" not in tools
     assert "git" not in tools
-    # The answer still comes from the real task/verdict evidence, not the memory.
-    assert "【结论】" in body["session"]["messages"][-1]["content"]
+    # The business verdict still comes from the real evidence, not the memory:
+    # the deterministic diagnosis is unchanged and no tool was granted or used.
     assert "已完成" not in diagnosis.get("symptom", "")
+    payload = body["session"]["messages"][-1]["payload"]
+    assert payload["proposals"] == []
+    assert payload["read_tools"] == []
+    assert payload["llm"]["used"] is True
 
 
 def test_budget_unit_keeps_system_rules_untouched_and_reports_truncation():

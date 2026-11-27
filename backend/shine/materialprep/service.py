@@ -2024,3 +2024,131 @@ def generation_progress(db, project_id: str) -> dict[str, Any]:
         .order_by(MaterialRun.created_at.desc())
     ).all() if (run.payload or {}).get("kind") == "production"]
     return {"project_id": project_id, "runs": runs, "generated_at": utcnow().isoformat()}
+
+
+def promote_material_candidate(
+    db,
+    settings,
+    *,
+    project_id: str,
+    candidate_id: str,
+    actor: str = "local-user",
+    offline: bool = False,
+    evidence: str = "copilot_confirmed",
+) -> dict[str, Any]:
+    """Promote an approved material CandidateAsset to a project Asset master."""
+    from shine.api_preparation import Decision
+    from shine.comfyops import approval, assets
+    from shine.comfyops.models import CandidateAsset
+
+    require_project(db, project_id)
+    row = db.get(CandidateAsset, candidate_id)
+    if row is None or row.project_id != project_id:
+        raise HTTPException(404, "CANDIDATE_NOT_FOUND")
+    issued = approval.issue(db, actor, "promote", row)
+    decision = Decision(
+        grant_id=issued["grant_id"],
+        snapshot=issued["snapshot"],
+        evidence=evidence,
+        listened=False,
+        offline=bool(offline),
+    )
+    assets.promote(db, settings, row, actor, decision, offline=bool(offline))
+    db.flush()
+    return assets.public(row)
+
+
+def regenerate_material_requirement(
+    db,
+    settings,
+    *,
+    project_id: str,
+    requirement_id: str,
+    idempotency_key: str,
+    actor: str = "local-user",
+    seed: int = 0,
+    style_preset: str | None = None,
+    style_loras: list[dict[str, Any]] | None = None,
+    character_sheet_mode: bool | None = None,
+    rights_id: str | None = None,
+) -> dict[str, Any]:
+    """Queue a new generation revision for one requirement under existing plan confirmation."""
+    from shine.comfyops.loras import StyleLoraError, freeze_image_lora_style
+    from shine.comfyops.models import AssetRequirement
+    from shine.materialprep.contracts import MaterialImageBrief
+    from shine.media.output_layout import output_root
+
+    require_project(db, project_id)
+    row = db.get(AssetRequirement, requirement_id)
+    if row is None or row.project_id != project_id:
+        raise HTTPException(404, "MATERIAL_REQUIREMENT_NOT_FOUND")
+    state = plan_progress(db, project_id, data_dir=output_root(db, settings), settings=settings)
+    confirmation = state.get("confirmation") or {}
+    if not confirmation.get("confirmation_id") or not confirmation.get("confirmation_hash"):
+        raise HTTPException(409, "MATERIAL_PLAN_NOT_CONFIRMED")
+    image_style: dict[str, Any] = {}
+    if style_preset or style_loras:
+        try:
+            image_style = freeze_image_lora_style(db, settings, style_loras or [], style_preset)
+        except StyleLoraError as exc:
+            raise HTTPException(exc.http_status, detail={"code": exc.code, "message": exc.message}) from exc
+    if character_sheet_mode is None:
+        character_sheet_mode = bool((state.get("preferences") or {}).get("character_sheet_mode"))
+    brief_raw = (row.payload or {}).get("brief") or {}
+    if not brief_raw:
+        item = db.scalars(
+            select(MaterialItem)
+            .where(MaterialItem.project_id == project_id, MaterialItem.requirement_id == requirement_id)
+            .order_by(MaterialItem.created_at.desc())
+        ).first()
+        if item is not None:
+            brief_raw = (item.payload or {}).get("brief") or {}
+    briefs: dict[str, dict[str, Any]] | None = None
+    if isinstance(brief_raw, dict) and brief_raw:
+        validated = MaterialImageBrief.model_validate(brief_raw).model_dump(mode="json")
+        if validated.get("questions"):
+            raise HTTPException(422, {"code": "MATERIAL_BRIEF_QUESTIONS_UNANSWERED", "questions": validated["questions"]})
+        briefs = {requirement_id: validated}
+    return create_batch(
+        db,
+        project_id,
+        confirmation_id=str(confirmation["confirmation_id"]),
+        confirmation_hash=str(confirmation["confirmation_hash"]),
+        requirement_ids=[requirement_id],
+        idempotency_key=idempotency_key,
+        rights_id=rights_id,
+        seeds={requirement_id: int(seed)},
+        briefs=briefs,
+        new_revision=True,
+        image_style=image_style or None,
+        character_sheet_mode=bool(character_sheet_mode),
+        settings=settings,
+    )
+
+
+def validate_image_runtime_setup(
+    db,
+    settings,
+    *,
+    project_id: str,
+    idempotency_key: str,
+    families: list[str] | None = None,
+    rights_id: str | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Queue small-sample image runtime validation through the single validation executor."""
+    from shine.comfyops import image_runtime as runtime
+
+    project = require_project(db, project_id)
+    if rights_id:
+        require_rights(db, project.id, rights_id)
+    config = runtime.load_config(settings)
+    if not config.base_url or not config.instance_id:
+        raise HTTPException(409, {"code": "IMAGE_RUNTIME_NOT_READY", "detail": "IMAGE_RUNTIME_NOT_BOUND"})
+    return create_validation_batch(
+        db,
+        project.id,
+        families=list(families or ["character", "scene", "prop"]),
+        idempotency_key=idempotency_key,
+        rights_id=rights_id,
+    )

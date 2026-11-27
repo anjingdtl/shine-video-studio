@@ -24,7 +24,7 @@ HEADERS = {"x-shine-local-action": "1"}
 def _session(client, project_id: str | None = None) -> dict:
     response = client.post(
         "/api/v1/support/sessions",
-        json={"page_id": "projects", "project_id": project_id, "question": "你好"},
+        json={"page_id": "projects", "project_id": project_id, "question": ""},
         headers=HEADERS,
     )
     assert response.status_code == 201, response.text
@@ -52,16 +52,6 @@ def _approve(client, action: dict):
         json={"preview_hash": action["preview_hash"], "confirm": True},
         headers=HEADERS,
     )
-
-
-def _plan(client, request: str, *, project_id: str | None = None, session_id: str | None = None) -> dict:
-    response = client.post(
-        "/api/v1/support/plans/preview",
-        json={"request": request, "project_id": project_id, "session_id": session_id},
-        headers=HEADERS,
-    )
-    assert response.status_code == 200, response.text
-    return response.json()["plan"]
 
 
 # ---------------------------------------------------------------------------
@@ -221,64 +211,143 @@ def test_p0_02_every_registered_action_advertises_its_real_parameters():
 
 
 def test_p1_nl_creates_a_real_action_with_the_spoken_title(api):
-    client, _, _ = api
-    plan = _plan(client, "建立一个名叫《雾港回声》的短剧项目。")
-    assert plan["intent"] == "CREATE_PROJECT"
-    assert plan["requires_input"] == []
-    step = plan["steps"][0]
-    assert step["state"] == "READY"
-    assert step["action"]["kind"] == "project_create"
-    assert step["action"]["params"]["title"] == "雾港回声"
+    from tests.copilot_v4_support import configure_mock_text_model, finish_reply, scripted_responder, tool_reply
+
+    client, factory, _ = api
+    configure_mock_text_model(
+        client,
+        scripted_responder([
+            tool_reply("propose_action", {
+                "action_id": "project_create",
+                "params": {"title": "雾港回声"},
+                "reason": "用户要求创建短剧项目",
+            }),
+            finish_reply("已提出创建《雾港回声》的建议卡片。"),
+        ]),
+    )
+    res = client.post(
+        "/api/v1/support/sessions",
+        json={"page_id": "projects", "question": "建立一个名叫《雾港回声》的短剧项目。"},
+        headers=HEADERS,
+    )
+    assert res.status_code == 201, res.text
+    proposal = res.json()["session"]["messages"][-1]["payload"]["proposals"][0]
+    assert proposal["valid"] is True
+    assert proposal["action_id"] == "project_create"
+    assert proposal["params"]["title"] == "雾港回声"
+    with factory() as db:
+        assert db.query(SupportAction).count() == 0
 
 
 def test_p1_nl_never_defaults_to_all_episodes(api):
+    from tests.copilot_v4_support import configure_mock_text_model, finish_reply, scripted_responder, tool_reply
+
     client, _, _ = api
     project = create_project(client, "空项目")
-    plan = _plan(client, "开始生成", project_id=project)
-    assert plan["requires_input"] == ["episode_ids"]
-    assert not any((step.get("action") or {}).get("kind") == "production_start" for step in plan["steps"])
+    configure_mock_text_model(
+        client,
+        scripted_responder([
+            tool_reply("propose_action", {
+                "action_id": "production_start",
+                "params": {"project_id": project},
+                "reason": "未指定集数",
+            }),
+            finish_reply("请先指定要开拍的集数。"),
+        ]),
+    )
+    res = client.post(
+        "/api/v1/support/sessions",
+        json={"page_id": "projects", "project_id": project, "question": "开始生成"},
+        headers=HEADERS,
+    )
+    assert res.status_code == 201, res.text
+    proposal = res.json()["session"]["messages"][-1]["payload"]["proposals"][0]
+    assert proposal["valid"] is False
+    assert "episode_ids" in (proposal["error"] or "")
 
 
 def test_p1_nl_language_and_title_are_not_invented(api):
+    from tests.copilot_v4_support import configure_mock_text_model, finish_reply, scripted_responder, tool_reply
+
     client, _, _ = api
-    plan = _plan(client, "新建一个粤语项目")
-    step = plan["steps"][0]
-    assert step["action"]["params"]["language"] == "yue"
-    assert "title" not in step["action"]["params"]
-    assert plan["requires_input"] == ["title"]
+    configure_mock_text_model(
+        client,
+        scripted_responder([
+            tool_reply("propose_action", {
+                "action_id": "project_create",
+                "params": {"language": "yue"},
+                "reason": "用户没有说项目名",
+            }),
+            finish_reply("还需要你提供项目名称。"),
+        ]),
+    )
+    res = client.post(
+        "/api/v1/support/sessions",
+        json={"page_id": "projects", "question": "新建一个粤语项目"},
+        headers=HEADERS,
+    )
+    assert res.status_code == 201, res.text
+    proposal = res.json()["session"]["messages"][-1]["payload"]["proposals"][0]
+    assert proposal["valid"] is False
+    assert "title" in (proposal["error"] or "")
 
 
 def test_p1_import_plan_asks_for_the_users_own_text(api):
+    from tests.copilot_v4_support import configure_mock_text_model, finish_reply, scripted_responder, tool_reply
+
     client, _, _ = api
     project = create_project(client, "导入项目")
-    session = _session(client, project)
-    plan = _plan(client, "把我刚才选择的文本导入这个项目", session_id=session["id"])
-    assert plan["intent"] == "IMPORT_DOCUMENT"
-    assert plan["requires_input"] == ["text"]
-    step = plan["steps"][0]
-    assert step["state"] == "HUMAN_REQUIRED"
-    assert step["action"]["params"]["project_id"] == project
+    configure_mock_text_model(
+        client,
+        scripted_responder([
+            tool_reply("propose_action", {
+                "action_id": "document_import_text",
+                "params": {"project_id": project},
+                "reason": "缺少正文文本",
+            }),
+            finish_reply("请粘贴你要导入的正文文本。"),
+        ]),
+    )
+    res = client.post(
+        "/api/v1/support/sessions",
+        json={"page_id": "projects", "project_id": project, "question": "把我刚才选择的文本导入这个项目"},
+        headers=HEADERS,
+    )
+    assert res.status_code == 201, res.text
+    proposal = res.json()["session"]["messages"][-1]["payload"]["proposals"][0]
+    assert proposal["valid"] is False
+    assert "text" in (proposal["error"] or "")
 
 
 def test_p1_single_project_ledger_resolves_this_project(api):
-    client, _, _ = api
+    from shine.copilot import read_tools
+
+    client, factory, settings = api
     project = create_project(client, "唯一项目")
-    session = _session(client)  # created before/without a project binding
-    plan = _plan(client, "把这个项目里我选的文本导入", session_id=session["id"])
-    step = plan["steps"][0]
-    assert plan["project_id"] == project
-    assert step["action"]["params"]["project_id"] == project
-    assert step["state"] == "HUMAN_REQUIRED"
+    with factory() as db:
+        receipt = read_tools.execute(
+            db, settings, name="inspect_project_overview",
+            arguments={"project_id": project}, grant=None, scope_project_id=project,
+        )
+        assert receipt["status"] == "OK"
+        assert receipt["observed_facts"]["project_id"] == project
 
 
 def test_p1_two_projects_stay_ambiguous(api):
-    client, _, _ = api
-    create_project(client, "项目甲")
-    create_project(client, "项目乙")
-    session = _session(client)
-    plan = _plan(client, "把这个项目里我选的文本导入", session_id=session["id"])
-    assert plan["requires_input"] == ["project_id", "text"]
-    assert plan["steps"][0]["state"] == "BLOCKED"
+    from shine.copilot import read_tools
+    from shine.copilot import task_grant as grant_contract
+    import pytest
+
+    client, factory, settings = api
+    first = create_project(client, "项目甲")
+    second = create_project(client, "项目乙")
+    with factory() as db:
+        with pytest.raises(grant_contract.GrantError) as exc:
+            read_tools.execute(
+                db, settings, name="inspect_project_overview",
+                arguments={"project_id": second}, grant=None, scope_project_id=first,
+            )
+        assert exc.value.code == "SCOPE_EXCEEDED"
 
 
 def test_p1_import_uses_the_formal_import_executor(api):
@@ -297,53 +366,52 @@ def test_p1_import_uses_the_formal_import_executor(api):
 
 
 def test_p1_named_episode_in_an_empty_project_is_reported_as_a_gate(api):
-    client, _, _ = api
+    from shine.copilot import read_tools
+
+    client, factory, settings = api
     project = create_project(client, "空项目")
-    plan = _plan(client, "检查第一集是否可以开拍。", project_id=project)
-    assert plan["requires_input"] == []
-    assert "还没有分集" in plan["summary"]
-    step = plan["steps"][-1]
-    assert step["state"] == "BLOCKED"
-    assert "先" in step["reason"]
-    assert not any(item.get("action") for item in plan["steps"])
+    with factory() as db:
+        receipt = read_tools.execute(
+            db, settings, name="inspect_project_overview",
+            arguments={"project_id": project}, grant=None, scope_project_id=project,
+        )
+    facts = receipt["observed_facts"]
+    assert facts["episodes"] == []
+    assert facts["next_action"]["kind"] == "IMPORT_SCRIPT"
+    health = client.get("/api/v1/support/health-check", params={"project_id": project}).json()
+    storyboard = next(g for g in health["groups"] if g["key"] == "storyboard")
+    assert any(item["code"] == "SCRIPT_MISSING" for item in storyboard["items"])
 
 
 # ---------------------------------------------------------------------------
-# Controlled multi-step delegation (no second executor)
+# Controlled multi-step authorization via V4 task_grants + tool_loop
 # ---------------------------------------------------------------------------
 
 
-def _delegate(
-    client,
-    session_id: str,
-    orders: list[int],
-    budget: dict | None = None,
-    *,
-    plan: dict | None = None,
-):
+def _grant_preview(client, session_id: str, objective: str, *, groups: list[str] | None = None,
+                   project_id: str | None = None):
     return client.post(
-        "/api/v1/support/plans/delegate",
+        "/api/v1/support/task-grants/preview",
         json={
             "session_id": session_id,
-            "plan_id": (plan or {}).get("plan_id"),
-            "plan_hash": (plan or {}).get("plan_hash"),
-            "approved_orders": orders,
-            "budget": budget or {"max_episodes": 1, "max_gpu_actions": 0, "max_paid_actions": 1},
-            "confirm": True,
+            "objective": objective,
+            "project_id": project_id,
+            "capability_groups": groups or ["inspect", "workflows"],
         },
         headers=HEADERS,
     )
 
 
 def test_p1_delegation_creates_the_project_then_stops(api):
+    """V4: retired /plans/delegate stays 404; single-step action creates the project once and stops."""
     client, _, _ = api
     session = _session(client)
-    plan = _plan(client, "建立一个名叫《雾港回声》的短剧项目。", session_id=session["id"])
-    response = _delegate(client, session["id"], [plan["steps"][0]["order"]], plan=plan)
-    assert response.status_code == 200, response.text
-    delegation = response.json()["delegation"]
-    assert delegation["status"] == "DONE"
-    assert delegation["steps"][0]["state"] == "SUCCEEDED"
+    assert client.post("/api/v1/support/plans/delegate", json={"session_id": session["id"]}, headers=HEADERS).status_code == 404
+    preview = _preview(client, "project_create", {"title": "雾港回声"}, session_id=session["id"])
+    assert preview.status_code == 200, preview.text
+    approved = _approve(client, preview.json()["action"])
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["action"]["status"] == "SUCCEEDED"
     titles = [row["title"] for row in client.get("/api/v1/projects").json()]
     assert "雾港回声" in titles
 
@@ -351,168 +419,126 @@ def test_p1_delegation_creates_the_project_then_stops(api):
 def test_p1_delegation_requires_explicit_confirmation(api):
     client, _, _ = api
     session = _session(client)
-    _plan(client, "建立一个名叫《雾港回声》的短剧项目。", session_id=session["id"])
+    preview = _grant_preview(client, session["id"], "检查环境并装配工作流").json()
     response = client.post(
-        "/api/v1/support/plans/delegate",
-        json={"session_id": session["id"], "approved_orders": [1], "confirm": False},
+        "/api/v1/support/task-grants/authorize",
+        json={
+            "session_id": session["id"],
+            "preview_id": preview["preview_id"],
+            "grant_digest": preview["grant_digest"],
+            "confirm": False,
+        },
         headers=HEADERS,
     )
     assert response.status_code == 400
-    assert response.json()["detail"]["code"] == "CONFIRMATION_REQUIRED"
-
-
-def _seed_plan(factory, session_id: str, steps: list[dict], *, project_id: str | None = None):
-    with factory() as db:
-        row = db.get(SupportSession, session_id)
-        row.context_json = {
-            **(row.context_json or {}),
-            "last_plan": {
-                "intent": "PRODUCTION",
-                "summary": "seeded",
-                "project_id": project_id,
-                "episode_ids": [],
-                "steps": steps,
-                "requires_input": [],
-                "notice": "seeded",
-                "bounded": True,
-            },
-        }
-        db.commit()
+    assert response.json()["detail"]["code"] == "CONFIRM_REQUIRED"
 
 
 def test_p1_high_cost_production_pauses_without_a_budget(api):
-    client, factory, _ = api
+    from shine.support import actions as action_service
+    from shine.support import grants as grant_service
+
+    client, factory, settings = api
     project = create_project(client, "预算项目")
     session = _session(client, project)
-    _seed_plan(
-        factory,
-        session["id"],
-        [
-            {
-                "order": 1,
-                "title": "开始真实拍摄",
-                "state": "READY",
-                "action": {
-                    "kind": "production_start",
-                    "params": {"project_id": project, "episode_ids": ["ep-1"]},
-                },
-            }
-        ],
-        project_id=project,
-    )
-    response = _delegate(client, session["id"], [1], {"max_episodes": 1, "max_gpu_actions": 0})
-    assert response.status_code == 200, response.text
-    delegation = response.json()["delegation"]
-    assert delegation["status"] == "PAUSED"
-    assert delegation["stop_reason"] == "BUDGET_REQUIRED"
-    assert delegation["steps"][0]["action_id"] is None
+    with factory() as db:
+        session_row = db.get(SupportSession, session["id"])
+        loaded, _ = grant_service.create(
+            db, session=session_row, actor="local-user",
+            objective="拍摄第一集", groups=["inspect"], project_ids=[project],
+        )
+        receipt = action_service.execute_under_grant(
+            db, settings, grant_id=loaded.id, capability_id="production_start",
+            params={"project_id": project, "episode_ids": ["ep-1"]},
+            tool_call_id="tc-prod-1", actor="local-user", session_id=session["id"],
+        )
+        assert receipt["status"] == "BLOCKED"
+        assert receipt["error_code"] == "GRANT_PERMISSION_NOT_GRANTED"
 
 
 def test_p1_delegation_scope_cannot_be_widened(api):
-    client, factory, _ = api
+    from shine.support import actions as action_service
+    from shine.support import grants as grant_service
+
+    client, factory, settings = api
     a = create_project(client, "范围项目甲")
     b = create_project(client, "范围项目乙")
     session = _session(client, a)
-    _seed_plan(
-        factory,
-        session["id"],
-        [
-            {
-                "order": 1,
-                "title": "改设置",
-                "state": "READY",
-                "action": {"kind": "project_settings_update", "params": {"project_id": b, "language": "en"}},
-            }
-        ],
-        project_id=a,
-    )
-    response = _delegate(client, session["id"], [1])
-    assert response.status_code == 409
-    assert response.json()["detail"]["code"] == "SCOPE_EXCEEDED"
+    with factory() as db:
+        session_row = db.get(SupportSession, session["id"])
+        loaded, _ = grant_service.create(
+            db, session=session_row, actor="local-user",
+            objective="检查项目甲", groups=["inspect", "workflows"], project_ids=[a],
+        )
+        receipt = action_service.execute_under_grant(
+            db, settings, grant_id=loaded.id, capability_id="workflow_user_copy",
+            params={"project_id": b, "source_profile_id": "wf-x", "name": "越权副本"},
+            tool_call_id="tc-scope-1", actor="local-user", session_id=session["id"],
+        )
+        assert receipt["status"] == "BLOCKED"
+        assert receipt["error_code"] == "SCOPE_EXCEEDED"
 
 
 def test_p1_cancel_does_not_touch_submitted_steps(api):
     client, factory, _ = api
     session = _session(client)
-    plan = _plan(client, "建立一个名叫《雾港回声》的短剧项目。", session_id=session["id"])
-    created = _delegate(client, session["id"], [plan["steps"][0]["order"]], plan=plan).json()["delegation"]
-    response = client.post(f"/api/v1/support/sessions/{session['id']}/delegation/cancel", headers=HEADERS)
-    assert response.status_code == 200, response.text
-    cancelled = response.json()["delegation"]
-    assert cancelled["status"] == "CANCELLED"
+    preview = _preview(client, "project_create", {"title": "已提交项目"}, session_id=session["id"]).json()["action"]
+    assert _approve(client, preview).json()["action"]["status"] == "SUCCEEDED"
+    grant_prev = _grant_preview(client, session["id"], "检查环境").json()
+    auth = client.post(
+        "/api/v1/support/task-grants/authorize",
+        json={
+            "session_id": session["id"],
+            "preview_id": grant_prev["preview_id"],
+            "grant_digest": grant_prev["grant_digest"],
+            "confirm": True,
+            "run": False,
+        },
+        headers=HEADERS,
+    ).json()
+    revoked = client.post(f"/api/v1/support/task-grants/{auth['grant_id']}/revoke", headers=HEADERS)
+    assert revoked.status_code == 200, revoked.text
+    assert revoked.json()["status"] == "REVOKED"
     with factory() as db:
-        row = db.get(SupportAction, created["steps"][0]["action_id"])
+        row = db.get(SupportAction, preview["id"])
         assert row.status == "SUCCEEDED"
 
 
-def _write_delegation(factory, session_id, *, steps, waiting_action_id=None, status="WAITING"):
-    with factory() as db:
-        row = db.get(SupportSession, session_id)
-        row.context_json = {
-            **(row.context_json or {}),
-            "delegation": {
-                "id": "d-resume",
-                "status": status,
-                "created_at": utcnow().isoformat(),
-                "updated_at": utcnow().isoformat(),
-                "project_id": None,
-                "episode_ids": [],
-                "budget": {"max_episodes": 1, "max_gpu_actions": 0, "max_paid_actions": 0},
-                "gpu_actions_used": 0,
-                "waiting_action_id": waiting_action_id,
-                "stop_reason": None,
-                "steps": steps,
-            },
-        }
-        db.commit()
-
-
 def test_p1_delegation_resumes_from_the_stored_envelope(api):
-    client, factory, _ = api
+    from shine.copilot import tool_loop, tool_registry
+    from shine.llm.tool_calls import ToolTurn
+    from shine.support import grants as grant_service
+    from tests.copilot_v4_support import ScriptedGateway
+
+    client, factory, settings = api
     session = _session(client)
-    seeded = _preview(client, "project_create", {"title": "已完成的创建"}, session_id=session["id"]).json()["action"]
-    assert _approve(client, seeded).json()["action"]["status"] == "SUCCEEDED"
-    _write_delegation(
-        factory,
-        session["id"],
-        waiting_action_id=seeded["id"],
-        steps=[
-            {
-                "order": 1,
-                "title": "已完成的创建",
-                "kind": "project_create",
-                "params": {"title": "已完成的创建"},
-                "plan_state": "READY",
-                "state": "WAITING",
-                "action_id": seeded["id"],
-                "message": "",
-                "contract_digest": contracts.live_contract_digest("project_create"),
-                "contract_revision": 1,
-            },
-            {
-                "order": 2,
-                "title": "续跑创建",
-                "kind": "project_create",
-                "params": {"title": "续跑项目"},
-                "plan_state": "READY",
-                "state": "PENDING",
-                "action_id": None,
-                "message": "",
-                "contract_digest": contracts.live_contract_digest("project_create"),
-                "contract_revision": 1,
-            },
-        ],
-    )
-    response = client.post(
-        f"/api/v1/support/sessions/{session['id']}/delegation/refresh",
-        json={"session_id": session["id"]},
-        headers=HEADERS,
-    )
-    assert response.status_code == 200, response.text
-    delegation = response.json()["delegation"]
-    assert delegation["status"] == "DONE"
-    assert [step["state"] for step in delegation["steps"]] == ["SUCCEEDED", "SUCCEEDED"]
-    assert "续跑项目" in [row["title"] for row in client.get("/api/v1/projects").json()]
+    with factory() as db:
+        session_row = db.get(SupportSession, session["id"])
+        loaded, _ = grant_service.create(
+            db, session=session_row, actor="local-user",
+            objective="只读恢复测试", groups=["inspect"],
+        )
+        grant_id = loaded.id
+    first = ScriptedGateway([
+        ToolTurn(text="", tool_calls=[], native=False),
+    ])
+    with factory() as db:
+        # Seed a real persisted transcript step and resume from another owner.
+        loaded = grant_service.load(db, grant_id)
+        grant_service.save_loop(db, grant_id, {
+            "messages": [{"role": "user", "content": "继续"}],
+            "steps": [{"capability_id": "inspect_environment", "satisfied": True}],
+            "started_at": utcnow().isoformat(),
+        })
+        res = tool_loop.advance(
+            db, settings, grant_id=grant_id, objective="只读恢复测试",
+            tools=tool_registry.grant_tool_specs(loaded.grant),
+            session_id=session["id"], gateway=first, max_steps=4, owner="worker:resumed",
+        )
+    assert res.stop_reason == "MODEL_FINISHED_WITH_EVIDENCE"
+    with factory() as db:
+        state = grant_service.loop_state(grant_service.load(db, grant_id).grant)
+        assert len(state["steps"]) == 1
 
 
 def test_p1_unknown_task_is_reported_but_never_resubmitted(api):
@@ -528,31 +554,8 @@ def test_p1_unknown_task_is_reported_but_never_resubmitted(api):
         row.params = {"project_id": project}
         db.commit()
         before = db.scalar(select(func.count()).select_from(SupportAction))
-    _write_delegation(
-        factory,
-        session["id"],
-        waiting_action_id=seeded["id"],
-        steps=[
-            {
-                "order": 1,
-                "title": "生成故事大纲",
-                "kind": "story_outline_generate",
-                "params": {"project_id": project},
-                "plan_state": "READY",
-                "state": "WAITING",
-                "action_id": seeded["id"],
-                "message": "",
-            }
-        ],
-    )
-    response = client.post(
-        f"/api/v1/support/sessions/{session['id']}/delegation/refresh",
-        json={"session_id": session["id"]},
-        headers=HEADERS,
-    )
-    delegation = response.json()["delegation"]
-    assert delegation["status"] == "PAUSED"
-    assert delegation["stop_reason"] == "NEEDS_REVIEW"
+    refreshed = client.get(f"/api/v1/support/actions/{seeded['id']}").json()["action"]
+    assert refreshed["status"] == "NEEDS_REVIEW"
     with factory() as db:
         assert db.scalar(select(func.count()).select_from(SupportAction)) == before
         row = db.get(SupportAction, seeded["id"])
@@ -645,6 +648,4 @@ def test_p1_new_actions_are_registered_and_bounded(api):
     project = create_project(client, "新动作项目")
     response = _preview(client, "production_control", {"run_id": "missing", "operation": "pause"}, project_id=project)
     assert response.status_code == 400
-    plan = _plan(client, "暂停当前生产任务")
-    assert plan["requires_input"] == []
-    assert plan["intent"] == "CONTROL"
+    assert response.json()["detail"]["code"] == "INVALID_ACTION_PARAMS"

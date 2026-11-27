@@ -2452,6 +2452,80 @@ def start_director_production(
     }
 
 
+def revise_director_shot(
+    db: Any,
+    project_id: str,
+    shot_id: str,
+    *,
+    expected_revision: int | None = None,
+    duration_target_s: float | None = None,
+    continuity_mode: str | None = None,
+    story_beat: str | None = None,
+    actor: str = "local-user",
+) -> dict[str, Any]:
+    """Authoritative single executor for revising a landed shot row."""
+    from shine.agents.continuity_engine import check_continuation_opening
+    from shine.models import Shot
+    from shine.schemas import ContinuityMode, ShotSpec
+    from shine.services import require_project, revise_shot_record
+
+    project = require_project(db, project_id)
+    shot = db.get(Shot, shot_id)
+    if shot is None or shot.project_id != project_id:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    if expected_revision is not None and shot.revision != expected_revision:
+        raise HTTPException(
+            409,
+            {"code": "SHOT_REVISION_CHANGED", "message": "镜头已更新，请刷新", "current_revision": shot.revision},
+        )
+    spec = ShotSpec.model_validate(shot.spec)
+    update: dict[str, Any] = {}
+    if duration_target_s is not None:
+        if any(line.end_s > duration_target_s for line in spec.dialogue):
+            raise HTTPException(
+                422,
+                {"code": "SHOT_DURATION_BELOW_DIALOGUE", "message": "成片秒数装不下这一镜的台词"},
+            )
+        update["duration_target_s"] = duration_target_s
+    if continuity_mode is not None:
+        next_mode = ContinuityMode(continuity_mode)
+        if str(next_mode.value).lower() == "last_frame":
+            episode_id = episode_of_shot(db, project_id, shot.id)
+            prev_spec: dict[str, Any] | None = None
+            if episode_id != "unassigned":
+                ordered_ids = episode_shot_table(db, project_id, episode_id).get("shots") or []
+                shot_ids = [row.get("id") for row in ordered_ids if isinstance(row, dict)]
+                if shot.id in shot_ids:
+                    idx = shot_ids.index(shot.id)
+                    if idx > 0:
+                        prev_row = db.get(Shot, shot_ids[idx - 1])
+                        if prev_row is not None and isinstance(prev_row.spec, dict):
+                            prev_spec = dict(prev_row.spec)
+            conflicts = check_continuation_opening(
+                prev_spec,
+                spec.model_dump(mode="json"),
+                mode="last_frame",
+                shot_id=shot.id,
+            )
+            if conflicts:
+                raise HTTPException(
+                    409,
+                    {"code": "CONTINUATION_OPENING_CONFLICT", "conflicts": conflicts},
+                )
+        update["continuity"] = spec.continuity.model_copy(update={"mode": next_mode})
+    if story_beat is not None and story_beat.strip():
+        update["story_beat"] = story_beat.strip()
+    if not update:
+        return {"shot_id": shot.id, "revision": shot.revision, "changed": False}
+    result = revise_shot_record(db, project, shot, spec=spec.model_copy(update=update), actor=actor)
+    return {
+        "shot_id": shot.id,
+        "revision": result["revision"],
+        "changed": True,
+        "invalidated_job_ids": result["invalidated_job_ids"],
+    }
+
+
 def _package_for_selection(db, project_id: str, episode_ids: list[str], *, strategy_sha: str | None = None,
                            workflow_profile_id: str | None = None, output: dict | None = None):
     """A confirmed, non-stale package whose scope - strategy - and frame match.

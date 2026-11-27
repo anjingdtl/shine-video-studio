@@ -137,25 +137,6 @@ _CODE_RULES: dict[str, dict[str, str]] = {
     },
 }
 
-_KEYWORD_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
-    (
-        ("out of memory", "cuda", "显存", "oom"),
-        _CODE_RULES["OOM"],
-    ),
-    (
-        ("node", "object_info", "节点"),
-        _CODE_RULES["NODE_MISSING"],
-    ),
-    (
-        ("401", "429", "unauthorized", "quota", "欠费", "密钥"),
-        _CODE_RULES["LLM_AUTH"],
-    ),
-    (
-        ("timeout", "timed out", "超时"),
-        _CODE_RULES["LLM_TIMEOUT"],
-    ),
-)
-
 
 def _first_rule_code(snapshot: dict[str, Any]) -> str | None:
     task = snapshot.get("task") or {}
@@ -170,19 +151,6 @@ def _first_rule_code(snapshot: dict[str, Any]) -> str | None:
     verdict_code = ((snapshot.get("setup") or {}).get("verdict") or {}).get("code")
     if verdict_code in _CODE_RULES:
         return str(verdict_code)
-    return None
-
-
-def _keyword_rule(text: str) -> dict[str, str] | None:
-    lowered = (text or "").casefold()
-    # "object_info" inside a preflight-unreachable failure code must not be
-    # read as "the renderer answered and is missing nodes": that verdict needs
-    # a real /object_info inventory.
-    if "object_info_unavailable" in lowered:
-        return _CODE_RULES["STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE"]
-    for words, rule in _KEYWORD_RULES:
-        if any(word in lowered for word in words):
-            return rule
     return None
 
 
@@ -448,7 +416,6 @@ def _apply_setup_diagnosis_detail(
 
 def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) -> dict[str, Any]:
     """Classify one snapshot.  No model is called here."""
-    page = snapshot.get("page_context") or {}
     verdict = (snapshot.get("setup") or {}).get("verdict") or {}
     runtime = snapshot.get("runtime") or {}
     task = snapshot.get("task") or {}
@@ -458,15 +425,6 @@ def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) 
     evidence_id = snapshot.get("evidence_id")
     question = question or ""
     refused = forbidden_intent(question)
-    text = " ".join(
-        [
-            question,
-            page.get("error_code") or "",
-            code or "",
-            (task.get("failure_code") or ""),
-            ((task.get("attempt") or {}).get("failure_code") or ""),
-        ]
-    )
 
     base: dict[str, Any] = {
         "evidence_id": evidence_id,
@@ -575,7 +533,11 @@ def diagnose_snapshot(snapshot: dict[str, Any], *, question: str = "", db=None) 
         return base
 
     rule_code = _first_rule_code(snapshot)
-    rule = _CODE_RULES.get(rule_code) if rule_code else _keyword_rule(text)
+    # V4: the deterministic diagnosis classifies by *named codes* only.  The
+    # retired keyword guessing (``_keyword_rule``) let a user's prose ("显存",
+    # "节点", "超时") decide a root cause; understanding prose is the LLM's job
+    # now, and it must cite real codes from the read-only tools.
+    rule = _CODE_RULES.get(rule_code) if rule_code else None
     if rule:
         base.update(
             {

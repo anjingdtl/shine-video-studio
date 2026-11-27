@@ -402,19 +402,64 @@ describe('ShineCopilot', () => {
     expect(call?.body).toMatchObject({ web_search: true });
   });
 
-  it('renders a bounded plan with knowledge citations and previews a plan step', async () => {
-    const planned = session({
+  it('renders V4 health-check panel and hides chat input when no LLM is configured', async () => {
+    stub = new StudioStub([
+      {
+        method: 'GET',
+        pattern: /\/support\/context/,
+        respond: () => jsonResponse({
+          snapshot: { setup: { verdict }, runtime: { llm: { configured: false } }, evidence_id: 'ev-1', provenance: [] },
+          suggested_questions: ['帮我检查环境'],
+          web_search_enabled: false,
+        }),
+      },
+      {
+        method: 'GET',
+        pattern: /\/support\/health-check/,
+        respond: () => jsonResponse({
+          generated_at: '2026-11-27T12:00:00',
+          project_id: 'p1',
+          project_title: '雾港测试',
+          summary: { blocking: 1, warnings: 1, status: 'BLOCKED' },
+          groups: [
+            {
+              key: 'environment',
+              label: '制作环境与可选能力',
+              status: 'BLOCKED',
+              summary: 'REAL_RUNTIME_NOT_ACTIVATED',
+              jump: '#d/setup',
+              items: [
+                { code: 'REAL_RUNTIME_NOT_ACTIVATED', label: '真实制作未激活', status: 'BLOCKED', detail: '缺少激活配置文件', jump: '#d/setup' },
+                { code: 'COPILOT_LLM_REQUIRED', label: 'AI 管家文本模型未配置', status: 'WARNING', detail: '请先配置文本模型', jump: '#d/advanced' },
+              ],
+            },
+          ],
+          blockers: [],
+          read_only: true,
+        }),
+      },
+    ]);
+    const user = userEvent.setup();
+    render(<ShineCopilot pageId="director" pageLabel="导演模式" projectId="p1" />);
+    await user.click(screen.getByLabelText('打开 AI 管家'));
+    expect(await screen.findByText('配置文本模型后开启 AI 管家对话与自主项目操作')).toBeTruthy();
+    expect(screen.getByLabelText('项目体检面板')).toBeTruthy();
+    expect(screen.getByText('真实制作未激活')).toBeTruthy();
+    expect(screen.queryByLabelText('向 AI 管家提问')).toBeNull();
+    expect(screen.queryByText('帮我检查环境')).toBeNull();
+  });
+
+  it('renders V4 read_tools trace, inline proposals, project grant trigger and action receipts', async () => {
+    const v4Session = session({
+      project_id: 'p1',
       messages: [
-        { id: 'u1', role: 'user', kind: 'message', content: '帮我把第一集准备好', payload: {}, evidence_ids: [], created_at: 't1' },
+        { id: 'u1', role: 'user', kind: 'message', content: '查第8镜为什么失败并帮我切换五视图', payload: {}, evidence_ids: [], created_at: 't1' },
         {
-          id: 'a2', role: 'assistant', kind: 'diagnosis',
-          content: '【结论】本机配置尚未就绪\n【操作计划】共 1 集：1 集可开拍。',
+          id: 'a2', role: 'assistant', kind: 'message',
+          content: '已查证第 8 镜提示词与素材状态，可先切换五视图并确认单步动作或开启本项目自主授权。',
           payload: {
-            diagnosis: diagnosis({ recommended_actions: [] }),
-            intent: 'production',
-            tool_trace: [
-              { tool: 'search_project_knowledge', status: 'OK' },
-              { tool: 'read_project_journey', status: 'OK' },
+            read_tools: [
+              { tool: 'read_shot_detail', status: 'OK', elapsed_ms: 12, ids: { shot_ids: ['shot-8'] }, authority: 'GET /projects/p1/shots/shot-8' },
             ],
             project_knowledge: {
               answered: true,
@@ -424,64 +469,106 @@ describe('ShineCopilot', () => {
               }],
               metadata: { state: 'UNKNOWN', notice: '当前构建未注入提交号，无法证明知识版本与当前代码一致。' },
             },
-            plan: {
-              intent: 'PRODUCTION',
-              summary: '共 1 集：1 集可开拍，0 个前置步骤需要处理。',
-              steps: [
-                {
-                  order: 1, title: '读取项目与每集真实状态', capability_id: 'read_project_journey',
-                  state: 'READ_ONLY', state_label: '只读查询',
-                  evidence: ['第一集：可开拍'], reason: '状态来自既有导演台账。',
-                },
-                {
-                  order: 2, title: '开始真实拍摄选定集', capability_id: 'production_start',
-                  state: 'READY', state_label: '可执行（仍需预览并确认）',
-                  action: { kind: 'production_start', params: { project_id: 'p1', episode_ids: ['ep-1'] } },
-                  reason: '只有原 Run 引擎能决定是否开拍。',
-                },
-              ],
-              requires_input: [], notice: '计划只是只读建议；每个可执行步骤仍需单独预览并确认。', bounded: true,
-            },
+            proposals: [
+              {
+                type: 'action',
+                action_id: 'material_preferences_update',
+                label: '更新素材生成偏好',
+                params: { project_id: 'p1', character_sheet_mode: true },
+                summary: '开启角色五视图生成偏好',
+                reason: '已核对第 8 镜素材缺件，适合先开启五视图。',
+                valid: true,
+                gpu: false,
+                paid: false,
+              },
+              {
+                type: 'project_grant',
+                objective: '完成第 8 镜素材补齐与换图',
+                capability_groups: ['inspect', 'materials', 'literary'],
+                reason: '多步修复适合一次性项目授权',
+                project_id: 'p1',
+                valid: true,
+              },
+            ],
           },
           evidence_ids: [], created_at: 't2',
+        },
+        {
+          id: 'r1', role: 'assistant', kind: 'action_receipt',
+          content: '已执行「更新素材生成偏好」，character_sheet_mode=true。',
+          payload: { action_id: 'p-action', action_kind: 'material_preferences_update', status: 'SUCCEEDED', verification: { outcome: 'VERIFIED', authority: 'GET /api/v1/projects/p1/material-preparation' } },
+          evidence_ids: [], created_at: 't3',
         },
       ],
     });
     stub = new StudioStub([
-      { method: 'GET', pattern: /\/support\/context/, respond: () => context() },
-      { method: 'POST', pattern: /\/support\/sessions$/, respond: () => jsonResponse({ session: planned, diagnosis: diagnosis({ recommended_actions: [] }) }, 201) },
+      { method: 'GET', pattern: /\/support\/context/, respond: () => jsonResponse({
+        snapshot: { setup: { verdict }, runtime: { llm: { configured: true, provider: 'deepseek' } }, evidence_id: 'ev-1', provenance: [] },
+        suggested_questions: [], web_search_enabled: false,
+      }) },
+      { method: 'GET', pattern: /\/support\/health-check/, respond: () => jsonResponse({
+        generated_at: '2026-11-27T12:00:00', project_id: 'p1', project_title: '雾港',
+        summary: { blocking: 0, warnings: 0, status: 'OK' }, groups: [], blockers: [], read_only: true,
+      }) },
+      { method: 'POST', pattern: /\/support\/sessions$/, respond: () => jsonResponse({ session: v4Session }, 201) },
       {
         method: 'POST',
         pattern: /\/support\/actions\/preview$/,
         respond: () => jsonResponse({
           action: {
-            id: 'p-action', kind: 'production_start', label: '开始真实拍摄', status: 'PREVIEWED',
+            id: 'p-action', kind: 'material_preferences_update', label: '更新素材生成偏好', status: 'PREVIEWED',
             preview_hash: 'hash-plan',
             preview: {
-              summary: '把选中的集交给既有导演包与 Run 引擎开始真实拍摄。',
+              summary: '更新项目素材偏好：character_sheet_mode=true。',
               blocked: false,
-              episodes: [{ episode_id: 'ep-1', title: '第一集', state: 'READY_TO_SHOOT', state_label: '可开拍' }],
-              authorization_summary: '确认后按原门禁真实开拍（占用 GPU 并生成视频）。',
+              authorization_summary: '只写入项目素材偏好，不触发 GPU。',
             },
             original_task_id: null, verification: {},
           },
           reused: false,
         }),
       },
+      {
+        method: 'POST',
+        pattern: /\/support\/task-grants\/preview$/,
+        respond: () => jsonResponse({
+          preview_id: 'gp-v4', schema: 'shine.copilot.task-grant.v1', grant_digest: 'g'.repeat(64),
+          purpose: '完成第 8 镜素材补齐与换图', can_authorize: true, summary: '在当前项目范围内推进多步素材操作',
+          capability_groups: ['inspect', 'materials', 'literary'], capabilities: ['material_preferences_update'],
+          blocked_capabilities: [], limits: { max_llm_tool_calls: 20 }, risks: [],
+          installation: { selected: null, choice_required: false },
+          model: { inherited: true, source_role: 'support_agent', model: 'deepseek-chat' },
+          expires_at: '2026-11-28T00:00:00', preview_expires_at: '2026-11-27T13:00:00', not_allowed: ['修改源码'],
+        }),
+      },
     ]);
     const user = userEvent.setup();
     render(<ShineCopilot pageId="director" pageLabel="导演模式" projectId="p1" />);
     await user.click(screen.getByLabelText('打开 AI 管家'));
-    await user.click(await screen.findByText('帮我检查环境'));
-    expect(await screen.findByText('操作计划')).toBeTruthy();
-    expect(screen.getByText('开始真实拍摄选定集')).toBeTruthy();
-    expect(screen.getByText('只读查询')).toBeTruthy();
+    expect(await screen.findByText('项目体检健康')).toBeTruthy();
+    const input = screen.getByLabelText('向 AI 管家提问');
+    await user.type(input, '帮我看看第 8 镜');
+    await user.click(screen.getByLabelText('发送'));
+    expect(await screen.findByText('AI 查证过程（1 步只读工具）')).toBeTruthy();
+    expect(screen.getByText('read_shot_detail')).toBeTruthy();
     expect(screen.getByText('导演模式七阶段')).toBeTruthy();
     expect(screen.getByText(/当前构建未注入提交号/)).toBeTruthy();
-    await user.click(screen.getByText('预览这一步'));
-    expect(await screen.findByText(/涉及集数：1/)).toBeTruthy();
-    const call = stub.calls.find((entry) => /\/support\/actions\/preview$/.test(entry.url));
-    expect(call?.body).toMatchObject({ kind: 'production_start' });
+    expect(screen.getByText(/执行回执/)).toBeTruthy();
+
+    await user.click(screen.getByText('预览并确认执行'));
+    expect(await screen.findByText(/更新项目素材偏好：character_sheet_mode=true/)).toBeTruthy();
+    const actionCall = stub.calls.find((entry) => /\/support\/actions\/preview$/.test(entry.url));
+    expect(actionCall?.body).toMatchObject({ kind: 'material_preferences_update' });
+
+    await user.click(screen.getByText('开启本项目自主执行授权'));
+    expect(await screen.findByText('文戏与分镜操作')).toBeTruthy();
+    expect(screen.getByText('素材准备与换图')).toBeTruthy();
+    const grantPreviewCall = stub.callsOf('POST', /\/support\/task-grants\/preview/)[0];
+    expect(grantPreviewCall.body).toMatchObject({
+      allow_gpu: true,
+      allow_download: true,
+      capability_groups: ['inspect', 'materials', 'literary'],
+    });
   });
 
   it('allows dragging corner handle to resize width and height and double-click to reset', async () => {

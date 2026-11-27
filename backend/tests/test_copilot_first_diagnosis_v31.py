@@ -56,14 +56,25 @@ def _snapshot(*, code=None, mode="READY", capabilities=None, error_code=None):
     }
 
 
-def test_config_keyword_diagnosis_recommends_an_action_instead_of_crashing():
+def test_config_code_diagnosis_recommends_an_action_instead_of_crashing():
     # NODE_MISSING is a CONFIG rule; before the fix this raised TypeError
     # (_repair_action did not accept db yet the call site passed it).
-    diagnosis = diagnose_snapshot(_snapshot(), question="为什么节点用不了", db=None)
+    # V4: the deterministic diagnosis keys on a *named code*, never on the
+    # user's prose — "why can't I use the nodes" is the LLM's job to investigate.
+    diagnosis = diagnose_snapshot(
+        _snapshot(mode="SETUP_REQUIRED", error_code="NODE_MISSING"), question="为什么节点用不了", db=None
+    )
     assert diagnosis["category"] == "CONFIG"
     actions = diagnosis["recommended_actions"]
     assert actions, "a CONFIG diagnosis must recommend the evidence-based action"
     assert actions[0]["kind"] in {"setup_repair", "setup_reconcile"}
+
+
+def test_prose_alone_never_decides_a_root_cause():
+    """V4: the retired keyword rule must not come back through the back door."""
+    diagnosis = diagnose_snapshot(_snapshot(), question="为什么节点用不了 显存 cuda 超时", db=None)
+    assert diagnosis["category"] == "OK"
+    assert diagnosis["recommended_actions"] == []
 
 
 def test_runtime_contract_change_repairs_only_the_invalidated_video_runtime():
@@ -108,13 +119,23 @@ def test_no_evidence_recommends_readonly_reconcile_not_a_blind_double_preparatio
     # verdict itself; the blind fallback is gone either way.
     for action in diagnosis["recommended_actions"]:
         assert action["params"].get("capabilities") != ["h3", "image"]
-    empty = diagnose_snapshot(_snapshot(capabilities={}), question="为什么节点用不了", db=None)
+    # SETUP_REQUIRED without a named code and without capability evidence is
+    # the one shape that reaches the repair scope with nothing to name.
+    empty = diagnose_snapshot(
+        _snapshot(mode="SETUP_REQUIRED", capabilities={}), question="帮我检查环境", db=None
+    )
+    assert empty["category"] == "CONFIG"
     action = empty["recommended_actions"][0]
     assert action["kind"] == "setup_reconcile"
     assert action["mutates"] is False
 
 
-def test_planner_readback_addresses_are_real_routes(studio):
+def test_authority_addresses_are_real_routes(studio):
+    """Every read-back the copilot declares must be a route that exists.
+
+    V4: the keyword planner is gone; the authorities are now the read-only
+    diagnostic tools' ``authority`` strings plus the health check's page jumps.
+    """
     client, factory, _, settings = studio
     routes = set()
     for route in client.app.routes:
@@ -123,25 +144,76 @@ def test_planner_readback_addresses_are_real_routes(studio):
             routes.add(re.sub(r"\{[^}]+\}", "{x}", path))
     from pathlib import Path
 
-    planner = (Path(__file__).resolve().parents[2] / "backend" / "shine" / "support" / "planner.py")
-    text = planner.read_text(encoding="utf-8")
-    readbacks = re.findall(r'"readback":\s*"(GET )?(/api/v1/[^"]+)"', text)
-    assert readbacks, "planner must declare readback authorities"
-    for _method, path in readbacks:
+    from shine.copilot import read_tools
+    from shine.support import health_check
+
+    sources = {
+        "read_tools": Path(read_tools.__file__).read_text(encoding="utf-8"),
+        "health_check": Path(health_check.__file__).read_text(encoding="utf-8"),
+    }
+    readbacks = []
+    for name, text in sources.items():
+        for _method, path in re.findall(r'"(GET )?(/api/v1/[^"]+)"', text):
+            readbacks.append((name, path))
+    assert readbacks, "the copilot must declare read-back authorities"
+    for name, path in readbacks:
         normalized = re.sub(r"\{[^}]+\}", "{x}", path)
-        assert normalized in routes, f"readback route does not exist: {path}"
-    assert "GET /api/v1/setup/prepare/{task_id}" not in text
+        # A semicolon-separated authority lists several routes; each must exist.
+        for part in normalized.split("; "):
+            part = part.strip()
+            if not part.startswith("GET "):
+                part = "GET " + part
+            assert part[4:] in routes, f"{name} authority route does not exist: {part}"
+    assert all("GET /api/v1/setup/prepare/{task_id}" not in text for text in sources.values())
+    # The health check's page jumps are the original hash routes.
+    assert health_check.JUMP_SETUP == "#d/setup"
+    assert health_check.JUMP_MATERIALS == "#d/materials"
+
+
+def _configure_text_model(client) -> None:
+    created = client.post(
+        "/api/v1/provider-profiles",
+        json={
+            "name": "first-diagnosis-model",
+            "kind": "openai_compatible",
+            "base_url": "http://127.0.0.1:9/v1",
+            "model": "local-text",
+            "enabled": True,
+        },
+        headers=HEADERS,
+    )
+    assert created.status_code == 201, created.text
+    routed = client.put(
+        "/api/v1/agent-routes",
+        json={"role": "comfyops", "provider_profile_id": created.json()["id"]},
+        headers=HEADERS,
+    )
+    assert routed.status_code in {200, 201}, routed.text
 
 
 def test_message_rebinds_a_restored_session_to_the_new_fault(studio):
     client, factory, _, _ = studio
+    # V4: the conversation needs a configured text model; the session itself
+    # does not.
     created = client.post(
         "/api/v1/support/sessions",
         json={"page_id": "run", "error_code": "OLD_CODE", "task_id": "old-task", "question": ""},
         headers=HEADERS,
     )
     assert created.status_code == 201, created.text
+    assert created.json()["llm"]["configured"] is False
     session_id = created.json()["session"]["id"]
+    refused = client.post(
+        f"/api/v1/support/sessions/{session_id}/messages",
+        json={"content": "帮我诊断这个失败：NEW_CODE"},
+        headers=HEADERS,
+    )
+    assert refused.status_code == 409
+    assert refused.json()["detail"]["code"] == "COPILOT_LLM_REQUIRED"
+    assert refused.json()["detail"]["href"] == "#d/advanced"
+    with factory() as db:
+        assert db.get(SupportSession, session_id).error_code == "OLD_CODE"
+    _configure_text_model(client)
     reply = client.post(
         f"/api/v1/support/sessions/{session_id}/messages",
         json={
