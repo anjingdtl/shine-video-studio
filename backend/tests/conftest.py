@@ -5,6 +5,7 @@ import ctypes
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 from collections import Counter
 from functools import lru_cache
@@ -15,12 +16,46 @@ from uuid import uuid4
 # (transaction rollback, WAL concurrency, and FK checks remain intact).
 os.environ.setdefault("SHINE_TEST_FAST_SQLITE", "1")
 
+# ``shine.main`` builds its module-level app at import time, and a default ``Settings``
+# resolves the data directory from the repository-root ``.env`` — on a developer machine
+# that is the real daily database.  Pin the data directory to a throwaway one before any
+# ``shine`` module is imported (created and removed after the imports, see below), so no
+# test process ever opens (or creates) the daily data.  It is assigned, not defaulted:
+# an exported SHINE_DATA_DIR must not leak into a test run.
+# A spawned child process (multiprocessing "spawn") re-imports this file and inherits the
+# parent's throwaway directory: it reuses that one instead of creating its own, because a
+# test may deliberately crash such a child, and a crashed process cannot clean up.
+if not os.environ.get("SHINE_DATA_DIR", "").rsplit(os.sep, 1)[-1].startswith("shine-test-import-"):
+    os.environ["SHINE_DATA_DIR"] = os.path.join(tempfile.gettempdir(), f"shine-test-import-{os.getpid()}")
+    os.environ["SHINE_TEST_IMPORT_DATA_DIR_OWNER_PID"] = str(os.getpid())
+os.environ.pop("SHINE_DATABASE_URL", None)
+
 import pytest
 from fastapi.testclient import TestClient
 
 from shine.config import Settings
 from shine.db import Base, make_engine
 from shine.main import create_app
+
+os.makedirs(os.environ["SHINE_DATA_DIR"], exist_ok=True)
+if os.environ.get("SHINE_TEST_IMPORT_DATA_DIR_OWNER_PID") == str(os.getpid()):
+    atexit.register(shutil.rmtree, os.environ["SHINE_DATA_DIR"], True)
+
+
+def _dispose_import_time_app() -> None:
+    """Close the throwaway app's databases before its directory is removed.
+
+    atexit handlers run last-registered first, so this runs before the rmtree
+    registered above; on Windows an open SQLite handle keeps the file undeletable.
+    """
+    state = getattr(getattr(sys.modules.get("shine.main"), "app", None), "state", None)
+    for name in ("engine", "m4_engine"):
+        engine = getattr(state, name, None)
+        if engine is not None:
+            engine.dispose()
+
+
+atexit.register(_dispose_import_time_app)
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"synthetic-fixture"
 

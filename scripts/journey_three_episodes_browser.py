@@ -24,7 +24,9 @@ What is replaced, and why it is named
 Run:
     backend\.venv\Scripts\python.exe scripts\journey_three_episodes_browser.py
 
-Screenshots land in ``.local-acceptance/journey-3x60/shots``.
+The isolated data directory and its ``shots`` land under
+``<test root>/acceptance/journey-3x60/``; the test root comes from ``SHINE_TEST_ROOT``
+(no machine directory is hardcoded).
 """
 
 from __future__ import annotations
@@ -37,10 +39,11 @@ import time
 import urllib.request
 from pathlib import Path
 
+from shine_test_root import acceptance_dir, work_root
+
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
-DATA_DIR = (REPO / ".local-acceptance" / "journey-3x60"
-            / time.strftime("run-%Y%m%d-%H%M%S"))
+DATA_DIR = acceptance_dir(work_root(), "journey-3x60", time.strftime("run-%Y%m%d-%H%M%S"))
 OUT = DATA_DIR / "shots"
 API_PORT = 8123
 WEB_PORT = 5199

@@ -13,9 +13,9 @@
 # 只在依赖确实就绪时才写回执（venv 能 import shine、node_modules 与 vite 入口存在），
 # 否则交给启动脚本走正常安装流程，不放宽任何检查。
 #
-# 用法：
-#   pwsh -NoProfile -File scripts/start_eval_instance.ps1 -DataDir .local-acceptance/eval-01 -ApiPort 8010 -WebPort 5180
-#   pwsh -NoProfile -File scripts/start_eval_instance.ps1 -DataDir .local-acceptance/eval-01 -Install
+# 用法（测试根由调用方给出，仓库不写死本机目录）：
+#   pwsh -NoProfile -File scripts/start_eval_instance.ps1 -DataDir <测试根>\acceptance\eval-01\data -ApiPort 8010 -WebPort 5180
+#   pwsh -NoProfile -File scripts/start_eval_instance.ps1 -DataDir <测试根>\acceptance\eval-01\data -Install
 
 param(
     [Parameter(Mandatory = $true)][string]$DataDir,
@@ -27,6 +27,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'shine_local_config.ps1')
 
 function Get-FileFingerprint([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return '' }
@@ -47,7 +48,9 @@ if (Test-Path -LiteralPath $backendPython) {
 }
 $frontendReady = Test-Path -LiteralPath (Join-Path $repoRoot 'frontend/node_modules/vite/bin/vite.js')
 
-$resolvedDataDir = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) $DataDir))
+# The one path resolver of the repository: a rooted -DataDir (the test root lies outside
+# the checkout) is taken as is, a relative one is resolved against the caller.
+$resolvedDataDir = Resolve-ShineLocalPath $DataDir (Get-Location).ProviderPath
 New-Item -ItemType Directory -Force -Path $resolvedDataDir | Out-Null
 $receiptDir = Join-Path $resolvedDataDir 'run'
 $receiptPath = Join-Path $receiptDir 'receipts.json'

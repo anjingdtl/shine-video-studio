@@ -1,7 +1,10 @@
-"""Index the final local acceptance evidence directory.
+"""Index one acceptance evidence directory.
 
 The report quotes this index, so the evidence list in the report and the files
-on disk cannot drift apart.
+on disk cannot drift apart.  The directory is always given by the caller; no
+machine directory is hardcoded.
+
+    python scripts/index_acceptance_evidence.py <test-root>/acceptance/<round>
 """
 
 import hashlib
@@ -9,7 +12,9 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(sys.argv[1] if len(sys.argv) > 1 else ".local-acceptance/final-local-pass")
+if len(sys.argv) != 2:
+    raise SystemExit("usage: python scripts/index_acceptance_evidence.py <evidence-dir>")
+ROOT = Path(sys.argv[1]).resolve()
 
 
 def sha256(path: Path) -> str:

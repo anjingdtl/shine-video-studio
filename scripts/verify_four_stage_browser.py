@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from shine_test_root import acceptance_dir, work_root
+
 REPO = Path(__file__).resolve().parents[1]
 BACKEND = REPO / "backend"
 
@@ -196,12 +198,16 @@ def _migrate(data_dir: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir", default=str(REPO / ".local-acceptance" / "four-stage-browser"))
+    parser.add_argument("--data-dir", default=None,
+                        help="isolated data directory; defaults to <test root>/acceptance/four-stage-browser")
+    parser.add_argument("--work-root", default=None,
+                        help="the caller's test root (fallback: SHINE_TEST_ROOT)")
     parser.add_argument("--port", type=int, default=8129)
     parser.add_argument("--seed-only", action="store_true")
     parser.add_argument("--serve-only", action="store_true")
     args = parser.parse_args()
-    data_dir = Path(args.data_dir).resolve()
+    data_dir = (Path(args.data_dir).resolve() if args.data_dir
+                else acceptance_dir(work_root(args.work_root), "four-stage-browser"))
     data_dir.mkdir(parents=True, exist_ok=True)
     os.environ["SHINE_DATA_DIR"] = str(data_dir)
     os.environ.setdefault("SHINE_RENDER_PROVIDER", "mock")

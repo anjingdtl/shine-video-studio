@@ -5,8 +5,8 @@ disk.  Every file under the root is hashed, so a later reader can prove that a
 screenshot, a log or a rendered movie is the very file the run produced.
 The index never lists itself: the output file is excluded by path, so repeating the build stays stable.
 
-    python scripts/build_evidence_index.py --root .local-acceptance/final-closure-v3 \
-        --out .local-acceptance/final-closure-v3/evidence-index.json
+    python scripts/build_evidence_index.py --root <test-root>/acceptance/<round> \
+        --out <test-root>/acceptance/<round>/evidence-index.json
 """
 from __future__ import annotations
 

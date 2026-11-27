@@ -51,6 +51,9 @@ temp/
 /.local-data/
 /.local-acceptance/
 /.local-data-*/
+# Machine-local companion of AGENTS.md (test root, data directory, model store).
+# The repository is public and hardcodes no machine directory; this file never ships.
+/AGENTS.local.md
 # Browser-verification screenshots from agent runs belong in docs/evidence
 /gui-test-screenshots/
 *.tsbuildinfo

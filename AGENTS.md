@@ -1,6 +1,25 @@
-# AGENTS.md — Shine Video Studio
+# AGENTS.md — Shine Video Studio（唯一权威规范）
 
-## 核心原则：一套事实、一个裁决、一个执行者（开发/测试/修改的最高依据）
+## 0. 怎么用这份文件
+
+- **本文件是开发、测试、验收、发布的唯一口径**，按三原则组织：§2 一套事实（每样东西只有一个落点）、
+  §3 一个裁决（每件事只有一条铁律）、§4 一个执行者（每类动作只有一个入口）。
+- **本文件是开源仓库的一部分，不写任何本机目录。** 落点一律写成角色加解析规则（`<仓库根>`、`<日常数据目录>`、
+  `<测试根>`…）。每台机器的实际取值记在该机器自己的 `AGENTS.local.md`（已被 Git 忽略，不入库、不进安装包）；
+  两者冲突时，规则以本文件为准，取值以本机文件为准。
+- **这些是工作纪律，不是产品门禁。** 不得为了落实本文件去给安装、整备或生产链路新增检查、状态或入口
+  （§1 三条禁令）。本文件只约束在这个仓库里工作的人和 agent：东西放在哪、什么时候清。
+- **2026-11-27 精简**：此前按日期追加的上百轮「事故 + 裁决」记录已原样移到 `docs/AGENTS_HISTORY.md`
+  （只读归档，不再追加）。本文件的条目都能在那里找到出处，索引见 §7。
+- **动工前**：先查 §3.3 登记表与 §7 索引，把对应主题的历史小节读完再动手。只读本文件不够——
+  那里才有函数签名、错误码、回归入口和事故原文。
+- **冲突时的优先级**：§1 三原则 > §3 铁律 > §4 入口 > §5 工作流 > §6 工作区规范 > 历史记录。
+  历史小节里没被收进本文件的约束**仍然有效**——发现时把它补收进本文件对应条目，
+  不要在历史里追加，也不要再新开一段带日期的小节。
+- **改规则的方式**：改对应主题的那一条，保持一事一条，条目末尾用「（YYYY-MM-DD 修订）」标注；
+  事故经过、任务 ID、哈希等证据写进 `docs/` 的验收文档，不写在这里。
+
+## 1. 三原则（最高依据）
 
 后续所有开发、测试、修改、验收都以这一条为最高依据，优先于下文任何具体规则。
 任何功能只允许有**一份权威事实**（同一台账/同一读投影）、**一个裁决口**（同一判定函数）、
@@ -19,7 +38,31 @@
 先例：2026-11-16 素材准备→导演包唯一链路轮（`docs/ACCEPTANCE_20261116_MATERIAL_TO_PACKAGE_UNIQUENESS.md`）——
 晋升/确认/上传/合并共用一个采纳执行者，journey/overview/导演包/素材清单读同一份 `shot.bindings` 事实。
 
-## Project authority
+## 2. 一套事实：唯一落点表
+
+任何东西只有一个合法落点。下表只写角色和解析规则，实际路径由当前机器的配置解析（见 §0）。
+写错了位置，按 §6.3 的清理口径收敛回去，**不要再加一个位置**。
+
+| 事实 | 唯一落点（角色） | 怎么解析 | 不得出现的地方 |
+|---|---|---|---|
+| 正式开发库（源码） | 当前这个仓库检出，分支 `main` | 仓库根由入口脚本自身推导；远端 `anjingdtl/shine-video-studio` | 第二个检出、worktree、源码快照、安装包解压副本（测试目录里也不行） |
+| 依赖 | `<仓库根>\backend\.venv`、`<仓库根>\frontend\node_modules` | 只由锁文件驱动安装 | 测试目录里的 `site-packages`、`node_modules`、venv 副本 |
+| 日常数据（真实作品） | `<日常数据目录>` | 命令行 `-DataDir` → 进程环境 → 仓库根 `.env` 的 `SHINE_DATA_DIR` → 默认 `.local-data` | 测试、验收、清理一律不得读写 |
+| 渲染器权重 | 工作台登记的 ComfyUI 安装目录下的 `models\` | 由基础配置的受管实例与运行配方解析 | 任何测试目录、默认数据目录、隔离数据目录里的副本 |
+| 工作台受管包（LoRA、RelayVSR、审片模型） | `<日常数据目录>\comfyops\isolated-packages\`，内容寻址缓存在其 `.cache\` | 只由工作台安装器写入 | 同上 |
+| 节点（custom nodes） | 同一安装目录的 `custom_nodes\`；源码在仓库 `integrations\` | 部署副本由配方 `adapter_sha256` 钉住 | 测试目录里的副本；手改部署副本（要改就改仓库源再走安装流程） |
+| 提示词 | `H3PromptCompiler`（唯一输出路径） | — | 自由文本直提 H3 |
+| 项目台账 | `<日常数据目录>` 里的 SQLite | — | 平行台账、为同步而加的状态字段 |
+| 一切可丢弃的测试产物 | `<测试根>`（布局见 §6.1） | 由调用方显式给出：`-WorkRoot` / `--work-root`，无参数解析的脚本读 `SHINE_TEST_ROOT`；唯一实现 `scripts/shine_test_root.py` | `%TEMP%`、仓库根、`.local-data\`、任何写死在仓库里的路径 |
+| 验收证据 | 入库：`docs/evidence/<日期-名称>/`；本机：`<测试根>\acceptance\<轮次>\evidence\` | — | 聊天记录、`.local-data\*.log`、`/tmp` |
+| 分片日志归档 | `<测试根>\shards-<时间戳>\chunk-*.log` | 由 `-KeepRuns` 管保留数 | `/tmp`、`.local-data\` |
+| 交付物 | `<仓库根>\releases\` | 只由构建脚本从已提交的树产出 | 手工拷贝 |
+
+## 3. 一个裁决：铁律
+
+### 3.1 产品基线不变量（原文保留）
+
+#### Project authority
 Before editing code, read in order:
 1. [V1.0 产品与工程基线](docs/Shine视频工作台_V1.0_项目建设方案.md)
 2. [Codex Cloud 首轮开发任务](docs/Codex云端Agent_建仓及首轮开发总提示词.md)
@@ -28,7 +71,7 @@ Before editing code, read in order:
 
 **Repository already exists:** `anjingdtl/shine-video-studio`, **public**, default branch `main`. Do not attempt to create another repository or overwrite existing work. Codex is used for development only; it must **not** become a runtime dependency.
 
-## Product invariants
+#### Product invariants
 - Local MiniMax-H3 through ComfyUI is the only official video-generation execution path. Mock adapters are for development/testing, never presented as real video.
 - **Ref2VA only.** Every real render is reference-driven; T2VA and the first/last-frame modes are not allowed. `shine/h3/mode_policy.py` is the single decision point, `make_render_request` is the single enforcement point, and package readiness asks the same question. A shot without a usable reference is refused by name (`PROJECT_REQUIRES_REF2VA`), never silently rendered from text alone.
 - Windows local-first Web UI: FastAPI + React/TypeScript + SQLite, with a separately restartable worker.
@@ -41,10 +84,10 @@ Before editing code, read in order:
 - Never copy third-party GPL sources into the main project without legal review. Myang remains an optional separately installed ComfyUI plugin; verify all upstream licenses and exact revisions.
 - Never commit model weights, generated videos, personal source material, secrets or API keys. Default backend binding is localhost; cloud transmission of asset bytes requires explicit user permission.
 
-## First development milestone
+#### First development milestone
 Deliver actual **M0 + M1**, not design-only outputs. Prioritize working FastAPI APIs, React screens wired to APIs, migrations, asset approval/lock, frozen style versions, persistent job state machine, mock renderer, worker recovery and adversarial tests. Create upstream audit and local-H3 acceptance instructions. Never claim local GPU/H3 validation from a cloud-only test.
 
-## M2/M3 offline additions (current branch)
+#### M2/M3 offline additions (current branch)
 
 - `H3PromptCompiler` is the only prompt output path. Do not submit free-form agent text directly to H3. Keep the pinned `h3-prompt-writing` rule version/hashes and official section order/label families.
 - ComfyUI jobs require a registered API workflow profile with an explicit `parameter_map`. Never fabricate a "validated" H3 workflow or silently change generation mode/checkpoint. Unmapped or missing workflow JSON is a documented blocker, not a reason to invent one.
@@ -62,7 +105,7 @@ Deliver actual **M0 + M1**, not design-only outputs. Prioritize working FastAPI 
 - Keep `/api/v1/system/status` distinctions (API, Worker, Mock, real H3) honest. Keep the API loopback-only until authentication exists.
 - The offline production loop is covered by `backend/tests/test_offline_e2e.py`; run it after any change to the worker, the gates or the repair engine.
 
-## Production series (real multi-shot H3 production)
+#### Production series (real multi-shot H3 production)
 
 - A **production series** is the durable unit of a real H3 run. It owns an ordered list of shots, its own claim, its own heartbeat and its own state. The resident Worker claims exactly one series at a time.
 - The first shot of a series owns a fresh managed startup; every following shot continues the **same** fenced renderer through the idle keeper's lease transfer. The exclusive GPU lease is therefore held across the whole run and released **exactly once**, at the end. Two serial H3 model stages must never overlap.
@@ -72,125 +115,118 @@ Deliver actual **M0 + M1**, not design-only outputs. Prioritize working FastAPI 
 - The ordinary job queue keeps its own semantics and is driven behind the same managed renderer, so a single queued shot no longer holds the lease forever.
 - The series must be reachable from the Web workbench, not only from a test harness. A run that a script drives by hand is not an unattended production acceptance.
 
-## Working method
+### 3.2 红线与硬约束（按主题收束）
 
-V1.1 keeps professional Agent outputs as typed, versioned proposals on the existing Gateway
-and database. Only user actions may apply style/camera suggestions. Rule-pack locks are
-immutable per project; unsupported source/rule changes require code review and tests.
-Never bundle official full-text guides without redistribution permission. Run
-`backend/tests/test_film_crew.py` alongside the offline E2E after crew/rulebook changes.
+每条是一句话的裁决；细则、函数签名与事故原文在 `docs/AGENTS_HISTORY.md` 对应小节（§7）。
 
-1. Inspect current repo and upstream implementations/commit IDs before reuse; write `docs/upstream-audit.md`.
-2. Keep feature changes small, testable and recoverable. Do not alter locked product decisions without user confirmation.
-3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.
-4. Follow the user's specified checkout and branch. For direct work on `main`, keep changes in the current checkout, preserve unrelated local files, and use an ordinary push when authorized.
-5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
+**产品与证据**
 
-### 新机安装、仓库搬迁与主分支交付
+- 真实视频只走本地 MiniMax-H3 / ComfyUI；mock 只用于开发测试，永不冒充真实视频。
+- **Ref2VA only**（2026-11-27 用户裁定为唯一规则）：`shine/h3/mode_policy.py` 是唯一裁决，`make_render_request` 是唯一执行点；没有可用参考的镜头具名拒绝（`PROJECT_REQUIRES_REF2VA`），绝不文字直出。历史小节里「素材是可选类需求、无参考时按 T2VA 编译」的说法以本条为准。
+- 只有用户动作能晋升主素材、冻结音色、应用风格或镜头建议、冻结 Style Bible、放弃未知结果。AI 可以生成 `CandidateAsset`，不得静默创建、替换、批准或改写主素材；候选的接受只能由用户评审。
+- 证据如实：技术交付不等于艺术验收，`pending_review` 不得改成 `accepted`；离线或替身渲染器的产物一律 `offline_only`，永不写成真机验证；用户反馈只能记 `reported_by_users`；拿不准就写「未验证」「未校准」「未运行」。
+- 已产出的成片、历史版本、已落库请求的 provenance 永不重写；修订等于产生新版本，旧版保留。
+- 云端传输素材字节需要用户明确许可；已证明为环回的端点一律 `trust_env=False`（本地调用不得继承宿主代理）。
+- 永不盲重提、不盲杀身份不明的进程、不静默降级：结果不确定就具名阻塞并交给人。
 
-- **源码以当前仓库为准。** 从入口脚本自身推导仓库根。外置虚拟环境只提供依赖，安装修复和运行使用同一个解释器，API、Worker 和迁移都从当前仓库加载 `shine`。复用依赖时用现有的安装回执和解释器核对这一点。
-- **配置读取和启停各有唯一实现。** Windows 路径由 `scripts/shine_local_config.ps1` 解析。数据目录按命令行 `-DataDir`、进程环境、当前仓库 `.env`、默认目录的顺序解析。显式 `-DataDir` 同步限定 SQLite 位置。开发入口、安装入口与监督进程都交给 `start_shine.ps1` 做整栈启动和存活裁决，停止沿用 `stop_shine.py` 的进程身份核对。整栈与单 Worker 启停共用同一把锁和 `processes.json`。
-- **路径按用途决定来源。** 仓库文件相对于仓库根，安装和数据文件相对于当前配置的根，机器专属输入由维护命令显式传入。`.local-acceptance/` 只作隔离验收输出。把绝对路径、旧 worktree、旧分支和个人 DB、模型、密钥引用限定在历史证据中，正式执行路径从当前配置或发布输入解析。
-- **锁文件和 CI 以公共仓库可用为准。** `backend/pyproject.toml` 与 `backend/uv.lock` 共同锁定公开 PyPI。检查锁文件的 registry、下载 URL 和版本变化，使用默认配置及 `uv --no-config sync --project backend --locked --dry-run` 验证。Windows Launcher 的有效构建定义在 `.github/workflows/launcher-windows.yml`，按触发 commit 上传构建产物。当前主分支由操作者授权的普通 push 更新。
-- **用实际启动验证路径。** 改安装、启动、依赖或发布后，从当前工作目录以外调用入口，使用含空格和中文的隔离路径，覆盖外置虚拟环境、端口被占用、半栈恢复和停止。核对实际源码、进程、SQLite 与 Web。全新缓存安装、复用依赖启动、打包校验与真实 H3 出片分别记录验收结果。安装包的临时解包只用于验证交付物。
+**H3 与提示词**
 
-### 日常工作台启动配置交还（2026-11-27 用户裁定）
+- `H3PromptCompiler` 是提示词的唯一输出路径，crew 永不写提示词；官方标准是规则包，不是风格。提示词新行为只进下一个编译器版本，已发布版本逐字节不变（`recompile_for_provenance` 按钉住版本重放）。
+- 口语语言的唯一事实是项目 `language`（规范英文名，`h3/spoken_language.py` 归一化）；音频合同一律正向描述；无对白镜头恒带禁声合同。
+- crew 提示词只在 `shine/agents/crew_prompts.py`，只写角色权限、官方约束、服务端核对用的数字；分段由 `editorial_timing_plan` 算好下发；无解的请求在调用模型前拒绝（`EDITORIAL_TIMING_UNGROUPABLE` / `EDITORIAL_BEAT_COUNT_MISMATCH`）。每次 Provider 调用前只在 `call_material_agent` 调一次 `pace_provider_call()`，逐场串行。
+- 一张镜头图以冻结请求为权威：`make_render_request` 建任务时裁决一次并冻结哈希，Worker 只认冻结哈希；两种合法形态的等价判断只在 `low_vram_attention_form_of_graph()`。新生产图只由 `comfy/graph_compiler.py` 编译；缺可选能力 `409 STRATEGY_BLOCKED`，不静默降级。
+- 人物与主素材的唯一连接键是 `entity_id`（`resolve_character_asset`），永不查 `tags`；顺序是先剧本后素材；同一镜的素材一次采纳、一次写入（`bind_adopted_masters_to_shots`），取消采用是显式释放。
+- 门禁拒绝时不替换方案：不改 INT8/FL2VA、不换参考资产或 checkpoint；用户显式选定的方案，一键开拍与导演包在任何情况下都不替换。候选变体不继承基线的验收，必须走完整门禁；服务端是唯一的门（`comfyops/profile_gate.py`），浏览器只显示、读不到结论时不发明拒绝。
+- 影片类型是服务端固定的 H3 合同（`StyleBible.film_type` 只接受 `live_action` / `animation`，固定英文句在 `h3/film_type.py`），不交给模型自由改写。
 
-用户日常双击仓库根目录的 `启动 Shine 工作台.cmd`。每轮建设或验收交付前都要确认该入口能打开
-原日常作品。涉及启动、Setup、端口或数据目录变更时，恢复本轮改动后再复验。失败、中断和交接也执行收尾。
+**渲染器、租约与对账**
 
-1. **开工留存。** 用入口现有的配置解析器定位日常数据目录和 SQLite，记录生效的启动配置。
-   工作栈在线时，核对实际监听 PID、匹配的 `processes.json` 和 `/api/v1/system/status`，记录
-   API/Web 端口及可见的原作品 ID。动配置前，在本机保存仓库根 `.env` 的原始字节和 SHA-256，
-   原先没有则记录文件不存在。快照留在本机，日志只记用于核对的路径和校验值。
-2. **验收隔离。** 隔离验收通过 `start_shine.ps1 -DataDir` 启动，使用日常入口以外的端口。
-   Setup 激活和生成运行配方可能回写仓库根 `.env` 的 `SHINE_DATA_DIR`、`SHINE_SETUP_RECIPE`
-   等设置。需要经过这类操作时，把配置恢复纳入 `finally` 或等效收尾流程。
-3. **收尾恢复。** 在任务到达安全边界后，沿用 `stop_shine.py --data-dir` 按身份收尾本轮隔离栈。
-   恢复本轮改动的日常启动配置，核对 `.env` 恢复到开工快照的字节或原先不存在的状态。原库、媒体、
-   密钥和任务台账原地保留。已有错库迹象、基线缺失或同期有用户改动时，必须用历史配置、原作品记录
-   或用户确认确定恢复目标。日常库的更换以用户授权为准。
-4. **用原入口复验。** 用 `启动 Shine 工作台.cmd` 按用户日常方式启动或接回，核对实际
-   API/Worker/Web 归属、SQLite 路径，以及「项目管理」中开工前的作品 ID。把入口、端口、数据库
-   路径和作品核对结果写入收尾报告。若用户明确要求停机，按要求收尾并记录实启状态。无法安全恢复
-   或复验时，交还状态写 `BLOCKED` 并列出具体原因。
+- 所有本机模型阶段共用一张全局资源租约表：`ResourceScheduler.admit` 只允许一个 `ACTIVE`（显存够也不并排），跨线互斥同一套；等待显卡不是失败。
+- 独占租约是对活进程的占有：释放只认 PID/birth + 命名 Job Object + 端口空闲三证；读不到身份是不确定，不是死亡；租约释放与 series `COMPLETED/RELEASED` 在同一事务提交。
+- 渲染器与审片器属于工作台：只停经双重证明归本安装所有的进程，关闭动作只有 `POST /api/v1/setup/managed-processes/release`；不得用脚本手工拉起 ComfyUI。`/free` 是异步请求，HTTP 200 不是释放证明（`free_models()` 轮询取证）。不跨外部提交持有 SQLite 写事务。
+- 提交意图先落盘、外部 ID 随后落盘。**`UNKNOWN` 不重发、不替代、不释放身份**，核对结论 `UNCONFIRMABLE`；只有 `NOT_SENT_PROVEN` 才可再请求；唯一例外是用户显式确认后的一次重发（原因记 `USER_AUTHORIZED_NEW_REQUEST`，不写 `NOT_SENT_PROVEN`）。
+- 外部结果必须经 `agent_call.classify_external_outcome()` 分为 `NOT_SENT` / `RESPONSE_RECEIVED` / `UNKNOWN`，依据 Provider 层已记录的 HTTP 状态，不猜测；流式响应「headers 未到不等于请求未送达」。被服务端确认过的流绝不静默重发。
+- 已落盘产物在整条身份链吻合时是权威：从已存字节续跑质检，不联系渲染器、不重提；记录采纳前先核验磁盘字节。
+- 一次授权只买一次新尝试（`start_pipeline_new_attempt` 在同一事务里消费授权）；429 按 `Retry-After` / 指数退避重试，它是「拒绝且没有答案」，5xx 与超时仍是未知结论、不重放。「这一镜归谁」只由 `comfyops/ownership.py` 回答。
 
-### 全量回归执行方式（固定规则：后端 8 分片并行）
+**质量门与校准**
 
-后端全量 `pytest backend/tests -q` 单进程串行要 1.5 小时量级，**不允许**这样跑；本项目
-的全量回归一律按测试文件均分成 **8 个分片并行**执行，单次约 10 分钟。
+- 确定性技术 QC 与概率性语义 QC 分开；缺 FFprobe/FFmpeg 是 `unavailable`，不是 pass；探测元数据不等于解码。审片（VLM/ASR）是 advisory：缺席、不兼容、失败都只记证据，永不阻塞生产，也不得伪报 READY。
+- 改了 `client_review_identity` 钉住的文件（`worker.py`、`preproduction.py`、`comfy/client.py`、`quality/client_identity.py`、handoff 模块）就必须重做真实 VLM 正负校准、发布新 revision 并重新冻结制片计划；没做就如实写「未校准」，旧证据不得复用。
+- 重验已产出的媒体，只在渲染绑定（风格、规则包、主素材、模型、H3 工作流）未变时允许。
 
-Windows 从当前仓库调用 `.\run_backend_shards.ps1 -WorkRoot <非系统盘上的隔离测试目录>`。
-脚本沿用当前仓库配置的 Python，每轮使用独立的临时目录，并记录 8 个分片的退出码与日志。
+**工作台与界面**
 
-**跑完必须落地清理。** 脚本判定完成后删除各分片的 `bt-*` basetemp（有分片失败时保留，
-便于定位失败用例的 `tmp_path`；`-KeepBasetemp` 强制保留），并删掉本脚本产出的旧
-`shards-*` 日志目录（`-KeepRuns N` 保留最近 N 次，默认 1）。`WorkRoot` 要**固定复用同一个
-测试根**：换一个中文名的手工目录跑一次，就多一份没人认领的残留（历史事故：`F:\ShineTest`
-累计 327 GB、`F:\ClaudeWorkSpace\.pytest-tmp` 累计 132 GB，两者合计吃掉 F 盘 459 GB）。
+- 导演模式的页面保持挂载、只切 `hidden`；面板必须承受数据未到或字段缺失（不得出现让整棵树崩溃的取值），缺失字段给可读值。用户必须做的动作统一用 `.required-action` / `.must-button` 并带简短说明，不得只显示裸错误码。
+- 完成态与进度只来自服务端（journey、台账）：前端不得另算就绪、不得累计自己的进度。三处配置入口同读 `GET /api/v1/setup/verdict`。
+- ⑦后期成片是单一选集链路；字幕的生成、批准、应用只在⑦；字幕事实读 `shot.spec.dialogue`，时码与装配同源。每集秒数的唯一裁决是 `episode_video_seconds`；画幅只在⑤一个控制节点。
+- 成片库是既有台账的只读视图；成片删除是墓碑，不改写历史；「当前采用版本」只在用户显式选中时改变（`media/video_layout.py`）。全机只有一个输出根目录（`media/output_layout.py::output_root`），变更只走 `PUT /api/v1/settings/output-directory`：保存即迁移，逐字节核验通过才在一个事务里切换。
 
-**假权重必须写成真稀疏文件。** 按字节数匹配目录清单的用例只能用
-`tests.conftest.make_sparse_file`。NTFS 上先 `FSCTL_SET_SPARSE` 再 `truncate` **仍然真实分配**
-（实测 20 GiB 全部落盘），必须标记稀疏后 seek 到末尾写最后一个字节（实测 0.1 MiB）。
-改回 `truncate` 会让单次全量回归写约 70 GB，这是上一轮把测试盘吃满的直接原因。
+**Copilot（AI 管家）**
 
-**分片数是时间/并发参数，不是空间参数。** 峰值占用由"哪几个用例造大文件"决定，与分片数无关；
-收缩分片只会让单次从约 10 分钟拉长到 20 分钟量级，不减少任何字节。要治空间就治造假文件和清理。
+- 能力只在 `backend/shine/copilot/declarations.py` 声明一次，知识索引与契约是生成器产物（`--check` 在本地与 CI 必须通过）：不手改产物，不加第二套参数 schema、执行者、调度器或就绪裁决。
+- 唯一授权事实是 `SupportDelegation.payload["grant"]`；唯一写入口 `shine.support.grants`；唯一自主执行入口 `execute_under_grant`（先 `preview_action`，再 `approve_action`，最后 `refresh_action`）。
+- 权限 = actor ∩ grant ∩ capability_contract ∩ original_executor_policy；改源码、任意 shell、任意 HTTP、删用户资产四项永久 false。模型只提议，永不携带权限（Discovery is not permission）。
+- `SUCCEEDED` 只在存在原任务回执时给出；循环必须有步数、墙钟、调用次数、无进展四道上限；`PAUSED_USER_DECISION` 只由用户显式恢复，Worker 不自动恢复。
 
-```bash
-cd <repo>
-ls backend/tests/test_*.py > /tmp/all-tests.txt
-split -n r/8 /tmp/all-tests.txt /tmp/chunk-          # 按文件均分，不按用例切
-for f in /tmp/chunk-*; do
-  backend/.venv/Scripts/python.exe -m pytest $(tr '\n' ' ' < "$f") -q -p no:cacheprovider \
-    > "$f.log" 2>&1 &
-done
-wait
-grep -H "^FAILED\|^ERROR" /tmp/chunk-*.log          # 无输出才算全绿
-```
+**测试纪律**
 
-判定口径：
+- 测试必须隔离：`make_studio` 的默认 ComfyUI 端点是刚释放的环回端口，不得默认 8188；后端测试在仓库根运行；不得用改测试预期的方式制造 PASS。
+- 假权重只能用 `tests.conftest.make_sparse_file` 写成真稀疏文件。
+- 共享环境红线：不执行 `npm ci` / `npm install`（会洗掉共享依赖）；不抢他人端口；不得用静态服务暴露仓库根（`.env`、`.git` 会变得可读）。
 
-1. **8 个分片全部退出码 0，且日志里没有 `FAILED` / `ERROR` 行**才叫通过。
-2. 本仓库 `conftest.py` 把 `[shine-module]` 逐模块摘要打在终端摘要位置，所以看不到
-   "N passed" 汇总行；不要用汇总行判定，也不要因为它缺失就认为没跑。
-3. 分片必须**按文件均分**（`split -n r/8`）。按用例切会让同一模块的 fixture 在多个进程
-   里重复初始化，出现假失败。
-4. 分片日志要留存（`.local-data/` 或 `/tmp`），报告里写清命令、分片数与各分片结果。
-5. 前端全量仍是 `npx vitest run --no-file-parallelism`（tinypool worker 在本机会崩，
-   与代码无关），这一条不受后端 8 分片影响。
-6. **必须在命令前加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`**。执行环境自带的 safe-delete 垫片按
-   "轮"统计删除次数，累计 50 次后开始拦截**每一次** `unlink`；pytest 清理 tmp 目录正好触发，
-   表现为 `test_v13_instances` / `test_v13_preparation` / `test_security_windows` 等模块
-   大片与代码无关的 `FAILED`/`ERROR`（实测守卫触发次数与失败数强相关，单独跑同一模块则全通过）。
-   加这个变量是让 pytest 自己删临时文件，不是放宽被测代码的门禁；**不要**因此改测试或跳过模块。
+**分支与发布**
 
-```bash
-CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
-  (backend/.venv/Scripts/python.exe -m pytest $(tr "\n" " " < "$f") -q -p no:cacheprovider \
-    > "$f.log" 2>&1; echo "$f exit=$?" >> /tmp/shards-exit.txt) & done; wait'
-```
+- 修复与验证一律在主仓原地、当前分支（`main`）做：不新建 worktree、不克隆副本、不把运行配置指向验收或测试目录。
+- `main` 只有仓库所有者可推（Ruleset `main-owner-only-push`）；被拒的推送是正确结果，不删 ruleset、不 `--force`。未经用户明确指示不推远端、不自动合并 PR。
+- 安装包只从已提交的树构建；没跑通的步骤在说明里写「未验证」，不得口头声称已发布。
 
-## Distribution package (tester hand-off)
+### 3.3 唯一事实 / 裁决 / 执行者登记表
 
-- Build releases only from a committed tree: `pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`.
-  The script refuses a dirty working tree, takes files from `git ls-files`, excludes models/databases/secrets/
-  `docs/evidence`/virtualenvs, and writes `BUILD_INFO.json` plus a per-file `PACKAGE_MANIFEST.json`.
-- One tester entry only: `一键安装并启动.cmd` (ASCII fallback `SETUP.cmd`) → `scripts/install_once.ps1`.
-  It must stay idempotent (installed → start, running → delegate to the launcher's three-proof liveness
-  verdict), prefer a non-system drive with ≥180 GiB free, and land on `#setup`. Personal desktop setup
-  requires no operator password. **2026-11-15 user ruling**: a single-disk machine may install to the
-  system drive only after explicit confirmation (interactive `YES` or `-AllowSystemDrive`); the 180 GiB
-  capacity floor is NOT lowered. The approval persists as `SHINE_ALLOW_SYSTEM_DRIVE=1` in `.env` plus
-  `allow_system_drive` in `deployment-storage.json`; bootstrap and start_shine honor that one fact.
-- Encoding is a correctness requirement, not style: `.cmd` entry files stay pure ASCII (cmd.exe uses the
-  active code page), and every `scripts/*.ps1` containing non-ASCII text must be UTF-8 **with BOM**
-  (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and fails to parse). `test_package_entrypoints.py`
-  enforces both.
-- Never package weights, generated media, SQLite files, `.env`, `operator-credentials.txt` or acceptance
-  evidence. Testers get the installer, not the data.
+动到左列的任何一件事，先看右列：那是唯一允许改、允许读、允许调用的位置。要改行为就改那里，
+不要在旁边再写一个。表里没列的事，到 `docs/AGENTS_HISTORY.md` 对应小节查「唯一」字样。
 
-## V1.3 amendment (supersedes V1.0's source-only restriction)
+| 事项 | 唯一位置 |
+|---|---|
+| 渲染模式裁决 / 执行点 | `h3/mode_policy.py` / `make_render_request` |
+| 提示词输出 / crew 提示词 / 分段答案 | `H3PromptCompiler` / `agents/crew_prompts.py` / `editorial_timing_plan` |
+| 图编译入口 / 图形态等价判断 | `comfy/graph_compiler.py` / `low_vram_attention_form_of_graph()` |
+| 可选能力裁决 / 单镜渲染策略门禁 | `sealed_optional_capabilities` / `services.make_render_request` |
+| H3 提交与 ACK 对账 | `submit_prepared_prompt` / `ComfySubmission`（两条业务线共用） |
+| 全局资源租约 / 模型释放证明 | `ResourceScheduler.admit` / `ComfyUIClient.free_models()` |
+| 渲染器归属与停止 / 关闭动作 | `comfyops/renderer_release.py` / `POST /api/v1/setup/managed-processes/release` |
+| 死渲染器租约释放 | `reconcile_dead_renderer_leases` |
+| 出图渲染器启动 / 活体复用裁决 | `comfyops/image_renderer.py` / `adopted_live_renderer` |
+| 续接派生媒体 | `shine/media/continuity.py`（Worker 拥有，按 lineage 校验） |
+| 导演包可否启动 / Run 推进 | `package_readiness`（每次派发重跑） / Worker tick 内的 `advance_runs` |
+| 分集产物来源 / 装配 / 后期合同 | `episode_current_jobs`（含 `run_owned_passed_jobs`） / `DeliveryAssembler.assemble` / `EpisodePostContract` |
+| 字幕事实与时码 / 字幕字号 | `shot.spec.dialogue` 与 `DeliveryOrder.edl_payload` / `subtitle-style:{project_id}`（裁决 `render_ass`） |
+| 每集秒数 / 画幅 | `director/contracts.py::episode_video_seconds` / ⑤的 `outputFrame.ts` 与 `h3/output_frame.py` |
+| 人工验收 / 镜头修订 | `delivery_acceptances` + `POST /deliveries/{id}/acceptance` / `POST /shots/{id}/revise` |
+| 大纲确认 / 确认依据 | `confirm_outline_artifact` / `director/basis.py::outline_for_document` |
+| 风格应用 / 镜头绑定采纳 | `api_freezes.apply_frozen_style_to_shots` / `materialprep.service.bind_adopted_masters_to_shots` |
+| 人物与主素材连接 / 镜头素材缺口 | `entity_id`（`resolve_character_asset`） / journey `_shot_material_problems` |
+| LoRA 选择 / 挂载 / 注词 | `evaluate_style_lora_selection()` / `attach_qwen_style_loras()` / `apply_image_lora_prompts()` |
+| 显存适配建议 / 实测显存准入 | `comfyops/capability.py::image_vram_advice()`（永不拦截） / `comfyops/image_renderer.py` 启动处 |
+| 外部结果分类 / UNKNOWN 重发 | `agent_call.classify_external_outcome()` / 三处 `…/resend-unknown` 入口（story-preparation、film-runs、material-preparation/scenes），各一次 |
+| 一次授权的新尝试 / 四阶段任务对账 | `start_pipeline_new_attempt` / `POST /projects/{id}/pipeline/tasks/{id}/reconcile` |
+| 变体解析 / 候选准入门 / 拍摄归属 | `comfyops/variant_binding.py` / `comfyops/profile_gate.py` / `comfyops/ownership.py` |
+| 制作依据（这版剧本或大纲）/ 导演包复用键 | `director/basis.py` / `delivery_snapshot` |
+| 人物、场景、道具目录 / 素材清单派生 | `materialprep/catalog.py` / `POST …/material-preparation/derive` |
+| 输出根目录 / 当前采用版本 / 成片库 | `media/output_layout.py::output_root` / `media/video_layout.py` / `media_artifacts` 的只读视图 |
+| 影片类型 / 代理环境规则 / 长文本切分与预算 | `h3/film_type.py` / `http_env.py` / `segment_document` 与 `budget_report` |
+| 提交是否已结清 / 审片身份 | `production/runner._job_submission_settled` / `client_review_identity`（输入经 `TrackedProvider`） |
+| 审片就绪 / 缺件分类 / 基础配置执行 | `advisory_review_readiness` / `capability_report` / 「一键准备」`/setup/prepare/execute` |
+| 配置是否同一 / 配方读取 / 配置结论 | `runtime_configuration.same_configuration` / `load_runtime_recipe` / `GET /api/v1/setup/verdict` |
+| 环境就绪与能力标签 / 运行身份 | `foundation/environment.py` / `source_identity.py` |
+| 页面步骤完成态 / 排产镜头范围 | `GET /projects/{id}/journey` / 其 storyboard `planned_shot_ids` |
+| Copilot 能力声明 / 授权事实 / 执行入口 | `copilot/declarations.py` / `SupportDelegation.payload["grant"]` / `execute_under_grant` |
+| 目标是否完成 / 最小修复范围 | `copilot/objective_verify.py` / `support/diagnostics.minimal_repair_scope` |
+| 整栈启动 / 停止 / 代码更新 / 栈存活裁决 | `scripts/start_shine.ps1` / `scripts/stop_shine.py` / `scripts/update_checkout.ps1` / `shine_supervisor.py::_stack_live` |
+
+### 3.4 V1.3 与个人桌面补充（原文保留）
+
+#### V1.3 amendment (supersedes V1.0's source-only restriction)
 
 - AI may generate `CandidateAsset` rows. Only explicit local-user grants may promote new
   `Asset` masters or freeze Voice Profiles. Do not use legacy approve/lock to promote candidates.
@@ -204,7 +240,7 @@ CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
   film crew, complete backend suite, Ruff, Alembic and TypeScript/Vite. Preserve Windows CI.
 - See `docs/V1.3_CLOUD_IMPLEMENTATION_REPORT.md` for evidence and explicit local boundaries.
 
-## Personal desktop simplification (2026-11-01, user-authorized)
+#### Personal desktop simplification (2026-11-01, user-authorized)
 
 - No password or manually typed rights evidence is required for uploaded-master confirmation.
   Same-origin loopback UI actions use a CSRF marker, with the actor recorded as `local-user`.
@@ -216,280 +252,175 @@ CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in /tmp/chunk-*; do
 - Normal installers do not generate or request an operator password. Preserve existing secrets
   and explicit legacy provisioning callers without rewriting their files.
 
-## 2026-11-03 late supplement (real-production recovery)
+## 4. 一个执行者：每类动作的唯一入口
 
-- **Do not hold the SQLite writer transaction across an external ComfyUI submit.** The claim,
-  preproduction and activation guards commit first; the upload/`/prompt` call runs outside the
-  transaction. A managed heartbeat or series heartbeat that sees `database is locked/busy`
-  defers to its next beat instead of declaring the lease lost.
-- A series whose shots all passed but whose ownership proof was lost is reconciled, not left
-  blocked. If the GPU lease is still `RECONCILE_REQUIRED/ACTIVE`, only a renderer proven by
-  PID/birth/named Job Object may be stopped, and the lease release plus `COMPLETED/RELEASED`
-  commit in one transaction. If the lease is already released, the series outcome is merged
-  without touching any renderer. Never resubmit a shot for this path.
-- An activation journal with `last_confirmed_stage=CONFIRMED` may reconcile a completed
-  external prompt only while the recorded renderer is still the same live, owned process.
-  Otherwise it remains a blocker. Operator abandon must also check startup/activation
-  renderer ownership before releasing the lease.
-- Guided advisory reviews must use `TrackedProvider` (which rebuilds `VerifiedInputEvidence`
-  from the database pin). Never pass a raw `{artifact_id, sha256}` pin to the reviewer;
-  a guided review that fails for this reason is an infrastructure defect, not a model verdict.
-- `client_review_identity` pins `worker.py`, `preproduction.py`, the handoff modules and the
-  quality client. Any change to those files invalidates an existing VLM revision by design:
-  rerun real positive/negative calibration calls, publish a new VLM revision, deprecate the
-  old one, analyze a new preproduction plan revision and re-freeze it. Old evidence is never
-  reused.
-- The formal project's frozen look was corrected after the first real render exposed a
-  daylight-versus-rainy-night conflict: Style V2 `7c3ed722-7bd0-4a52-96e1-2e2c4c0a7624`,
-  shot revision 4, frozen plan `3187c16d-3b80-4ea8-a3d7-f6047d2873eb`. Style V1 and the
-  earlier renders remain as history; they are not rewritten.
-- Current pending blocker (see `docs/PROGRESS_20261103_CONTINUATION.md`): shot `f0173fbe…`
-  has a persisted artifact `469ee15a…` but the worker process was lost before QC. The GPU
-  lease `96971172…` is `ACTIVE` and expired while the renderer is already gone. Recovery must
-  prefer QC from the persisted artifact (artifact SHA + attempt output SHA + prompt graph
-  hash) and must not blind-resubmit. The corrected current shot is **not yet accepted**.
-  (Resolved in the 2026-11-03 closing round — see the supplement below.)
-- After worker/quality changes run `backend/tests/test_offline_e2e.py`,
-  `test_comfy_completion_window.py`, `test_production_series.py`, `test_advisory_queue.py`
-  and the full backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`.
-  Build the Windows package only from the final committed tree with
-  `pwsh -File scripts\build_test_package.ps1`.
+同一类动作只有一个入口。要改行为就改这个入口，不在旁边再加一个；入口失灵时修它背后的链路（§1 三条禁令）。
 
-## 2026-11-03 closing round (persisted-artifact recovery, dead-renderer lease, spoken language)
+| 动作 | 唯一入口 | 说明 |
+|---|---|---|
+| 日常启动（含更新代码） | `启动 Shine 工作台.cmd` 或同名快捷方式 → `scripts/start_dev.ps1` → `scripts/update_checkout.ps1` → `scripts/start_shine.ps1` | 入口只有这两个，指向同一套脚本（§5.6） |
+| 整栈启动 / 恢复 | `scripts/start_shine.ps1` | 选端口、收尾旧栈、迁移数据库、换代判定、写 `processes.json` |
+| 整栈停止（含隔离栈） | `scripts/stop_shine.py --data-dir <目录>` | 唯一的进程身份核验与收尾，含 supervisor |
+| 关闭本机后台并释放显存 | `POST /api/v1/setup/managed-processes/release` | 工作台唯一的关闭动作 |
+| 后端全量回归 | `.\run_backend_shards.ps1 -WorkRoot <测试根>`（8 分片） | 唯一的全量执行者（§5.4） |
+| 定向测试 | 仓库根 `pytest … --basetemp=<测试根>\manual\<轮次>\bt` | 测试根见 §2；不用 `%TEMP%` 的默认目录 |
+| 前端全量 | `frontend\` 下 `npx vitest run --no-file-parallelism`、`tsc --noEmit`、`npm run build` | tinypool worker 在部分机器上会崩，与代码无关 |
+| 隔离验收栈 | `scripts/start_shine.ps1 -DataDir <测试根>\acceptance\<轮次>\data`，非日常端口，并设 `SHINE_RUNTIME_ENV_PATH` | §5.3、§6.1 |
+| 测试根的解析 | `scripts/shine_test_root.py` | 参数优先，环境变量 `SHINE_TEST_ROOT` 兜底；脚本不得写死本机目录 |
+| 竣工清理与占盘测量 | `scripts/clean_test_workspace.py --work-root <测试根>` | §6.3 口径的唯一执行者：默认演练，`--apply` 才删，只拆链接 |
+| 能力声明再生成 | `backend/scripts/generate_shine_copilot_contracts.py`、`generate_copilot_knowledge.py` | 生成器无参数才写入；开发检出不带 `--commit` |
+| 打包 | `scripts\build_test_package.ps1 -OutDir releases -Verify` | 只从已提交的树（§5.7） |
+| 提交 / 推送 | `git add <明确路径>` → commit → 用户授权后普通 push `main` | 不 `git add -A`、不 `--force`（§5.6 C） |
 
-- **A persisted render artifact is authoritative when its whole identity chain matches.** Adopt
-  an already-persisted artifact only if `artifact.sha256 == attempt.output_sha256`, the attempt
-  carries a `prompt_graph_sha256`, the job/attempt/artifact agree on the external prompt id, and
-  the artifact's attempt/job/project ids match and it is not a mock. Then re-run technical QC and
-  the five gates from the stored bytes, record `reconciliation_state=adopted_persisted_artifact`
-  and `resubmitted=false`, and never contact the renderer or resubmit H3. Bytes changed after
-  persistence stay rejected (`ARTIFACT_HASH_MISMATCH`). External history is corroboration only.
-- **Verify the stored bytes before recording the adoption.** The digest/size check on disk runs
-  before `adopted_persisted_artifact`, the reconciliation row and the `RECONCILE_COMPLETE` journal
-  are written. A tampered file must leave no adoption evidence behind, otherwise the attempt can
-  never be reviewed again.
-- A handoff journal already reconciled to `RECONCILE_COMPLETE` is history: the persisted-artifact
-  path never rewrites it. The one exception is a render whose bytes are stored and whose gates
-  never ran: no conclusion exists yet, so the gates may still continue on the stored bytes.
-- **An exclusive GPU lease is a claim on a live process.** Release it only when PID/birth identity,
-  the named Job Object (no live member) and a free port all prove the renderer is gone
-  (`reconcile_dead_renderer_leases`). An unreadable process identity is uncertainty, never death.
-  Otherwise the lease stays `RECONCILE_REQUIRED`. The lease release and the series
-  `COMPLETED/RELEASED` transition commit in one transaction; a release that already committed is
-  idempotent. A series with a blocked shot is never marked complete, and a completion that was
-  merged before its shots were decided is explicitly corrected to `NEEDS_REVIEW`.
-- Re-validating already-produced media against the current frozen contract is allowed only when
-  the **render bindings** (style, rule pack, master assets, models, H3 workflow) are unchanged;
-  a changed render binding is refused. Advisory-review capability revisions — including the
-  models they run on — are not render bindings and may be re-bound explicitly through the
-  operator action.
-- **The H3 prompt must state the spoken-language contract explicitly.** With dialogue:
-  `All spoken dialogue must be spoken in {project language}, matching the original line text
-  exactly`. Without dialogue: `do not produce speech, voice-over or vocal sounds of any kind`.
-  The language is written in its canonical English name: the official rule pack rejects CJK
-  outside the dialogue tags, so a project setting written in another script is normalised
-  (`shine/h3/spoken_language.py`) or refused with 422 at the API boundary — never copied into the
-  prompt. The project `language` setting is the single source of truth and is exposed in the
-  director UI; already-produced shots are never rewritten. Verifying the model's actual accent
-  still requires a real re-render with spoken lines.
-- After worker/quality changes in this area, rerun the real VLM positive/negative calibration,
-  publish a new revision, deprecate the old one, re-analyze and re-freeze the plan. Current
-  approved VLM revision: `03f32432-4c94-4476-8580-e1a14e9fc37f`; frozen plan
-  `7832906a-d383-4eaa-a94d-0e0b510769d2`; the formal shot `f0173fbe…` is `PASSED` with
-  `acceptance_status=accepted`, its series `a6b97b5e…` is `COMPLETED/RELEASED`, lease
-  `96971172…` is `RELEASED`, and the delivery `ac7f0298…` is `DELIVERED`.
-- After worker/quality changes run `backend/tests/test_offline_e2e.py`,
-  `test_comfy_completion_window.py`, `test_production_series.py`, `test_advisory_queue.py`,
-  `test_comfy_handoff_journal.py`, `test_v13_preparation.py`, `test_h3_compiler.py` and the full
-  backend suite. Run `npm.cmd run build` and `npm.cmd test` in `frontend/`. Build the Windows
-  package only from the final committed tree with `pwsh -File scripts\build_test_package.ps1`.
+## 5. 标准工作流（一轮 = 开发或测试或验收）
 
-## 2026-11-04 renderer lifecycle round (ComfyUI belongs to the workbench)
+每一轮按同一顺序走完；任何一步没做完，这一轮就不算「竣工」，不得开下一轮。
 
-- **ComfyUI and the local reviewers are started by this installation, so they belong to
-  the workbench, not to the machine.** A renderer that outlives the stack keeps the model
-  resident in GPU memory and blocks the next run. The launcher therefore releases leftover
-  backends before a clean start (`scripts/release_residual_backends.py`, called by
-  `scripts/start_shine.ps1`), and the workbench has one action that closes them:
-  `POST /api/v1/setup/managed-processes/release` plus the「关闭本机后台并释放显存」button
-  in the setup panel.
-- **Ownership is proven twice or the process is not touched.** A managed renderer or reviewer
-  is stopped only when its recorded PID/birth identity and the membership of its named
-  `Local\ShineHandoff-<uuid>` Job Object agree (`shine/comfyops/renderer_release.py`). A
-  renderer that serves a running attempt is never stopped; a process whose ownership cannot
-  be proven is reported as `UNVERIFIED` and left alone. A leftover reviewer that no process
-  record names any more is owned when its command line names this installation's own review
-  script.
-- **The startup record is the only ownership proof; a reconciliation may not drop it.**
-  `reconcile_managed_startups` keeps the process identity, port and lease id when it marks an
-  interrupted startup `RECONCILE_REQUIRED`. A record that loses that identity can neither be
-  released nor matched to its lease, and the renderer becomes unstoppable.
-- **The workbench never claims a renderer that is gone.** A managed record whose process is
-  provably gone is written back as `STOPPED` and its lease is released as reconciled; the
-  `comfy_instances` row follows. Stale `RUNNING_PENDING_HEALTH` rows are history, not a
-  running renderer.
-- Evidence: `docs/ACCEPTANCE_20261104_RENDERER_LIFECYCLE.md`,
-  `backend/tests/test_managed_process_release.py`.
+| 步骤 | 做什么 | 依据 |
+|---|---|---|
+| ① 开工 | 核对 `git status` 与 `HEAD`；留存日常配置基线；建本轮目录 | §5.3、§6.1 |
+| ② 开发 | 主仓原地、当前分支；小步可回退；动工前先问「这件事的唯一事实、裁决、执行者在哪」，并读完对应主题的历史小节 | §1、§3、§5.1、§7 |
+| ③ 测试 | 定向 → 全量 8 分片 → 前端全量与构建 → Ruff、契约 `--check`、Alembic | §5.4 |
+| ④ 验收 | 需要真机或隔离栈时，起隔离栈、走真实链路、留证据 | §5.3、§6.1 |
+| ⑤ 竣工清理 | 停隔离栈、删本轮数据、留存证据、量化核对占盘 | §6.4 |
+| ⑥ 交还复验 | 恢复日常配置，用原入口启动并核对原作品 | §5.3 |
+| ⑦ 提交发布 | 明确路径 `git add`；授权后普通 push；从干净树打包 | §5.6、§5.7 |
 
-## 2026-11-04 crew prompt round (director chain: EDITORIAL_TIMING_CONFLICT and LLM_FORMAT)
+定向测试的标准写法（在仓库根执行；`<测试根>` 取本机约定值，见 §0）：
 
-- **The five crew prompts live in `shine/agents/crew_prompts.py`.** They state three things
-  only: the role's authority, the official H3 constraints, and the deterministic numbers the
-  server checks the answer against. Never let a prompt sentence contradict a server check:
-  the 2026-11-04 director failures (`5cb3a8fc`/`170afa21` → `EDITORIAL_TIMING_CONFLICT`,
-  `b6f2bda9`/`31ead07a` → `LLM_FORMAT`) came from a prompt that invited regrouping and a
-  "natural tail" while the server required the cut table exactly.
-- **The segmentation is computed, not negotiated.** `editorial_timing_plan`
-  (`shine/agents/editorial_timing.py`) is the finished answer and is served to the crew in the
-  context; the director prompt writes out every `duration_s` and every cut `start_s` it must
-  copy. A role must never recompute a boundary the server already fixed.
-- **A request no answer can satisfy is refused before the model call.**
-  `EDITORIAL_TIMING_UNGROUPABLE` (the cut table cannot be grouped into 4–15 s segments) and
-  `EDITORIAL_BEAT_COUNT_MISMATCH` (the scriptwriter's beat count cannot match the table) are
-  server-side facts; both are recorded in `trace.editorial_refusal` and returned as
-  `rejection_reason_code`. Never ask a model to solve them.
-- **The grouping search falls back.** The three-segment search stays the primary answer; when
-  it has no solution, a fallback minimises the longest segment and prefers more segments. The
-  pinned 8-shot grouping (4.3 / 5.1 / 5.6 s) must not change.
-- **A refusal must name its reason.** The chain returns `rejection_reason_code` for every
-  rejection and the workbench shows it. `LLM_FORMAT` keeps `provider_schema_path` and
-  `provider_schema_validator` (the field that broke), never provider text.
-- **The official standard is the rule pack, not a style.** Every crew prompt carries the
-  Ref2VA section order (`subject_definitions`, `summary`, `retention_analysis`,
-  `detailed_description`, `overall_soundscape`, `non_diegetic_music`) and the rule ids
-  `H3_ENGLISH` / `H3_TIMING` / `H3_DIALOGUE` / `H3_LIMITS` / `H3_LABELS`. The crew never
-  writes the prompt; `H3PromptCompiler` is the only prompt output path.
-- **A beat lists only the characters that appear in it.** Every listed character becomes a
-  required subject reference, so repeating the whole cast in every beat fills the reference
-  budget that the render needs.
-- Evidence: `docs/ACCEPTANCE_20261104_CREW_PROMPT_REPAIR.md`,
-  `backend/tests/test_crew_prompt_contract.py`. A real-model rerun of the failing script is
-  still outstanding, and a project without a registered workflow profile stays blocked at
-  `PENDING_WORKFLOW_MAPPING`.
+```powershell
+New-Item -ItemType Directory -Force <测试根>\manual\<轮次> | Out-Null    # --basetemp 的上级目录必须先存在
+backend\.venv\Scripts\python.exe -m pytest <测试文件…> -q -p no:cacheprovider `
+  --basetemp=<测试根>\manual\<轮次>\bt *> <测试根>\manual\<轮次>\pytest.log
+```
 
-## 2026-11-03 workbench usability round (naming, step gap, resume)
+定向运行会做环回 HTTP 调用的模块时，带上分片脚本同款的免代理设置（`NO_PROXY` / `no_proxy` 含 `localhost,127.0.0.1,::1`）：
+宿主系统代理会劫持环回请求，造成与代码无关的假失败；分片脚本自己会处理，单独跑不会。
 
-- **`entity_id` is the only join key** between a script character and an uploaded master
-  (`shine/asset_identity.py`). A crew step that needs a character master resolves the name
-  through `resolve_character_asset`, which matches `entity_id` (or an exact asset UUID) and
-  nothing else. `tags` are never consulted.
-- **The order is script first, material second.** The user imports the script; the
-  scriptwriter names the characters; the server retrieves the masters and proposes a mapping
-  (`POST /projects/{id}/storyboard/character-binding/proposal`); the user confirms every row;
-  the confirmed names are written on the masters and the script breakdown is re-keyed into a
-  **new** artifact (`.../character-binding/apply`); only then are the masters approved and
-  locked. A proposal never approves, locks, creates or replaces a master. An ambiguous or
-  duplicated name is refused (`CHARACTER_NAME_ALREADY_IN_USE`), because an ambiguous binding is
-  a blocked shot.
-- **A proposal is a reading, not a verdict.** Name matches outrank tag and filename matches;
-  upload order is offered only as the weakest candidate and is labelled as needing a human.
-  The human confirmation is the authority.
-- **One crew step at a time, with a real gap.** `SHINE_AGENT_STEP_DELAY_MS` (default 1200ms)
-  separates two real model calls. A failed role is retried from itself:
-  `POST /projects/{id}/storyboard/generate` accepts `start_role` and `resume_steps`, and the
-  server reuses an artifact only when it belongs to the project, carries the role's contract
-  kind and is not stale. A rejected response carries `failed_role` and `resume_steps`.
-- **Every action the user must take is loud.** A required action uses the same
-  `.required-action` / `.must-button` block, and every module carries a short
-  `.module-guide` that says what to do and why it is required. A raw error code is never the
-  only thing on screen.
-- Evidence: `docs/WORKBENCH_USABILITY_ROUND_20261103.md`,
-  `backend/tests/test_character_binding.py`.
+### 5.1 开发方法（原文保留）
 
-## 2026-11-04 round (voice masters, project workflow, continuous production)
+#### Working method
 
-- **The setup capability owns the local voice runtime and this project's H3 workflow.**
-  `shine/voiceops/runtime_config.py` holds the configuration (role → verified package, interpreter,
-  overlay); the setup panel writes it and the voice provider reads it, rebuilding the provider when
-  the configuration changes. `GET /setup/voice-readiness` states per role whether the package is
-  hash-verified, declares the capability and has a runtime. `POST /setup/profiles/validate`
-  registers this project's Ref2VA profiles and verifies them on the real renderer.
-- **A hash-verified package advances its registry status.** The install reconcile recorded
-  `MATCHES_PINNED_FILES` but left the package `UNVERIFIED_ORIGIN` forever; it now advances to
-  `FILES_VERIFIED_PENDING_RUNTIME` (files verified ≠ runtime verified) and may re-verify a
-  reconciled attempt without network or deletion.
-- **Only live work blocks a runtime re-validation.** A `NEEDS_REVIEW` series is blocked and
-  unclaimable, so it must not freeze every re-validation of this machine.
-- **A name list is split by every consumer.** A chorus line (`"S1, S2, …"`) is split by
-  `split_character_names` in the binding rewrite, the director's character check, the `ShotSpec`
-  speaker check and the rule pack's dialogue-removal regex — and it stays **one** `<d>` block
-  (the rule pack requires one language-tagged block per original line).
-- **A profile may offer more reference slots than a request binds.** The submitted graph drops the
-  loader of every unused slot (deterministically); otherwise the placeholder file name made
-  ComfyUI reject the whole prompt. The physical slot order follows the manifest order, so the
-  shot bindings are ordered by family (subjects, pictures, video, audio).
-- **A provider injected by the host is the host's to own** and is never replaced by the product.
-- **The local H3 node's Autogrow group carries up to nine reference images**; the workbench's own
-  profiles used two or three. A project whose shots bind more masters needs its own wider profile,
-  built from the real node and validated on the real renderer.
-- Evidence: `docs/ACCEPTANCE_20261104_VOICE_AND_REF2VA.md`,
-  `backend/tests/test_setup_voice_readiness.py`, `test_setup_workflow_profiles.py`,
-  `test_reference_slot_pruning.py`, `test_idle_configuration.py`.
+V1.1 keeps professional Agent outputs as typed, versioned proposals on the existing Gateway
+and database. Only user actions may apply style/camera suggestions. Rule-pack locks are
+immutable per project; unsupported source/rule changes require code review and tests.
+Never bundle official full-text guides without redistribution permission. Run
+`backend/tests/test_film_crew.py` alongside the offline E2E after crew/rulebook changes.
 
+1. Inspect current repo and upstream implementations/commit IDs before reuse; write `docs/upstream-audit.md`.
+2. Keep feature changes small, testable and recoverable. Do not alter locked product decisions without user confirmation.
+3. Run backend tests and frontend build/lint where possible. Report exact commands and failures, including unavailable external services.
+4. Follow the user's specified checkout and branch. For direct work on `main`, keep changes in the current checkout, preserve unrelated local files, and use an ordinary push when authorized.
+5. Report implemented, mock-verified, pending Windows/H3 hardware validation, and blocked items separately.
 
-## 2026-11-04 director-mode round (setup, output frame, cast identity, optional voice)
+### 5.2 安装、路径与配置（原文保留）
 
-- **The director layer owns its own setup page.** `#d/setup` (topbar「基础配置」and the first-run
-  card) renders the same `SetupPanel`, `SettingsPanel` and LLM configuration the expert layer uses;
-  a new user can install/download, configure the text model and register a generation profile
-  without switching layers. Installation plans and generation profiles stay bound to a project, so
-  the page offers an inline "create the first work" step instead of silently creating one.
-- **The output frame is a real render parameter, not a review expectation.** A production series
-  records `output_spec` (width, height, 24 fps, optional clip length). `width`/`height` reach H3 only
-  through an explicit `parameter_map` entry; a profile that does not map them refuses the run with
-  `WORKFLOW_SIZE_NOT_MAPPED` instead of rendering at its own size. The canonical profiles now map
-  `31.inputs.width`/`31.inputs.height`; an older project copy adopts the two keys through the audited
-  standard-parameter migration, and `POST /workflow-profiles/{id}/standard-parameters` adds them only
-  when the registered graph itself declares the inputs.
-- **Clip length is applied to the shot, or refused by name.** A run-level `clip_seconds` revises the
-  selected shots (dialogue must fit, internal cut timestamps must fit) and invalidates their earlier
-  versions; the request never carries a duration different from the compiled shot spec.
-- **The subject slot order follows the cast order of the shot.** The manifest is family-ordered
-  (subjects, pictures, video, audio) and, inside the subject family, ordered by `spec.characters`
-  (`order_bindings_for_cast`, applied at storyboard apply and again at render time for older shots).
-  The compiler states the cast order and forbids face swapping; every listed character without a
-  bound subject reference blocks compilation (`H3_CHARACTER_REFERENCE_MISSING`) instead of rendering
-  an invented face. Headless acceptance on the real project confirmed `<Subject n>` now follows the
-  shot's character order.
-- **A voice master is optional.** H3 speaks a dialogue line natively; the shot reference policy
-  reports `voice` as an optional role, the director prompt no longer requires an audio master, and
-  the setup page presents fixed timbre as an enhancement (2–15 s reference limit unchanged).
-- Evidence: `backend/tests/test_output_spec_and_identity.py`, `test_h3_compiler.py`,
-  `test_bindings.py`, `test_storyboard.py`, `test_production_series.py`,
-  `docs/ACCEPTANCE_20261104_DIRECTOR_MODE.md`.
+##### 新机安装、仓库搬迁与主分支交付
 
-## 2026-11-04 导演模式全旅程、一键开拍与语言修复（发版 0.2.0）
+- **源码以当前仓库为准。** 从入口脚本自身推导仓库根。外置虚拟环境只提供依赖，安装修复和运行使用同一个解释器，API、Worker 和迁移都从当前仓库加载 `shine`。复用依赖时用现有的安装回执和解释器核对这一点。
+- **配置读取和启停各有唯一实现。** Windows 路径由 `scripts/shine_local_config.ps1` 解析。数据目录按命令行 `-DataDir`、进程环境、当前仓库 `.env`、默认目录的顺序解析。显式 `-DataDir` 同步限定 SQLite 位置。开发入口、安装入口与监督进程都交给 `start_shine.ps1` 做整栈启动和存活裁决，停止沿用 `stop_shine.py` 的进程身份核对。整栈与单 Worker 启停共用同一把锁和 `processes.json`。
+- **路径按用途决定来源。** 仓库文件相对于仓库根，安装和数据文件相对于当前配置的根，机器专属输入由维护命令显式传入。测试与验收的可丢弃产物只进 `<测试根>`（§6）；`.local-acceptance/` 自 2026-11-27 起冻结为只读历史，新轮次不再写入。把绝对路径、旧 worktree、旧分支和个人 DB、模型、密钥引用限定在历史证据中，正式执行路径从当前配置或发布输入解析。
+- **锁文件和 CI 以公共仓库可用为准。** `backend/pyproject.toml` 与 `backend/uv.lock` 共同锁定公开 PyPI。检查锁文件的 registry、下载 URL 和版本变化，使用默认配置及 `uv --no-config sync --project backend --locked --dry-run` 验证。Windows Launcher 的有效构建定义在 `.github/workflows/launcher-windows.yml`，按触发 commit 上传构建产物。当前主分支由操作者授权的普通 push 更新。
+- **用实际启动验证路径。** 改安装、启动、依赖或发布后，从当前工作目录以外调用入口，使用含空格和中文的隔离路径，覆盖外置虚拟环境、端口被占用、半栈恢复和停止。核对实际源码、进程、SQLite 与 Web。全新缓存安装、复用依赖启动、打包校验与真实 H3 出片分别记录验收结果。安装包的临时解包只用于验证交付物。
 
-- **导演层是状态机驱动的单任务界面**：五步旅程（建作品→备素材→定风格→出分镜→制成片）
-  由真实数据判定，页面级步骤条打勾；制作页按「①剧本分镜 ②排产制作 ③进度与结果」
-  stage-dock 单任务聚焦，非当前阶段折叠为一行摘要；运行中的分镜链保持挂载不中断。
-- **一键开拍（自动适配）是排产区唯一主按钮**：自动选方案 → 按方案 parameter_map 声明的
-  参考槽位确定性补齐每镜绑定（无对白镜头不补人声）→ 自动勾选 → 提交；策略选择全部收进
-  「高级设置」折叠。制作进行中隐藏「为什么不能开始」清单，状态由进度卡负责（阶段名、
-  总进度条、镜头圆点、本镜/总计秒级计时——服务端 UTC 时间戳，解析必须补 Z 后缀）。
-- **拍摄质量三档**（catalog 1.2.0）：快速 pdd8 / 高质量原生 20 步 / 超清 pdd8+放大，
-  全部来自上游既有标准图；缺档标「未登记」，`POST /setup/profiles` 幂等补齐。
-- **无对白镜头的外语呢喃根因是两层的**：①冻结风格「声音表演」维度与禁声合同自相矛盾
-  （H3PromptCompiler 现按镜头有无对白裁剪该维度）；②真人音色参考被 H3 当语音线索——
-  `validate_declared_transfer_families(dialogue_free=…)` 对无对白镜头豁免 audio family，
-  未用音频装载节点由既有 prune_unused_reference_nodes 剪除。历史成片不重写，重新交付对照。
-- **孤儿 H3 租约不再死锁 GPU 台账**：worker 崩在「取得租约后、写启动记录前」时，
-  `_release_orphan_h3_lease` 以保守三证（job 未真实渲染、无活进程记录、受管端口空闲、
-  无 handoff-reservation）释放并写审计；有 attempts/provider_job_id 的租约永远保守。
-- **交付单按时间倒序，最新置顶带「最新」徽标，历史折叠**；版本号均为 v1 不代表新旧。
-- 安装器 `install_once.ps1` 在首次安装与已安装两条成功路径上都会在桌面创建
-  「Shine 视频工作台」快捷方式（指向 START_APP.cmd，幂等覆盖，失败不阻断安装）。
-- 证据：`docs/ACCEPTANCE_20261104_DIRECTOR_JOURNEY_ONE_CLICK.md`（三轮真实出片、
-  语言根因、质量档、孤儿租约）；新增/更新回归见 test_managed_process_release.py、
-  test_h3_compiler.py、test_production_series.py、frontend seriesOrder/managed fixtures。
+### 5.3 开工留存、验收隔离与交还（原文保留）
 
-## 2026-11-04 启动器与发版规范（每次建设/发布必须执行）
+##### 日常工作台启动配置交还（2026-11-27 用户裁定）
+
+用户日常双击仓库根目录的 `启动 Shine 工作台.cmd`。每轮建设或验收交付前都要确认该入口能打开
+原日常作品。涉及启动、Setup、端口或数据目录变更时，恢复本轮改动后再复验。失败、中断和交接也执行收尾。
+
+1. **开工留存。** 用入口现有的配置解析器定位日常数据目录和 SQLite，记录生效的启动配置。
+   工作栈在线时，核对实际监听 PID、匹配的 `processes.json` 和 `/api/v1/system/status`，记录
+   API/Web 端口及可见的原作品 ID。动配置前，在本机保存仓库根 `.env` 的原始字节和 SHA-256，
+   原先没有则记录文件不存在。快照留在本机，日志只记用于核对的路径和校验值。
+2. **验收隔离。** 隔离验收通过 `start_shine.ps1 -DataDir` 启动，使用日常入口以外的端口。
+   Setup 激活和生成运行配方可能回写仓库根 `.env` 的 `SHINE_DATA_DIR`、`SHINE_SETUP_RECIPE`
+   等设置。需要经过这类操作时，把配置恢复纳入 `finally` 或等效收尾流程。
+   `DataDir` 一律用 `<测试根>\acceptance\<轮次>\data`（§6.1），并设置 `SHINE_RUNTIME_ENV_PATH` 指向该隔离目录自己的 `.env`；
+   否则 `POST /setup/configuration` 会把数据目录写回仓库根 `.env`，日常入口被换成隔离库。
+3. **收尾恢复。** 在任务到达安全边界后，沿用 `stop_shine.py --data-dir` 按身份收尾本轮隔离栈。
+   恢复本轮改动的日常启动配置，核对 `.env` 恢复到开工快照的字节或原先不存在的状态。原库、媒体、
+   密钥和任务台账原地保留。已有错库迹象、基线缺失或同期有用户改动时，必须用历史配置、原作品记录
+   或用户确认确定恢复目标。日常库的更换以用户授权为准。
+4. **用原入口复验。** 用 `启动 Shine 工作台.cmd` 按用户日常方式启动或接回，核对实际
+   API/Worker/Web 归属、SQLite 路径，以及「项目管理」中开工前的作品 ID。把入口、端口、数据库
+   路径和作品核对结果写入收尾报告。若用户明确要求停机，按要求收尾并记录实启状态。无法安全恢复
+   或复验时，交还状态写 `BLOCKED` 并列出具体原因。
+
+### 5.4 测试与回归（原文保留）
+
+##### 全量回归执行方式（固定规则：后端 8 分片并行）
+
+后端全量 `pytest backend/tests -q` 单进程串行要 1.5 小时量级，**不允许**这样跑；本项目
+的全量回归一律按测试文件均分成 **8 个分片并行**执行，单次约 10 分钟。
+
+Windows 从当前仓库调用 `.\run_backend_shards.ps1 -WorkRoot <测试根>`（见 §6：每台机器固定一个测试根，由调用方显式传入）。
+脚本沿用当前仓库配置的 Python，每轮使用独立的临时目录，并记录 8 个分片的退出码与日志。
+
+**跑完必须落地清理。** 脚本判定完成后删除各分片的 `bt-*` basetemp（有分片失败时保留，
+便于定位失败用例的 `tmp_path`；`-KeepBasetemp` 强制保留），并删掉本脚本产出的旧
+`shards-*` 日志目录（`-KeepRuns N` 保留最近 N 次，默认 1）。`WorkRoot` 要**固定复用同一个
+测试根**：换一个中文名的手工目录跑一次，就多一份没人认领的残留（历史事故：测试根
+累计 327 GB、`%TEMP%` 下的 pytest 临时目录累计 132 GB，两者合计吃掉测试盘 459 GB）。
+
+**假权重必须写成真稀疏文件。** 按字节数匹配目录清单的用例只能用
+`tests.conftest.make_sparse_file`。NTFS 上先 `FSCTL_SET_SPARSE` 再 `truncate` **仍然真实分配**
+（实测 20 GiB 全部落盘），必须标记稀疏后 seek 到末尾写最后一个字节（实测 0.1 MiB）。
+改回 `truncate` 会让单次全量回归写约 70 GB，这是上一轮把测试盘吃满的直接原因。
+
+**分片数是时间/并发参数，不是空间参数。** 峰值占用由"哪几个用例造大文件"决定，与分片数无关；
+收缩分片只会让单次从约 10 分钟拉长到 20 分钟量级，不减少任何字节。要治空间就治造假文件和清理。
+
+以下两段是分片脚本内部的等价做法，用来说明判定口径；实际执行一律走 `run_backend_shards.ps1`，不要手工另起一套。
+
+```bash
+cd <repo>
+ls backend/tests/test_*.py > <测试根>/manual/all-tests.txt
+split -n r/8 <测试根>/manual/all-tests.txt <测试根>/manual/chunk-          # 按文件均分，不按用例切
+for f in <测试根>/manual/chunk-*; do
+  backend/.venv/Scripts/python.exe -m pytest $(tr '\n' ' ' < "$f") -q -p no:cacheprovider \
+    > "$f.log" 2>&1 &
+done
+wait
+grep -H "^FAILED\|^ERROR" <测试根>/manual/chunk-*.log          # 无输出才算全绿
+```
+
+判定口径：
+
+1. **8 个分片全部退出码 0，且日志里没有 `FAILED` / `ERROR` 行**才叫通过。
+2. 本仓库 `conftest.py` 把 `[shine-module]` 逐模块摘要打在终端摘要位置，所以看不到
+   "N passed" 汇总行；不要用汇总行判定，也不要因为它缺失就认为没跑。
+3. 分片必须**按文件均分**（`split -n r/8`）。按用例切会让同一模块的 fixture 在多个进程
+   里重复初始化，出现假失败。
+4. 分片日志留存在产生它的 `<测试根>\shards-<时间戳>\` 归档目录（需要跨轮引用时显式传 `-KeepRuns`），报告里写清目录名、分片数与各分片结果；`/tmp` 与 `.local-data\` 不算留存位置。
+5. 前端全量仍是 `npx vitest run --no-file-parallelism`（tinypool worker 在本机会崩，
+   与代码无关），这一条不受后端 8 分片影响。
+6. **必须在命令前加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`**。执行环境自带的 safe-delete 垫片按
+   "轮"统计删除次数，累计 50 次后开始拦截**每一次** `unlink`；pytest 清理 tmp 目录正好触发，
+   表现为 `test_v13_instances` / `test_v13_preparation` / `test_security_windows` 等模块
+   大片与代码无关的 `FAILED`/`ERROR`（实测守卫触发次数与失败数强相关，单独跑同一模块则全通过）。
+   加这个变量是让 pytest 自己删临时文件，不是放宽被测代码的门禁；**不要**因此改测试或跳过模块。
+
+```bash
+CODEBUDDY_SAFE_DELETE_ENABLED=0 bash -c 'for f in <测试根>/manual/chunk-*; do
+  (backend/.venv/Scripts/python.exe -m pytest $(tr "\n" " " < "$f") -q -p no:cacheprovider \
+    > "$f.log" 2>&1; echo "$f exit=$?" >> <测试根>/manual/shards-exit.txt) & done; wait'
+```
+
+### 5.5 竣工清理与交还复验
+
+按 §6.4 的闸门执行，再按 §5.3 第 3、4 条恢复日常配置并用原入口复验。
+
+### 5.6 启动器与发版规范（原文保留，每次建设或发布必须执行）
+
+#### 2026-11-04 启动器与发版规范（每次建设/发布必须执行）
 
 本节是**强制流程**，不是建议。任何会改变启动方式、依赖、端口、数据目录或前端产物的
 改动，都必须同时完成「开发机根目录一键启动」和「项目安装包」两条验收链。只改代码、
 不验证入口的提交视为未完成。
 
-### A. 开发机根目录一键启动（每轮必验）
+##### A. 开发机根目录一键启动（每轮必验）
 
 交还用户入口时执行上文的[日常工作台启动配置交还](#日常工作台启动配置交还2026-11-27-用户裁定)，核对日常 SQLite 和原作品。
 
@@ -537,7 +468,7 @@ Target/Arguments/WorkingDirectory，保留原图标）。不要手写一个指�
 - 浏览器只能在 Web 真正返回 200 后打开；只等监听 socket 不够。
 - 永不盲杀身份不明的进程；无法核对就归档记录并继续（唯一入口不能被一条坏记录卡死）。
 
-### B. 项目安装包（每次发布必更）
+##### B. 项目安装包（每次发布必更）
 
 安装包从**已提交的树**构建；已跟踪文件有未提交修改时脚本会拒绝（`BUILD_INFO` 必须
 指向真实 commit）。未跟踪的个人文件不会进入包，也不会阻塞构建。
@@ -566,7 +497,7 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
 - 安装包绝不包含：模型权重、生成的视频、SQLite 数据库、`.env`/密钥、
   `node_modules`/虚拟环境、`docs/evidence`、日志。
 
-### C. 提交与发布顺序
+##### C. 提交与发布顺序
 
 1. 后端 `pytest` 相关批次、`ruff check shine tests`；前端 `tsc --noEmit`、
    `vitest run`、`npm run build`。
@@ -577,2117 +508,132 @@ scripts\build_test_package.ps1 -OutDir releases -Verify
    需要公开时再创建 GitHub Release 并上传两个资产。
 6. 任何一条没跑通，就在提交说明/交付说明里写明「未验证」，不得口头声称已发布。
 
-
-## 2026-11-05 受管出图渲染器与"谁拥有渲染器"（本轮新增）
-
-- **出图渲染器属于工作台，不得由脚本手工拉起**。出图运行时只能绑定**受管实例**
-  （`ComfyInstance.payload.managed` 为真，`POST /setup/image-runtime` 会拒绝非受管实例）。
-  渲染器由工作台自己启动：`backend/shine/comfyops/image_renderer.py`，
-  启动意图先落库、所有权由 PID/birth/命名 Job Object 三证、队列先关闭、
-  适配器确认身份后才放行、显存与内存按实测准入，记录写在 `renderer-startup:` 前缀下，
-  因此既有的「关闭本机后台并释放显存」路径能关掉它并回收显存。
-  任何脚本或手工拉起的 ComfyUI 都会成为工作台无法证明归属、因而无法释放的孤儿渲染器。
-- **谁拥有渲染器，决定证据的等级**。每条出图 attempt 与候选都记录 `renderer_owned`：
-  只有**工作台自己拥有且本次真的启动**的渲染器产出的样本，才能把该类别提升到第四层
-  （`RENDER_VERIFIED`）；外部或替身渲染器的字节只能证明链路可用，
-  晋升出来的素材一律带 `offline_only`，永远不能算作已验证的生产素材。
-  台账推导就绪度，不看任何状态标志。
-- **等待显卡不是失败**。图片项先取共享 GPU 租约，再在租约内启动渲染器：
-  租约被视频系列占用时按具名原因等待，渲染器不可用时按具名原因拒绝，
-  都不把"忙"写成失败。渲染器已经不在时释放动作按"没有模型驻留"确认，
-  而不是留下一条假的待对账。
-- 浏览器 E2E 闸门（`scripts/verify_v13_web.py`）的实例生命周期段现在**执行**假实例计划：
-  只批准不执行就不会产生实例行，下一步生命周期计划就会因"外部实例受保护"而失败。
-  弹窗由一个可切换策略的处理函数统一接管（第二个处理函数无法再处理已被处理的弹窗；
-  不要再注册第二个弹窗处理函数与它竞争同一个弹窗）。
-
-## 2026-11-05 真实三类小样出图轮（本轮新增）
-
-- **检测先于收编，探测行不挡收编**。本地模式的只读检测会为同一确定性身份
-  （`local:http://127.0.0.1:<port>`）先写一条**未收编、非受管**的证据实例行；
-  首次收编（`adopt_existing_installation`）现在**接管**这一行（响应与审计记
-  `replaced_probe_row=true`），而不是 409 `INSTANCE_IDENTITY_CHANGED`。
-  已收编但快照/根不符、或 prior 行本身是受管行的，仍然拒绝。
-- **真实出图验收只认这一条链**：取配置哈希（签发授权前）→ scope → inspect → verify →
-  adopt → configuration → image-runtime 绑定 → `/setup/image-runtime/start` 受管启动 →
-  `image-readiness` 到第三层 `GRAPH_VERIFIED` → `/setup/image-runtime/validate`
-  （需已批准 asset 权利记录）→ Worker 渲染 → 台账第四层 `RENDER_VERIFIED` →
-  `/setup/image-runtime/stop` 回收显存。写操作带 `x-shine-local-action: 1`。
-  真机证据见 `docs/ACCEPTANCE_20261105_REAL_IMAGE_VALIDATION.md`：
-  run `8289c72e…` 三类全 CANDIDATE_READY、`renderer_owned=true`、technical/decode pass、
-  GPU 回基线、无孤儿渲染器。
-- **语义 QC 如实挂起**。验证小样的 QC 里 `semantic=PENDING_HUMAN_REVIEW` 是正确状态：
-  技术质检可自动判定，构图/美术/像不像只能由用户评审；不得把 `READY_FOR_REVIEW`
-  的候选写成已被接受。
-- **浏览器闸门按当前界面导航**：`#preproduction` 的高级区在 reload 后会重新折叠；
-  卡片只显示 8 位 id 前缀（两个 native fixture 同前缀，按显示的 `payload.name` 选卡）；
-  crew 面板在 `#v/pro`、文本模型设置在 `#v/setup`、素材断言须在可见的 production 页跑；
-  个人桌面路径下风格冻结 actor 是 `local-user`（前端 `api()` 恒带本地动作标记），
-  思考深度按中文标签渲染（low → 低（快））。
-
-## 2026-11-05 受托素材轮 → 正式出片（导演模式，本轮新增）
-
-- **登记生成方案必须早于 crew 链**。导演在排参考集之前需要知道本项目
-  已登记方案映射了几个图像槽位（`workflow_reference_budget` → 参考预算提示）。
-  项目没有登记任何方案时，这个事实是空的，导演就会按剧本需要承诺超过任何方案能带的参考数
-  （实测：钟表铺一镜 6 张），提交时才以 `PENDING_WORKFLOW_MAPPING` 拦下。
-  顺序是：**登记方案 → 在真实渲染器上校验 → 再跑 crew 链 → 再排产**。
-- **绑定更多主素材的项目要自己的宽方案**。真实节点 `MiniMaxH3ReferenceToVideo` 的
-  `ref_images` 是 `COMFY_AUTOGROW_V3`，**max=9**（`ref_audios` max=3）。
-  宽方案从规范方案派生：在节点 31 上补 `ref_images.ref_image_N` 与对应 `LoadImage` 节点，
-  `parameter_map` 增加 `reference_picture_N`；然后**必须在真实渲染器上校验**
-  （`POST /api/v1/workflow-profiles/{id}/validate` → `missing_nodes=[]`、`missing_inputs=[]`），
-  未校验的方案不算数。宽方案是**项目自己的**方案，不改部署目录、不改标准方案的槽位声明。
-  实测：宽方案下 6 张参考（人物 + 5 张道具/场景）真实出现在同一画面里。
-- **声明了却没有的媒体族会被拦**。带 `-1aud` 的标准方案声明了 audio 传输族；
-  有对白而没有音色主素材的镜头会被 `validate_declared_transfer_families` 判为
-  「声明了却没绑定」。H3 原生朗读台词，音色主素材是可选的，因此**没有音色的项目要用
-  只声明 image 传输族的方案**，而不是给方案补一个假的音频槽。
-- **真实出产前先收遗留后台**。上一轮遗留的受管渲染器仍占着 8188 时，
-  本轮 Worker 自己的受管渲染器起不来，任务在**提交前**就以 `WORKER_EXCEPTION` 失败。
-  收尾用受管动作：`POST /api/v1/setup/managed-processes/release`（归属由命名 Job Object 证明）。
-  提交前失败**不是不确定提交**（无 `provider_job_id`、`prompt_graph_sha256` 为空），
-  可以 `POST /api/v1/operator/jobs/{id}/abandon` 结案（`resubmitted=false`）后重开序列；
-  GPU 租约要等渲染器被证明消失后才由 `reconcile_dead_renderer_leases` 释放。
-- **候选评审直接读本地图**。外部视觉工具对部分图 30s 超时且并发必超时；
-  候选图下载到本地后逐张读图目检，并把本地文件的 sha256 与服务端登记的
-  `content_sha256` 比对（12/12 一致），评审结论与注记写进晋升的 `evidence`。
-- **后端测试必须在仓库根运行**。`backend/tests` 里的测试按相对路径解析仓库根脚本
-  （如 `scripts/managed_comfy_bootstrap.py`），在 `backend/` 目录里跑 pytest 会让
-  `test_image_managed_renderer.py` 误报失败。正确命令：
-  `backend\\.venv\\Scripts\\python.exe -m pytest backend/tests -q`（在仓库根）。
-- **语义验收门如实挂起**。本机没有可用的 VLM/ASR 审片模型时，三镜都是
-  `PASSED` 且 `acceptance_status=pending_review`、`acceptance_final_gate=needs_review`：
-  技术质检与解码是真实的，构图/美术/对白只能由人看，最终验收门不得假装通过。
-
-## 2026-11-06 导演模式可用性轮（页面状态、预览网格、素材命名）
-
-- **页面切换不再丢状态**：导演模式的「素材与风格」「AI导演制作」「成片中心」三个页面**保持挂载**，
-  只切换 `hidden`，因此已展开的阶段、已选的候选、已打开的预览在来回切换后都还在。
-  代价是这些页面的面板必须能承受「数据还没到/字段缺失」：风格草稿可能没有七项，
-  环境检测可能还没有 GPU 段——**任何一处 `undefined.trim()` 都会让整棵树崩掉**，
-  面板读到缺失字段一律要给出可读的值。
-- **`hidden` 必须真的隐藏**。CSS 里曾经只有 `#produce[hidden]{display:none!important}` 这一条作用域规则，
-  于是别的页面的 `hidden` 属性形同虚设：DOM 里是隐藏的，屏幕上却照样渲染。
-  现在是通用规则 `[hidden]{display:none!important}`，页面的 `display:flex` 之类的声明不得再盖过它。
-- **素材阶段要认全服务端的四个阶段**。服务端会返回 `materials_ready`，
-  前端只认三个值时，**已经做完的作品每次都显示成「① 读剧本」**。映射补全后，
-  完成的作品停在「③ 选择素材」。
-- **候选网格是一个密排网格，不是按批次分行**。批次只是台账里的容器，
-  人在这里看的是图：一个网格放所有候选（人物/道具/场景），
-  图在下、文字作说明，工程细节（批次 id、attempt）折进「批次与技术信息」。
-  **还没有出图的条目也要占一格**，否则「出品人要澄清」这件事会从网格里消失。
-- **产出的镜头必须能在页面上播放**。分段网格的预览之前指向一个**并不存在**的路由
-  （`/api/v1/jobs/{id}/media`），点开永远是空的。现在有两个真实路由：
-  `GET /api/v1/jobs/{job_id}/media`（该任务自己的产物，带摘要校验）和
-  `GET /api/v1/jobs/{job_id}/thumbnail`（海报帧，供网格当封面）。
-  分段卡片的封面是海报，点开才是视频；没有解码器时封面显示「预览不可用」，视频照样能放。
-- **素材文件名带上人和顺序**。生成的图按 `{编号}-{人物/物品/场景名}.png` 命名，
-  编号按这个实体**在剧本里第一次出现的场次**排（不是台账的字母序），
-  这样按文件名排序就等于按剧本顺序，人、道具、场景在剧本与分镜之间对得上。
-  规则写在 `shine/materialprep/naming.py`，出图与晋升两处都用它；
-  没有对应条目的手工素材保留人自己的文件名。
-
-## 2026-11-06 导演包与整部作品持续生产（本轮新增）
-
-- **导演包是身份快照，不是物料副本**。`director_package_versions`（根）+ `director_package_episodes`（分集）
-  只保存已有对象的 id / revision / hash（剧本、分集、镜头、素材、风格、工作流、制片准备、政策）。
-  包不能批准素材、冻结风格、应用专业提案；确认只能由用户动作完成。
-  根 manifest 只放范围、政策、绑定身份与每集清单 hash，**不得把整部长剧塞进一个 JSON 字段**。
-- **`ready` 与 `startable` 是两件事**。`ready` = 内容可满足；`startable` = 已确认且未失效。
-  风格重冻、工作流图变更、制片准备变更、镜头 revision 变更必须在就绪检查里变成明确 blocker，
-  不能静默沿用旧结论，也不能把“一次成功生产”当成永久资格。
-- **运行层不是第二个调度器**。`ProductionRun` 只在 Worker 同一个 tick 里做一件短事：
-  决定哪个批次可领取。每次推进最多创建一个 `ProductionSeries`（有 live series 时不再派发），
-  GPU 租约、renderer、job/attempt 全部仍在 series 机制里，Run 不持有整部作品期限的锁。
-  `_advance_production_runs` 在 mock / offline / 无受管运行配置时返回 0：跑不了真实 H3 的机器不得凭空派发。
-  运行层的任何异常都不得杀死 Worker 主循环。
-- **一批不是一集**。属于某个 Run 批次的 series **不再自动发布自己的纪录片**（`enqueue_auto_delivery` 返回 `None`）；
-  分集交付由 run episode 订单负责，跨多个 series 生成一条有序 EDL。重复发布就是重复交付。
-- **交付范围靠列而不是靠 NULL 判重**。`delivery_orders` 有 `scope_kind/scope_id/input_digest`，
-  分集用部分唯一索引 `(scope_kind, scope_id, version) WHERE scope_id IS NOT NULL`；
-  旧的 `(series_id, version)` 唯一性必须保留，旧行 scope 回填为 `series`。
-- **分层装配，不放大单次上限**。`EditDecisionList` 的 100 项合同不变；
-  `DeliveryAssembler.assemble(page_size=100)` 先折页再拼总片，每层 `-c copy`，源片段只编码一次。
-- **一个页面可能承载两个阶段**（剧本与素材）。步骤条只高亮“当前该做的那一个”，
-  且六阶段完成态只能来自 `GET /projects/{id}/journey`；没有服务端状态时**不得**显示“全部完成”。
-- **推荐只读、只算、不承诺**。`comfyops/recommendation.py` 读 `config/deployment` 的已审计组合，
-  多卡显存不相加，未实测的组合只能是 `estimated`；目录里的整数 GiB 内存门槛要用
-  `effective_floor_mb`（减 1 GiB）读取，否则推荐会比安装器更严——这就是“三套结论”。
-- **迁移 head 现在是 `f180a0010001`**。`delivery_orders` 的列变更走 `batch_alter_table`（SQLite 表重建），
-  旧库升级需验证历史订单行、两条唯一约束与 `alembic check` 无 drift。
-
-## 2026-11-06 收尾修复轮（状态身份正确性与主需求闭环）
-
-- **分集产物只认本 Run 的 series item**：`run_owned_passed_jobs`（episode→batch→series→item→job）是分集
-  EDL/摘要/进度的唯一来源；全局"最新通过 job"永不入选。交付前置条件是**计划内全部批次**已创建且 PASSED
-  ——批次没派发就是未完成，不是历史。已误标 COMPLETED 的 Run 由 `reconcile_run` 纠正为 NEEDS_REVIEW
-  （保留事件与审计），不静默改写。
-- **Run 控制必须到达子 series**：暂停/预算/存储走 `_pause_child_series`（QUEUED→PAUSED、RUNNING→
-  PAUSE_REQUESTED），series.control_reason 记录暂停主体，resume 只恢复本 Run 暂停的；`claim_series`
-  拒绝领取属于非活跃 Run 的 series。取消是两段式：有在途外部工作→CANCEL_REQUESTED，外部工作落定后由
-  beat/对账收尾成 CANCELLED。预算/存储分支是条件 UPDATE（fencing），陈旧对象不能复活终态。
-- **冻结包三哈希 + 派发复核**：package_readiness 校验根 manifest/scope/policy 哈希；每次批次派发重跑
-  readiness，不可启动→具名阻塞，包确认不是永久启动资格。政策是 strict 类型化合同（extra=forbid），
-  并经 series 落到每个 job（`max_semantic_retries`/`auto_repair` 覆盖项目默认）。
-- **双入口一条链路**：`director/creative.py` 的 CreativeBrief 是版本化 AgentArtifact（人工创作留痕）；
-  生成剧本是持久任务（远程文字需一次性同意并钉 provider 指纹；UNKNOWN→NEEDS_REVIEW 不重放），产物是
-  普通 ProjectDocument，走既有大纲链路。分集先按剧本场次（sections 模式），`materialize` 只认各场
-  **已应用**分镜的镜头；按镜头分组是兼容入口。
-- **分集后期合同修订不重拍**：`EpisodePostContract`（入出点+字幕版本；音频混音按名拒绝）进 input_digest；
-  修订=新交付版本、旧版保留、Job 数不变；字幕钉 revision+sha 且时码不得超出剪辑长度；装配中的订单不打断。
-  长装配有 `AssemblyHeartbeat`：活跃装配不被跨租期抢占，失联可收回，迟到回写被 claim token 拒绝。
-- **部署组合推荐是真机只读检测**：前端推荐卡片调 `/setup/deployment-recommendations`，展示要求/下载/
-  复用/证据等级/具名阻塞；未实测组合只标 estimated，不写成已验证。
-- **`/health` 暴露 schema 身份**（schema_revision/head/up_to_date，读不到=unknown）；前端 SchemaNotice 在
-  库落后于程序时提示重启升级，旧栈 404 不再被当成"功能不存在"。
-- 回归入口：`backend/tests/test_director_long_form_regressions.py`（18 条独立反例迁入 + 暂停/取消/纠正/
-  T01/T02）、`test_director_entries_and_post.py`（双入口/先分集/后期合同）、`test_schema_identity.py`；
-  迁移 head 为 `f180b0010001`。证据：`docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_20261106.md`。
-
-## 2026-11-06 收尾修复 V3 轮（调度公平性与创意任务租约）
-
-- **检查过 ≠ 有进展**。`advance_run` 必须区分四件事：**检查过**（`observations`）、**真实状态变化**
-  （`actions`）、**新工作入队**（`batch_dispatched` / `episode_queued`）、**复用已有待执行单**
-  （`episode_delivery_pending`）。只有真实变化才算 `progressed`，且只有真实变化才移动
-  `last_progress_at`。没有真实变化时 `action="waiting"`，**这一拍必须让给下游执行器**。
-  复用一份已存在的 PENDING/ASSEMBLING/DELIVERED 交付单**永远不是**新工作。
-- **运行层不得独占 tick**。`_advance_production_runs` 返回 `RunAdvanceSummary(checked, progressed,
-  dispatched, queued)`；`_run_configured_once` 只有在 `progressed` 时才 `return "run:N"`。
-  否则它必须继续走交付执行器、series 执行器、普通队列。
-- **多个 Run 之间要公平**。`advance_runs` 按 `updated_at ASC, created_at ASC` 轮转（每次推进都会
-  刷新 `updated_at`），不能用 `created_at` 先到先服务——那会让最老的 Run 永远排在最前。
-- **创意剧本任务是带租约的持久工作单元**。领取写 `lease_expires_at`（30 分钟）并由
-  `_renew_creative_claim()` 续租；领取范围含 QUEUED 与 **RUNNING 且租约已过期**（`lease_expires_at
-  IS NULL` 的历史孤儿同样算过期）。**过期表示"需要核对"，不表示"请求没发出"。**
-- **创意任务的阶段机是权威进度**（`trace.stage`）：`DRAFT`（可证明未发出→可发）、`SENDING`
-  （发送意图已落库→**不重放**，进 NEEDS_REVIEW）、`RESPONSE`（回答已落库为 `CreativeScriptDraft`
-  产物→**复用回答写文档，不再买第二次模型调用**）、`DOCUMENT`（文档已入库→只收敛状态，绝不写第二份）。
-  发送意图与稳定请求身份必须在**外部调用之前**落库。
-- **创意任务的写回全项 fencing**：成功与失败都走条件 UPDATE（`state_version` + `lease_owner` +
-  `status`）。租约失效的旧 owner 迟到写回被拒绝：不得覆盖终态、不得复活已终结任务、不得创建
-  重复 ProjectDocument。文档与任务终态在**同一事务**提交。
-- **前端必须显示中断、核对、失败与下一步**（`stage` / `reconciliation` / `next_step`），不能一直显示
-  "生成中"。Worker 丢失后任务必须离开 RUNNING，否则用户会永远等待。
-- **整链回归必须走真实 Worker 调度入口**：`backend/tests/test_director_worker_integration.py` 用
-  `worker.run_configured_once()` 驱动 3 集 / 6 批次 / 6 镜直到 Run COMPLETED，不手工调用
-  `advance_run`、不手工把 job/series 标为 PASSED、不手工补交付。**被替换的只有渲染边界**
-  （物理 ComfyUI 进程与 H3 推理），GPU 独占准入仍走 `ResourceScheduler`，FFmpeg 装配是真实的。
-  证据等级只到 OFFLINE_VERIFIED。
-- **改了 `worker.py` 就必须重做 VLM 校准**：`client_review_identity` 钉住 `worker.py`，改动按设计
-  使旧 VLM revision 与被冻结计划失效。真实生产验收前必须重新真实正负校准、发布新 revision、
-  弃用旧 revision、重新分析并人工重新冻结计划；旧证据不得复用。**跑测试期间也不要改被钉住的
-  文件**——`REVIEW_CLIENT_SOURCE_CHANGED_SINCE_LOAD` 会让整片原生 VLM 用例变红。
-- 回归入口：`backend/tests/test_director_worker_scheduling.py`（7 条）、`test_creative_script_task_lifecycle.py`
-  （7 条）、`test_director_worker_integration.py`（1 条）；原 18 条反例与上轮 3 条新反例的原始探针
-  文件保持不变、独立可复跑。
-- 本轮文档：进度 `docs/PROGRESS_20261106_DIRECTOR_LONG_FORM_V3.md`、
-  分级验收 `docs/ACCEPTANCE_DIRECTOR_LONG_FORM_CLOSEOUT_V3_20261106.md`、
-  测试报告 `docs/TEST_REPORT_20261106_DIRECTOR_LONG_FORM_V3.md`；
-  证据目录 `.local-acceptance/closeout-v3-20261106/`（Git 忽略，不进安装包）。
-
-## 2026-11-06 跨批次续接轮（跨 series 真实媒体续接 + 部署目录缺陷修复）
-
-- **续接必须是真实媒体，不是提示词里的一句话**。`last_frame` / `hard_frame_anchor` /
-  `video_reference` / `audio_reference` 各自派生一份带 lineage 的派生物
-  （`shine/media/continuity.py`）：来源 job 必须 PASSED、未失效、shot revision 未变，
-  attempt 与 artifact 的 sha/字节数一致。派生物**不是**用户批准的主素材：它不进人工绑定集合、
-  不进冻结清单的 links，而是按 lineage 校验；上传前还要重新核验**源文件字节**，源被改动即拒绝。
-- **Worker 拥有派生物**：`worker._load_comfy_context` 按 `role=continuity_derivative` 装载
-  `MediaArtifact`；`preproduction.enforce_references` 把派生物与主素材分开校验。
-  派生动作一律在**写事务之外**（FFmpeg），提交前重查来源。
-- **跨批次调度必须冻结**。导演包策略新增 `split_continuity`（默认开）：批次边界可以落在连续性链上，
-  下一个 series 绑定上一个 series 已验证的来源媒体。策略随包冻结，重启不得改变计划。
-  以续接开场的批次**不立即建 job**，由 Worker 在拿到租约后解析真实来源并派生引用。
-- **来源解析顺序固定**：同 series 前序镜 → 本 Run 自有已通过的 job（可跨集）→ 声明的 previous_job_id →
-  项目台账里该镜最近一次**真实通过**的 job。更新的其他生产 job 不得被采用。
-- **部署目录必须能声明审片模型的能力与显存预算**。`CatalogComponent` 增加
-  `capabilities` / `resource_mb` / `resource_measurement`，`_catalog_package_spec()` 透传；
-  目录里 `qwen3-vl-8b-fp8 → ['VLM_REVIEW'], 8000 MiB, ESTIMATED`，
-  `qwen3-asr-0.6b → ['ASR'], 4000 MiB, ESTIMATED`（本机基线，不是实测峰值）。
-  否则安装出来的模型包 `capabilities=[]`，**原生 VLM/ASR 能力永远无法发布**。
-  `register_catalog_packages()` 允许"文件逐字节相同、只有声明变化"的升级并写审计；文件变了仍然拒绝。
-- **目录变化会让运行时身份变化**：服务验证证据随即失效，必须按
-  `configuration → services/validate → runtime/activate` 重跑，不得跳过。
-- **ASR 的 Python ABI 问题单独记录**：本机 ComfyUI 内嵌 Python 3.13.11，已固定的 `nagisa` wheel 是
-  cp312，`qwen_asr` 导入失败。ASR 是 advisory，不阻断 H3、不改变门禁强度，也**不得伪报 READY**；
-  但它使"同时钉住 VLM 与 ASR 的生产计划"在本机被 `CAPABILITY_MISSING` 硬阻断。
-- 回归：`test_continuity_media.py`、`test_cross_series_source.py`、`test_cross_series_continuity.py`（新增）、
-  `test_production_series.py`、`test_director_worker_integration.py`。
-  证据：`docs/ACCEPTANCE_20261106_CROSS_SERIES_CONTINUITY.md`。
-  **改动 `worker.py` / `preproduction.py` 后仍必须重新做真实正负校准**；本轮因本机 8B 推理未在
-  验收窗口内结束而未完成新 revision，旧 revision 不得复用，也不得据此声称已重新校准。
-
-## 2026-11-06 接手轮（导演模式解阻 + 本机真实 H3 出片）
-
-- **本地调用不得继承宿主代理**。本机 `HTTP_PROXY` 指向一个会替 `/health` 返回 404 的代理，
-  而 `LocalReviewRelease.release_models()` 与审片客户端都继承了它：前者使"模型已释放"的
-  证明永远不成立（租约因此永久阻塞），后者会把一次长推理交给代理。凡是**已证明为环回**的
-  端点一律 `trust_env=False`；远端审片仍走宿主代理。证据与复现见
-  `docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md` §2.1。
-- **中断的子调用必须能被证据判死**。`reconcile` 不再是空操作：产物已落库 → 采用；子调用停在
-  `PREPARING / WAITING_RESOURCE / PREPARING_PROVIDER`（网关在真正调用前才写
-  `WAITING_PROVIDER`）→ 判 `NOT_SENT_PROVEN`，注销为 `SUPERSEDED` 并**释放唯一的
-  `request_identity`**（否则新请求 `IntegrityError`）；可能已发出 → `UNCONFIRMABLE`，保持阻塞。
-  `FAILED`（有回答但被合同拒绝）不得新建重请求。只有持久化的 pre-provider 阶段证据或
-  provider transport 明确 `NOT_SENT`，并写入 `NOT_SENT_PROVEN` reconciliation 后，才可释放旧
-  request identity 并重新请求。
-  注销的行是历史，不是答案：`prepare_scenes` 的复用查询必须排除 `SUPERSEDED`。
-- **有疑问的大纲需要用户决定，而不是无限重生成**。`confirm` 接受
-  `acknowledge_questions_sha256`（由 `GET story-preparation` 提供，绑定当前问题列表）；
-  没有它或与当前问题不符仍然 409。确认审计记录 `questions_acknowledged`，artifact 的
-  payload/sha256 不改写。悬疑剧本里"问题"是创作意图，不是缺陷。
-- **方案的参考槽位是有限资源**：`local-h3-ref2va-pdd8-2img-1aud` 只有 1 个 `reference_subject`
-  与 1 个 `reference_picture` 槽。两个人物时第二个必须绑成 `picture`（编译器同样为它生成
-  `<Picture n>` 标签），否则 `PENDING_WORKFLOW_MAPPING`。多人物镜头要用更宽的方案。
-- **中文 Style Bible 不能直接进 H3 提示词**：手工镜头必须自带英文 `prompt_style`
-  （七维转写），否则 `H3_ENGLISH` 在提交前拒绝。分镜链产出的镜头本来就有英文 `prompt_style`。
-- **启动阶段失败的 H3 租约会死锁**：`release_dead_renderer_lease` 对有 attempt 的任务保守拒绝，
-  而 `operator/jobs/{id}/abandon` 要求 `H3_LEASE_STILL_ACTIVE` 先解除。当前唯一出口是重启
-  工作台触发启动对账（本轮实测有效）。修这个死锁时不得放宽"有外部提交就必须对账"的前提。
-- **素材计划无法跨场合并同一人物**：同一人物在不同场有不同外观描述时，
-  `MATERIAL_IDENTITY_AMBIGUOUS` 直接拒绝整份计划，而产品没有"合并同一人物"的用户动作。
-  可用的收敛方式：只对**单场**建计划（导演模式"准备所选段落的素材清单"即此语义），
-  或让场次准备产出统一名字。
-- 本轮真实出片（唯一一镜）：job `aa8baa09…`，prompt `72738f4e…`，artifact
-  `92b862e6…`（1024×576 / 24fps / 158 帧 / 6.583 s / h264+AAC），`ffmpeg -f null -` 解码 0 错，
-  technical `passed`、final `needs_review`、`acceptance_status=pending_review`。
-  **不是** 20 段成片，也**不是**验收通过。
-- **审计写入必须有真实实体**：审片释放失败的 `ADVISORY_REVIEW_RELEASE_FALLBACK` 曾把
-  `entity_id` 传 `None`，`NOT NULL` 直接终止 Worker 主循环（出片完成后一秒后台"卡死"、
-  显卡空闲）。任何 worker 路径里的审计/记账写入都必须挂在一个存在的 id 上，并且
-  自身失败不得结束这一拍。
-- 证据：`docs/ACCEPTANCE_20261106_DIRECTOR_UNBLOCK_REAL_H3.md`；
-  回归：`backend/tests/test_story_preparation.py`（含 4 条新反例）、
-  `backend/tests/test_advisory_queue.py`（审片释放失败不终止 Worker）。
-
-## 2026-11-07 第 7 轮（场景底图全量入库 + 两处导演提示词缺陷修复）
-
-- **无剪辑表场景的导演提示词必须禁止 same-beat cuts**：`validate_output` 要求每个 cut 窗口
-  覆盖所涉 beat 的全部台词，而旧提示词从未约束无 `editorial_timing_plan` 时的 cuts，模型把
-  一个 beat 剪成 2.5/4.2/6.5/8.5s 的碎片，`EDITORIAL_TIMING_CONFLICT` 永远不可自愈（S3 连续
-  4 次，抓包实证）。修复：无剪辑表时"一 beat 一 shot、禁用 cuts、cut 只折叠更晚的 beat"。
-  无声场景能通过不构成反证——它们只是没有台词。
-- **台词说话方=必须绑定的人物**：服务器把 dialogue speaker 计入 required_characters，
-  旧提示词只要求"出场人物"。修复：说话方即使从不露面，其已批准主素材也必须出现在该片段
-  `asset_ids`（S8 三次 `CHARACTER_MASTER_BINDING_REQUIRED` 实证）。
-  **2026-11-08 变更**：这条门禁不再拦在 crew 链里，而是**需求链**的一环 —— 分镜提出需求
-  （缺哪个角色主素材），需求随答案交给素材层，拦住未满足需求的是「拍摄素材准备」这一步与
-  导演包冻结（`SHOT_CHARACTER_MASTER_MISSING`）。说到的仍是"说话方必须可绑定"。
-  以上两处回归都在 `backend/tests/test_crew_prompt_contract.py`；真实链以 S3/S8
-  "修前连败、修后一次过"验证。证据：`docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md`。
-- **仅声音的说话实体**（如念名单的"广播"）产品未建模：`_character_coverage` 按人物名解析
-  必然 409。本轮把该实体按 character 家族建单场素材计划（视觉=舱壁铜质号角喇叭特写），
-  promote 为 entity_id=`广播` 的主素材，如实地满足"说话方必须可绑定"的门禁。
-- **多人物/多参考项目要宽方案并真实校验**：本项目注册了已提交的
-  `config/workflows/ref2va-pdd8-6img.json`（1 subject + 5 picture，image-only 传输族），
-  真实渲染器 `live_object_info` 校验 `missing_nodes=[]`。第二人物按既有语义绑成 picture
-  参考是合法答案（真实镜头 96c6d395 已验证）。
-- R7 接手时台账快照（数据目录 `.local-acceptance/live-browser`）：主素材 39（26 场景底图 + 6 人物 +
-  原有 7）；当时订单 9 卡在 apply-camera 422（camera artifact `529c502d`），12–21 未跑。
-  R7 快照见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §1–§6；第 8 轮续跑后的权威结果见 §7。
-- **候选评审口径**：候选图逐一与台账 `content_sha256` 比对（32/32 一致）+ VLM 目检；
-  拼版自绘编号不是水印、码头系缆桩不是人影——复核原图再下结论，不要把拼版标注当缺陷。
-- 本轮未改 `worker.py`/`preproduction.py`，不触发 `client_review_identity` 重校准义务；
-  VLM 正负校准仍未做，不得声称已校准。
-
-## 2026-11-07 第 8 轮真实续跑（订单 9–21）
-
-- 第 8 轮使用真实 MiniMax 五角色链与产品 `apply-camera`。订单 9 根因由本地同构 ShotSpec 重建确认：dialogue `speaker_id=广播` 未列入 `characters`，因为旧 continuity fact 说它不是出场人物。受托 `local-user` 改一条事实生成新 task 后成功应用 3 镜；旧 artifacts 保留。
-- orders 12–17、21 已按单段真实运行并应用（新增 22 镜；加订单 9 的 3 镜，共 25 镜）。orders 12 和 14 的 `LOCKED_FACTS_CHANGED` 按产品路径 resume 后成功。详见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7.2。
-- orders 18、19、20 的子任务分别以 `LLM_TIMEOUT` / `external_outcome=UNKNOWN` 结束；没有 provider request id、HTTP 状态或 response hash。产品 `abandon-remote-response` 把丢失响应审计为 `ABANDONED`，仍是 `UNKNOWN` 且 `automatic_replay=false`。本节早先写的“没有重发”后来被同一台账中的三条 `STORY_UNKNOWN_SUBTASK_REPLACED` 事件证伪：旧 UI 允许创建新 task identity；事件与修复见本文件 §10 及进度 §10。不得把保留旧行或 `automatic_replay=false` 当作未重请求的证明。
-- `POST /episode-plans/1/materialize` 因 `EPISODE_SECTION_NOT_STORYBOARDED` 返回 409，明确列出 orders 18–20 的三个 pending section；只有确认所有段均已应用后才能 materialize、confirm v2、建 DirectorPackage 和 ProductionRun。当前 `/journey` 为 54 project shots / 0 planned shots；本轮没有新 H3 attempt。台账保留上轮唯一真实 job `aa8baa09-0c1f-4627-a874-193a1a3647e1`（`PASSED`、`quality_verification=real`，artifact SHA-256 `92b862e64eb7b4e31b2961c455503ff1f0b8fc4bf7163f184ea2bef8a718a190`、`last_qc_result=needs_review`），不代表整片完成或 accepted。
-- 本轮没有改源代码或 `worker.py` / `preproduction.py`，R7 pytest/Ruff 报告仍是旧证据；VLM 正负校准继续未完成。H3 renderer 未启动。工作台按 `scripts/stop_shine.py --data-dir .local-acceptance/live-browser` 停止，端口 8000/5173/8188 均已验证无监听。
-- 本轮完整续跑及真实边界见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §7 与 `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §5。
-
-## 2026-11-07 串行模型资源与全片续跑收尾
-
-- **所有本机模型阶段共享一张全局资源租约表，严格串行**。`ResourceScheduler.admit`
-  即使账面显存预算可并排，也只允许一个 `ACTIVE`；过期 `ACTIVE` 必须转
-  `RECONCILE_REQUIRED`，不能按超时当成资源已释放。
-- **无人续租的 WAITING 预约要有限期**。`WAITING_LEASE_TTL_SECONDS=60`；真实排队方在
-  `enqueue` 时续租，已过期且不是当前活跃请求的 WAITING 行可以置为 `RELEASED`（它从未持有
-  renderer/provider side effect）。当前请求若在等待期间过期，可在 `admit` 中续自己的位置；
-  任何别人的过期 WAITING 都不能被冒认成活跃。这样旧 H3 队列项不会永久挡住后续 MiniMax
-  资源请求。
-- **Comfy `/free` 是异步卸载请求，HTTP 200 不是释放证明**。`ComfyUIClient.free_models()`
-  最多等 120 秒、每 0.5 秒轮询；只有 Comfy 队列 running/pending 均为空，且 `/system_stats`
-  证明 live CUDA tensor ≤512 MiB（ComfyUI <0.39 按旧字段要求 torch pool 为 0），才能归还
-  lease。读取不可用、格式未知或超时一律 fail closed；再由 reconciliation 处理，禁止再发第二次
-  `/free`，也禁止用固定睡眠代替释放证据。空闲 allocator cache 不等于 live model memory。
-- **真实 H3 的串行单位是 production series**：同一 series 内的 shots 通过 idle keeper 续用同一
-  renderer/租约，不在每镜之间卸载；series 完结时只停止经 PID/birth + Job Object 证明归本安装
-  所有的 renderer，且确认端口释放后，租约和 series 状态才一起提交。下一 series 此后才可开机，
-  不可把 per-shot 续用改成并发或未经证明的释放。
-- **恢复队列的 UI 状态跟实际领取状态一致**。safe pre-submit recovery 只将 series/batch 设为
-  `QUEUED`，由唯一 resident Worker 领取、取得资源租约后再变 `RUNNING`；reconcile 也将无 worker
-  claim 的 `QUEUED` series 同步回 batch，避免若干待领取批次残留成“同时拍摄中”。`UNKNOWN`、有
-  provider id/attempt/artifact 或活动租约的请求仍不得重开。
-- 根因与真实证据见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §8、测试与限制见
-  `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §6。新增回归覆盖：旧 WAITING 不再饿死队列、
-  ACTIVE 超时仍阻塞、异步 `/free` 超过旧 3 秒仍能被确认、预检失败不重复 unload、safe resume
-  留在 QUEUED、reconcile 清除 stale RUNNING batch。改动未涉及 `worker.py` / `preproduction.py`；
-  VLM calibration 仍未完成，不能声称已校准。
-
-## 2026-11-07 第 9 轮（64 镜 / 4 集真实 Run 收尾）
-
-- 项目 `3707a9ed-eced-435b-b69a-0b1ecdd5f146` 的 episode plan v2
-  `0af55b3b-a628-48eb-a3fd-34f8bb326dd4`（SHA-256
-  `2e856030014f8f126239409bbed7b7f076fc23f349acb9509a399d0950428a6b`）来自
-  `script_sections_materialized`，由所有者授权委托的 `local-user` 确认。整部 Run
-  `e2da69c8-5b28-45b4-83e8-102b7c09a997` 终态 `COMPLETED`：64/64 非 mock H3 镜头
-  `PASSED`、12/12 批次 `PASSED`、4/4 集 `DELIVERED`、0 blocker、0 active series、
-  0 live resource lease。逐镜 SHA/字节、H.264 1024×576@24fps `ffprobe`、全文件
-  `ffmpeg -f null -` exit 0 均通过。逐镜证据在本机忽略目录
-  `.local-acceptance/r7/final_run_verification_20261107.json`。
-- 每集 EDL clip order、delivery order 与 run episode manifest 对齐；每个 EDL payload
-  的台账原文 SHA-256、输入 digest、成片 artifact SHA-256 / 时长见
-  `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §9。
-- 实际内置浏览器显示 4/4 集交付、64/64 镜完成；打开 ep-04 预览后加载出真实画面。
-  UI 仍将每集显示为「待你确认」，因此这是生产与确定性技术交付完成，不是人工艺术验收；
-  `pending_review` 没有改成 `accepted`。VLM 正负 calibration 未执行。
-- Advisory 队列已排空：ASR 29 条 `UNAVAILABLE`（未配置）、VLM 68 条 `UNAVAILABLE`
-  （reviewer 路由无法提供），不会阻塞确定性生产。
-- MiniMax M3.1 Flash agent 输入及 JSON schema 使用紧凑 JSON；无显式 output budget 时
-  默认 `max_completion_tokens=16384`，并对该模型施加同值 ceiling；不裁剪上下文/事实。
-  MiniMax 官方调试台将 M3.1 Flash 标为 1M context，示例请求使用 16,384 completion
-  tokens。该值是保守输出预算，不是 context 上限。历史订单 18–20 没有 provider
-  response/body/id 持久化，`UNKNOWN` 不能证明 context overflow。审计显示三个旧 UNKNOWN 子调用
-  后续曾通过显式替换创建新 task 并成功；这是旧产品入口允许的行为，但违反 no-resend 门禁，
-  现已在 API 与 UI 禁止，并在后续 §10 如实记录。
-- 根因、实跑摘要及验收边界见进度 §9 / 测试报告 §7。该轮不等于用户的艺术验收。
-
-## 2026-11-07 UNKNOWN 请求身份安全补充（覆盖此前显式替换规则）
-
-- `external_outcome=UNKNOWN` 只允许核对原 task、采用身份链完整的已落库 artifact，或保持
-  `UNCONFIRMABLE`；不得因用户授权、一次性 grant、旧任务仍保留或 `automatic_replay=false`
-  而创建替代 task。只有 durable 证据证明请求未送达，并写入 `NOT_SENT_PROVEN` 后才可再请求。
-- 只有明确 transport `NOT_SENT` 或可证明停在 gateway 的 `WAITING_PROVIDER` 之前，才能生成
-  `NOT_SENT_PROVEN`。无 phase、超时、模型已返回但合同拒绝、HTTP 错误状态不自动等价于未发送。
-  没有充分证据保持原状态并阻塞。
-- 导演分段、整剧分镜、直接 FilmAgentDispatcher 与单场素材分析都执行此规则。旧 API
-  `replace-unknown` / `replace_interrupted_task_id` / `replace_unknown_task_id` 返回拒绝；单场素材
-  UI 提供“核对已有结果”，它不发起 provider 请求。对已证明未发送的单场任务，核对仅解除
-  identity 并提示用户单独执行下一次分析；不会自动重试。
-- 2026-11-07 台账中有三次历史 `STORY_UNKNOWN_SUBTASK_REPLACED`，actor=`local-user`，旧 task
-  仍 `UNKNOWN/ABANDONED`，其新 task 已成功；三次都违反了本规则。该事实不可回滚或改写；64 镜
-  技术交付证据仍成立，但本轮不得声称整段旅程完全遵守 UNKNOWN 门禁或已获艺术验收。详见
-  `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §10。
-- 若修改 `worker.py` / `preproduction.py`，仍按上文 `client_review_identity` 规则重做真实
-  positive/negative calibration；本补丁未修改这两个文件。
-
-## 2026-11-07 导演阶段严格使用确认分集范围
-
-- `/journey` 的 storyboard `planned_shot_ids` 是当前 confirmed episode plan 的权威镜头顺序；
-  无 confirmed plan 时才按原兼容语义使用项目全部 shot。导演模式排产候选只允许使用此范围，
-  不得用 project shot 总数代替本次计划数。全项目 `ShotPanel` 和任务审计仍保留历史记录。
-- 导演 stage-dock 的通过数使用 journey 的 `passed_shot_count/scope_shot_count`；若任务页展示
-  全项目 job 历史，必须清楚说明其包含计划外旧镜头，不能用其通过/失败总数冒充当前 ProductionRun。
-- 修订没有改变已确认计划、Run、生成物或技术/人工质量门禁。64 镜、4 集的全片输出证据和本次
-  UI 根因修复见 `docs/PROGRESS_20261107_DIRECTOR_JOURNEY_R7.md` §9–§11 与
-  `docs/TEST_REPORT_20261107_DIRECTOR_JOURNEY_R7.md` §7.5–§7.7；人工艺术确认仍保留给用户。
-
-## 2026-11-07 H3 spoken-audio contract
-
-- Locked story facts may mention dialogue that belongs to another shot. The H3 compiler labels them as background continuity context, never as material to speak or narrate. Dialogue-free shots always carry a silence contract even when project language is unset; dialogue shots allow only their explicitly tagged lines in the project language.
-- ASR advisory review covers every shot in `basic` or `full` self-review scope, including dialogue-free shots. Recognized speech in a dialogue-free shot, or ASR text beyond the explicitly scripted lines, is uncertain advisory evidence only; it never becomes a deterministic production failure. An absent, mock, pending, or unavailable ASR result must be visible at delivery and cannot be presented as language verification.
-- FFprobe and decode establish technical audio presence/integrity only. They do not establish spoken language or silence. Existing artifacts are never rewritten or silently re-accepted after an audio prompt/reviewer change.
-- Episode delivery downloads use the verified project title plus the episode's ordinal within its
-  run in the HTTP `Content-Disposition` filename (for example `项目名-第1集.mp4`). Windows-invalid
-  filename characters are replaced and the project-title portion is bounded. Later revisions may
-  add `-vN`; generic non-episode deliveries use `项目名-成片.mp4`.
-- Keep the underlying delivery file content-addressed and immutable. A display-name change must not
-  rename storage paths, modify bytes, or bypass SHA/size/decode or pending-review gates.
-- The Director 「生成分段」 view follows the newest `ProductionRun`'s confirmed episode and shot order across all of its `ProductionRunBatch` series; it must not present only the newest batch as the whole run. Each shot keeps its source batch `series_id`, so retake selection still writes through that batch's existing assembly gate. Show at most 6 shot cards per page. A passed but unsatisfactory shot can be explicitly retaken, with the old artifact preserved and a newly passed replacement explicitly selected. A historical `NEEDS_REVIEW` mapping failure stops blocking only when all attempt/audit/renderer-activation evidence proves no external submission; the explicit retake action records `ExternalJobReconciliation.result=NOT_SENT_PROVEN` before scheduling a new job. Other failed, `NEEDS_REVIEW`, or `UNKNOWN` work stays blocked until its original outcome is reconciled.
-
-## 2026-11-07 新用户全旅程修复：LLM P0、模型调用外部结果分类与 12GB 低端机候选
-
-- 本轮依据 `docs/NEW_USER_JOURNEY_REPAIR_PLAN_20261107.md` 实施阶段 A（LLM P0）、阶段 C
-  （硬件资格与变体清单）、阶段 D（图形化安装外壳与官方权重核实）；阶段 B（安装持久化与续传）
-  另行实施。实施证据见 `docs/NEW_USER_JOURNEY_REPAIR_IMPLEMENTATION_20261107.md`。
-- **模型调用外部结果必须分类，不得一律压成 UNKNOWN**：`agent_call.classify_external_outcome()`
-  区分三种事实——`NOT_SENT`（根本没发出请求：本地配置错误、拒绝同意、发送前传输失败）、
-  `RESPONSE_RECEIVED`（服务商已答复：4xx 拒绝没有答案，2xx 答复不可用）、`UNKNOWN`（可能已
-  答复但答复丢失：5xx、超时、发送后连接中断）。分类依据是 Provider 层已经记录的 HTTP 状态，
-  不做猜测；`response_status` 随 trace 落盘作为可核对证据。
-- **`UNKNOWN` 门禁保持不变**：可能已发出的请求仍然不重发、不替代、不释放身份，核对结论仍是
-  `UNCONFIRMABLE`，恢复仍是 409。`RESPONSE_RECEIVED` 是**另一个**结论：请求已结束、不存在
-  可被重复购买的答案，因此允许在 `MAX_SUBTASK_RETRIES` 预算内释放一次并重新提问；记录的是
-  `RESPONSE_RECEIVED_NO_ANSWER`，**不是** `NOT_SENT_PROVEN`，不得据此声称“未发出”。
-- **核对结论必须幂等**：已判定的块在重复核对时保持原结论，不得被覆盖回 `UNCONFIRMABLE`；
-  后端 `resumable` 判定与恢复门禁必须是同一套规则，界面不得给出服务端必然拒绝的按钮。
-- **官方权重事实（A 级，2026-11-07 核实 revision `54472221d27c695fca9621b0c3ed52f06c4af707`）**：
-  `Comfy-Org/MiniMax-H3` 全部 39 个文件中**不存在** W4/AWQ/GPTQ/INT4 的 DiT，唯一 4bit 文件是
-  文本编码器 `qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors`。官方最小 DiT 是
-  `minimax_h3_ref2va_pruned_w6a8.safetensors`（15,983,746,636 B /
-  `ece96bbbce76670ec782de84acc888fd9d9b210bd2ab97c1957b39896734f9f1`），官方 INT8 ConvRot
-  视频 VAE 为 2,811,065,184 B。官方**未公布**任何显存/内存门槛，12GB 显卡能否运行属于待核；
-  候选变体 `acceptance_status` 只能是 `CANDIDATE`，不得进入默认生产推荐。
-- 面向用户的 W4 ConvRot 需求登记为**显式未钉住的候选槽位**（`source: THIRD_PARTY_UNVERIFIED`、
-  全部 pin 为 `unknown`、`acceptance_status: BLOCKED`），并列出钉住它所需的可信来源、revision、
-  size、SHA-256、许可证原文与显存实测来源。**不得编造** URL、体积、哈希或许可证结论。
-
-## 2026-11-08 导演链路阻滞：死亡 worker 的子任务与「按状态复用任务」
-
-- **场景子任务必须能被识别为「worker 已死」**。`materialprep/scenes.py` 的单场子任务此前
-  **完全没有租约**，worker 带着请求死在半路时，行永远停在 `RUNNING`，与「正在跑」无法区分：
-  界面显示假进行中，而该场再也不能被重新请求，整条大纲就停在那里。现在子任务以
-  `created_at` 超过 `SCENE_DEAD_AFTER_SECONDS`（900s，超过服务商超时上限）判定为死亡，
-  并按最后一个 phase 决定：
-  - phase 在 `PRE_REQUEST_PHASES`（`PREPARING`/`WAITING_RESOURCE`/`PREPARING_PROVIDER`）
-    → 可证明请求从未发出，写入 `NOT_SENT_PROVEN`、退休该行并释放身份，**以新请求重问这一场**；
-  - phase 已到 `WAITING_PROVIDER` 或更晚 → 结果仍未知，**不退休、不重发**，保留身份等人核对，
-    并在结果里带 `dead_worker`/`outcome_unknown`，界面不再显示「运行中」。
-  - 同一场最多自动退休 `MAX_SCENE_DEAD_RETRIES`（2）次，超过即停并等人，避免无限重试。
-- **任务复用必须看状态，不能只看身份**。`story.queue_outline` 之前按 `request_identity` 无条件
-  复用旧任务，于是**已取消或已失败的大纲任务被永远原样返回**：用户点多少次「后台提取并归并
-  总体大纲」都拿不回可推进的任务。现在只有 `REUSABLE_TASK_STATUSES`
-  （`QUEUED/RUNNING/PAUSED/NEEDS_REVIEW/SUCCEEDED`）的旧任务会被复用；其余尝试保留身份作为
-  历史，新尝试使用带 `attempt` 的新身份（base identity 记录在 trace 里，所有尝试都能被找到）。
-  归并子调用（`_merge`）同样处理死亡 worker。
-- **已取消的任务仍可「核对已有结果」**：核对只读证据、不发 Provider 请求，因此允许对
-  `CANCELLED` 任务执行，让用户能释放可证明未发出的身份；`CANCELLED` 任务不提供「恢复未完成工作」。
-- 以上都不放松 UNKNOWN 门禁：可能已发出的请求仍然不重发、不替代、不释放身份，核对结论仍是
-  `UNCONFIRMABLE`，恢复仍是 409。
-- 验收：`backend/tests/test_scene_dead_worker.py`（3 项）与 `backend/tests/test_story_outline_unblock.py`
-  （4 项）、`frontend/src/test/storyOutlineUnblock.test.tsx`（4 项）。
-
-## 2026-11-08 用户授权的未知子任务一次性重发 + 连续模型调用间隔控制
-
-- **（覆盖 2026-11-07 的「不得因用户授权创建替代 task」）** `external_outcome=UNKNOWN` 的子任务，
-  在**用户显式确认**后允许**一次**新的模型请求：
-  - 入口：`POST /projects/{id}/story-preparation/tasks/{task_id}/resend-unknown`；`expected_state_version`
-    绑定用户看到的状态，`evidence` 记录用户的确认说明。
-  - 只在用户点「明确重发这一场」并确认后发生；系统**绝不自动**发起，核对（reconcile）仍然只读证据。
-  - 旧任务退休时记录的原因必须写 `USER_AUTHORIZED_NEW_REQUEST`，**不得**写 `NOT_SENT_PROVEN`：
-    旧请求的结果仍然未知，它只是被用户明确覆盖的一条未知事实。
-  - 每一场最多一次（`MAX_UNKNOWN_RESENDS = 1`），第二次同一场被拒（`STORY_UNKNOWN_RESEND_ALREADY_USED`）；
-    审计事件 `STORY_UNKNOWN_SUBTASK_RESEND_AUTHORIZED` 记录旧身份、证据与「允许一次新请求」。
-  - 其余门禁不变：UNKNOWN 仍不会被自动重放或自动替代，身份在未被用户覆盖前不会释放。
-- **调用间隔控制收归唯一入口**：`agent_call.call_material_agent` 现在在**每次** Provider 调用前调用
-  `pace_provider_call()`（`SHINE_AGENT_STEP_DELAY_MS`，默认 1200ms）。此前只有 brief 路径调用它，
-  而**逐场大纲每场是一个任务步，跨步之间没有任何间隔**——21 场连续调用会共用同一条连接与同一个
-  限流，失败的表现正是「卡住」。`scenes.prepare_scenes` 里那次重复 sleep 已移除，间隔只有一个口径。
-  逐场调用保持**串行**：一次一个任务步，不并发、不并行扇出。
-- 验收：`backend/tests/test_story_unknown_resend.py`（3 项）、`backend/tests/test_scene_dead_worker.py`
-  （3 项）、`frontend/src/test/storyOutlineUnblock.test.tsx`（5 项）。
-
-## 2026-11-08 公开仓库的主分支推送限制（仅仓库所有者可推送）
-
-- **远端仓是公开仓库**（`visibility: public`），但 **`main` 只允许仓库所有者 `anjingdtl` 更新**。
-  约束由仓库 Ruleset `main-owner-only-push`（id `26763523`）执行：`update` 规则作用于
-  `refs/heads/main`，bypass 白名单只有一条 —— `RepositoryRole` admin（`actor_id=5`，
-  `bypass_mode=always`）。本仓库目前只有 `anjingdtl` 一个 admin（协作者 API 实测），
-  因此「admin 角色」即「所有者本人」。
-- **不要用 classic 分支保护的用户级限制来做这件事**：GitHub 对个人账户仓库直接拒绝
-  （`Only organization repositories can have users and team restrictions`），Ruleset 是
-  个人仓库可用的等价机制。若将来要按**人**授权，必须先把仓库迁到 Organization。
-- **所有者仍可直接推 `main`、仍可合并 PR**（bypass 为 `always`）；**其他分支不受限制**，
-  feature branch + PR 的工作流照旧可用。外部贡献者只能走 fork + PR，且只有所有者能合并
-  （合并同样会写 `main`）。
-- **被拒的推送是正确结果，不是故障**：不要为了让推送通过而删除 ruleset、删掉 bypass
-  白名单或改用 `--force`。Ruleset 同时挡住了 force push 与 `main` 删除。
-- 验收：临时清空 bypass 白名单后做了一次**真实**推送，服务端返回
-  `GH013: Cannot update this protected ref`，远端 `main` sha 未变（零污染）；恢复白名单后
-  所有者推送非 `main` 分支成功。证据见 `docs/BRANCH_PROTECTION.md`。
-## 2026-11-08 四阶段二轮复验（R01–R08 关闭）
-
-- **一次授权只买一次新尝试**：`start_pipeline_new_attempt` 在建新任务的**同一事务**里用
-  `state_version` + `status` fence 消费授权，旧行写 `new_attempt_authorization`；重复调用
-  返回同一回执。旧行保持 `UNKNOWN` 历史且不再提供动作。审计分开：`PIPELINE_TASK_NEW_ATTEMPT`
-  与 `PIPELINE_TASK_RECONCILED`。
-- **四阶段任务有角色匹配的对账入口**：`POST /projects/{id}/pipeline/tasks/{id}/reconcile`。
-  只有 `NOT_SENT_PROVEN` 才允许普通继续；`UNKNOWN_REQUIRES_NEW_ATTEMPT` 只允许「核对后
-  重新发送一次」。普通 resume 仍拒绝 UNKNOWN。
-- **分镜交付按「预期单元」核验，不按场次数**：`expected_storyboard_units` 由当前场次
-  revision、来源范围、chunk ordinal/hash 与连续性基线算出稳定单元清单；逐单元结果、失败、
-  剧组步骤与 apply 句柄存在 `four-stage-storyboard-units:{pid}:{vid}` 台账里。丢片、重复、
-  越界、失效、未应用、失败全部具名拒绝正式交付；局部 `section_ids` 重做只替换自己。
-- **交付快照才是复用键**：`delivery_snapshot` 绑定 unit/apply、镜头 revision+spec、绑定、
-  冻结风格、规则包与工作流图/参数映射；只有完全相同的快照才复用包。镜头升版产生新包，
-  旧包以 `SHOT_REVISION_CHANGED` 阻止新 Run 与未提交批次，历史仍可读。缺 lineage 的旧
-  **四阶段**包进入新生产前需重新交付（`CREATIVE_LINEAGE_MISSING`），普通旧导演包不受影响。
-- **正式分集交付保留 EpisodeScript 身份**：`PlannedEpisode.episode_script_id` 是类型化
-  字段，分集清单同时保留它。分集合同以**当前**大纲与场次剧本为准，被替代即具名拒绝；
-  `volume_scope` 只在没有任何已确认分集合同时作为兼容合同保留。
-- **蓝图依据是可验证的**：蓝图产物带 `basis`（有序 outline refs + plan revision）；确认、
-  读取、卷发布与包准入读同一个 `bible_basis_blockers`。草稿蓝图写出的场次在发布时与确认
-  蓝图比对主线/人物/世界/时间线/锁定事实/结局/跨卷开放项。
-- **面板渲染服务端状态**：四阶段面板不再把分镜草案放在本地 state，刷新/崩溃/重启后仍能看到
-  待应用镜头、失败与对账句柄、发布回执与**确切 package ID**；「核对并只重做这一场」只重做
-  该场；地址栏 `#d/package?package=<id>` 可直达指定导演包。
-- 验收：`backend/tests/test_four_stage_reacceptance.py`（R01–R06）、
-  `frontend/src/test/fourStageRecovery.test.tsx`（R07/R08）、
-  `scripts/verify_four_stage_browser.py`（隔离浏览器旅程）。
-  证据见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md`。
-
-
-## 2026-11-08 追加：素材后置（用户裁定）
-
-- **素材一律后置**：剧本定稿、分镜设计完成后，才到素材库**按分镜**准备素材，然后拍摄。
-  每镜需要什么素材是分镜的产物（`required_asset_ids` 来自摄影方案），不是剧本的产物。
-- **阶段次序改为 7 步**：`script 创意与剧本 → plan 剧本统筹 → storyboard 镜头拆解 →
-  assets 拍摄素材准备 → package 导演包 → production 视频生产 → post 后期成片`。
-  ② 只判分集方案与冻结风格，③ 只判镜头自身，④ 判逐镜素材。
-- **素材是可选类需求（2026-11-08 第二轮收尾修订）**：④ 的素材缺口只**报**（notice），不再是 blocker；
-  导演包冻结也不再因缺主素材拒绝。缺的那个图片由 H3 自行生成。
-  详见下一节。
-- **四阶段面板按同一顺序**：单元回执带 `missing_characters`，面板如实显示；「应用这一场」不再
-  因为缺素材而禁用（缺的那个图片由 H3 自行生成，可以先落镜）。
-- 验收：`backend/tests/test_director_long_form.py`（两条新断言）、
-  `frontend/src/test/setupEntry.test.tsx`（阶段条次序）。
-  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 8 节。
-
-## 2026-11-08 第二轮收尾：素材是可选类需求（R09）
-
-- **素材缺失只提示，不再硬阻滞**：镜头点名的素材若不存在、不是本项目的、或没有批准锁定，
-  `apply-camera` **跳过绑定**并回 `material_notices`（`MISSING_IMAGE_MATERIAL`，
-  「无图片素材将由H3自行生成」），这一镜照样落。素材阶段（journey ④）与导演包冻结
-  （`package_readiness`）都不再因此拒绝。
-- **跳过绑定必须同时改「要求」**：被跳过的素材要从这一镜的 `required_asset_ids` 里去掉，
-  否则 `create_shot_record` 与渲染预检仍会拒掉它——只跳过绑定不改要求，等于把一种 422
-  换成另一种 422。
-- **绝不绑定未批准锁定的素材**：已绑定但没确认锁定的素材仍然具名拒绝（`ASSET_NOT_MASTER`）；
-  渲染侧 `_validate_binding_inputs` 也会拒绝。跳过的字节不进渲染。
-- **渲染侧的 image 族豁免有前提**：方案声明 image 传输族时，这一镜**一张图片都没绑**才豁免
-  （`WORKFLOW_MEDIA_FAMILY_NOT_BOUND` 不再触发，未用的图片装载节点会被剪掉，不会有占位文件名
-  送到渲染器）；绑定了就一张都不丢。audio 族的规则不变：有台词的镜头仍必须有音频参考。
-- **人物主体缺位仍然拦住**：H3 编译期 `H3_CHARACTER_REFERENCE_MISSING` 保护身份漂移的规则不变；
-  「人物主体」不是可选类素材。缺主素材且这一镜**没有任何参考**时走无参考的 T2VA 编译，
-  H3 临时生成人物（画面一致，但不保证是你指定的那个角色）。
-- **「一键开拍（自动适配）」尚未改**：排产提交入口仍会在缺参考素材时挡住提交（画面参考与人物主体
-  都算缺）。人物主体缺位应当继续拦住；画面参考缺位要降级为提示，得先解决 Ref2VA 方案
-  「至少一张参考」与无参考时编译模式退化为 T2VA 的匹配问题。
-- 验收：`backend/tests/test_four_stage_reacceptance.py`（R09 两条）、
-  `backend/tests/test_reference_transfer.py`（两条反向断言）、
-  `backend/tests/test_production_series.py`（API 层反向断言）。
-  报告见 `docs/FOUR_STAGE_REACCEPTANCE_REPORT_20261108.md` 第 9 节。
-
-## 2026-11-09 W6A8 低显存候选轮（导演模式新档）
-
-- **一个变体，一个目录，一套方案**。`shine/comfyops/variant_binding.py` 是唯一解析
-  变体→部署目录→工作流文件的地方。`POST /setup/profiles` 带 `variant_id` 时登记的是
-  **该变体自己的**方案（`local-h3-ref2va-lowend-pdd-free-2img`），绝不借用默认目录的方案；
-  **不传变体参数的调用完全不变**（默认目录 + 原三个方案）。
-- **变体与目录不一致就拒绝**。`VARIANT_CATALOG_MISMATCH`（409）：变体清单登记的
-  `catalog_id` 与调用方指定的不一致时，不合并、不回退到任何一个。同名同项目内容不同仍然
-  `PROFILE_CONTENT_CHANGED`；重复登记仍然幂等。
-- **身份链要能核对**。变体清单登记 `checkpoint_id` 与 `graph_sha256`（方案名→图哈希），
-  `profile_metadata` 才能从图反查变体；候选方案因此带 `variant_id=ref2va-lowend-candidate`、
-  `variant_acceptance_status=CANDIDATE`、`variant_verified=false`。**候选不继承基线的验收**。
-- **五层就绪 + 唯一下一步**。`GET /setup/variant-readiness` 给出「待准备权重 / 文件已核验 /
-  工作流已登记 / 本机运行环境已验证 / 真实出片已验证」，并只给**一个**下一步。
-  「差不多能用」不是动作。权重要求**跟着方案图走**：图里没加载的可选 turbo LoRA 不算缺件。
-- **候选的下载仍然是关闭的**。`auto_download_allowed` 仍是 `false`，安装计划仍以
-  `VARIANT_NOT_DOWNLOADABLE` 拒绝；**禁止**通过改 `SUPPORTED`、改 `auto_download_allowed`
-  或跳过资格检查来解锁。已批准的准备路径是既有的「检测已有安装 / 导入模型」，并且这条路径
-  现在按**变体自己的目录**比对 revision、字节数与 SHA-256。
-- **候选必须走完整门禁才能进生产**。`shine/comfyops/profile_gate.py` 只对**未验收**变体加码，
-  已验收变体（含 INT8 基线）行为完全不变。门禁项：项目作用域、图身份、已登记到本作品、
-  节点已核对、权重已就位并逐字节核验、受管运行时已配置、宽高已接入。任一不满足 → 具名 409，
-  **不替换方案**（不改 INT8、不改 FL2VA、不换参考资产、不换 checkpoint），且拒绝发生在
-  **改镜头规格、自动补绑定、入队之前**。
-- **服务端是唯一的门，浏览器只是显示**。`create_series`、`create_render_job`、
-  `build_package` 调用同一个门禁，绕过界面直接调接口同样被拒；浏览器读到不了结论时
-  **不发明拒绝**，由服务端裁决并给出它自己的原因。
-- **候选不与基线混档**。拍摄质量新增独立档「低显存候选 · W6A8」；W6A8 方案绝不会被当成
-  「高质量 · 原生20步」，一键开拍不会把它换回 INT8。**显式选中的候选方案优先于质量档**：
-  要么用它，要么明确说为什么不能用。
-- **显式选定就保持同一身份**。导演包钉住 `workflow_profile_id / graph_sha256 / checkpoint_id /
-  parameter_map / media_transfers / validated_against`，生产系列与 Job 带同一个
-  `workflow_profile_id`，实际 `/prompt` 用同一份 `parameter_map`。
-- **最终用哪套方案由用户决定（2026-11-09 用户裁定）**。基础配置的方案列表是**参考清单**，
-  不是产品的决定；真正用哪一套由用户在制作页自己选。**用户显式选过的方案，一键开拍与
-  导演包都必须照用，任何情况下都不替换**——包括质量档与所选方案不一致时。拍摄质量档只在
-  **用户还没选过方案**时充当推荐依据。界面必须显示「用你选定的方案 X」。
-- **五层就绪状态是累积的**。后一层只有在前一层达成时才算达成：权重都没到位就不能说
-  「文件已核验」，方案没登记就不能说「本机运行环境已验证」。层与层之间的依赖顺序写在
-  `variant_readiness.py`，页面不允许出现依赖未达成却显示「已完成」的层。
-- **就绪状态区不能长得像方案列表**。五层用独立的 `readiness-layers` 样式并写明标题
-  「五层就绪状态」；候选在参考清单里是**同一份列表里的一行**（标注「候选 · 未登记」），
-  不能另起一张看起来像方案清单的卡片，否则用户会以为原来的方案不见了。
-- **本轮不改 `client_review_identity` 钉住的文件**（`worker.py` / `preproduction.py` /
-  handoff / quality），因此不触发 VLM 重校准；但真实正负校准本来就没做过，**不得声称已校准**。
-- **本轮真机出片是 BLOCKED**：本机是 RTX 5080 16GB（无 4070 Super 12GB），且官方 W6A8 权重
-  未就位（候选不进自动下载路径）。因此**没有**任何 attempt / artifact / 显存峰值 / 解码 /
-  人工观感证据，**不得声称任何真实出片结论**。
-- 证据：`docs/ACCEPTANCE_20261109_W6A8_LOWEND_VARIANT.md`；回归
-  `backend/tests/test_variant_binding_and_gate.py`（21 项）、
-  `frontend/src/test/variantCandidate.test.tsx`（4 项）。
-
-## 2026-11-09 复验收尾轮（R01–R07：入口与状态交接）
-
-- **当前制作依据只有一个解析口**。`shine/director/basis.py` 是「这次制作属于哪一版剧本」
-  的唯一答案：显式选中的文档、该文档下已确认的大纲，以及镜头**真正来自哪一版大纲**
-  （分节运行 → 分镜应用回执 → 镜头）。普通按镜头分组、按场次物化和四阶段按卷共用它。
-- **按镜头分组必须记录真实来源**。兼容入口不再留空来源：它记录镜头实际来自的大纲，
-  所以「A 的镜头重新分组」不会被无声认作 B。旧行有可信回执证据就自动衔接；
-  证据缺失只在旅程里指出现有的「确认大纲 / 重新拆分镜」，不新增审批层。
-- **生产准入读「已核验」，不读「已发现」**。`profile_gate` 现在区分
-  `PROFILE_WEIGHTS_NOT_AVAILABLE`（没就位）、`PROFILE_WEIGHTS_NOT_VERIFIED`（没逐字节核验）
-  和 `PROFILE_WEIGHTS_NOT_CONSUMABLE`（已核验但当前受管实例不消费那个目录）。
-  `prepared` 只用于显示。已核验缓存、实际绑定目录和当前实例是三件事：
-  切换受管实例后重新判断消费关系，正常提交不反复全量哈希。
-- **导演包与采用按执行合同判定**。导演包的 `output` 走既有 `OutputSpec`：
-  24 fps、成对的 32 倍数画幅、4–15 秒片段；不合规时草案可以显示缺项，
-  确认与开拍按 `OUTPUT_SPEC_INVALID` 拒绝。片段长度还要装得下每一镜的对白与内部剪辑点
-  （`CLIP_TOO_SHORT_FOR_DIALOGUE` / `CLIP_TOO_SHORT_FOR_CUT`）。
-  素材权利撤权后，采用预览必须显示 `ASSET_RIGHTS_NOT_APPROVED`、采用不得写新 revision，
-  已冻结的包不得继续显示可开拍。
-- **一键开拍判定整批，不只第一镜**。提交带 `expected_shot_revisions`（前端看到的镜头修订）
-  与显式授权的绑定；服务端先核对快照，再在同一事务写绑定，并对**每一镜**跑单镜入口
-  用的静态判定。任一镜不可执行 → `PRODUCTION_SERIES_SHOT_NOT_EXECUTABLE`，
-  列出该镜原因与仍可开拍的镜头；不留半写绑定，也不产生意外 Job。
-- **拍摄归属只有一个答案**。`shine/comfyops/ownership.py` 回答「这一镜现在归谁」：
-  生产序列的预留（哪怕还没建 Job）与活动 Job 都算占用。单镜、Series 与 Run 派发共用它；
-  独立请求撞上活动拍摄 → `SHOT_ALREADY_IN_PRODUCTION` 并指出原任务；
-  内部派发按自己持有的预留建 Job；同一请求身份（`request_key`）重接已有回执。
-- **首次向导读真实回执**。计划状态不是真相，写入物理目标的尝试才是：
-  运行中的尝试在向导原地续上并显示进度，已完成的沿原步骤继续准备实例，
-  真正需要对账的才交给专业设置；向导与基础配置共用同一套回执读取。
-- **旅程范围跟随当前 Run**。选集与镜头来自 Run 冻结的 scope/episode 行；
-  整包概况是独立字段（`package_scope`），进度分母、可操作 Run、后期与下载用同一选定范围。
-  切换包/作品/Run 时丢弃旧异步结果。
-- 回归：`backend/tests/test_director_basis_grouping.py`、
-  `test_production_gate_weight_evidence.py`、`test_director_execution_contract.py`、
-  `test_one_click_batch_admission.py`、`test_shoot_ownership.py`、
-  `test_director_run_scope.py`；前端 `frontend/src/test/realWizard.test.tsx`（+2）。
-  报告见 `docs/REACCEPT_R01_R07_REPORT_20261109.md`。
-
-## 2026-11-10 成片库、真实文件名与采用目录
-
-- **成片库是既有台账的只读视图，加上一条受保护的删除通道**。`GET/POST
-  /api/v1/projects/{id}/video-library` 只聚合 `media_artifacts` 的 `video` 与 `delivery`：
-  同一 artifact 的多个交付回执只出现一次，缩略图与连续性派生图不是成片条目。
-  采用判定来自 `shine/media/video_layout.py`：显式装配选择优先，否则最新的正常通过生产；
-  只有“选为当前装配版本”才会让重拍成为当前，重拍在选中前是历史。
-- **删除是墓碑，不是改写历史**。迁移 `f180b0070001` 增加 `deleted_at/deleted_by/deleted_reason`；
-  服务端只接受本项目 artifact ID，逐项阻止活动/待核对任务、当前采用、被有效成片或连续性关系引用、
-  哈希不一致与路径越界；同名共享文件只移除记录保留字节；文件已缺失可清理记录。
-  Job、attempt、交付回执与审计保留原 artifact 身份；媒体接口对已删除视频返回 404，
-  交付列表带 `artifact_deleted`。
-- **真实文件名即磁盘文件名**。`shine/media/video_naming.py` 生成
-  `《项目名称_003镜_02集》.mp4` / `《项目名称_001-006镜_02集》.mp4`；无集号写 `未分集`，
-  范围不明写 `镜号未登记`；非法字符、Windows 保留名、同名冲突（`_v2`）与 Unicode 都在此处理。
-  SHA-256 仍是身份，旧文件不改名、不批量迁移；只有用户显式选择重拍时才移动相关文件。
-- **采用与未采用分目录**：新单镜采用版本写 `artifacts/<项目>/current/`，重拍先写 `history/`，
-  显式选中时两文件互换并同步 attempt 输出路径与连续性来源路径（提交失败回滚文件移动）；
-  新的自动交付写 `delivery/current/`，手工装配写 `delivery/history/`。
-  库页的「整理采用目录」是唯一会批量移动既有文件的动作（Operator，只移动、不删除、不改 SHA，
-  失败逐条报告）；普通加载与生产不自动迁移。正式六镜、三镜与 v2 不得在验收中删除或迁移。
-- **视频封面取 1 秒代表帧，封面失败仍可播放**。`thumbnail(..., seek_s=1.0)` 由视频接口使用，
-  图片接口保持首帧；封面 URL 带 `?poster=1s` 以绕过旧的 immutable 缓存。
-  `VideoPreview` 封面失败时内嵌 `<video>`，不显示死帧“预览不可用”。
-- **单张普通参考图 + 已选 Ref2VA 不再被推断成 I2VA**（`make_render_request` 的 `mode_hint`）；
-  显式工作流/检查点、无方案推断与帧角色校验不变。
-- 回归：`backend/tests/test_video_library.py`（13 项），以及 `test_delivery_assembly`、
-  `test_delivery_orders`、`test_generation_segments`、`test_job_media`、三个迁移测试；
-  前端 `videoLibrary.test.tsx`（8 项）。运行依赖真实 HTTP 的测试时，若本会话 `NO_PROXY`
-  含 `[::1]`，先 `env -u NO_PROXY`，否则 httpx 解析失败会被误判为发布失败。
-- 本轮修改了 `worker.py`，按 `client_review_identity` 约定旧 VLM revision 失效；真实正负校准
-  仍未完成，不得声称已校准。两镜试拍与新单镜均为技术通过、`final=needs_review`，不是人工验收。
-
-## 2026-11-10 长文本 2/3 分块与手工镜头英文风格投影
-
-- **长文本按原尺寸的 2/3 切分**：大纲 `segment_document(..., max_scene_chars=MAX_SCENE_CHARS * 2 // 3)`
-  （4000→2666），长文本分镜 `max_scene_chars=1200`（原 1800）。切分仍由
-  `shine/materialprep/source_spans.py` 的 `segment_document` 完成，不新建分块器。
-- **预算控制器统一输入与输出**：`budget_report(..., input_share=2/3)` 用同一份
-  `context_window_tokens`、输出预留与 margin 计算可用预算；`scenes.prepare_scenes` 用
-  `input_share=2/3` 决定是否继续二分。不要另建一套 token 估算。
-- **手工镜头的中文冻结风格要被投射成英文**：`services.make_render_request` 在
-  `shot_spec.prompt_style` 为空且风格含 CJK 时，用
-  `shine/director_styles/service.py::english_style_bible` 读取冻结模板的
-  `instruction_en`，把结果附着到**请求的 shot_spec.prompt_style**（不是替换 style
-  snapshot），让 `H3_ENGLISH` 与 `SHINE_PROVENANCE` 同时通过；冻结风格 id/hash 不变。
-  不要只在编译时临时换 style，否则校验器重编译会报 provenance 不一致。
-- **新登记方案必须先在本机验证**：`PROFILE_NOT_VALIDATED` 时先到「基础配置 → 模型与生成方案」
-  对本项目方案点「验证本机节点」（真实渲染器 object_info），再排产；不要用 API 绕过。
-- 回归：`backend/tests/test_material_budget_share.py`（2 项）、
-  `test_director_styles.py::test_english_style_projection_uses_the_frozen_template_techniques`。
-
-- **新提交不得继承旧输入的 UNKNOWN**：`prepare_scenes` 的旧格式兼容查询只允许
-  `request_identity is None` 的旧行按文档/场次复用；带身份的 UNKNOWN 属于它自己的输入
-  （不同的锁定事实、提示词或 provider 就是另一份请求），新提交必须真正发出新请求。
-  回归见 `test_material_scenes.py::test_a_new_scene_input_does_not_inherit_an_unknown_from_a_previous_input`。
-
-## 2026-11-10 影片类型与手动解锁/应用新冻结（本轮新增）
-
-- **影片类型是服务端固定的 H3 合同，不是自由文本**：`StyleBible.film_type` 只接受
-  `live_action` / `animation`；固定英文范例在 `shine/h3/film_type.py`，由
-  `H3PromptCompiler` 写进每条提示词。`The entire shot is 2D cel-shaded animation...`
-  这类句子不得交给模型自由改写；动画项目不选影片类型，模型可能自行拍成真人画面。
-- **旧风格快照的哈希形状不能变**：`film_type` 未设置时序列化必须省略该键。Pydantic 的
-  `model_config.exclude_none` 在本版本不会作用于 `model_dump`，因此 `StyleBible` 用
-  `model_serializer` 过滤 `None`；嵌套 `ShotSpec.prompt_style` 也一样，旧风格/旧请求哈希
-  保持可复验。语义审片仍只审七维（`STYLE_BIBLE_FIELDS`），影片类型是确定性提示词合同。
-- **手工镜头与分镜镜头的英文风格都要继承冻结影片类型**：`_prompt_style` 为旧
-  `prompt_style` 补上冻结的 `film_type`；`services.make_render_request` 的英文风格投射
-  也显式带上它。不要只改 style snapshot，否则请求与编译哈希不一致。
-- **每个冻结设置都有用户手动解锁入口，且旧历史不重写**：
-  `POST /projects/{id}/freeze/style/refresh` 冻结当前草稿并把所有旧镜头修订到新风格；
-  `POST /projects/{id}/freeze/shots/style` 只把当前已冻结风格应用到旧镜头；
-  `POST /projects/{id}/freeze/assets/{asset_id}/unlock` 解除主素材的 approved/locked，
-  修改后走既有「确认使用」重新冻结；`POST /projects/{id}/freeze/episode-plans/{version}/unlock`
-  把已确认分集退回 DRAFT 并将其已确认导演包标记 stale；
-  `POST /projects/{id}/freeze/director-packages/{package_id}/unlock` 只把包标记 stale，
-  不重写已确认快照。
-- **有活生产时拒绝解锁**：风格/镜头/素材/分集/导演包的解锁都先查活动 Job、活动 series 或
-  活动 run；返回具名 409，不打断正在上传或生成的镜头。旧产物、旧风格版本、旧导演包
-  全部保留，重拍/重冻产生新 revision/version。
-- **素材候选列表缺省不是丢失**：直接上传并确认的素材没有生成批次，素材页的
-  「③ 选择素材 · 0 项候选」是真实事实；页面现在明确提示「先在 ① 分析剧本、② 确认需求」，
-  不伪造候选，也不把直接上传的主素材混进候选网格。
-- 回归：`backend/tests/test_freeze_unlock.py`（4 项）、`test_h3_compiler.py` 的影片类型/
-  旧哈希形状、`test_director_styles.py` 的固定类型目录；前端
-  `frontend/src/test/directorStyle.test.tsx`、`styleFreeze.test.tsx`。改动未触及
-  `worker.py` / `preproduction.py`。
-
-## 2026-11-10 输出目录与可读文件名轮
-
-- **全机只有一个输出根目录**。未设置时沿用现有默认目录 `settings.data_dir`；设置后所有项目的
-  素材、视频、成片、音色都存放两级：`<根目录>/<项目名>/素材|视频|音色/...`。无项目的全局素材
-  放在 `<根目录>/素材中心/素材|视频|音色/...`。解析入口唯一：`shine/media/output_layout.py`
-  的 `output_root(db, settings)`；**不要**在别处再拼一套目录规则。
-- **文件名统一是 `项目_类型_名称.ext`**：项目、类型（素材/视频/音色）、可读名称。镜头视频为
-  `项目_视频_003镜_02集.mp4`，成片为 `项目_视频_001-006镜_02集.mp4`，素材为
-  `项目_素材_01-易千寒.png`，音色为 `项目_音色_易千寒.wav`；素材中心为
-  `素材中心_素材_...`。不再使用《》或内容哈希作为磁盘文件名；哈希仍是台账身份。
-  同名不同内容用 `_v2`、`_v3` 区分，绝不覆盖。
-- **调整目录是一次迁移，不是改一行设置**。`PUT /api/v1/settings/output-directory`：
-  先拒绝活动镜头/素材任务（`OUTPUT_DIRECTORY_BUSY`），写迁移锁；逐文件复制（同卷优先硬链接）
-  到新根并逐字节核验台账 SHA-256；全部通过后才在**一个事务**里切换 `storage_path`、
-  `JobAttempt.output_path`、连续性来源路径和 `output-directory` 设置；提交后才删除旧文件。
-  任一步失败都不切换目录（`OUTPUT_DIRECTORY_SOURCE_INVALID` / `TARGET_CONFLICT` / `COPY_FAILED`），
-  已复制的新文件只是无害的孤立副本。迁移锁期间的写入返回 `STORAGE_MIGRATION_IN_PROGRESS`。
-- **请求里的旧路径不是身份**：移动根目录后，已存 `job.request` 的 `storage_key` 会过时。
-  读取方必须调用 `refresh_reference_paths(db, request)`（worker 装载上下文、审片队列都用它）；
-  H3 引用校验只按 SHA-256 + content_type 认身份，**不再**把 `storage_key` 与
-  `asset.storage_path` 的不等视为身份变化。旧 Job 的 request 不被改写。
-- **默认目录也使用同一套命名**：新产物即使没有自定义目录，也写入
-  `<data_dir>/<项目>/素材|视频|音色`。旧文件不会自动搬动；把目录保存为默认（空路径）或
-  任意自定义目录都会把旧文件迁移进新布局。旧历史字节不重写。
-- **页面入口**：导演模式「基础配置 → 安装与下载」和专业设置都渲染 `OutputDirectoryPanel`，
-  显示当前根、两级结构、文件数、可用空间和活动阻塞；不存在只改设置不迁移的路径。
-- **迁移不信任未核验的共享文件**：`LibraryMedia` 与 `LibraryVersion` 可能共享同一物理文件，
-  迁移按台账逐行分配可读名；同名同哈希复用，同字节不同名各复制一份。候选删除前会再查
-  `JobAttempt`、连续性 lineage 和全部 `storage_path` 列，仍在引用的旧文件不删。
-- 本轮改了 `worker.py`（输出根解析、引用路径刷新），按 `client_review_identity` 约定旧 VLM
-  revision 已失效；真实正负校准**尚未**重做，不得声称已校准。
-- 回归按影响范围定向执行：`test_output_directory.py`（9 项）、`test_asset_center.py`、
-  `test_workflow.py`、`test_security_windows.py`、`test_material_image_jobs.py`、
-  `test_offline_e2e.py`、`test_video_library.py` 共 102 项通过；另跑媒体/系列、素材/剧组、
-  参考/门禁、迁移/模式四批定向用例。按用户要求**不跑全量后端套件**。前端
-  `OutputDirectoryPanel`、`npm.cmd run build` / `npm.cmd test`。证据见
-  `docs/ACCEPTANCE_20261110_OUTPUT_DIRECTORY.md`。
-
-## 2026-11-11 穿测修复轮（限流、宿主代理、素材缺口、崩溃遗留任务）
-
-浏览器实测《放开那个女巫1-10章》④ 分镜编写阶段暴露了七个缺陷，全部已修：
-
-- **服务商 429 不再直接判死一场分镜**：`openai_compatible._request` 过去对 POST 的 429
-  立即抛出，一次限流就让整场失败。现在按 `Retry-After`/指数退避重试
-  （`RATE_LIMIT_BACKOFF_SECONDS`），并把冷却记在**同一端点**上（`note_rate_limit`），
-  后续调用共享等待。预算由 `ProviderConfig.rate_limit_retry_attempts` 决定：
-  **agent 通道 2 次**（`AGENT_RATE_LIMIT_RETRY_ATTEMPTS`），连通性探测仍是 0 次。
-  429 是「拒绝且没有答案」，因此重试不会买到第二份答案；5xx 与超时的未知结论仍不重放。
-- **剧组链的重试要带具名原因**：`RETRYABLE_REJECTIONS` 增加 `LLM_RATE_LIMIT` 与
-  `LLM_FORMAT`；合同拒绝（对白非原文、格式不符等）重试时由
-  `CONTRACT_REPAIR_NOTES` 给出可执行的做法，而不是让模型原样再错一次。
-  纠错说明只写规则与做法，**不携带服务商文本**。
-- **宿主代理环境不得打倒本机客户端**：`[::1]` 这类带方括号的 `NO_PROXY` 条目会让 httpx
-  拒绝建客户端（`InvalidURL: Invalid port: ':1]'`），此前只有文字通道规整过，渲染器、
-  本地文本模型、实例健康检查仍会失败。规则统一到 `shine/http_env.py`：
-  **环回端点一律 `trust_env=False`**，远端调用先规整 `NO_PROXY`。
-- **素材缺口不是连续性冲突**：`shot_reference_policy` 现在区分「策略违规」与
-  「素材请求」：`policy_compliant` 只由被禁用的引用决定，`material_request` 列出还缺的
-  主素材。连续性报告里只报告素材缺口的条目由 `material_request_issues` 判为素材请求，
-  **不进仲裁也不阻塞单元**（与 2026-11-08 的「素材是可选类需求」一致）。
-- **崩溃遗留的剧组任务必须能核对**：服务商调用活不过它自己的超时，因此超过该超时仍处于
-  `RUNNING` 的剧组任务属于已死进程：请求阶段证明没发出的按 `NOT_SENT_PROVEN` 释放，
-  可能已发出的保持 `UNKNOWN_REQUIRES_NEW_ATTEMPT`，由
-  `POST /projects/{id}/film-runs/{task_id}/resend-unknown` 记录人的明确授权
-  （旧行退役为 `USER_AUTHORIZED_NEW_REQUEST`，**不得**写成「未发出」）。
-- **核对必须幂等**：结论一旦写入就不可再被版本挡住（已核对的结论在版本检查之前返回）；
-  请求开始前的「先前未决任务」拒绝必须带上 `state_version`，否则面板永远重做不了这一场。
-- **面板要能解释**：剧组的拒绝原因、素材提示与缺项都在 ④ 面板如实显示；镜头描述含中文被
-  拒时，重试的纠错说明要求用角色标签代替中文专名。
-- 回归：`backend/tests/test_agent_retry_and_rate_limit.py`（新增）、
-  `test_film_unknown_outcomes.py`（新增 4 条）、`test_storyboard.py`（新增 2 条）、
-  `test_llm_setup_contract.py`（NO_PROXY 断言迁到共用模块）。
-
-## 2026-11-12 素材分析进度透传与 UNKNOWN 分场授权重发（穿测缺陷修复）
-
-- **逐场素材分析的进度必须从台账透传，而不是只活在浏览器内存里**。`POST
-  /material-preparation/scenes/prepare` 是同步长请求；旧面板把返回的 `scenes`
-  存在本地 state，刷新即丢，运行中也没有逐场进度。新增只读
-  `GET /projects/{id}/material-preparation/scenes/status?document_id=`
-  （`scenes.scene_status`，按分割顺序返回每场最新任务的状态/phase/外部结果/
-  核对结论），面板挂载即读、分析期间 5s 轮询；分析进行中禁用「分析剧本」，
-  避免并发重复提交。读路径不发模型调用、不建任务。
-- **素材分场的 UNKNOWN 也要有用户授权的一次性重发入口**。发送后断连
-  （`LLM_CONNECTION`/UNKNOWN）的分场此前既不能 dead-worker 退休（状态是
-  NEEDS_REVIEW 而非 RUNNING），reconcile 又只回 UNCONFIRMABLE，story 的
-  resend 入口不接收素材任务——永久阻塞。新增
-  `POST /projects/{id}/material-preparation/scenes/{task_id}/resend-unknown`
-  （`scenes.authorize_scene_unknown_resend`）：镜像 story 语义，一次、带证据、
-  审计 `MATERIAL_SCENE_UNKNOWN_RESEND_AUTHORIZED`，旧行退役为
-  `USER_AUTHORIZED_NEW_REQUEST` 且**保持 UNKNOWN，不得写成未发送**；预算按
-  同 input_hash 计，第二次授权 409 `MATERIAL_SCENE_UNKNOWN_RESEND_ALREADY_USED`；
-  下一次「分析剧本」才创建那一次新请求。
-- 回归：`backend/tests/test_material_scene_progress.py`（3 项）+
-  `test_material_scenes.py`/`test_scene_dead_worker.py`/`test_material_scene_safety.py`
-  共 25 项；前端 `materialPreparation.test.tsx` 17 项、全量 261 项、tsc/build。
-- **分镜输出上限 16K→32K（2026-11-12 用户裁定）**：长分镜答案在 16K 处被
-  `finish_reason=length` 截断、重试表现为「卡」。`DEFAULT_AGENT_OUTPUT_TOKENS`
-  提至 32_768（agent 通道默认 ceiling；显式配置更小仍优先；创作通道
-  `literary.budget` 不受影响）。回归 `test_llm_gateway.py` 等 6 批 100 项。
-- **分集勾选只做一次（2026-11-12 用户裁定）**：四阶段分集合同已确认的作品，
-  素材页内嵌的 `StoryPreparationPanel` 不再显示旧链路的生产段落勾选网格与
-  「准备所选段落的素材清单 / 为所选生产段落生成正式分镜」按钮，改为只读
-  「总体大纲与分集范围 · 已确认（无需再勾选）」摘要（逐集列出已确认场次）；
-  范围由 `GET /projects/{id}/pipeline` 的 confirmed episode_contracts 推导。
-  无合同的作品保留旧勾选入口。回归 `materialPreparation.test.tsx`（+2）。
-- **素材清单复用四阶段分析，零模型调用（2026-11-12 用户裁定）**：剧组链已逐场
-  读过合同场次，二次整剧逐场分析是重复购买。新增
-  `POST /projects/{id}/material-preparation/derive`（`materialprep/derive.py`）：
-  只认**当前有效**的已确认分集合同，按 `source_refs` 偏移把场次映射到素材分割，
-  人物取自场次剧本 characters+对白说话方（描述用全局圣经 identity），场景描述
-  取场次原文开头；产出同一 ScriptPreparation 合同进 `create_draft_plan`，确认/
-  出图门禁不变。无合同的作品保留「分析剧本」旧入口。面板有合同时主按钮为
-  「复用分镜分析生成素材清单」，隐藏二次分析入口。回归
-  `test_material_derive.py`（2 项，含 forbidden responder 证明零调用）、
-  `materialPreparation.test.tsx`（+1）。
-- **旧四步层归并进七阶段（2026-11-12 用户裁定）**：制作页删除旧「①剧本分镜
-  ②素材准备③排产制作④进度与结果」聚焦条与③④两个 dock，只保留③镜头拆解、
-  ④拍摄素材准备两个工作区；排产（一键开拍/单镜高级）与进度结果整体移入
-  ⑥视频生产页（run），与整部作品运行面板同页；旧深链 `#d/produce?stage=produce|monitor`
-  重定向到 run。七阶段旅程条是唯一阶段导航；rail 主/次按钮自动共存不丢入口。
-  回归 `produceFocus.test.tsx` 重写、`directorEntries/modeEntry/shotDraft` 导航更新，
-  全量 265 项。
-- **素材清单全项目统揽（2026-11-12 用户裁定）**：逐场拼名会把同一人拆成多个
-  主素材、前后不一致。新增 `materialprep/catalog.py`：一次全项目模型调用
-  （producer，合同 `MaterialEntityCatalog`）读全局圣经+全部合同场次，产出
-  人物唯一条目（aliases 合并、identity 稳定、variants 按场记衣服/外貌变化）、
-  关键场景、关键道具（core_prop_reason+carrier）。目录按 basis（圣经+场次剧本
-  哈希）落 artifact，basis 不变复用、不买第二次调用；UNKNOWN 不自动重放，
-  核对/授权重发入口与分场同语义（守卫接受 producer/entity_catalog）。derive
-  从目录映射到素材分割生成清单；人物描述只用稳定 identity（变体在目录与镜头
-  视觉描述里），避免跨场描述差异造成假冲突。回归 `test_material_derive.py`
-  重写 3 项（含 UNKNOWN 核对+一次重发）、前端 265 项。
-- **素材小样必须携带冻结影片类型（2026-11-12 穿测目检发现）**：动画项目的
-  参考图曾出成写实照片——brief 只拿到中文七维+film_type 代码，模型漏了媒介。
-  `image_prompts` 升 v5：compose 接收 `film_style`（`h3.film_type.film_type_sentence`
-  的固定英文句）作为提示词层，动画/实拍各加对应 negative 排除；brief 上下文加
-  `film_style_instruction` 与媒介规则。模板版本绑定 readiness 指纹 → 升版后必须
-  重新「验证三类真实小样」再出图。回归 `test_material_no_overlay_rule.py`（+1）。
-- **人物定义全貌化（2026-11-12 用户裁定）**：程岩即罗兰·温布顿，素材中心必须
-  拿到准确的全貌定义而非碎片短名。统揽提示词要求 name 用后续通用完整姓名、
-  identity 写全貌（含穿越背景）、aliases 收本名/简称、variants 按场记外貌；
-  目录复用键加入 prompt_sha256（提示词改进即重新统揽）。derive 把
-  character_definition（canonical_name/aliases/identity/variants）附着到人物
-  需求 payload 与计划；绑定键 entity_id 仍用镜头用名（零绑定风险）。新增
-  `GET …/material-preparation/entity-catalog` 只读接口；素材中心展示规范全名+
-  全貌+按场变体；晋升时定义随主素材 provenance 入库。回归 test_material_derive（+断言）。
-
-## 2026-11-14 H3 资源自整备 V2.0 最终收尾轮
-
-- **W6A8 可选择 ≠ 可开拍**：`GET /setup/variant-availability` 解耦七态
-  （selectable_for_preparation/installed/verified/bound/profiles_registered/
-  runtime_validated/trial_ready/production_ready），`available` 仍是开拍闸门。
-  `installed` 以**图推导权重**为准：候选 manifest `required_component_ids=[]`
-  不再使 `installed` 恒假。导演拍摄页未就绪/候选模型按钮不再禁用，选中即显示
-  资源整备卡；开拍仍由 `strategy_blockers`（MODEL_VARIANT_NOT_ACCEPTED）把守。
-- **离线整备无循环依赖**：`/setup/resources/install-plan` 的 `instance_id` 改可选。
-  阶段 A（扫描/哈希/授权下载/断点/缓存）不要求受管 ComfyUI 实例；阶段 B 绑定仍钉
-  实例身份。`validate_resource_plan` 接受无实例计划并拒绝伪造 `instance_pin`。
-  复用既有 ControlledDownloader/InstallationPlan/Attempt，不新建安装器。
-- **动态装配闭包已正确**：W6A8 native20 图采用候选配方的完整模型链
-  （W6A8 DiT/NVFP4 文本/INT8 ConvRot 视频 VAE/FP32 音频 VAE，无 realism LoRA/SolAttn），
-  不是只换 DiT。`test_graph_compiler` 锁定四权重闭包防回退。**受管启动配置仍按
-  INT8 默认门槛生成**（`generate_configuration`），W6A8 requirements 全 unknown，
-  不得猜测门槛 → W6A8 受管激活/试镜保持 BLOCKED，待真机验收。
-- **旧 WebView 兼容**：新增 `api.ts::timeoutSignal(ms)`，`AbortSignal.timeout`
-  缺失（旧 Edge WebView2/Safari16）时回退 AbortController，避免每个超时请求抛错
-  误报断线；全站替换（含 useStudio 的 /system/status 轮询）。
-- **CI 修复（run 43491015993）**：Ruff UP037 去引号；GPU 释放确认阳性阶段放宽抗
-  CI 抖动窗口（产品默认 120s 不变）；权重证据包入口用例补 `fake_deployment_host`
-  隔离系统盘存储策略（CI Windows 临时目录在系统盘使 require_storage 抛错，把
-  NOT_VERIFIED 误成 NOT_AVAILABLE）；浏览器 E2E 大纲主操作已收进页面级操作栏，
-  断言改读 `.action-rail`。均未删测试/放宽安全拒绝。另修预存 CI 配置缺口：
-  L1 quick job 未装 FFmpeg（L2/L3 才装），候选 QC 全解码返回 unavailable 致
-  `CANDIDATE_NOT_APPROVED`（main 上被 Ruff 失败掩盖）；给 L1 补 FFmpeg 安装步骤。
-- **回归口径**：后端 8 分片全 exit 0、零 FAILED/ERROR（2106 用例）；两处首轮失败
-  （test_renderer_supervisor、test_v13_e2e）均为本会话 `NO_PROXY` 含 `[::1]` 的
-  httpx 假失败，`env -u NO_PROXY -u no_proxy` 复跑通过。前端 49 文件/287 项、
-  tsc/build、Ruff、Alembic（head f180d0010001，无 drift）通过。
-- **真机边界**：本机 RTX 5080 16GB（非 4070），W6A8 权重未下载、RelayVSR 权重未钉
-  SHA → W6A8/4070 试镜与 Relay X2 为 NOT_RUN/BLOCKED；VLM 正负校准未做。本轮未改
-  worker.py/preproduction.py，不触发重校准义务。证据
-  `docs/H3_V2_FINAL_CLOSEOUT_REPORT_20261114.md`、
-  `docs/H3_V2_T01_T24_ACCEPTANCE_20261114.md`；回归
-  `test_resource_resolver_v2`（+2）、`test_graph_compiler`、`directorRun.test.tsx`（+1）、
-  `timeoutSignal.test.ts`（新增）。
-
-## 2026-11-14 设置可用性与输出目录迁移修复轮（用户裁定）
-
-- **环境检测只由用户点击触发**：`SetupCenter` 挂载/切页不再自动检测；检测结果存
-  sessionStorage 快照（含方案选择与能力勾选），回来直接读快照并显示「上次检测」时间；
-  「刷新全部状态」是唯一的重新检测入口；切页只补顶卡轻量状态读取。
-  回归 `frontend/src/test/setupCenter.test.tsx`（4 项），`setupEntry`/`directorEntries`
-  改为点击「检测本机」后断言。
-- **候选权重下载解锁（用户裁定，覆盖 2026-11-09「候选下载关闭」的下载层决定；
-  验收状态与生产门禁不变）**：`POST /setup/install-plan` 新增
-  `candidate_download_acknowledged`；候选（CANDIDATE/EXPERIMENTAL）显式确认后可下载，
-  审计 `CANDIDATE_VARIANT_DOWNLOAD_AUTHORIZED`；BLOCKED 仍拒绝。候选的硬件门槛
-  unknown 记录但不阻挡已确认下载，实测 BLOCKED 仍拒绝。UI 候选 radio 可选
-  （BLOCKED 禁用），确认卡写明「下载不等于验收」。回归
-  `test_install_plan_qualification.py`（+3）。
-- **能力勾选「本机已找到权重」标红**（`.cap-found-warn`）；勾选时二次确认
-  「重复下载 / 仅复用，不下载 / 取消」；重复下载计入下载体积并走安装计划。
-- **输出目录迁移不再被历史缺文件挡死**：源文件已缺失的台账记录具名报告并跳过
-  （路径保持不变），其余文件仍逐字节核验、哈希不一致仍拒绝；响应带
-  `missing/missing_count`，面板如实显示。真实台账副本端到端：132 迁移 / 133 缺失报告。
-  回归 `test_output_directory.py::test_missing_sources_are_reported_and_skipped_not_fatal`。
-- **W4 ConvRot 第三方槽位按用户裁定删除**（`config/deployment/variants/ref2va-w4-convrot.json`
-  移除；未知变体 404 `VARIANT_MANIFEST_UNKNOWN`）。2026-11-07「登记为显式未钉住候选槽位」
-  的描述自此失效；历史文档保留为记录。
-- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-14 大纲版本管理轮（用户报障：确认后保存新版本无进度/状态）
-
-- **未确认草稿不得顶掉确认依据**。`director/basis.py::outline_for_document` 改为优先返回
-  该文档**最新已确认**大纲；仅当从未确认时才回退最新草稿（legacy 无 document_id 回退保留，
-  且 legacy 已确认优先于本文档草稿）。修复前它取「最新非 stale」含草稿，使
-  `_confirmed_outline`/journey/分集/导演包在草稿挂起时全部翻成「未确认」。
-- **大纲接口暴露版本链**。`GET /director/outline` 增加 `versions`（同文档最近 30 版，含
-  approved/stale/user_edited/revision_of/confirmed/sha/created_at）并支持 `?artifact_id=`
-  读指定版本（404 具名）。确认仍走唯一 `confirm_outline_artifact`，旧版本不重写。
-- **面板以视图为当前版本真相**。`OutlineConfirmationPanel` 不再用任务附带的旧产物渲染
-  横幅/徽章/确认按钮；保存新版本后立即显示「待你审阅 · 用户编辑稿」+「当前确认依据是版本 X」
-  + 确认入口；版本历史折叠列表可「确认此版 / 查看正文」（旧版载入编辑器、以旧版 sha 保存）；
-  编辑器 dirty 跟踪，未改动不可保存。
-- **重新提取如实报告复用**。相同（剧本+锁定事实+provider）输入 `queue_outline` 复用旧
-  SUCCEEDED 任务（不重跑模型）；前端按回执区分：QUEUED/RUNNING=已排队，SUCCEEDED=「复用已有
-  大纲结果，没有重跑模型」，不再谎报排队。保存新版本是同步草稿创建，无需模型调用，文案写明。
-- 回归（定向，用户裁定不做全量）：后端 `test_director_streamline`（+版本链用例）/
-  `test_story_preparation`/`test_story_outline_unblock` 及 basis 影响面 6 模块共 85 例；
-  前端新增 `outlineVersions.test.tsx`（3）+ `storyOutlineUnblock`（7）+ 4 个入口文件 43 例；
-  tsc/build/Ruff 通过。浏览器真实 MiniMax 旅程：提取进度透传→确认 v1→保存 v2 草稿可见→
-  草稿挂起 journey 仍认 v1→确认 v2→相同输入复用提示。证据
-  `docs/ACCEPTANCE_20261114_OUTLINE_VERSIONS.md`。
-- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-14 大纲节奏三档 + 登场人物介绍（用户报障：大纲无人物介绍）
-
-- **三档节奏是请求身份的一部分**。`materialprep/pacing.py` 声明 compact/balanced/relaxed
-  （紧凑/均衡/舒缓），`normalize_pacing` 只认三档、其余回退 balanced。`queue_outline` 与
-  `_merge` 都把 pacing 计入身份：切换节奏=新大纲输入，不重用旧结果。
-- **节奏只塑造归并叙事，不碰事实**。merge system 追加节奏指令（紧凑=压缩 beats/快升级；
-  舒缓=氛围/内心停留/细时间线）；叶子事实提取与素材准备共用 `scenes.prepare_scenes`，
-  不受 pacing 影响。source 分段/锁定事实/人物编号/production_sections 均不变。
-- **登场人物必须有介绍**。`OutlinePart` 增加 `characters[{name,introduction}]`；merge 被要求
-  为每个真实登场人物写 grounded 介绍（不臆造传记）；最终 payload `characters` 带
-  `introduction`（merge 优先、回退叶子描述）+ `pacing`/`pacing_label`。
-- **正文渲染登场人物**。`outline_to_markdown`/`markdown_to_outline` 增加 `## 登场人物` 锚点，
-  往返无损；编辑只改介绍、保留 entity_id/stable_identity。
-- **前端三档选择器**。`constants.ts::pacingOptions`；`OutlineConfirmationPanel` 与
-  `StoryPreparationPanel` 提取时提交 pacing，横幅显示当前节奏标签。
-- 回归（定向）：后端 story/streamline/outline-unblock 33 例 + merge 影响面 8 模块 82 例；
-  前端 outlineVersions(+1)/storyOutlineUnblock/materialPreparation 32 例 + 3 入口 22 例；
-  tsc/build/Ruff 通过。浏览器真实 MiniMax：选紧凑→新任务→正文出现登场人物介绍+「紧凑剧情」。
-  证据 `docs/ACCEPTANCE_20261114_OUTLINE_PACING_CHARACTERS.md`。
-- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-14 P1 第二轮：资源整备与 H3 生产准入解耦（RTX 4070 实障）
-
-- **实障**：RTX 4070（12282 MiB）/ 32GB / 503GB 可用 / ComfyUI 已有 / H3 INT8 本机 3 个权重文件已找到，
-  勾选素材出图并点「确认并下载安装（约16.1GiB）」，**没有开始下载**，收到 `HOST_NOT_QUALIFIED`
-  并伴随 `[object Object]; [object Object]`。
-- **根因（前端）**：`SetupCenter.prepare()` 用**综合就绪**（`filesReady`，全局 L2 层）而不是
-  「用户勾了什么」来决定是否创建 H3 安装计划；409 抛出后整条链进入 `catch`，
-  **图片计划根本没有提交**。H3 计划还混入了审片组件，审片权重被 H3 显存门禁一起挡住。
-- **根因（后端）**：`deployment.resolve_variant()` 遍历**全部**变体 manifest，不以**清单**为边界，
-  "图片计划绝不绑定 H3 生产变体"只是组件碰巧不匹配，没有结构保证。
-- **根因（错误渲染）**：`api.ts::describeDetail()` 对 `blockers` 对象数组直接 `join()`
-  → `Array.prototype.join` 把对象 `toString()` 成 `[object Object]`，原因与数字全被吃掉。
-- **能力门禁（新增 `backend/shine/comfyops/capability.py`）**：能力由**服务端按清单**判定
-  （`CATALOG_CAPABILITIES` 登记「清单 → 能力 → 期望 catalog_id」，核对清单身份，
-  未登记清单一律 409 `CATALOG_CAPABILITY_UNKNOWN`）；`InstallPlanRequest.capability` 是
-  **声明**而非开关，服务端重推不一致即 409 `CAPABILITY_CATALOG_MISMATCH`。
-  **下载是存储行为、推理才是算力行为**：各能力自己的显存/内存门槛以
-  `runtime_requirements` / `runtime_advisories` **如实报告**（图片 15360MB/32768MB、
-  审片 VLM 8000MB、ASR 4000MB），门禁回到渲染器启动时，**不是被取消**。
-- **变体解析以清单为边界**：`resolve_variant()` 要求 `catalog["variant_id"] == manifest["variant_id"]`；
-  Qwen Image 清单没有 `variant_id` → 图片计划**结构上**不可能绑定 H3 生产变体。
-- **前端一份计划 = 一个能力**：H3 视频生成由「必装」改为**可勾选能力**（默认勾选）；
-  素材出图/画面审片/语音核对同理；一项能力失败被单独记账，**其它合法能力继续执行**；
-  H3 计划只在「权重确实不在本机」或「人明确要求重下」时创建；权重已在本机时走
-  **只读哈希核验 + 补充登记**，**核验没做完不会重新下载几十 GB**，只有哈希**核验不通过**才按清单重下。
-  H3 生产激活（受管实例 → 方案登记 → 配置 → 服务核验 → 激活）**只在勾选 H3 且其资源就绪时**进行。
-- **按钮语义**：按实际选择计算（"确认下载素材出图权重（约16.1GiB）"/"确认准备 H3 候选模型"/
-  "确认整备所选能力"/"自动补装缺失基础工具"/"确认并完成配置（不下载）"），并展示**分项下载量**
-  与**分项结论**；本机已有 H3 文件但硬件不达标时明说
-  「本机已有这套权重，但当前硬件不具备这一方案的正式生产准入条件」（不暗切模型、不自动改下候选）。
-- **顺带修复的上游回归**：`test_install_plan_qualification.py` 的
-  "unqualified host is refused" 在 `main`（`6fbf498`）上**本来就是红的**；
-  `cc618a2` 的生产门禁语义（生产变体 UNKNOWN 也拒绝）被 `89dbfd2` 误删了
-  `or not candidate_ack`。本轮**恢复**该条件（未改测试预期、未放宽任何资格检查）。
-- **回归**：新增 `backend/tests/test_setup_capability_gates.py`（21 例，CASE-01/02/03/04/05/07/08/10）
-  与 `frontend/src/test/setupCapabilityGates.test.tsx`（10 例，CASE-01/06/07/09）；
-  既有 3 个前端文件只更新按钮文案契约断言。PR #23
-  （https://github.com/anjingdtl/shine-video-studio/pull/23），PR 必要状态
-  L1/L2/Frontend build 全绿，合并 commit `afb596940f07ed71c82fc7cfb1ec9baf73df8cb0`。证据
-  `docs/ACCEPTANCE_20261114_P1_CAPABILITY_DECOUPLING.md`。
-- **既有失败（未由本轮引入）**：`test_deployment_recommendation`（2 例 RAM 门槛）与
-  `simpleAssets.test.tsx`（2 例素材锁定按钮）在未改动的 `main` 上同样失败（后者来自 PR #21）；
-  `test_sdk_role_process`/`test_v13_instances`/`test_runtime_activation`（5 例）是 2 核上并行跑时的
-  计时抖动，三个模块在本分支单独跑全过。本轮未动这些模块，也未用改测试预期的方式制造 PASS。
-- **真机边界**：云端无 RTX 4070，本轮全部是**注入硬件事实 + 端到端请求**验证，
-  **不构成任何真机生产通过结论**；Windows 真实安装（FFmpeg/PowerShell 补装、断点续传）
-  亦未执行。Qwen Image 清单自身要求 15GB 显存 / 32GB 内存，4070 **下载得到但跑不动**，
-  是否降档出图方案属产品裁定，不得私换模型。本轮未改 `worker.py`/`preproduction.py`，
-  不触发 VLM 重校准义务。
-
-## 2026-11-15 模拟测评团队轮（MiniMax Bot）
-
-- **团队已建成**：MiniMax Bot 插件内的「Shine 实景测评组」（group `grp_e251e930ccd2`，admin=Chief，
-  reply_mode=admin，用 `@名字` 交接）。名册：Chief（模拟测评总控，派发与汇总）、小导演（视频七阶段
-  主线测评）、美术师（素材与图片链路测评）、修复师（缺陷定位与修复，**唯一改代码**）、质检员
-  （只读复核与全量回归）。操作手册见 `docs/EVAL_TEAM_MINIMAX_BOT.md`。
-- **拟人化实操是硬要求**：成员在真实浏览器里以普通用户身份点按钮、填表单、逐个确认弹窗；命令行
-  只用于起停本机服务、只读查日志台账、改代码、跑回归。**禁止用 API 绕过界面推进业务**。
-- **隔离运行**：测评一律用 `.local-acceptance/<run-id>/` 数据目录与独立端口，不碰 `.local-data/` 里
-  用户的真实项目；浏览器驱动用 `uv run --with playwright==1.64.1`（Chromium 在 `%LOCALAPPDATA%\ms-playwright`）。
-- **所有权唯一**：代码只由 修复师 改（一次一个缺陷、必带定向回归）；测评员只写 `docs/TEST_REPORT_*`；
-  质检员只写 `docs/ACCEPTANCE_*`、只读复核，不合格即退回。
-- **诚实边界**：本机 mock 可用但 `h3_connected=false`、`production_mode=BLOCKED`；离线结果标"离线模拟"，
-  不得声称真实 H3 渲染或成片验收；未跑到的阶段写"未运行"。
-- **团队记忆**：成员用 `recall/remember(scope=team)` 共享运行配方、导航结构、已知坑点与回归口径
-  （键：`shine.env` / `shine.team` / `shine.journey` / `shine.rules` / `shine.language`）。
-- **沟通语言**：该团队一律使用**全中文**沟通与答复（群内发言、回执、报告、缺陷描述、结论）；
-  仅代码标识符、文件路径、命令、API 路径、错误码原文与产品专名保持原样不译。
-- **用户直接指挥**：用户可在「Shine 实景测评组」群里或与 Chief 单聊直接下达测评要求，
-  Chief 负责拆解、派发、汇总与回话；也可 @成员 或与某成员单聊，成员不擅自行动。
-- **共享环境红线（2026-11-15 事故）**：**绝不执行 `npm ci` / `npm install`**——它会先删掉
-  `frontend/node_modules`，本机在跑的 vite 占用 `esbuild.exe` 导致 Windows EPERM 失败，并会洗掉共享依赖、
-  打断用户与其他 agent 正在运行的工作台（该事故曾使 8000/5173 工作台掉线，后用 `npm --prefix frontend ci`
-  按锁文件还原修复）。**绝不抢占他人端口**（8010/5180 可能被别的 agent 建设占用，先查端口）。
-  要装依赖或起停工作栈，先问用户。隔离实例用 `scripts/start_eval_instance.ps1`（复用现有依赖，不重装）。
-- **端口实况随时变**：多套栈常并行（2026-11-15 06:25 实测为 8010/5180、8020/5190、8030/5200，5173 无监听），
-  起实例前先 `Get-NetTCPConnection` 查端口，被占用就换端口；最新实况记在团队记忆 `shine.ports`。
-  另：8000 曾被别的 agent 用 `python -m http.server` 直接服务仓库根，导致 `.env`、`.git`、`.local-data`
-  可被本机 HTTP 读取——此类静态根目录服务不得用于本仓库，发现即上报用户，不要擅自停止他人进程。
-
-## 2026-11-15 工作栈生命周期与全流程依赖一键整备轮
-
-- **页面 presence + 空闲自动退出**：App 根组件每 20s 向监督进程报 presence；watchdog
-  在「页面曾打开又关闭 + 无活工作」超过宽限（`SHINE_IDLE_SHUTDOWN_MINUTES`，默认 5，
-  0 关闭）后自动 `stop_shine.py` + `release_residual_backends.py`。活工作 = idle gate ∪
-  媒体活工作 ∪ 创意任务 ∪ 交付单 ∪ 安装 attempt；**在途生产不打断，无头/脚本用法不自动退**。
-  `WorkStackMonitor` 提供「停止后台并退出」与 Worker 停/启（行内二次确认）。
-- **Worker 级停/启**：supervisor `/stop-worker` 用临时单 entry manifest 做身份核验停止，
-  **不改真实 manifest**（整栈 stop 跳过 GONE、下次启动器对账重启）；`/start-worker` 持
-  startup guard 原子写回 owners。服务复核验可在产品内到达「API 活着 + Worker 停止」；
-  心跳 30s 自然过期，不伪造。
-- **节点白名单按磁盘目录解析**：`resolve_node_pack_dirs`（精确名 → 唯一归一化别名 →
-  missing 具名）；`generate_configuration` 白名单用目录名，H3 能力缺包具名
-  `NODE_PACK_DIRECTORY_MISSING`；adoption 指纹与 inventory 同口径，强度不放宽。
-  受管启动日志经 `SHINE_COMFY_LOG_FILE` + bootstrap `dup2` 落盘（env 不进 argv，
-  不改 recipe 身份）；`LIVE_WORKFLOW_CONTRACT_FAILED` 带 `renderer_log` 与 import 摘录；
-  新增只读 `GET /setup/renderer-log`。
-- **一键整备 INSTANCE 步**：`setup_preparation` 在单授权下驱动
-  CREATE→INSTALL_NODE→BIND_MODELS（`approve_lifecycle_plan` 与 API 审批共用许可规则），
-  下载字节进缓存后才批准（30 分钟执行窗不空烧），NEEDS_REVIEW 具名停交对账、不盲重试；
-  `prepare-plan` 增 `runtime_gap`（source/wheel/node 闭包 + 阶梯只读预览）。
-  导演 `#d/setup` 嵌入完整 `SetupCenter`（用户裁定），不建第二套安装器。
-- **迁移阻塞对象化**：`GET /settings/output-directory` 增 `blocker_details` 与
-  `worker_online`；面板列具体任务、给启动 Worker 与深链；安全门不变。
-- 本轮**未改** `client_review_identity` 钉住文件，不触发 VLM 重校准；历史校准未完成，
-  不得声称已校准。回归：新增 `test_supervisor_lifecycle` / `test_node_pack_whitelist` /
-  `test_setup_preparation_instance` + 定向 `test_output_directory` /
-  `test_setup_capability_gates`；前端全量 vitest / tsc / build；Ruff 干净。
-  真机边界：自动退出与 Worker 停启在开发机验证；裸机全链真实下载与收编机 L4 封存
-  在用户机执行并如实报告。证据 `docs/ACCEPTANCE_20261115_SETUP_LIFECYCLE_DEPENDENCIES.md`。
-
-## 2026-11-15 新装机全链路对抗性审查修复轮（唯一性原理）
-
-- **人工验收闭环**：导演模式「待你确认」此前是死状态（无动作入口），唯一审片入口在
-  专家层且每镜 10 项证据表。新增 `delivery_acceptances` 追加式台账（迁移
-  `f180e0010001`）与 `POST /deliveries/{id}/acceptance`：接受必须声明完整观看、
-  拒绝必须写原因、绑定看到的 SHA-256、文件改动/mock/已删除不得验收、request_id
-  防重放。最新决定生效、历史留痕；**不改写** job/门禁/装配 provenance。成片库、
-  分集总览、run summary、journey 叠加人工验收态（`accepted_episode_count`），
-  交付判定语义不变。前端 `EpisodeAcceptance` 接入待审清单/分集卡/成片库；
-  生成分段每镜新增「分项审片」入口复用 `OperatorReview`。
-- **播放性能与完整性**：`media/integrity.py` 分块哈希 + (路径,大小,mtime) 验证缓存；
-  镜头/成片路由不再每请求（含每个 Range 分段）全量读+哈希，加 ETag/304 与
-  `private, no-cache`（采用/重拍互换同路径文件，**不用 immutable**）。缩略图先查
-  ETag 再触文件，ffmpeg 直读已验证路径。篡改仍按原拒绝码拒绝。
-- **就绪度跟随选定变体**：`/setup/summary` 与 `/setup/reconcile` 增 `variant_id`；
-  h3 的文件系统事实与核验清单改用该变体自己的目录（图推导必需组件）。修复
-  「有 INT8 权重时选 W6A8 候选被报成已准备好、候选权重永不下载」的唯一性缺陷。
-  不传参数行为不变；未知变体具名 404。
-- **启动器存活判定唯一化**：install_once 的 API-only「已在运行」捷径改为委托
-  start_shine 三证（API+Web+监听 PID）与半死栈收尾；删除 `Test-ShineApiAlive`。
-- **工具门槛单一来源**：`tools-windows-x64.json` 增 `command_floors`（每命令一个
-  门槛，npm 与 node 版本号体系不同）；bootstrap.ps1 与 host_env 都从清单读取。
-- **指引**：errorActions 补齐 15 个装机/门禁拒绝码导航；summary 的 vlm/asr 标
-  `optional` 且机器级「唯一下一步」跳过可选能力；安装计划的 `runtime_advisories`
-  （显存/内存门槛对比）随下载结论展示；FilmCrewPanel 旧版密码框收进高级折叠。
-- **系统盘显式确认（用户裁定）**：单磁盘机器容量达标且显式确认（YES /
-  `-AllowSystemDrive`）后可装系统盘，180GiB 门槛不降；确认事实经
-  `SHINE_ALLOW_SYSTEM_DRIVE=1` 与 `deployment-storage.json` 贯穿三处守卫。
-- 本轮**未改** `worker.py` / `preproduction.py` / handoff / quality 客户端，不触发
-  VLM 重校准义务；历史校准仍未完成，不得声称已校准。12GB 显卡真机路径与 W6A8
-  候选激活仍 BLOCKED/NOT_RUN（本轮只做诚实指引）。证据
-  `docs/ACCEPTANCE_20261115_FULL_CHAIN_ADVERSARIAL_FIX.md`。
-
-## 2026-11-15 出图渲染器崩溃取证与不再无限等待轮（用户报障：图片工坊被阻滞）
-
-- **阻滞事实**：受管出图渲染器启动后进程消失（`torch_cpu.dll` / `c10.dll`
-  `0xc0000005` 原生崩溃），8188 空，图片工坊停在「等待本机能力验证」，
-  《诊断日志》里的三条 `SUBMITTED` attempt 无终态。原生崩溃本身发生在
-  用户机的 torch/自定义节点组合里，**本轮不声称已修复该原生崩溃**。
-- **启动不再空等十分钟**：`image_renderer._wait_for_owned_listener` 改为轮询
-  受管进程组的退出状态；整组退出即以具名码 `IMAGE_RENDERER_EXITED_DURING_STARTUP`
-  + 内核退出码失败，不再用监听超时掩盖崩溃。运行中的进程组永不被判为崩溃。
-- **崩溃可取证**：每次启动把**启动参数**（解释器、argv、工作目录、端口、
-  `PYTHONPATH`/`PYTHONHOME`/`VIRTUAL_ENV` 等解释器环境、recipe/adapter 摘要、
-  固定的 torch wheel）随启动记录落盘；失败与消失时记录内核退出码。
-  新增只读 `GET /setup/renderer-evidence` 与
-  `image_renderer.renderer_crash_evidence`（含渲染器日志尾部与 import 失败摘录）。
-  交接令牌等环境**值**不落盘，只留变量名。
-- **阻塞具名**：渲染器可证明消失时，出图就绪度报 `IMAGE_RENDERER_GONE`
-  （附退出码、日志路径与启动参数），不再折叠成 `IMAGE_GRAPH_NOT_VERIFIED`；
-  启动期退出保留自己的具名码。`/setup/image-readiness` 与前端三处码表
-  （`AssetsWorkspace` / `api.ts` / `ImageCapabilityCard`）同步登记。
-- **attempt 必须有终态**：渲染器在 `/prompt` 之后消失时，
-  `materialprep` 与 `asset_center` 两条出图路径都把 attempt 落到
-  `UNKNOWN`（`RECONCILE_REQUIRED`）并把条目置 `NEEDS_REVIEW`，
-  错误码为 `IMAGE_RENDERER_GONE`；原始异常类名留在 attempt payload 里。
-  未证明消失时保持 `IMAGE_OUTCOME_RECONCILIATION_REQUIRED`。**不自动重投**，
-  对账仍由人发起（`reconcile_run` / 资产中心对账动作）。
-- 本轮**未改** torch/triton/自定义节点的安装与版本策略，**未改**显存门槛与
-  变体契约（`min_free_vram_mb` 仍为 8000），**未改** H3 受管渲染器生命周期、
-  `owned_process` 的 Job Object 与钉住文件机制，**未改**任何验收/准入门禁。
-  回归：新增 `test_image_renderer_crash_evidence`（9 例）+ 前端
-  `imageWorkshopBlockers` 两例；后端 8 分片全量 + 前端全量 vitest/tsc/build；
-  Ruff 干净。**真机边界**：原生崩溃的最终定位与修复仍需在用户机执行——
-  用 `GET /setup/renderer-evidence` 取到的启动参数、退出码与日志尾部，
-  与最后一次成功启动逐项比对（解释器归属、torch wheel、自定义节点版本）。
-  证据 `docs/ACCEPTANCE_20261115_IMAGE_RENDERER_CRASH_EVIDENCE.md`。
-
-## 2026-11-15 拍摄提示词调优轮（编译器 1.3.0：正向音频合同，扫清不明语言旁白）
-
-- **不明语言旁白的诱导源是固定句式的否定枚举**。≤1.2.3 的禁声/语言合同点名
-  "narration, voice-over, whispering, mumbling, singing, humming…"；视频模型把
-  枚举当渲染概念而非禁令，且这些概念没有语言锚点，于是随机语言发声。
-  `H3PromptCompiler` 1.3.0 把音频合同改为**正向描述**：无对白镜头只陈述
-  "没有对白、声带全非人声"；有对白镜头锚定 "Every voice in this shot speaks
-  {language}"，唯一能听到的词是被 `<d>` 标记的台词原文。配乐句只留
-  "Instrumental only."，音频参考保留句改为非人声环境声/台词音色的正向表述。
-- **历史版本逐字节不变**：`LEGACY_SOUND_COMPILER_VERSION=1.2.3` 与
-  `legacy_sound` 门控保留全部旧句式；1.2.1/1.2.2/1.2.3 重编译仍得原哈希，
-  已落库请求的 provenance 校验不受影响。`KNOWN_COMPILER_VERSIONS` 保证历史
-  版本回执如实报告自身版本号。规则包钉住、章节顺序、`<d>` 标签格式不变。
-- **旁白功能不变**：用户开启的画外音（`narrator.py`）照常走语言标签，并被
-  新的语言锚点覆盖；冻结风格声音维度仍只在有对白镜头引用。
-- 回归：`test_h3_compiler.py` 30 例（含诱导词表反例与 5 组镜头 × 3 历史版本
-  的 SHA-256 基线）+ 35 模块定向 4 批共 473 例全绿；Ruff 干净。未改
-  `worker.py`/`preproduction.py`，不触发 VLM 重校准。**真机边界**：离线测试
-  不能证明 H3 不再发出旁白，需在用户机以 1.3.0 重新出片并人耳核对；历史成片
-  不重写。证据 `docs/PROMPT_TUNING_20261115_NARRATION_PRIMING.md`。
-## 2026-11-15 解阻滞轮（用户报障：三个地方各说各话 + 目录迁移卡死 + 总是准备不好）
-
-用户原话：「这三个板块就不能合并到一起，减少用户的阻滞吗」「我都不知道哪个地方还有镜头，
-一直卡在这里没办法迁移目录」「能不能解除这些乱七八糟的阻滞点」。本轮把「人看得见、
-动不了」的死路逐条拆掉，每条都留了回归。
-
-- **三处配置面板只有一份结论**：新增只读 `GET /api/v1/setup/verdict`，由
-  `summarize_production_mode` 同一个函数算出（mode/label/detail/action/code/
-  runtime_status/services_verified/validation_blockers）。右上角徽标、导演模式
-  「基础配置」、专业模式「设置」全部改读它；此前徽标读 `/system/status`、
-  基础配置读 `system.production_mode`、专业设置读 `/setup/runtime`，三处各自
-  推导，导演说环境 OK、专业说不行。`api.ts` 新增 `SetupVerdict` 类型。
-- **停泊镜头不再堵死输出目录迁移**：`REPAIR_PENDING` 从「在跑的工作」里移除
-  （它不占租约、不占渲染器、不占队列，也写不出字节）。此前一个停泊镜头就让
-  「迁移目录」永远 409，且面板只给任务 id，人根本找不到是哪个作品的哪个镜头。
-  阻断面板现在报出 `project_title` / `shot_name`，并指到「视频生产」页处理。
-- **失败的「可选审片模型」下载不再冻结整台机器**（两处）：
-  - `setup_preparation._live_installation_work` 只把 `QUEUED/SUBMIT_INTENT/
-    INSTALLING` 算活工作，并跳过全是可选审片组件（VLM/ASR）的计划；
-  - `runtime_configuration.require_idle_configuration` 里 `FAILED_RECONCILE_REQUIRED`
-    只在「还占着租约」或「计划里有非可选组件」时才算活工作。
-  实障：一次 `UNTRUSTED_DOWNLOAD_URL` 的 ASR 下载失败后，服务核验、运行配置激活
-  与真实制作徽标全部永久拒绝，而页面里没有任何地方能清掉它。
-- **Windows 上 npm 探针永远失败**：`host_env` 用 `subprocess.list2cmdline` 转义
-  `.cmd` 里的引号，cmd.exe 不认那个转义，报「找不到网络路径」，于是 npm 永远
-  判为缺失 → L0 阻断 → 整条基础配置走不通。改为把整条命令行交给 cmd.exe 执行。
-  真机复测：npm 11.14.1 present=True、版本达标。
-- **文本通道不再长时间空转**：materialprep 通道既不给输出上限也不走流式，
-  MiniMax 在空连接上反复思考 319 秒后被网关切断 → `LLM_CONNECTION` +
-  `external_outcome=UNKNOWN` → 大纲任务要人工对注重试。现在非创作类调用一律带
-  `completion_cap + streaming + reasoning_effort=low`（同一请求实测 11–16 秒
-  返回；不给上限时 315 秒空转后被切），创作类保留模型自己的思考预算但强制流式。
-  `apply_output_budget` 同步带上 `reasoning_effort`，否则上限不可用。
-- **授权重试不再毁掉失败尝试的证据**：`llm_call_attempts` 一行 = 一次物理请求，
-  查表键加入 `task_id`；新尝试没有错误码时清空 `error_code`。此前重试会覆盖
-  失败行，把 UNKNOWN 的证据抹掉。
-- **监督进程的重启不再永久卡住**：`shine_supervisor._run_restart` 把启动器/停止器
-  的输出改写文件而不是管道——被启动的整栈会继承管道句柄，监督进程就永远等不到
-  EOF，重启状态卡在「starting」，之后每次重启都被判为「进行中」。另外停滞超过
-  15 分钟的重启作废重开（页面有唯一入口，不能被一次卡死锁住）。真机复测：重启
-  18 秒完成并回报「后台已重启」。
-- **停 Worker 后立刻算离线**：监督进程停止 Worker 时直接把它的记录写成
-  `stopped`；前端 `stopWorkerAndWaitOffline` 等的是后端自己的判断，而不是进程
-  消失。此前进程刚停、心跳还有 30 秒才过期，服务核验会以「Worker 还在」再拒
-  一次，人点同一个按钮再得到同一个答复。
-- **裸错误码也要带出 code**：前端 `api()` 只在 `detail.code` 是对象字段时才记
-  code，裸字符串 detail 被丢掉 → 页面上「停止 Worker 并继续验证」这个恢复入口
-  永远不出现，只剩一句让人自己去找开关的说明。现在裸码按码形状取回。
-- **一键准备完成后 Worker 自己回来**：专业设置「一键准备」成功后会恢复 Worker
-  （此前核验前置把 Worker 停下后就没有人叫它回来，关掉页面本机就没有后台了）。
-- 本轮**未改** H3 渲染器生命周期、变体契约、显存门槛与四阶段提示词；**未改**
-  真实推理质量，只恢复「能走通」。回归：新增/修改
-  `test_output_directory.py`（停泊镜头不阻断 + 面板报出作品与镜头）、
-  `test_idle_configuration.py`（可选审片下载不阻断 / 生产下载仍阻断 / 占租约仍阻断）、
-  `test_supervisor_lifecycle.py`（停掉的 Worker 立刻离线）、
-  `test_supervisor_restart.py`（启动器不写管道 / 停滞重启不再锁死）、
-  `test_literary_governor.py`（结构化调用带上限与传输 / 创作类保留思考预算）、
-  `test_literary_transport_and_ledger.py`（重试不抹掉失败证据）、
-  `test_host_tool_resolution.py`（带空格的路径下真的跑起来）、
-  `frontend/src/test/apiError.test.ts`（裸码带出 code）。
-
-## 2026-11-15 分镜链真跑轮（用户授权继续：从第 2 场卡点一路推到落镜）
-
-线上事实：第 2 场连续 4 次被拒，页面只写「CONTRACT_OR_POLICY_REJECTED」，重试一次买一次。
-逐条查下来是五个独立缺陷叠在一起；每条都先写红测试再修。
-
-- **输出上限被思考吃光**：分镜链的五个工种走 `complete_for_role(precompiled=…, budget=…)`，
-  这条预编译路径只带 `completion_cap`，不带 `reasoning_effort`（governor 那条路带）。
-  MiniMax-M3.1-flash 于是把 6916 的额度全花在 reasoning 上：`finish_reason=length`、
-  `provider_text_chars=0`，连一个可见字符都没有；把上限抬到 19660 后同样耗尽 10 分钟。
-  现在网关在「有 completion_cap 且预算没点名 effort」时补 `reasoning_effort=low`
-  （profile 或预算自己写了 effort 的仍然优先）。实测：同一场从 8–10 分钟降到数秒。
-- **引文被当成中文散文**：第 2 场的英文 beat 自己就把刻字写成 `“沈禾”`（弯引号），
-  而 `VISUAL_TEXT_MUST_BE_PROMPT_LANGUAGE` 只剥 `"…"` 与 `「…」`。忠实照抄这段引文的
-  英文画面描述被判中文，重试三次都判同一条。现在 `descriptive_text()` 统一剥掉
-  `<d>`、ASCII 引号、`「」`、`“”`、`‘’`、`『』` 六种引法；裸中文散文仍然拒绝。
-- **重试会忘掉刚学到的教训**：同一次请求内 attempt 1 因截断（LLM_FORMAT）失败时，
-  attempt 2 会把 `repair_visual_language` 覆盖回 False、把修注换成截断注，于是第二次
-  调用又把中文写回去。现在修注是累积（OR + 去重追加），不会被后一条失败抹掉。
-- **落镜失败只报 `HTTPException`**：五个工种全成功后落镜闸门用结构化 detail 拒绝，
-  `streamline` 只认字符串 detail，于是 `error_code=HTTPException`，阻断面板的
-  `rejections` 是空的——人看到「这一集被阻塞」却没有任何原因。现在 `_fault_code()`
-  从 `detail.code` 取具名码，并把这条拒绝写进该集的 blocker。
-- **落镜重试被自己的旧记录卡死**：落镜失败后运行仍留着上一次工种拒绝的 `failed_task_id`，
-  而那条记录早被这次重试自己 SUPERSEDED 了；重试于是每次都撞
-  `STORYBOARD_UNKNOWN_REQUIRES_RECONCILIATION`（对着一条已被替代的记录）。现在：
-  1) SUPERSEDED/不存在的失败指针按历史处理（不是未决拒绝，也不触发未知对账）；
-  2) 落镜故障单独记 `pending_landing`，重试直接复用五个已完成的工种产物重新落镜，
-     不买任何新模型调用；同一份产物第二次仍被拒时才丢掉它、下次重试重新问工种。
-- **页面话术跟着事实走**：阻断面板新增「落镜」归属，落镜故障时说明「重试会复用已完成
-  的工种结果，只重新落镜」，而不是假的「重试会发起一次新的模型请求」。
-- 回归：`test_llm_gateway.py`（预编译结构化预算必须带 bounded effort / 显式 effort 保留）、
-  `test_film_crew.py`（弯引号引文通过、裸中文仍拒且拒因具名到字段）、
-  `test_director_streamline.py`（落镜故障具名 / 落镜重试零模型调用 / SUPERSEDED 指针不设闸）、
-  既有 `test_a_truncated_retry_does_not_drop_the_lesson_it_was_told`。
-  前端 `vitest` 435 例全绿。
-
-## 2026-11-17 ⑥页投影实时收敛与验收提示归位（用户报障：拍完仍显示拍摄中/没有当前有效成片）
-
-- **⑥ 的集卡、右轨、运行卡必须同读一份实时事实**。App 层 journey/overview 此前只在
-  手动刷新/动作回调时重读，而 jobs 有 3s 轮询：后台运行完成后运行卡是新的、集卡与
-  右轨却停在旧事实（「拍摄中 0/6」「还没有当前有效成片」×6）——一套事实多处显示的
-  反例。现在 `productionMoving`（本次 run 活跃，或存在排队/生成中任务）驱动每 5s
-  跟读 journey/overview，停止后再收敛读一次；`DirectorShootPanel` 的运行卡经
-  `refreshEpoch` 同节奏刷新。跟读只更新事实、不重置 loading 态；读失败保留上一次
-  真实投影，手动重试另有入口。没有运行时不启动跟读（不空转请求）。
-- **最终验收的提示与动作只在⑦后期成片（与成片库）**。⑥ 任务明细的 `pending_review`
-  徽标改为指向事实「最终验收在⑦后期成片」；⑥ 集卡已交付的 footer 由「等待下一步」
-  改为指针「到『后期成片』播放并确认」；run 模式分支不再渲染验收徽标/「观看并确认」。
-  ⑦ 的待审清单、「观看并确认」与按镜网格不变。
-- 回归：`frontend/src/test/productionProjectionRefresh.test.tsx`（2 例：后台完成后
-  三处一起收敛、无运行不轮询）。前端全量 vitest 77 文件 / 393 例、tsc、build 全绿；
-  真实浏览器复测⑥全绿（7/7 阶段、6/6 镜、已交付 1 集、右轨无待处理），⑦验收入口齐备。
-- 本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-17 素材缺口/一次采纳/字幕剪辑表/整备一条链（本轮新增）
-
-- **每镜素材需求只读一份逐镜裁决**。`director/requirements.py` 不再用「这一场有没有素材」
-  决定是否补场景参考；只有 journey `_shot_material_problems` 报 `SHOT_REFERENCE_MISSING`
-  且本镜自己没有任何可绑参考（人物/场景；道具不算）时，才按真实场次标题补该镜的场景
-  需求，已有同名场景主素材时直接复用。已有参考的镜头不生成填充图。
-- **同一镜的素材一次采纳、一次写入**。`materialprep/service.py::bind_adopted_masters_to_shots`
-  先把同一镜的全部确认合成为目标集合，再写一次 `shot.bindings` 并同步一次
-  `required_asset_ids`；同一人物/场景换主素材只留新的那份，其他有效引用保留。
-  绑定相等判定复用 `services.bindings_unchanged`（读取前从台账重读），重复确认不写第二遍。
-  冻结/在途/已通过镜头仍受 `protected_shot_ids` 保护。
-- **⑦ 字幕与装配读同一张实际剪辑表**。`director/subtitles.py` 沿当前所选成片版本的
-  `ProductionRunEpisode.delivery_order_id` 读 `DeliveryOrder.edl_payload`（只认
-  `DELIVERED`），按真实顺序与 `in_s`/`out_s` 计算时码；换版只跟随指针，重新装配仍复用
-  原镜头产物。六镜成片第 6 镜起点 49.912s（计划值 49.000s 不再使用）。
-- **检索 → 核验 → 复用 → 下载一条链**。添加目录走同一个 `_queue_scan`（有种子即 `QUEUED`）；
-  显式重检索按 `rescan` 重走用户目录与固定盘；`reconcile_installation` 消费
-  `resource_discovery.verification_candidates`，命中则登记并把字节复制进现有缓存，
-  `create_install_plan` 的 `download_bytes` 为 0。`setup_summary` 只用当前证据
-  （`verify_receipt` / `cache_candidates`）判定 `FILES_FOUND`/`FILES_VERIFIED`，
-  `in_place` 才从缺件里排除；旧 `ModelPackage` 登记不再压制缺件。
-- **基础配置只有「一键准备」一个执行入口**：`RECONCILE` 与审片/语音下载都提交
-  `/setup/prepare/execute`，进度读已有安装记录。`worker.py::run_configured_once` 里
-  文本队列先于资源扫描（突发窗口仍放行扫描），整备 `:waiting` 与只搬可选审片字节的
-  安装计划（`deployment.review_only_plan`）不再独占 tick。
-- 回归：`test_material_shot_scene_gap`（2）、`test_material_adoption_one_write`（5）、
-  `test_episode_subtitle_cut`（3）、`test_setup_chain_convergence`（4）、
-  `test_worker_batch_priority`（6）、前端 `setupSingleExecutor`（2）。验收记录见
-  `docs/ACCEPTANCE_20261117_R3_MATERIAL_SETUP_UNIQUENESS.md`。
-
-## 2026-11-17 环境整备状态随机器走 + 钉死路径专项排查（本轮新增）
-
-- **配置身份只比机器事实**。`runtime_configuration._CONFIGURATION_FACTS`
-  （`instance_id` / `instance_sha256` / `catalog_sha256` / `recipe_sha256` /
-  `comfyui_base_url`）+ 安装态钉住文件摘要集合，构成唯一裁决 `same_configuration`。
-  数据目录被复制、改名、换 worktree，只要这五项与安装字节不变，就仍是同一套配置；
-  徽标保持「真实制作已就绪」，不再每次启动都要求重走基础配置。
-- **仓库自带脚本不算安装事实**。`_workbench_pin_names` 把
-  `scripts/managed_comfy_bootstrap.py` 与 `scripts/local_review_isolated_server.py`
-  排除在比对之外：它们随产品版本升级，改代码不该让整台机器「环境失效」。
-  审片 `manifest`（`asr.json`/`vlm.json`）仍计入，它变了要重验。
-- **配方里的绝对路径是书签**。`load_managed_recipe(..., anchor=...)` 先按磁盘字节
-  校验 `expected_sha256`，再递归把文档里的绝对路径锚定到现位置；
-  `_recorded_roots`/`_anchored` 只处理「旧 `<data>/comfyops`」与「旧仓库根」两处会搬的根。
-  于是配方字节不变时，渲染器拿到的是**现位置**的 bootstrap、runtime 目录与审片清单。
-- **一条读取链**。`recipe_path` / `RECIPE_RELATIVE_PATH` 只在 `managed_recipe` 定义一份；
-  `load_runtime_recipe(settings, expected_sha256=, path=)` 是唯一入口，返回
-  `(recipe, sha256)`。`service_validation`、`worker._managed_recipe`、`image_renderer`
-  全部改走它，`identity["recipe"]` 这种「记录路径当可访问路径」的读法已删净。
-- **证据封条只封机器**。`configuration_fingerprint(identity)` 只含上面五项事实；
-  读取时同时接受旧口径 `graph_hash(identity)`，旧证据继续有效，不逼操作员重验。
-- **钉死路径后续复验**沿用上面的「新机安装、仓库搬迁与主分支交付」处理方式。
-  R4 覆盖受管运行配方与安装事实。启动器、依赖锁、GitHub Actions 和维护脚本的复验见
-  [主仓可移植性验收](docs/ACCEPTANCE_20261117_MAIN_PORTABILITY.md)。
-- **固定规则（不再犯）**：修复与验证一律在**主仓原地、当前分支**上做，不新建 worktree、
-  不新建副本、不把运行配置指向 `.local-acceptance`；记录进台账的绝对路径一律视为书签，
-  下次启动按现状解析，不要拿它直接当可访问路径。
-- 回归：`test_runtime_identity_relocation`（8 例，含「配方内部路径全指向已删除 worktree」
-  「仓库启动器升级不算环境变化」「重新封印后搬家仍 READY」）。行为级基线红→绿用
-  `.local-acceptance/_repro_relocation.py`（只用 `resolve_runtime`/`runtime_report`）。
-  验收记录见 `docs/ACCEPTANCE_20261117_R4_RUNTIME_IDENTITY_RELOCATION.md`。
-- **锚定的裁决是「当前数据目录优先」**。`_anchored` 只要求「当前 `<data>/comfyops` 下
-  有对应文件」就用它，不再先看记录路径是否存在——否则「刚复制完、源目录还在」的迁移
-  中间态会继续指回旧目录（实测报 `ADOPTED_RUNTIME_DATA_ROOT_INVALID`）。记录路径只在
-  当前目录缺这份文件（部分复制）时回退。
-- **生产数据目录不放在 `.local-acceptance/`**。那里是验收隔离目录（`SHINE_DATA_DIR=
-  .local-acceptance/<轮次>`），语义是「可按轮次清理」。日常运行目录用独立位置
-  （本机现为 `D:/Shine/data`）；迁移用 `robocopy /E` 复制、逐项比对文件数与字节后
-  再删源，改 `.env` 的 `SHINE_DATA_DIR` 即完成。删源前确认库里没有素材路径引用旧目录
-  （素材按相对路径存于 `<data>/assets`）。
-
-## 2026-11-17 能力卡缺件与文件裁决同源轮（用户报障：已核验却报缺件 / 审片 0 GiB 缺件 / 整备停步裸 ValueError）
-
-- **缺件表与「① 文件」是同一个裁决**。`capability_report` 对每个文件只分类一次：
-  `missing_files`/`missing_bytes` 只列**需要外取**的字节（未落位到消费根、本机无有效
-  核验凭据、也不在缓存），供卡片显示与下载体积预览；`unplaced_files` 是「尚未落位到
-  消费根」的全集（含本机还没有的字节），供执行者建计划——缓存/凭据命中下载 0 字节，
-  执行的是本地放置。已核验但未落位的字节不得在「文件已就绪并核验」旁边再报缺件；
-  落位/绑定是②的问题，由同一个「一键准备」完成。`prepare-plan` 与 `_step_download`
-  的组件取两者并集，下载体积只算 `missing_bytes`，与卡片同一个数。
-- **审片能力（vlm/asr）的 presence 与 `advisory_review_readiness` 同根**
-  （`isolated-packages/<component_id>`），不再读 ComfyUI 的 models 目录；②的原因挂
-  同一份审片就绪裁决（模型文件计数 + 缺的运行时包），不在卡片里另写推断。
-- **H3 缺件表与事实层跟同一份「图真正加载的组件」**：有作品时基线 binding 解析前移，
-  图不加载的可选 LoRA 不进缺件表；显式 `variant_id` 行为不变，读不到的基线回退默认
-  清单并由台账层具名。②的原因挂 `variant_readiness.next_step` 既有的唯一下一步
-  （如 `WEIGHTS_NOT_BOUND`），卡片不再丢弃它而显示通用句。
-- **整备停步的具名码必须到达页面**：安装链的拒绝是裸 `ValueError`、具名码在 message
-  里，`_code_of` 按码形状取回（与前端裸码规则同口径）；前端失败块挂 `describeBlocker`
-  （新增 `INSTALL_APPROVAL_REQUIRED_OR_PLAN_HASH_CHANGED` 映射：再点一次一键准备会
-  重新批准同一份计划并从停下的步骤继续），不再显示「ValueError」。批准不提交即回滚
-  的根因早前已修（见 `test_machine_progress`），本轮收敛的是显示与缺件裁决。
-- 回归：`backend/tests/test_setup_missing_verdict.py`（6 例）、
-  `test_setup_chain_convergence` 缓存字节断言迁移；前端 `setupMissingVerdict.test.tsx`
-  （3 例）。前端全量 80 文件 / 402 例、tsc、build、Ruff 干净；后端定向 9 模块全绿。
-- **真机边界**：报障截图来自远端旧包；本轮无新真实 H3 出片，远端 DOWNLOAD 停步是否
-  在新包复现待真机复测。改动未触及 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-17 supervisor 归入同一停止链（远端报障：uv sync 替换 brotli 时 os error 5）
-
-- **残栈 supervisor 是依赖替换的锁持有者**。它故意不在 `processes.json`（重启不被
-  自己杀掉），但完整停止此前也不收尾它：它用本 checkout 的 venv 持有 site-packages
-  DLL，下次 `uv sync --locked` 换包即「拒绝访问 (os error 5)」，唯一启动入口停死并被
-  误导向 bootstrap.ps1。
-- **一个停止执行者**：`stop_shine.py` 新增 `stop_supervisor`，复用同一条
-  `stop_manifest` 身份核验停止路径；归属证明 = 记录里的 birth（新记录写入 birth 与
-  repo_root），旧记录用记录端口自己的 `/health`（role/pid/repo_root/data_dir，
-  health 新增 pid）证明后才停；证明不了就保留记录、不碰进程。
-- **自发起停止带保留标记**：supervisor 的 `_run_stop`/`_run_restart`（含重启时拉起的
-  start_shine 子进程）带 `SHINE_STOP_KEEP_SUPERVISOR=1`，重启不会杀掉驱动重启的自己；
-  用户双击启动不带标记，残栈 supervisor 必须被收尾。
-- **启动器残栈收尾认 `supervisor.json`**：没有 manifest 但有 supervisor 记录时也先走
-  同一条 stop_shine 收尾再 `uv sync`；依赖失败给具名指引（占用依赖文件→同一条停止
-  命令收尾→重试本入口），不再误导 bootstrap。
-- 回归：`backend/tests/test_supervisor_stop_convergence.py`（6 例，含真实进程停止、
-  旧记录 health 证明、拒绝保留、标记传递、启动器契约）；隔离目录真机验收
-  `.local-acceptance/sup-stop-20261117/accept.ps1`（首启→页面级停止留 supervisor→
-  无 manifest 再启必须先收尾 supervisor→完整停止后记录与端口全清）。
-- 顺带：`stop_shine.py` 的 `UNKNOWN` 判定显名化（它是模块对外契约，测试用作 classify
-  结论），不再是被 Ruff 报-unused 的悬空导入。
-
-## 2026-11-17 端口归属与身份收敛轮（用户报障：验收残留接管日常入口、进度 20% 卡死）
-
-- **机器默认入口端口归日常配置的数据目录**。`start_shine.ps1` 用同一配置解析器解析
-  `$dailyDataDir`；非日常目录且未显式 `-ApiPort/-WebPort` 时 `$reserveDefaultPorts`
-  生效：候选排除 8000/5173、从 +1 起找空闲端口。验收/隔离实例哪怕端口空闲也不得
-  接管用户入口（事故根因：并行会话的 accept4 残留在日常栈倒下时占走 8000/5173，
-  浏览器读验收空台账，20% 永不动、「启用真实制作」只是跳转故无反应）。
-  实测：默认端口空闲时隔离实例让位 8002/5175。
-- **supervisor 栈死收回端口声明**。`shine_supervisor.py::_stack_live` 是唯一存活裁决
-  （记录的 API listener PID/birth 必须仍是同一进程）；`/health` 栈死时 `stack=down`、
-  `api_port/web_port=null`；`/lifecycle.stack_running` 与 watchdog 同读它。残栈
-  supervisor 不再永久声明入口端口。
-- **服务栈自报身份，监督流量跟随**。`/system/status` 增 `data_dir` 与
-  `supervisor_port`（读自己的 `run/supervisor.json`，唯一事实）；顶栏在线灯旁显示
-  当前数据目录；前端 `noteSupervisorPort` 使 presence/重启/停止跟随服务栈自己的
-  supervisor，硬编码 8790 降为旧栈回退。读错台账时人一眼可见。
-- 回归：`test_supervisor_lifecycle`（+2）、`test_supervisor_stop_convergence`（+1
-  端口保留契约）、`test_system_status_identity`（新增）、前端
-  `dataDirIdentity.test.tsx`（新增 2）；定向后端 68 例、前端全量 81 文件/404 例、
-  tsc/build/Ruff 全绿；隔离浏览器实测顶栏 `D:\Shine\data`、真实制作已就绪、14 个真实作品。
-- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-18 接手轮（整备 60% 解阻、恢复入口解互锁、管家口径收敛）
-
-- **同一授权失败后续跑**：`setup_preparation.enqueue` 对 FAILED/CANCELLED 且请求身份完全一致的任务走
-  `_resume_stopped_task`——同一 task_id 从首个未完成步骤继续，DONE/SKIPPED 与回执保留，
-  旧 claim/租约/supervisor 委托失效；不同请求仍 SUPERSEDED。新审计码
-  `SETUP_PREPARATION_RESUMED` 已登记前端 `auditEventCodes.json`。
-- **停摆安装对账与人工对账同一套硬校验**：`reconcile_stopped_isolated_attempts` 复用
-  `reconcile_failed_install` 的 plan/attempt 摘要、executor/isolated、逐包 spec 校验；
-  观察循环包 savepoint（坏包不留部分晋升）；收尾时 status 与 stage 一次写成
-  `RECONCILED_NO_RETRY`（`installation.TERMINAL_STAGES` 收录该值，`attempt_view.terminal` 一致）。
-- **租约释放只认本租约目标证据**：`workflow_validation:*` 需要
-  `validate_registered_workflow` 落的 `workflow-validation:<lease_id>` journal 三证
-  （PID/birth + named Job Object + 端口空闲）；无 journal 的旧记录保留核对，全局端口空闲不再是释放证明。
-  `image:*` 仅在「无任何 image 启动 journal + 无在途 image 工作 + 全机静默」的启动前证明下释放。
-- **已结清失败史不再永久挡取消/恢复**：`production/runner._job_submission_settled`（终态 + 无活租约 +
-  最新核对结论非 `requires_reconciliation`，或无外部 ID/ack/graph/submit-intent 硬证据）；
-  `_series_has_unreconciled_submission` 跳过已结清，cancel 与 `resume_series_in_session`
-  （新接受已证结清的 NEEDS_REVIEW 序列回 QUEUED）共用该裁决；真正未决仍具名拒绝。
-- **P4 收敛**：`runtime_orchestrator/executor._reconcile` 把「三证死亡」的独占租约委托给
-  Worker 恢复拍同一个 `reconcile_dead_renderer_leases` 收尾后重读事实；不新增第二条释放链，
-  活渲染器/归属不明/PID 重用保护不变。
-- **Worker 每 tick 一个职责一次**：控制操作只在 `_reconcile_pre_runtime_control_and_leases`
-  推进（前置 storage-migration 守卫），`_run_configured_once` 里的重复调用删除；runtime 失效时
-  安装/整备/文本队列照常。异常分支的图片小样只跑本任务 `image_sample_run_id` 的 run
-  （`run_pending_image_items(run_id=…)`，run 范围内不回退无关 LibraryRenderTask）。
-- **搬迁容忍唯一判定**：`instances.relocated_managed_root`；`configuration_identity` 与
-  `deployment.generate_configuration` 两个消费点同用，受管自有行搬迁后按当前锚定读写。
-- **管家口径**：`STRATEGY_RENDERER_OBJECT_INFO_UNAVAILABLE` 精确映射（预检不可达≠缺节点，
-  关键词 `object_info_unavailable` 不再落 NODE_MISSING）；`idle_blockers` 读取失败是
-  `None`（无法核实），诊断区分「无法核实/为空/逐项」，`root_cause_confirmed` 只授予权威读取事实；
-  取消 run 的建议只指向实际阻塞配置门禁的 run。
-- **P2 结论**：默认 1344×768/24fps/17k+5 是钉住的产品事实（`test_output_spec_and_identity` 锁定），
-  容量门禁需真机实测登记目录后由既有 production admission 消费；不得单机实测写全局上限、
-  不得静默降分辨率。
-- 回归：五个复现 8 红测转绿；定向 25 模块全绿；8 分片全量与前端 433 例/build/tsc/Ruff/
-  Copilot `--check`/Alembic 干净；隔离旧库 `f180b0010001→f180f0010006` 由实际启动器完成。
-  证据：`docs/ACCEPTANCE_20261118_TAKEOVER_RECIPE_UNBLOCK.md`。本轮改了 `worker.py`/
-  `handoff_startup.py`/`service_validation.py`（钉住清单内），VLM 真实正负校准待相应本机能力。
-
-## Copilot V2.1 — mandatory contract rule (do not duplicate)
-
-The AI copilot's knowledge index and capability registry are **build outputs**, not
-hand-maintained lists. When you add or change a product capability:
-
-1. Implement the real business code and keep its Pydantic schema authoritative.
-2. Declare it once in `backend/shine/copilot/declarations.py`
-   (`WRITE_ACTIONS` / `READ_ACTIONS` / `FEATURES`). Reference the real route,
-   request model, single executor and read-back authority. Do **not** add a second
-   parameter schema, a second executor, a second scheduler or a second readiness
-   verdict.
-3. A new write action additionally needs a reviewed dispatcher binding in
-   `backend/shine/support/actions.py`; without it keep `availability="REVIEW_REQUIRED"`.
-4. Run `PYTHONPATH=backend uv run --project backend python backend/scripts/generate_shine_copilot_contracts.py --write`
-   and commit the regenerated `support/generated/copilot_contracts.json` +
-   `knowledge_manifest.json`.
-5. `--check` must pass locally and in CI. A removed parameter, raised permission
-   tier, new GPU/paid cost, changed executor or changed route is **BREAKING**:
-   bump `contract_revision` and pass `--allow-breaking` only after review.
-6. Never edit the generated artefact by hand to grant a capability; the runtime
-   compares it with the packaged declarations and refuses mismatches.
-7. Never give the runtime copilot shell/git/pip/arbitrary HTTP/source-write tools,
-   and never let an unreviewed API become executable. Discovery is not permission.
-
-## 2026-11-19 「文件找到却用不了」收敛轮（用户报障：素材出图又被阻滞）
-
-- **完成的检索轮次是终态**：`_step_scan` 不得重启已完成的检索（旧逻辑与 Worker
-  常规 `advance_scan` 交替形成活锁，整备永远停在 SCAN，出图永远「已找到/跑不通」）。
-  整备发起的深搜用 `start_scan(reuse_completed=True)` 复用已完成覆盖（检索复用）；
-  每轮检索带 `round_id`，任务记录自己发起的轮次身份；显式重检索入口保留全量重走。
-- **图层证据持久化且同源读**：`runtime.record_graph_verification` 是唯一写入点
-  （受管启动 / IMAGE_VERIFY / image-readiness 活体探测三个调用方），按运行时指纹
-  键控存 `image-graph-verification`；`readiness` 无活体时读同一份证据，换绑/改模型/
-  改模板使指纹变化即如实失效。渲染器停止后卡片不得回退「未核验/跑不通」。
-- **adopted 活体只读复用**：`image_renderer.adopted_live_renderer` 是唯一裁决——
-  adopted 且非 mock、登记端口被环回活体 ComfyUI 服务、且无本工作台 RUNNING 受管
-  记录 → 该监听就是这套安装的渲染器，只读复用（不启动、不停止、不做内存准入）；
-  `start_image_renderer` 在外部端口拒绝前先过它。非 adopted 绝不复用外部监听。
-  GPU 忙 / H3 占用 / 另有启动者在途 → 具名 PENDING 等待，不是失败。
-- **整备进行中卡片不投影死胡同**：整备任务活跃且覆盖该能力时，`_two_step_projection`
-  把②投影为 PREPARING「后台整备中，完成后自动可用」，前端隐藏只会重排同一任务的
-  按钮；事实读同一份整备台账，不新增权威状态。
-- 回归：`backend/tests/test_image_found_runnable_convergence.py`（9 例）、前端
-  `setupPreparingProjection.test.tsx`（2 例）；真机同一台账重启续跑全链 DONE
-  （三类真实小样 + 五模式出图，指纹 `ede62ef0…`）。证据
-  `docs/ACCEPTANCE_20261119_IMAGE_FOUND_RUNNABLE_CONVERGENCE.md`。
-  本轮未改 `worker.py` / `preproduction.py`，不触发 VLM 重校准义务。
-
-## 2026-11-19 Copilot V3.1 — 任务级一次授权（硬约束，不得绕开）
-
-V3.1 把 AI 管家从「规则诊断 + 有限操作」升级为「一次授权内的自主运维」。以下每条都是**结构约束**，
-不是文案要求；违反任意一条即视为回退到 V2 的逐项点击模型。
-
-1. **唯一授权事实**：`SupportDelegation.payload["grant"]`（`shine.copilot.task-grant.v1`）是任务授权的唯一事实。
-   `SupportDelegation.grant_id / grant_digest / expires_at / budget_version` 是它的列级投影。
-   禁止为 AI 另建授权表、预算表或任务表。
-2. **唯一写入口**：`shine.support.grants` 是 grant 的唯一写入者；`shine.support.actions.execute_under_grant`
-   是唯一自主执行入口。两者都不执行任何业务动作本身。
-3. **不跳过原校验**：`execute_under_grant` 必须先调 `preview_action`（快照、目标指纹、能力合同、原 Pydantic 参数），
-   再调 `approve_action`（二次校验 + 原子 claim），最后用 `refresh_action` 回读。任何让子动作"直接执行"的改动都是缺陷。
-4. **权限来源**：`effective = actor ∩ grant.permissions ∩ capability_contract ∩ original_executor_policy`。
-   `modify_source_code / arbitrary_shell / arbitrary_http / delete_user_assets` 永久为 false，不接受任何输入开启。
-5. **能力目录一致**：`copilot/task_grant.py::CAPABILITY_PERMISSIONS` 的每个键都必须在
-   `copilot/declarations.py::WRITE_ACTIONS` 里有声明。没有声明、没有执行器的名字不得出现（否则预览会列出假能力）。
-6. **模型只提议**：模型输出 `ToolIntent` 或原生 `tool_calls`，永不携带权限。工具名必须是已注册能力；
-   未注册即 `TOOL_NOT_DECLARED` 并计入无进展。禁用 `eval/exec` 解释模型文本。
-7. **成功只来自原裁决**：`SUCCEEDED` 仅在存在原任务回执（`verification.outcome ∈ {VERIFIED, PLAN_FROZEN, ...}`）时给出。
-   模型说"做完了"但无回执 → `PAUSED_USER_DECISION / NO_AUTHORITATIVE_EVIDENCE`。
-   `REGISTERED_NOT_EXECUTABLE`、`UNKNOWN`、`NEEDS_REVIEW` 一律停止并保留现场，不得重提。
-8. **有界**：`copilot/tool_loop.py` 必须有步数、墙钟、工具调用次数、无进展四道上限，且都由 grant 预算或 `LoopLimits` 提供。
-   禁止无上限循环。
-9. **LLM 继承**：`support_agent` 显式路由优先；没有路由时按 `ROLE_INHERITANCE` 继承已配置的文本模型。
-   不得要求用户为管家重新输入 API Key 或新建 ProviderProfile。
-10. **两条传输，一个裁决**：原生 tool calling（OpenAI 兼容 / Anthropic）与结构化 JSON 意图都必须汇入
-    `execute_under_grant`。provider 拒绝 `tools` 形状时降级并记录 `degraded_reason`，不得静默失败。
-11. **构建产物同步**：新增/修改能力声明或路由后必须重新生成 `backend/shine/support/generated/copilot_contracts.json`
-    与 `knowledge_manifest.json`（`python -m scripts.generate_shine_copilot_contracts`，开发检出**不要**带 `--commit`）。
-12. **测试**：`backend/tests/test_copilot_task_grant_v31.py`（授权合同）、`test_copilot_grant_execution_v31.py`（执行链）、
-    `test_copilot_tool_loop_v31.py`（循环与有界）、`test_copilot_llm_tools_v31.py`（继承与工具协议）
-    与 `frontend/src/test/taskGrantCard.test.tsx` 是本轮回归基线，不得删除或弱化断言。
-
-## 2026-11-19 收尾建设：用户入口正确工作栈 + 一次授权整备（本轮新增）
-
-- **运行身份是一份事实**：`backend/shine/source_identity.py`（纯 stdlib）是唯一实现。
-  Git 检出 = HEAD + 运行根（backend/frontend/scripts）的 tracked diff 与 untracked 内容摘要；
-  分发包 = BUILD_INFO.json；皆无 = 显式 unknown。启动器经 `scripts/shine_source_identity.py`
-  计算并写入 `processes.json.source_identity`；API `/health`、`/api/v1/system/status`、
-  supervisor health/记录、顶栏与 BLOCKER 报告都读它。**「本次 Git 是否快进」
-  （update_checkout.ps1，ff-only）与「运行栈是否需换代」（start_shine.ps1，启动锁内）是两个判定**；
-  后者比较身份 digest + data_dir + render_provider + Worker 形态（-NoWorker 双向），
-  不符则经唯一停止执行者换代；停止失败且旧 API 仍活 → 具名失败、归档、绝不交付旧页面。
-  旧清单缺身份 ≠ 当前；supervisor 同规则（legacy 记录经 health 证明归属后 verified stop 重建）。
-- **最小修复范围单一裁决**：`support/diagnostics.minimal_repair_scope`——缺件→精确缺件能力；
-  运行合同码（ACTIVE_RUNTIME_CONFIGURATION_CHANGED 等）→ 只修被失效的视频运行时 h3；
-  无证据→只读 setup_reconcile。planner 复用同一函数；**禁止无依据 ["h3","image"] 双整备**。
-  整备回读地址是 `GET /api/v1/setup/summary`（preparation 段），不存在 GET /setup/prepare/{task_id}。
-- **授权循环是持久驱动**：转录/步骤/无进展/started_at/pending 落 grant 行 `payload.grant.loop`；
-  `grants.claim_loop/save_loop/release_loop` 短租约 CAS；Worker tick 每拍一个有界模型回合，
-  API `/run` 同租约（重复点击接回 LOOP_ALREADY_RUNNING）。委托原任务 → WAITING_EXECUTOR 读回驱动；
-  **终态读回必须消费 pending**（否则 NEEDS_REVIEW 读回死锁）；回执含 targets/next_step 留痕。
-  模型叙述式 finish（正文代替工具调用）在有成功读取时给有界纠正续行；scope 真实 ID 进入状态摘要。
-  PAUSED_USER_DECISION 仅由用户显式「继续推进」恢复（审计 SUPPORT_TASK_GRANT_RESUMED）；
-  Worker 不自动恢复任何暂停；预算/范围/合同/未知暂停点击不可恢复。
-- **settle 是累计账本**：`grants.settle(reserved=, actual=, step_key=)` 只退还本步预留未用部分，
-  绝不以单步实际覆盖累计；step_key 幂等防重放双退；actual>reserved 不扩边界；委托未报账保留预留。
-- **成功按目标核验**：`copilot/objective_verify.py` 分项读原权威（plan_frozen/files_verified/
-  nodes_loadable/graph_registered/production_selected=jobs.workflow_profile_id 真实选用/
-  sample_completed=非 mock PASSED job+artifact 链/setup_verdict）；完成 = 有原回执 ∧ 必需里程碑全 VERIFIED，
-  否则 OBJECTIVE_NOT_VERIFIED 具名暂停；结论落 `payload.objective_verification`。
-- **只读调查工具**（copilot/read_tools.py）不建 SupportAction、计入工具预算、越界具名拒绝；
-  read_node_inventory 读真实 live object_info，渲染器不在不为读取而启动。
-  production_start 经 test 组接入授权菜单（唯一生产入口，原门禁不变）。
-- **前端 JSON POST 必须带 Content-Type: application/json**（api() 不自动加；真实服务器会把
-  无类型 body 当 form 解析 → 422 model_type；stub 测试发现不了，回归断言已钉住）。
-- 本轮改了 `worker.py`（client_review_identity 钉住），旧 VLM revision 按设计失效；
-  真实正负校准仍未完成，不得声称已校准。真实小样与自定义图装配在开发机模型会话中未走到
-  （PARTIAL）；复用判据（零下载/零安装/零额外 Profile）已台账直查证明。
-  证据：`docs/ACCEPTANCE_20261119_USER_ENTRY_AND_GRANT_CLOSEOUT.md`；回归
-  `test_launcher_source_identity.py`（16）、`test_copilot_first_diagnosis_v31.py`（8）、
-  `test_copilot_grant_durable_v31.py`（12）、`test_copilot_objective_budget_v31.py`（9）、
-  前端 `copilotFirstGoal.test.tsx`（2）、`taskGrantDurable.test.tsx`（2）。
-
-## 2026-11-19 逐镜素材注入与取消采用收敛轮（用户报障：晋升被拒/不能取消/每镜塞全量）
-
-- **三个报障同根**：派生/采纳把全部场景底图塞进每一镜，单镜图像参考撞 H3 九图上限
-  （`services._validate_binding_inputs`），新候选晋升被 422 `H3 input limit exceeded` 拒；
-  且已晋升素材没有取消出口。修复全部收敛到既有采纳执行者
-  `materialprep.service.bind_adopted_masters_to_shots`，不新增平行链路。
-- **每镜至多一张场景底图**：bind 合成目标集合时，场景 picture 超过一张只留最新采纳的一张，
-  其余解绑并同步 `required_asset_ids`；人物主体仍按 `spec.characters` 逐镜注入。历史「全塞」
-  绑定在下次确认/晋升时被同一执行者自动收敛清理。实测每镜 required 1–3、场景恒 1。
-- **取消采用是显式释放，不是 generate 的副作用**：`confirm` 在「reuse_master→非 reuse」转变时
-  记录 `release_asset_id`，bind 据此解绑；从未采纳过的 generate **不**删除镜头已有参考
-  （避免误删 storyboard 自带绑定）。释放意图一次性消费。界面已采用素材/候选加「取消采用」，
-  走同一 commit 执行者（`queue_generation:false`，不触发新批次）。实测解绑 5→0、恢复 0→5。
-- **场景需求不再 blanket 引用全场所有镜**：`director/requirements.py` 目录场景只作建议列入清单；
-  已采纳场景经 bindings/required 反馈环保持其真正绑定的镜头；无参考镜由 lacking 环补一张本场场景。
-  聚合 `ScriptPreparation`（单 scene_key 带全量需求）按 scene_key×场次偏移映射，不得把别场场景塞进本场。
-- **重派生不复活取消**：`_confirmed_material_bindings` 按身份取最新决定；已确认行的 strategy 胜过
-  推导建议，取消（改回生成）不会被旧修订绑定或「有主素材即复用」的建议翻回。
-- 回归：`test_material_shot_scene_gap.py`（逐镜注入反例）、`test_material_adoption_one_write.py`
-  （取消采用反例）、`test_director_material_commit.py`、`test_four_stage_reacceptance.py`、
-  `test_material_derive.py`、`test_material_image_jobs.py` 共 80 例；前端
-  `materialToPackage.test.tsx`（取消采用两反例）+`materialPreparation.test.tsx` 34 例；tsc/Ruff 干净。
-  真机验证：新动画候选晋升 200（原 422）、取消/恢复解绑回绑、逐镜单场景。全量回归留待穿测结束。
-
-## 2026-11-19 ④页单一选定面与阶段推进收敛轮（用户报障：选图面重复/一行一张/卡在备料）
-
-- **唯一选定面**：`MaterialGenerationProgress` 顶部一个「选定并采用」网格，待选候选与已采用
-  主素材同列、**每行四张**（`.mgp-candidate-grid` grid 4 列）；下方批次只报进度/在途/待核对，
-  不再重复一套选图/晋升/取消入口。晋升仍走 `/candidate-assets/{id}/promote`、取消仍走 commit
-  （`queue_generation:false`），一个执行者。
-- **阶段推进读 journey 单一裁决**：`ShotMaterialsPanel` 新增 `assetsDone`/`onAdvance`（App 传
-  `stageDone.assets` 与 `goToDirectorPage(next_stage)`）。素材阶段已完成→主操作「确认并进入下一步」
-  （commit 成功后导航），次操作「重新生成素材」（regenerate-all）；未完成→「确认决策并开始准备素材」。
-  不在前端另算就绪。实测点击后进入 `#d/package`。
-- 回归：前端 `materialToPackage`（单一选定面/取消/推进两反例）+`materialPreparation`/`simpleAssets`/
-  `directorEntries`/`directorRequiredAction` 共 52 例；tsc 干净。本轮仅前端，HMR 生效不重启。
-
-## 2026-11-19 导演包阶段收敛轮（用户报障：预检风格阻滞/画幅唯一节点/RelayVSR 分裂裁决）
-
-- **风格应用只有一个执行者**：`api_freezes.apply_frozen_style_to_shots`（含活生产守卫与
-  STYLE_APPLIED_TO_SHOTS 审计）。`freeze/shots/style`、`freeze/style/refresh` 与分镜书确认
-  （`_apply_and_freeze_style`，含 identical no-op 路径）全部委托它——冻结新风格后镜头不得
-  停在旧风格。此前分镜书确认只冻不改镜，⑤ 预检以 SHOT_STYLE_MISMATCH 拒整包。
-- **⑤ 页就地恢复**：预检报 SHOT_STYLE_MISMATCH 时显示「让镜头执行当前冻结风格」
-  （复用 freeze/shots/style，不另起链路）。实测女巫1119：38 镜 v2→v3，草稿包预检
-  ready=True、0 blocker；开拍点击留给用户。
-- **画幅/分辨率在七阶段里只有⑤一个控制节点**：`outputFrame.ts` 与 `h3/output_frame.py`
-  同源（横屏 1344×768 / 竖屏 768×1344 基准 × 0.3/0.5/0.7/1.0，32 网格取整、256–2048 夹取）。
-  选择产出 OutputSpec 宽高，随 `startDirectorProduction.output` 冻结进包 `binding.output`，
-  series 派发读同一份（runner 既有链路）；`_package_for_selection` 把 output 纳入重放判定，
-  换画幅建新包不重放旧画幅。旧 `DirectorProductionRunPanel` package 分支的画幅控件删除。
-- **RelayVSR 就绪单一裁决**：`setup_summary.relayvsr_machine_readiness(db, settings=None)`
-  是唯一读取口（installation 解析同一函数，显式 None=无安装保持未证明）；能力卡、
-  `strategy_options/upscale_options/strategy_blockers`、`resource_resolver` 全读它。
-  此前 strategy 无参调 `relayvsr_readiness()` 永远 BLOCKED，与基础配置 READY 分裂。
-  实测已下载就位 → AVAILABLE、⑤ 超分勾选可用。
-- **变体标签不再同名**：`describeVariantName` 先匹配 nvfp4 再 lowend（NVFP4 的 id 含
-  lowend，曾被显示成第二个 W6A8）。
-- **制片准备面板模式挂单一裁决**：标题读 `/setup/verdict`（与顶栏同一 machine_verdict）；
-  本地 select 降级为「本次维护请求的执行器」，默认值由裁决派生（READY/RUNNING→local）。
-- **吸顶栏闭包同步**：`useStageRail` deps 补 orientation/resolutionScale（否则栏内 primary
-  用旧闭包，画幅选择不生效——真实 UI 缺陷，测试抓出）。
-- **⑥ 显性生产进度条**（用户要求，任务在跑时前端-only 建设、不重启）：顶部醒目
-  「正在生成第 N / M 镜 · P%」，100% = 本阶段生产完成。事实只读两份既有台账：
-  run 的 `progress.passed_shot_count / scope.shot_count` 与 job 台账正在渲染的任务
-  （App 透传 activeJob，「第几镜」按 run 分集镜头顺序定位）；前端不累计自己的进度，
-  跟读节奏与集卡/运行卡同一份（productionMoving 5s）。工作中条纹动画、宽度平滑过渡。
-  实测真实运行：第 3/9 镜 · 22%，渲染镜名与任务明细一致。回归
-  `frontend/src/test/runProgressBar.test.tsx`（3→4→9 镜动态前进至 100%）。
-- **测试隔离修复（环境污染，非产品回归）**：`make_studio` 默认 ComfyUI 端点改为刚释放的
-  环回端口。此前默认 8188 会被操作者正在跑的生产渲染器占用，登记方案的「尽力而为活体
-  校验」把真机节点表（无测试节点 H3BaseSampler）写进测试台账，致 offline e2e /
-  worker integration / setup_workflow_profiles 在**生产运行期间**假失败
-  （COMFY_NODE_UNAVAILABLE）。需要渲染器的测试显式传 fake/monkeypatch，不受影响。
-- `test_duration_target_chain` 过期前提更新：目标秒数驱动分组后 60s 场各自成集（偏差 0），
-  偏差裁决改用单场 120s 超长场景验证，门禁不放宽。
-- 回归：前端 `packageStyleGap`（恢复入口/画幅唯一赋值/变体标签/面板裁决 6 例）+
-  `directorRun`/`outputFrame`/`directorPackageGuide`/`materialToPackage` 共 34 例、tsc 干净；
-  后端 16 模块定向（freeze_unlock/duration/streamline/relayvsr×2/output_spec/one_click/
-  setup_chain/dynamic_strategy/director_shoot/production_series/offline_e2e/graph_compiler/
-  variant_binding/worker_integration/capability_gates）；Ruff 干净。空闲时经监督进程
-  `/restart-stack` 重启生效。本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-19 ⑦ 字幕唯一生成入口收敛轮（用户报障：后期成片生成字幕失败）
-
-- **失败根因是两处断链**：生成执行者 `compile_episode_subtitle_track` 只认③人工冻结
-  字幕，作品有对白却报 `EPISODE_SUBTITLE_EMPTY`；装配合同编辑器 `EpisodePostEditor`
-  是死代码（无页面挂载），⑦ 提示的「选择版本装配」没有入口。
-- **生成读唯一事实**：无手工冻结时读 `shot.spec.dialogue`（H3 真正朗读的台词与剪辑
-  时码），人工冻结按镜覆盖；不新增第二套字幕事实。来源标记 `shot_dialogue` /
-  `director_shot_config`，结果带 `manual_shots`/`dialogue_shots`。
-- **范围跟随所选成片版本**：真实剪辑表在时，字幕范围就是该版 EDL 的镜头（③ 实时镜表
-  可能已应用不属于这一版的新镜头——实障 15 镜 vs 交付 9 镜，旧逻辑回落计划时长排到
-  77.5s/51s 成片之外）；无交付才回落实时镜表计划时长并如实警告。时码换算与装配同源
-  （`_selected_cut_timing`，in_s/out_s 裁头/clamp 不变）。
-- **入口唯一在⑦**：每集卡片「按真实成片时长生成 / 更新字幕轨」→「字幕与台词核对」
-  批准（SubtitlePanel 随 dataEpoch 重读）→ 同卡挂载既有 `EpisodePostEditor` 选批准版
-  重新装配（复用既有 `PUT /production-runs/{id}/episodes/{eid}/post-contract`，不新建
-  执行者）。③ 仍只撰写，不新增生成入口。
-- 回归：后端 `test_episode_subtitle_cut`（6，含「实时镜表新镜头不得进入成片字幕」反例）
-  + `test_shot_subtitles`（5）；前端新增 `postSubtitleFlow`（生成→批准→装配同页走通）
-  + `p3EmptyStatesAudit`/`deliveryRefresh`/`directorRun`/`productionProjectionRefresh`/
-  `shotSubtitle` 共 23 例；tsc/Ruff 干净。
-- 真机复测（女巫1119 ep-01）：生成第 4 版 10 行，时码跟随 51s 真实成片（第 2 镜对白
-  8.583s 起、末行 49.987s 止）；旧计划时码草稿保留为历史。批准与烧录装配留给用户。
-  本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-19 第 4 镜外语人声核查与修订后重拍收敛（用户报障+裁定）
-
-- **核查结论**：入拍提示词合规（1.3.0 禁声合同、闭口、非人声、无音频参考；动态图
-  离线重编译哈希与入拍一致 `979b9a54…`，文本节点全技术参数）。分镜链无丢台词：
-  原文该节是内心独白（无出口台词），冻结风格 `narration_level=none` 合同禁止独白
-  入声音链，故拆解/导演/摄影/落镜对白皆空。外语人声是 H3 概率性违反禁声合同。
-- **用户裁定**：加中文独白并重拍此镜。经既有唯一修订执行者 `POST /shots/{id}/revise`
-  加第一人称独白（说话方列入 characters，时码 fit 4s），修订 16；编译预览出现
-  「Every voice in this shot speaks Chinese」与 `<d>[Chinese]` 台词锚点。
-- **重拍闸门收敛（⑦ 既有入口，不新增入口）**：修订把旧 job 标 stale+NEEDS_REVIEW
-  后，`_blocker` 原报 SHOT_REVISION_REPLACED 禁用重拍；单镜入口自动选窄方案、Run
-  链路要求整集重拍——修订后的镜头无处可拍。现 `_blocker` 承认「最近退休的通过版
-  （stale+SHOT_REVISION_REPLACED+有 artifact）可作为修订后重拍的源」；绑定比对在
-  修订重拍时豁免 `shot_spec`（用户修订正是改它），风格/规则/方案/主素材仍须同一。
-- **strategy 继承**：Run 派发的 job 无静态 profile、带动态 strategy；重拍路由原先
-  只传空 profile 被 409「require a registered workflow profile」。现 CreateJob 继承
-  `source.request.strategy`，与 Run 派发同一条动态编译路（strategy 门禁照跑）。
-- 回归：`test_generation_segments.py` +1（修订后重拍：新 job 带新对白、渲染绑定
-  不变、旧通过版保留）共 6 例绿；Ruff 干净。真机：⑦ 点击重拍排入 job `97989652…`
-  （rev 16），Worker 受管启动渲染。通过后由用户「选为当前装配版本」，字幕重新
-  生成→批准→装配。未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-19 重拍进度/选用/字幕烧录三阻滞收敛（用户报障）
-
-- **重拍进度条**：⑥ 无整片运行在跑时显示单镜重拍进度条（读同一份 job/attempt
-  台账，`retakePct`）；⑦ 分段卡对进行中的重拍显示进度条（`replacement_progress`
-  读 attempt.progress），轮询覆盖 SUBMITTING/REPAIR_PENDING。不另建状态。
-- **选用闸门收敛**：`accepted_job` 原要求 final 门真过，与自动装配（PASSED 即可）
-  分裂，导致无 VLM 校准的机器上重拍永远不能选用。现与交付同口径：真实、技术通过
-  的当前版（PASSED+非stale+artifact 身份链+字节核验）；艺术验收在独立台账，不挡装配。
-- **整集当前事实收敛**：新增 `episode_current_jobs`＝run 自有通过版叠加显式装配
-  选择（选定重拍）。整集 EDL/`episode_input_digest`/交付门禁同读它，选定重拍进入
-  整集装配与字幕烧录，不再"run 自有"单一口径漏掉重拍。
-- **字幕烧录根因**：`assemble(subtitle_ass=…)` 收到的是 ASS **文本**却直接拼进
-  `ass=` 滤镜；且 Windows 绝对路径（盘符冒号+反斜杠）被滤镜二次解析炸掉。现把
-  ASS 文本写入工作目录、以 cwd=工作目录+裸相对文件名 `ass=subtitles.ass` 烧录。
-- **烧录入口**：⑦ 每集「修订剪辑/字幕」改为版本下拉（含状态），草稿版提交时就地
-  批准（复用既有 approve/post-contract 执行者），不再要求先去折叠 dock 批准。
-- 回归：`test_generation_segments`（+选择叠加单元）7 例、`test_delivery_assembly`
-  （+Windows 真实烧录）15 例、delivery_orders/episode_subtitle_cut/director_long_form
-  共 73+ 例绿；前端 `postSubtitleFlow`/`runProgressBar`（+重拍条）4 例、tsc 干净。
-- 真机：女巫1119 第 4 镜重拍选用→整集 v3 烧录第 9 版字幕 DELIVERED；抽帧 1s
-  「殿下，醒醒……」、17.5s 中文独白均确认烧录，第 4 镜为重拍新画面。旧版保留。
-  未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-20 ⑦ 后期成片界面重构（用户裁定：单一选集链路）
-
-- **自上而下逻辑**：选集条（手动、一次一集）→ 该集预览卡（视频+验收+折叠字幕）→
-  该集镜网格（`GenerationSegmentsPanel fixedEpisode` 锁定只展示选中集）。
-- **待审清单并入集预览卡**：每集卡内「观看并确认」（复用 `EpisodeAcceptance`），
-  看完即可确认；删除独立待审清单板块。
-- **删除重叠板块**：「成片文件与导出（历史版本）」`DeliveryPanel` 与「剪辑方案/
-  剪辑数据」整体下线（组件与页级测试一并移除，文件夹/下载由成片库与集卡提供）。
-- **字幕与台词核对上移**：新增 `EpisodeSubtitleFold` 折叠进集预览卡，只服务选中集；
-  生成/批准/应用仍走既有唯一执行者（compile/approve/post-contract），应用后立即
-  刷新预览（overview 跟随 `delivery_order_id`，预览 video 以 artifact 为 key 重载）。
-- 回归：前端全量 452 例绿、tsc 干净；`postSubtitleFlow`/`directorRun`/
-  `deliveryAcceptance` 改断言到新布局。真机⑦：选集→预览烧录版→折叠字幕→镜网格，
-  重叠板块消失。未改后端执行者，不触发 VLM 重校准。
-
-## 2026-11-20 字幕字号单一设置（用户报障：烧录字体过大）
-
-- **根因**：`render_ass` 未设 PlayRes，libass 按 288p 把 48 号字放大到成片分辨率。
-  现固定 `PlayResX/Y=1280/720`，Fontsize 以 720p 像素计并随成片缩放。
-- **三原则**：字号是唯一事实，存 `subtitle-style:{project_id}`（`GET/PUT
-  /projects/{id}/subtitle-style`，12–96，越界 422）；唯一裁决 `render_ass`；
-  烧录执行者经 `burn_ass_for_track` 在烧录时读当前字号（改字号下次应用即生效，
-  不需重新批准文本）。compile 存预览 ASS 同读该事实。
-- **字号参与版本判定**：`episode_input_digest` 加入 `subtitle_font_size`，改字号
-  产生新交付版本重烧，不复用旧文件。
-- **入口唯一**：字号控件在⑦集预览卡的「字幕与台词核对」折叠内（保存字号），
-  保存后点「按新合同重新装配」即按新字号烧进预览。
-- 回归：`test_shot_subtitles` +字号单一事实用例、delivery_assembly/episode_subtitle_cut
-  绿；Ruff/tsc 干净。真机：字号 28 重烧 v4，抽帧字幕小而清晰（原 48 过大）。
-  未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准。
-
-## 2026-11-20 V2 双生产线收尾验收（统一底座 + 七阶/四阶真机双线）
-
-- **架构定案：一套基础底座 + 两条独立业务线。** 统一基础配置、公共素材中心、公共 H3 制片底座各只有
-  一套事实/裁决/执行者；七阶（导演模式）与四阶（manual4 人工分镜线）只保留各自的业务阶段裁决与编排
-  （Run/Job/续跑/质检状态独立）。四阶经公共能力门面使用底座，不得越过门面依赖七阶导演/文学/导演包业务
-  内部实现；七阶既有 API/UI/数据库行/出片行为兼容不变；manual4.sqlite 与历史作业、提示词 SHA、交付
-  证据全部保留，迁移期禁止双写、重投或删除旧媒体。方案与 A01–A22 逐项 PASS 台账见
-  `docs/SHINE_UNIFIED_FOUNDATIONS_DUAL_PIPELINES_CLOSEOUT_V2_20261120.md`、
-  `docs/SHINE_FOUNDATION_DUAL_PIPELINE_FINAL_ACCEPTANCE.md`。
-- **H3 提交与 ACK 对账只有一条链**（`foundation/h3.py` 与七阶 `comfy/provider.py` 共用
-  `submit_prepared_prompt`、`ComfySubmission`、ComfyUI 客户端及历史/队列对账；四阶移除重复的真实图编译
-  与 `object_info` 读取）：先持久化参数化图 SHA-256，再提交，收到 ACK 后持久化外部 ID；对账先按外部
-  ID，ACK 缺失时按幂等键+图 SHA 定位，证据不足进待核对、绝不盲重投。七阶沿用既有幂等键，四阶从已有
-  Job+attempt 号推导提交身份，`_recover_comfy_job` 恢复查询同样携带幂等键。提示词来源不混淆：
-  七阶编译、四阶手写冻结（提交前强制 `sha256(prompt_text)==job.prompt_sha256`）。
-- **环境就绪与能力标签单一来源**：`foundation/environment.py` 合并整备投影与运行回执，四阶 API 嵌同一
-  快照、`Manual4App` 按前端类型合同读 `capabilities.*.state`；`SETUP_CAPABILITY_LABEL` 让 `READY`、
-  `VERIFIED_RENDER`、`BOUND` 等能力状态在两条线同一套措辞。加载失败显示原因，配方准入结果仍由
-  `/platform/capabilities/check.status` 表达。
-- **大纲确认只有一个写入路径**：旧确认入口复用 `confirm_outline_artifact`；七阶正文、`/journey` 与
-  分集读取同一个已记录确认指针（旧项目按版本创建时间回退兼容，旧入口的响应与错误码保留）。确认成功
-  触发既有工作台刷新；历史大纲回选由契约测试钉住。
-- **GPU 跨线互斥双向实测**：四阶持真实独占租约时七阶准入 `409 GPU_BUSY_RETRY_OR_QUEUE`，七阶持租约
-  时四阶 `409 GPU_BUSY_OTHER_LINE`；完工时活跃租约与待核对租约均为空，跨线仲裁只有
-  `ResourceScheduler` 一套。
-- **真机双线交付**：七阶导入剧本路径 1 集 2 镜、四阶人工分镜 2 集 3 镜全部真实 H3 出片（Ref2VA INT8
-  ConvRot / PDD8、672×384），过 FFprobe、全片解码、SHA-256 与播放端点核验（Chrome 实际载入帧）。
-  四阶批次中途暂停→重启→同批次恢复：首镜媒体 SHA 前后一致、每镜 attempt=1；跨集边界自动清空
-  `previous_job_id`，不串集尾帧。七阶重放启动请求返回同一个生产 Run。
-- **如实未满足项**：七阶跨镜持续单租约未满足——本轮经既有 review handoff 在首镜后释放第一个 H3 租约、
-  再顺序取得第二个（两个顺序租约），按原行为保留并如实列为未满足。本轮改过 `worker.py`（恢复查询携带
-  幂等键；`client_review_identity` 钉住该文件），旧 VLM revision 按设计失效；隔离栈 VLM/ASR 路由
-  未配置（`VLM_ROUTE_NOT_CONFIGURED`/`ASR_ROUTE_NOT_CONFIGURED`），真实正负校准仍未完成，不得声称
-  已校准。两线成片均为 `pending_review`，待用户看片签验，不改 accepted。
-- **执行契约**：本轮方案 §13——未经用户明确指示不得自行推送远端 main、不得自动合并 PR。
-- 证据：`docs/SHINE_V2_FINAL_CLOSEOUT_ACCEPTANCE.md`（双线收尾全记录，含真机媒体 SHA 与证据文件
-  清单）。回归：后端 8 分片全量在最终代码 `b839c97` 上完整一轮全绿（一次 `WinError 10053` 本地连接
-  中止偶发：同用例隔离复跑通过后完整重跑 8/8 干净）+ `backend/tests/manual4` 专项 + 前端 vitest
-  全量 + `tsc`/Vite build + Ruff。
-
-## 2026-11-21 中断拍摄恢复解阻轮（用户报障：待核对无直达、⑥无续拍入口）
-
-- **根因是恢复路径的活锁**：工作栈中途关闭后重启，`recover_expired_jobs` 每拍把
-  「重新阻塞一个已阻塞的 job」记成进展（同一 job 实测 6827 条重复
-  `COMFY_HANDOFF_RECOVERY_BLOCKED` 审计，约 100ms 一条），tick 永远停在
-  `reconciled`，series/run 执行器拿不到拍子：run 永远 RUNNING，⑥ 页假装在跑，
-  人工决定面永远不露出。修复收敛为「检查过 ≠ 有进展」：
-  `_block_interrupted_handoff` 仅在真实写入新结论（日志/租约/job 状态变化）时
-  返回 True 并写审计；`_handoff_decision_pending` 只读已记录的阻塞结论，
-  `_recover_one_job` 对其返回 0。状态机照常推进：series → NEEDS_REVIEW、
-  run → NEEDS_REVIEW，既有⑥按钮与⑦重拍链路随之可见。不新增状态、不新增执行者。
-- **唯一裁决携带导航事实**：`summarize_production_mode` 在
-  `LEASE_RECONCILE_REQUIRED` 时从同一份租约事实推导 `focus{project_id,run_id}`
-  （租约 owner → job → series item → run batch）；顶栏「去处理」直达该作品的
-  ⑥ 视频生产页，不再一律送进基础配置。
-- **⑥ 运行卡就地挂载既有执行者**：范围内「结果未知」镜头显示
-  「放弃未知结果（保留产物，不重投）」（复用 `abandonJob`，与任务明细同一执行者）
-  与「去⑦重拍此镜」；「已放弃」镜头只指去重拍。NEEDS_REVIEW 的 run 标题如实为
-  「运行等待人工核对」。放弃是产品的人类决策点：监督进程重启安全门
-  （`RUNTIME_CONFIGURATION_REQUIRES_IDLE_AND_RECONCILED_WORK`）要求先无待核对
-  租约，故后端修复的真机生效需用户先放弃未知结果；未经用户授权不得代为放弃。
-- 回归：`backend/tests/test_stuck_run_recovery.py`（3 例：活锁反例、真实
-  `_run_configured_once` tick 推进到 NEEDS_REVIEW + focus、无租约无 focus）；
-  前端 `stuckRunRecovery.test.tsx`（4 例：顶栏直达、放弃/重拍入口、已放弃只指重拍、
-  范围外不显示）；定向批次（handoff/recovery/scheduling/production_mode/
-  offline_e2e/production_series/long_form 等）与 8 分片全量、前端全量 469 例、
-  tsc/build/Ruff。
-- **本轮改了 `worker.py`**（`client_review_identity` 钉住）：旧 VLM revision 按设计
-  失效，真实正负校准仍未完成，不得声称已校准。真机边界：⑥ 新决定面已在当前栈
-  浏览器实测可见；后端活锁修复的真机生效待用户授权放弃后重启验证。
-- **恢复链后三段同样收敛到既有执行者**（真机穿测发现放弃后仍无处续拍）：
-  ① 重拍唯一裁决 `api_segments._blocker` 承认「用户已放弃、结论已结清」
-  （`USER_ABANDONED_UNRECONCILED`）的 FAILED 源——重拍是新请求，不是旧提示词重投；
-  未结清的 UNKNOWN/NEEDS_REVIEW 仍具名拒绝。② `select_replacement` 在根序列
-  NEEDS_REVIEW 且全镜选用通过时把选用写回根序列 items（旧 job 留作历史），不新建
-  状态。③ `reconcile_abandoned_series` 读「租约已 RELEASED」事实合并结论：全镜通过
-  即 COMPLETED，批次/分集/交付单/Run 由既有 advance 链路收敛。NEEDS_REVIEW 的 Run
-  仍由⑥「继续安全可恢复批次」既有入口恢复，不新增入口。
-- **响应契约同步**：`schemas.ProductionModeStatus` 登记 `focus`（新增
-  `ProductionModeFocus`），/system/status 严格模型不再 ValidationError。
-- 整链回归 `test_stuck_run_recovery.py` 第 4 例：放弃→⑦重拍→选用→序列 COMPLETED→
-  恢复→分集交付单创建，全部经既有 API/执行者。定向批次含
-  test_generation_segments/test_production_series/test_video_library。
-
-## 2026-11-21 每集秒数唯一裁决轮（用户报障：②/⑥ 把场景覆盖秒数当每集计划）
-
-- **根因**：`derive_episode_plan_from_sections` 的 `planned_seconds` 是场景覆盖估计
-  （原文秒数），② 预览、⑥ overview、⑦ 运行集卡与 EDL provenance 都把它当每集视频
-  计划读，一份事实两种语义。用户裁定：每集行只展示该集计划秒数；总剧本超出只在
-  头部标识。
-- **唯一裁决** `director/contracts.py::episode_video_seconds`：有落镜=落镜时长之和，
-  未拆镜=目标秒数。消费点（streamline 预览、overview、runner.episode_public、
-  episode_delivery EDL rules）全部改读它；头部 `total_planned_seconds` 改为各集视频
-  计划之和，`covered_scope` 覆盖标识保留头部。前端②行删除「与目标差」与每集覆盖
-  边界警告渲染。确认门禁（duration_target_verdict 等）不变。
-- 历史冻结快照/旧交付存储值不重写；新显示与新交付读裁决。
-- 回归：`test_episode_seconds_verdict.py`、前端 `episodeSecondsDisplay.test.tsx`、
-  `test_duration_target_chain.py` 显示契约更新；定向 7 模块 144 例、前端 470 例、
-  tsc/build/Ruff、8 分片全量。真机：⑥ 集卡 75/107 秒、② 预览只读复核一致。
-- **测试隔离修复**：新增测试文件改变 8 分片后暴露既有泄漏——
-  `test_director_setup_contract.py` 在 local 首次导入前 patch `installer.LocalInstaller`，
-  同分片后续测试导入 local 永久捕获假类。改为先导入 local 并同时 patch 两处绑定
-  （不弱化断言）；共分片复跑 0 失败。
-- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。
-  证据 `docs/ACCEPTANCE_20261121_EPISODE_SECONDS_VERDICT.md`。
-
-## 2026-11-21 V3 P1 单 Ref2VA 工作流
-
-- 新生产从 `foundation/h3.py::compile_h3_ref2va_graph` 进入
-  `comfy/graph_compiler.py`。`shine.ref2va.v1` 按变体、采样和实际参考清单生成逐镜图。
-  两条生产线沿用各自冻结输入与共享的参数映射、提交、对账、GPU 租约和技术质检。
-- `mode_capabilities` 从同一配方推导基础节点。整备与服务核验使用单图、单采，默认基础采样
-  为 `native20`。PDD、参考音频、二采和 RelayVSR 的资源随实际选项使用。
-- `config/workflows` 和数据库 profile 用于显式兼容及历史回放。常规整备不自动登记旧模板，
-  真实提交校验冻结图或配方 SHA，历史提示词与配方 SHA 继续可复现。
-- 验收记录见 `docs/ACCEPTANCE_20261121_V3_P1_SINGLE_REF2VA.md`。
-
-## 2026-11-22 V3 P2 按需可选节点与多模态 Ref2VA
-
-- PDD 8 步、二次采样、`VHS_LoadVideo`（最多 3 路、仅接 `ref_videos.ref_video_i`、严禁接
-  `ref_video_audio_i` 破坏静音/音轨序号）及 9 图/3 音/3 视频合计 <= 12 的按需执行图均由
-  `comfy/graph_compiler.py` 唯一编译，禁用能力不生成对应节点也不加载多余权重。
-- `mode_capabilities.probe_optional_capabilities` 在服务核验写入 `optional_capabilities`，
-  `setup_summary.sealed_optional_capabilities` 与 `strategy.py` 作为唯一裁决口同时供给
-  `/director/strategy-options` 与 `services.make_render_request`（含 DB-only 路径对
-  `ACTIVE_KEY` 的复用）；选中缺失能力显式 `409 STRATEGY_BLOCKED`，拒绝静默降级。
-- 本机 ComfyUI `b0b743566` 缺少 `RelayVSRConditioning`/`VSRDecode`，RelayVSR 2X 在实机上诚实
-  阻塞为 `RELAYVSR_NODES_MISSING_IN_LIVE`（离线单测与 EDL `episode_input_digest` 已验证，真机
-  RelayVSR 未验证）。其余实机已出 `pdd8 + second_pass + VHS_LoadVideo` 与 `native20 + audio`
-  真实视频。验收记录见 `docs/ACCEPTANCE_20261121_V3_P2_OPTIONAL_MULTIMODAL.md`。
-
-## 2026-11-22 V3 P3 基础配置与生产全链收敛
-
-- `setup_summary.summary` 与 `foundation/environment.py::environment_snapshot` 统一输出
-  `optional_capabilities`（`pdd`、`second_pass`、`video_reference`、`audio_reference`、
-  `relayvsr`），并将可选告警与顶部阻塞 `blockers` 分离，未启用可选能力与缺失审片包绝不阻塞基础
-  1 图 H3 拍摄；`deployment_readiness` 在活体服务核验 `READY` 时置 `workflow_profiles_registered=True`。
-- `strategy.shot_reference_capability_blockers` 作为按镜参考依赖唯一裁决口接入
-  `director/package.py`、`services.make_render_request` 与 `manual4/production/service.py`
-  （通过 `foundation/environment.py` 门面遵循四阶静态边界守卫）：缺失 `VHS_LoadVideo` /
-  `VHS_LoadAudioUpload` 时仅阻断实际绑定对应参考的镜头与分集，不误伤其他纯图镜头或分集。
-- `resource_discovery` 纳入 `relayvsr-x2-windows-x64` 并按 `setup_summary._component_ids_for`
-  统一分桶，消除扫描页把可选/审片模型误算作 H3 缺件的问题；`adoption._required_h3_files` 与
-  `profile_gate._weight_blockers` 收敛到统一基线与动态配方入口。
-- 回归与实机：8 分片 303 文件全绿（`shards-20261122-020135-231`）、前端 94 文件 472 测试与构建通过；
-  RTX 5080 独立目录验证外部 ComfyUI 43.98 GB 零下载核验接管、服务核验与七/四阶段共享出片均通过。
-  验收记录见 `docs/ACCEPTANCE_20261122_V3_P3_SETUP_PRODUCTION_CONVERGENCE.md`。
-
-## 2026-11-22 V3 P4 原生电影 Skills 与旧名导风格安全退出
-
-- **可审阅 `SKILL.md` 包与唯一选择器**：在 `config/cinema_skills/` 建立 `manifest.json`（`shine-cinema-skills-manifest/1`、`1.0.0`、`Apache-2.0`）及 6 套内置电影专业 Skill（覆盖 `scriptwriter`/`director`/`cinematographer`/`editor`/`continuity_supervisor`，含 `references/*.md` 与归一化 SHA-256）；由 `shine/agents/cinema_skills.py::CinemaSkillRegistry` 与 `select_skills_for_role` 统一做路径禁闭、32 KiB 限额、许可/角色白名单与指令注入/外链/shell 扫描，运行时（`strict=False`）缺失或损坏自动降级跳过、绝不阻塞生产。
-- **不新增 Agent/执行器/阻滞**：`FilmAgentDispatcher.run` 按任务标签与 `FilmType` 从唯一入口检索最多 2 项 Skill（`DEFAULT_SKILL_TOKEN_BUDGET=1200`）作为不可信参考注入 `crew_prompt`，结果记录进 `AgentTaskRecord.trace["cinema_skills"]`；若上下文窗口紧张则自动将 Skill 裁为 0（`budget_trimmed_to_zero=True`），不触发 `LLM_CREATIVE_CONTEXT_OVERFLOW`；支持 `SHINE_CINEMA_SKILLS_ENABLED=0` 零迁移回滚。
-- **渐进退出强制名导模板**：`StoryboardBookPanel` 默认 `profileId=""`（`电影专业 Skills 自动`）与中性七维预设，`director/streamline.py::_apply_and_freeze_style` 允许省略 `profile_id` 冻结中性 `StyleBible`（`director_style_binding=None`），`services.py::make_render_request` 通过 `director_styles/service.py::default_english_style_bible` 为无绑定中文 `StyleBible` 镜头投影合法英文 H3 风格约束；保留 `FilmType`（真人/2D 动画）、历史 `director_style_binding` 与 `/director-styles*` 只读/重放兼容，未改 `worker.py`/`preproduction.py`。
-- **回归与 RTX 5080 实机 A/B**：`test_v3_p4_cinema_skills.py`（13 例）及定向 7 模块全绿、Ruff/Copilot 契约（475）/Alembic/`test_isolation_static.py` 全绿；后端 8 分片 304 文件全绿（`shards-20261122-082210-861`，0 失败）、前端 94 文件 472 测试与 `tsc`/Vite build 全绿；RTX 5080 隔离出片完成 `animation` 与 `live_action` 共 4 组 8 镜真实 A/B（`pdd8`、`1344x768`、`5.166s` 全片解码 exit 0，GPU 租约全部 `RELEASED`），实证无对白镜闭口与音量抑制（B 相比 A 峰值降低 16.1–24.4 dB）及双人轴线/道具接续提升；远程实机 LLM 链路与多评审员人工盲听留为诚实未测边界。验收报告见 `docs/ACCEPTANCE_20261122_V3_P4_NATIVE_CINEMA_SKILLS.md`。
-
-## 2026-11-22 V3 最终收尾验收（CI 修复、单工作台 E2E、RelayVSR 核查、真实五角色 LLM × 连续 H3）
-
-- **CI 失败定位与零放宽修复**：核对 `44937030711` / `44971331892` 全部失败：
-  - 更新 `scripts/verify_v13_web.py` 完整对齐导演工作台（`#d/creative`、`#d/assets`、`#d/materials` `uploadFor`、`#d/package` `#preproduction`、`#d/produce` `#shots` Ref2VA-only、`#d/advanced` `#film-crew`、`#d/setup` `#director-setup`、`#d/deliver` 与顶栏 `快速切换作品`），连续两次 Chromium 实跑均通过（`MOCK_VERIFIED`, `api_errors: []`）。
-  - 修复真实跨平台 bug `shine/comfyops/runtime_configuration.py`（Windows `\` 路径在 Linux 上归一化后再取 `.name`）；Windows runner 系统盘拒绝与 Linux 无 PowerShell 报错均通过补全测试夹具与 `@pytest.mark.skipif(os.name != "nt")` / `windows_port_listeners` mock 解决，不放宽任何安全/安装约束。未修改 `quality/client_identity.py` 锁定文件。
-- **P1–P4 三原则复核**：修复 `frontend/src/useStudio.ts::queueShot` 在 `workflowProfiles` 为空时不再阻滞 `comfyui` 单镜排队，统一下沉至唯一裁决口 `services.make_render_request` 的动态策略。
-- **实机全链路验收**：独立目录 `.local-acceptance/v3-final-20261122` 实测既有 ComfyUI `b0b743566` 零拷贝接管与 `READY` 服务核验（`node_count=1281`）；确认 `RelayVSR X2` 权重在盘但缺少核心节点，各入口诚实报 `RELAYVSR_NODES_MISSING_IN_LIVE`、`POST /jobs` 返回 `409 STRATEGY_BLOCKED`（真机超分保留 `NOT_VERIFIED`），基础 1 图 H3 不受阻滞；真实 `MiniMax-M3.1-flash`（`reasoning_effort=low`）以中性风格（`profile_id=""`）完成五角色自动创作（全部命中 `cinema_skills`）与 RTX 5080 四镜连续 H3 成片 + 整集交付合成（23.52s、`ffprobe`/`ffmpeg` 零错误、静默镜 `-49.0/-40.9 dB`、对白镜 `-18.6/-15.5 dB`、7 条 GPU 租约全部 `RELEASED`）。
-- **全量回归**：Ruff、Copilot 契约（475）、Alembic、`test_isolation_static`、定向 12 模块（245 收集/244 通过/1 跳过）、Vitest（94 文件 472/472）、`tsc`、Vite build 与后端 8 分片 304 文件（`shards-20261122-110054-047`，8 分片全部 exit 0、`shards_with_failure_markers=0`）均通过。验收报告见 `docs/SHINE_V3_FINAL_ACCEPTANCE_REPORT_20261122.md`。
-
-## 2026-11-22 LLM 流式 UNKNOWN 语义收紧（接手 Codex 额度中断轮）
-
-- **被服务端确认过的流绝不静默重发**：`OpenAICompatibleProvider._complete_stream` 的回退出口收窄到仅剩两个——流形状被 4xx 拒绝（未受理），或 `ConnectTimeout/PoolTimeout/ConnectError` 且连接根本未建立。其余形态一律如实分类：headers 已到后断开、POST 已写出但读失败（含 headers 未到）、SSE 结束无终止事件 → `LLMConnectionError` UNKNOWN；「headers 未到 ≠ 请求未送达」。
-- **忽略 `stream=true` 的兼容服务器复用同一响应**：对流式请求返回 `application/json` 完整体时，读取该响应体走普通解析路径，只发一次请求，不再当作「无事件流」丢弃重发。
-- **有终止事件的空流是 RESPONSE_RECEIVED 不是 UNKNOWN**：`saw_done`（`finish_reason`/`[DONE]`）且无内容 → `LLMFormatError`，`classify_external_outcome` 判 `RESPONSE_RECEIVED`，重问走既有 `MAX_SUBTASK_RETRIES` 预算；只有 `reasoning_content` 无正文或完全空流仍是 UNKNOWN。
-- **首事件上限 180 → 300s**（`MAX_FIRST_EVENT_S`）：300s 常规档等满 300s 才判首事件超时，更长档保留上限，慢首事件不再被过早判成挂起。
-- **scriptwriter 补充台词说话方约束**：对话率分支钉住「补充台词的说话方必须是该节拍 `characters` 里列出的既有 source 人物，不得添加画外说话人」——服务器按名字解析说话方，画外新说话人是不可绑定镜头。契约断言补进 `test_crew_prompt_contract.py`。
-- 本轮未改 `worker.py`/`preproduction.py`，不触发 VLM 重校准义务。进度与行为矩阵见
-  `docs/PROGRESS_20261122_LLM_STREAM_UNKNOWN_SEMANTICS.md`；回归：定向三文件 26 用例、相邻/扩展模块 182 用例、Ruff、后端 8 分片 304 文件全量（`shards-20261122-231522-576`，wall `1108.6s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）均通过。
-
-## 2026-11-23 H3 LowVRAMAttention 高水位门控（真机核验收尾轮）
-
-- **一张镜头图有两种合法形态，冻结请求是权威。** 自 45,000 token 门控起，同一
-  `variant / accelerator / second_pass / 参考数` 的镜头可编译出不挂节点 `"15"` 与挂载节点 `"15"`
-  两张图：`recipe_sha256` 相同，`graph_sha256` 不同。`make_render_request` 建任务时裁决一次并冻结
-  哈希；Worker 不重新裁决，只认冻结哈希点名的那一种（审计原因 `frozen_request`），升级前冻结的存量
-  请求因此照常渲染。既不是任一合法形态的哈希仍按 `WORKFLOW_IDENTITY_CHANGED` 拒绝。
-- **`low_vram_attention_form_of_graph()` 是唯一知道这对形态的函数**（`shine/comfy/graph_compiler.py`，
-  经 `shine.foundation.h3` 导出），`is_low_vram_guard_variant()` 复用它。重拍
-  （`api_segments._same_render_binding`）用同一个函数把同一镜头的两张图判为同一 H3 工作流绑定，
-  其余绑定逐字比对。**不要再写第二个「两张图哈希是否等价」的判断。** 首轮实现缺这一步，结果是
-  存量冻结请求一条都不提交、存量低水位镜头重拍全部 `409 GENERATION_RENDER_BINDINGS_CHANGED`。
-- **审计键名不得含 `token`。** `security.sanitize_payload` 把键名含 `token` / `secret` / `api_key` /
-  `password` / `credential` / `authorization` 的值一律存成 `[redacted]`。本功能的可观测字段是
-  `estimated_attention_seq_len` 与 `low_vram_attention_threshold`；断言审计字段时写真实数字，
-  `is not None` 挡不住 `"[redacted]"`。
-- **Token 口径**：`vram_guard.estimate_h3_attention_tokens` 在三个前提下等于本机真实
-  `PackedLayout.seq_len`（用 ComfyUI 内嵌解释器实测 16 组零误差，含 1344×768·5s 的 5 图 43,774 /
-  6 图 44,782 阈值边界）：文本条件按 1024 计（真实值是 `cond.shape[1]`，即提示词加每图视觉 token，
-  不是常数）、参考图不小于目标面积、音频参考按 6.4 s 计。45,000 阈值在 9 图上限内保留 ≥ 10% 余量。
-- **真机事实（RTX 5080 16GB，隔离目录，8 次真实出片全部 `PASSED`）**：默认阈值下 23,902 tokens
-  省略节点 `"15"`、56,040 tokens 挂载，执行图取自 ComfyUI 交接历史归档。**节点 `"15"` 数学等价得到
-  最硬证据**：同项目、同提示词、同种子下，挂载与不挂载的成片 MP4 **逐字节相同**
-  （1024×576·5s 124/124 帧、1344×768·7s 175/175 帧 PSNR 均为 inf），而提示词只差一个风格版本
-  UUID 的对照是 26.2 dB。低水位镜头省略节点 `"15"` 渲染快约 16%（108.4s 对 129.1s）。
-- **本机未复现 OOM**：不挂节点 `"15"` 的 1344×768·2 图在 7s（56,040）/ 10s（76,426）/
-  15s（112,102）全部首次通过。方案所述「56k~78k 撞墙区」在本机本次条件下不成立；兜底从未被排程
-  （不误触发得到真机确认），**真机 OOM 兜底、受管渲染器路径与 production series 中的兜底均无真机或
-  离线用例**，只有代码走读。
-- **`worker.py` 已被修改**（首轮与本轮）：`client_review_identity` 按设计失效，真实生产验收前必须
-  重做真实 VLM 正负校准并重新冻结制片计划。本轮未做，8 次出片均为
-  `acceptance_status=pending_review`，是技术交付不是艺术验收。
-- **隔离验收必须设置 `SHINE_RUNTIME_ENV_PATH=<隔离目录>\.env`。** `POST /setup/configuration` 会把
-  `SHINE_DATA_DIR` / `SHINE_SETUP_RECIPE` / `SHINE_ENABLE_LOCAL_EXECUTION` 写回仓库根 `.env`；
-  不设钩子时日常启动器的数据目录被换成隔离目录，隔离栈随之占用日常端口 8000/5173。
-- 回归：`backend/tests/test_h3_low_vram_guard.py`（21 例，含存量冻结请求与存量重拍两条新反例）、
-  `test_generation_segments.py`；后端 8 分片 305 文件（`shards-20261123-231702-338`，8 分片全部
-  exit 0、`shards_with_failure_markers=0`）、前端 488/488 与 `tsc`/Vite build、Ruff 均通过。
-  证据与未完成项见 `docs/ACCEPTANCE_20261123_H3_LOW_VRAM_ATTENTION_GUARD.md`。
-
-## 2026-11-25 统一素材生图 LoRA 与剧本对齐提示词 V1（2026-11-26 配方裁定与显存适配建议收尾）
-
-- **生图 LoRA 与 H3 LoRA 同一张台账，靠 `base_model` 区分**（`minimax_h3` / `qwen_image_21`）。唯一裁决仍是
-  `evaluate_style_lora_selection()`，两条生图线提交前都走 `resolve_live_image_loras()`；唯一挂载口是
-  `attach_qwen_style_loras()`，节点 `4511 → 4512 → 4513` 串在 UNET 与 `QwenImage21Cache` 之间（T2I 缓存 `480`、
-  编辑图缓存 `469`）；唯一注词口是 `apply_image_lora_prompts()`。**不要再在 `api_asset_center.py` /
-  `api_material.py` 里写平行的 LoRA 校验或节点拼装。**
-- **零 LoRA 基线不变**：图谱原样，25 步 / cfg 1.0 / euler / simple，零额外下载、零额外门禁。2026-11-26 用户裁定
-  删除赛博朋克配方，出厂保留两套配方（电影级写实摄影 35 步、暗黑奇幻插画 30 步，均为 `cfg=3.5`、`euler/simple`）；
-  「Qwen 多视角镜头」LoRA（约 319 MB）暂留可选下载包（约 740 MiB）供手动挂载，是否移出待用户决定。手工装配 LoRA
-  而未选配方时按 30 步、`cfg=3.5`、`euler/simple`。
-- **`material-image-v6-qwen21` 的运行时指纹含模板合同摘要。** 模板升级让旧 `RENDER_VERIFIED` 凭证按设计失效，
-  每台机器更新后必须先重跑一次 `POST /api/v1/setup/image-runtime/validate`（三类小样），`can_generate` 才会恢复
-  （与显存无关）。幂等键绑定着已结束的运行，重试要换新键。
-- **被单独暂停的安装记录要用 attempt 级 `resume` 恢复。** 对同一请求再次「确认整备」时，任务仍在
-  `QUEUED/RUNNING` 就原样返回，不会恢复它；此时整备摘要显示「正在下载并安装」，因为 `_DOWNLOAD_ACTIVE`
-  含 `PAUSED`（既有行为，留待下次收尾修复）。
-- **ComfyUI 提示线程死亡而 HTTP 存活时，工作台识别不了。** `/history` 永远为空、`/system_stats` 返回 500，
-  要等满 `POLL_LIMIT=1800`（约 31 分钟）才进 `NEEDS_REVIEW`，期间 `image-runtime/stop` 被在途保护拒绝。
-  既有出口依次是：取消运行（停掉未开始的项）→ 等轮询上限 → `managed-processes/release` → 租约由对账释放
-  → `image-runtime/stop` 把启动记录改写为 `STOPPED`。
-- **显存真相与适配建议唯一落点（2026-11-26 收尾）**：
-  - `comfyops/scheduler.py` 仅互斥台账（`enqueue` 只在 `budget_mb > 16384` 名义容量时拒绝，`admit` 不读真实显存），
-    `IMAGE_BUDGET_MB = 12000` 仅是租约名义预算；**唯一的实测显存准入在 `comfyops/image_renderer.py` 启动处**
-    （空闲 ≥ `IMAGE_RUNTIME_REQUIREMENTS["min_vram_mb"] = 8000`，否则 `IMAGE_RENDERER_MEMORY_INSUFFICIENT`）。
-  - RTX 5080 16 GB 实测整卡峰值 `15473` MiB（`model_mb = 14580` + 桌面 `894`）；输出尺寸 640–1024、是否挂 LoRA、
-    步数均不改变显存占用（绝不写「调低分辨率省显存」）。RTX 4070 Super 12 GB 用户反馈可正常出图（ComfyUI 0.39
-    动态换页至 32 GB 级系统内存），记为 `reported_by_users`，不得写成实测；LoRA 配方在 12 GB 上未验证过。
-  - 唯一裁决：`comfyops/capability.py::image_vram_advice()` / `image_vram_advice_for_host()`，**永不拦截**
-    （`blocks=False`）；`config/deployment/qwen-image-2.1-windows-x64.json` 的 `platform.min_vram_mb` 同步降至 `11776`
-    （12 GB 档下限），`_floor_notes()` 对齐 `qualify` 的 `effective_floor_mb` 与固件保留内存规则。
-  - 后端三处返回 `vram_advice`：`api_loras.py::get_loras`（仅 `base_model=qwen_image_21`）、`materialprep/runtime.py::readiness()`、
-    `comfyops/recommendation.py::recommend()`（`image_prep` 选项经 `_selected_card_memory(env)`）。前端共享只读组件
-    `frontend/src/shared/ImageVramAdvicePanel.tsx` 复用在 `StyleLoraAssemblyPanel.tsx`、`ImageCapabilityCard.tsx` 与
-    `DeploymentRecommendationCard.tsx`（含 `reported_by_users` 标签）。
-- **MULTIREF 上不要叠配方（留待下次收尾修复）。** 现存两套配方的正向核心词仍原样追加到编辑提示词后面，在 MULTIREF
-  等编辑模式下会压过「保留参考图主体」指令（电影级配方做 I2I 正常，暗黑奇幻配方未在编辑模式测过；零 LoRA 正常）。
-- **GPU 任务进行中关掉 NVIDIA App 的驱动自动更新。** 本轮 21:39 驱动被后台从 621.24 热升到 621.40，
-  正在加载模型的渲染器随即 CUDA OOM。
-- **长轮询的验收脚本给 `httpx.Client` 加 `Connection: close`**：5 秒轮询会撞 uvicorn 默认 5 秒 keep-alive，
-  偶发 `RemoteProtocolError: Server disconnected`。
-- **跑分片回归前先确认保留数。** 11-25 首轮终检用了默认的保留 1 次，清掉了 `F:\ShineTest` 下 28 个更早的归档
-  日志。需要留历史时必须显式传 `-KeepRuns`。
-- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。2026-11-26 收尾终检：Ruff 全部通过、
-  前端 `tsc` / Vitest（96 文件 506/506）/ Vite build 全部通过、后端 8 分片 316 文件（`shards-20261126-010210-636`，
-  墙钟 `863.8s`，8 分片全部 exit 0、`shards_with_failure_markers=0`）全部通过。证据、更正与遗留问题见
-  `docs/ACCEPTANCE_20261125_IMAGE_LORA_AND_PROMPT_V1.md`。
-
-## 2026-11-26 中世纪奇幻 8 镜全流程真机穿测（导演模式七阶段 + 1.0× 原生出片）
-
-原始剧本定为 1 集 60 秒、单镜 8 秒，全程只在界面操作，最终精确落成 8 镜 / 59.5 秒并在 RTX 5080 上真实出片。
-报告与证据：`docs/ACCEPTANCE_20261126_MEDIEVAL_FANTASY_8SHOT_E2E.md`、`docs/evidence/20261126-medieval-fantasy-8shot-e2e/`。
-
-- **提示词的新行为只进下一个编译器版本，这条要当硬规则执行。** 按镜裁剪锁定故事事实（不在场人物的设定、
-  本镜没用到的道具、计划自身的结构说明不进提示词）落在 `shine-h3-compiler/2.2.0`；已发布的 `2.1.0` 转为
-  `LEGACY_ANCHORED_TOKENS_COMPILER_VERSION`，保持发布字节。`h3/rulebook.py::recompile_for_provenance` 要求存档请求
-  按钉住的版本逐字节重放，行为在旧版本号下变了，升级前排队的任务就会被判 `SHINE_PROVENANCE`。改任何提示词行为后，
-  用 `git show HEAD:backend/shine/h3/compiler.py` 取出已发布的编译器，与工作区编译器对真实存档请求逐条比对。
-- **裁剪事实只丢人物设定，不丢带标签的世界观事实。** 「前缀不认识」不能作为丢弃理由（「时代：…」「基调：…」
-  会中枪）；只丢弃值以年龄或性别描述开头的人物设定。
-- **场景底图不得含角色携带的道具**（`materialprep/brief.py` 场景族规则）。会发光的手持道具（提灯）会被模型当成
-  场景里的实用光源写进 `must_keep`，成片里就出现「手里一只、祭坛上一只」。
-- **运行控制**：`ADVANCEABLE_RUN_STATUSES` 含 `PAUSE_REQUESTED`，暂停请求由 Worker 在子序列到达安全边界后收敛为
-  `PAUSED`，收尾期间以 `pause_reconciling` 让出节拍。前端「是否已有运行占着拍摄范围」只读 `overview.run.active`
-  （后端 `ACTIVE_RUN_STATUSES` 的唯一投影），不得另抄状态清单。
-- **运行的幂等复用看状态**：仍在推进或待核对的运行原样复用；全部终结后用同一导演包再开拍必须发起新运行。
-- **剧组提示词里的拍数、镜头数按分集预算给**（`scene_budget_seconds` + `episode_progress`），不写死与预算矛盾的数字。
-- **道具绑定**：清单优先用戏剧场次的 `drama_span_ids`，道具名中英都要能对上（`_english_prop_aliases`）。
-- **回归脚本**：`Remove-ShineDir` 删除前先清只读属性（`test_clean_checkout_identity` 会建真实 git 仓库，对象文件只读，
-  否则每轮留下一个 `bt-*`）；「最近 N 轮」按目录名里的时间戳排，不按最后修改时间。跑之前按上一节的提醒确认 `-KeepRuns`。
-- **遗留 D12（未修，待产品决定）**：镜头冻结在已确认导演包里且已有通过成片时，素材页「选用并晋升」新主素材后不会
-  回绑（`bind_adopted_masters_to_shots` 的保护规则），需求行却已指向新主素材，页面还写死显示「已采用 / 已回绑」。
-  结果是需求清单与镜头绑定不一致，且没有给已开拍镜头换素材的路径。
-- 出片耗时参考：`1344×768`、原生 20 步、INT8，单镜 9–15 分钟（参考图越多越慢），60 秒一集约 1 小时 40 分钟。
-- 本轮未改 `worker.py` / `preproduction.py` / `comfy/client.py`，不触发 VLM 重校准。收尾门禁：Ruff 全部通过；前端
-  `tsc` / Vitest（99 文件 518/518）/ Vite build 全部通过；后端 8 分片 317 文件（`shards-20261126-195824-351`，
-  墙钟 858.8s，8 分片全部 exit 0、`shards_with_failure_markers=0`）全部通过。
+### 5.7 安装包（原文保留）
+
+#### Distribution package (tester hand-off)
+
+- Build releases only from a committed tree: `pwsh -File scripts\build_test_package.ps1 -OutDir <dir> -Verify`.
+  The script refuses a dirty working tree, takes files from `git ls-files`, excludes models/databases/secrets/
+  `docs/evidence`/virtualenvs, and writes `BUILD_INFO.json` plus a per-file `PACKAGE_MANIFEST.json`.
+- One tester entry only: `一键安装并启动.cmd` (ASCII fallback `SETUP.cmd`) → `scripts/install_once.ps1`.
+  It must stay idempotent (installed → start, running → delegate to the launcher's three-proof liveness
+  verdict), prefer a non-system drive with ≥180 GiB free, and land on `#setup`. Personal desktop setup
+  requires no operator password. **2026-11-15 user ruling**: a single-disk machine may install to the
+  system drive only after explicit confirmation (interactive `YES` or `-AllowSystemDrive`); the 180 GiB
+  capacity floor is NOT lowered. The approval persists as `SHINE_ALLOW_SYSTEM_DRIVE=1` in `.env` plus
+  `allow_system_drive` in `deployment-storage.json`; bootstrap and start_shine honor that one fact.
+- Encoding is a correctness requirement, not style: `.cmd` entry files stay pure ASCII (cmd.exe uses the
+  active code page), and every `scripts/*.ps1` containing non-ASCII text must be UTF-8 **with BOM**
+  (Windows PowerShell 5.1 reads BOM-less UTF-8 as ANSI and fails to parse). `test_package_entrypoints.py`
+  enforces both.
+- Never package weights, generated media, SQLite files, `.env`, `operator-credentials.txt` or acceptance
+  evidence. Testers get the installer, not the data.
+
+## 6. 测试根与工作区规范
+
+### 6.1 测试根布局：`<测试根>` 是一切可丢弃测试产物的唯一落点
+
+```text
+<测试根>\
+├─ manual\<YYYYMMDD>-<主题>\        定向测试：pytest --basetemp、临时脚本、日志 —— 竣工即删
+├─ acceptance\<YYYYMMDD>-<主题>\    隔离验收（需要真机或隔离栈时才建）
+│   ├─ data\                         隔离 DataDir —— 竣工即删
+│   └─ evidence\                     必要证据 —— 保留；要长期引用的复制进 docs\evidence\
+├─ shards-<时间戳>\                  只由 run_backend_shards.ps1 产生与清理（-KeepRuns，默认留 1 轮）
+└─ .media-cache\                     只由分片脚本使用
+```
+
+- 测试根由调用方显式给出，每台机器固定一个非系统盘目录并复用：有参数解析的脚本用 `-WorkRoot` / `--work-root`，
+  没有参数解析的（pytest 模块、裸跑的浏览器脚本）读环境变量 `SHINE_TEST_ROOT`。唯一实现在 `scripts/shine_test_root.py`；
+  仓库里的脚本、测试与配置不得写死任何本机目录（`backend/tests/test_workspace_hygiene.py` 守护）。
+- **导入即建栈的陷阱**：`shine/main.py` 在模块顶层执行 `app = create_app()`，默认配置会经仓库根 `.env` 解析到
+  **日常数据目录**——任何进程只要导入 `shine.main`，就会打开（不存在则创建）日常库。所以 `backend/tests/conftest.py`
+  在导入任何 `shine` 模块之前把 `SHINE_DATA_DIR` 钉到一次性目录，并在退出时关引擎、删目录（顺序由
+  `test_workspace_hygiene.py` 守护）。新增 pytest 入口、插件或要导入应用模块的独立脚本时照此办理：
+  **先隔离数据目录，再导入应用模块**。
+- **顶层不放任何自起名的目录或文件。** 手工 basetemp 一律进 `manual\<轮次>\`，不落在根下，不每跑一次换一个新名字；
+  重跑复用同一目录，跑前先清。
+- `%TEMP%`、`.local-data\`、仓库根不得再写入测试产物或隔离数据。`<仓库根>\.local-acceptance\` 是旧的验收目录，
+  自 2026-11-27 起冻结为只读历史，新轮次不再写入。
+- 模型与节点不得在测试目录留副本：隔离栈竣工时连同它的 `data\` 整个删掉，其中就包含它自行缓存的权重。
+
+### 6.2 命名
+
+- 轮次目录 `YYYYMMDD-<主题>`：只用 ASCII 字母、数字和 `-`，不含空格、中文、括号。
+- 路径里不得出现中文或乱码：控制台代码页会把中文路径写成乱码目录（曾留下一个名字全是乱码的测试目录）。
+- 一轮一个目录、一个名字；本轮产生的一切都写在这里。
+
+### 6.3 清理口径（测试根通用；竣工清理与大规模清理都用这一套，不得另定标准）
+
+唯一执行者是 `scripts/clean_test_workspace.py`：默认演练并按真实分配字节数报告，`--apply` 才删除，
+`--prune-links` 才动保留条目里的链接。以条目为单位（测试根的一级条目，以及 `manual\`、`acceptance\` 下的轮次目录）：
+
+1. 条目顶层的散文件是证据（日志、JSON、截图、交接文档），一律保留。
+2. pytest basetemp（子目录以 `test_*` 为主）整棵删除，不论大小；不含任何文件的空壳目录移除。
+3. 分片归档目录（子目录全是 `bt-*`）只删 `bt-*`，保留 `chunk-*.log`。
+4. 真实占盘 < 100 MiB 的目录视为轻量证据，整棵保留。
+5. ≥ 100 MiB 的目录视为数据目录，内容全删；但下列目录整棵保留：`comfyops\{isolated-packages,models,setup}`、
+   名为 `evidence` / `browser-evidence` / `logs` / `handoff-history` 的目录、直接含真实 safetensors 权重的目录。
+6. junction 与符号链接只拆链接本身，绝不进入其目标。
+7. 真实权重副本不在这里删：先核对「规范位置存在同大小、头尾逐字节一致的原件」并迁回模型库，核对不到的保留并上报。
+
+**占盘看真实字节数，不看 `du`**：Git Bash 的 `du` 对稀疏文件报逻辑大小（2026-11-27 实测同一目录 571 GiB 逻辑、
+346 GiB 真实）。脚本按真实分配字节数统计。
+
+### 6.4 竣工清理闸门（每轮必做，缺一不算竣工）
+
+1. 停隔离栈：`scripts/stop_shine.py --data-dir <本轮 data>`，确认端口无监听、GPU 租约为 0。
+2. 清理：`scripts/clean_test_workspace.py --work-root <测试根>` 先演练并留下清单，确认后加 `--apply --prune-links` 执行；
+   分片失败保留的 `bt-*` 在定位后立即删除。
+3. 需要长期引用的证据复制进 `docs/evidence/<日期-名称>/`，报告里写清路径。
+4. 量化核对：把演练输出里的删除量与测试根占用写进收尾报告。预算：`<测试根>` 在轮次关闭后 ≤ 2 GiB
+   （分片归档与证据）。超出必须列明原因和保留清单。
+5. 恢复日常配置并用原入口复验（§5.3）。
+
+### 6.5 删除安全
+
+- 永久删除没有回收站：先演练（逐条目列出大小与动作），复核后执行，再把执行结果与演练逐条比对。
+- 动手前查三件事：日常栈是否引用（配方、清单、库的全表全列）；里面有没有真实权重或从未入库的内容；有没有 junction。
+- 下列内容永不当作测试垃圾删除：日常数据目录及其备份、从未入库的源码或文档、`backup-*` 目录、
+  别人正在运行的进程所使用的目录。
+
+## 7. 专题细则索引
+
+### 7.1 主题 → 历史小节（`docs/AGENTS_HISTORY.md`，括号内是精简前 AGENTS.md 的行号）
+
+| 要做的事或碰到的问题 | 先读哪里 |
+|---|---|
+| 写新功能、改既有链路 | 本文件 §3.3 登记表 → 对应「唯一位置」的源码 → 下表对应小节 |
+| 持久化产物恢复、死渲染器租约、口语语言合同 | 2026-11-03 late supplement（L219）、closing round（L258） |
+| 渲染器的启动、归属、释放 | 2026-11-04 renderer lifecycle round（L307）、2026-11-05 受管出图渲染器（L581）、2026-11-15 出图渲染器崩溃取证（L1746） |
+| 剧组提示词、分段、分镜链失败 | 2026-11-04 crew prompt round（L334）、2026-11-07 第 7 轮（L864）、2026-11-15 拍摄提示词调优轮（L1781）、分镜链真跑轮（L1862） |
+| 人物绑定、音色、方案槽位、画幅 | 2026-11-03 workbench usability round（L370）、2026-11-04 round（L399）、director-mode round（L430）、受托素材轮（L628） |
+| 导演模式旅程、一键开拍、七阶段 | 2026-11-04 导演模式全旅程（L461）、2026-11-08 素材后置与第二轮收尾（L1125、L1141）、2026-11-09 复验收尾（L1218）、七阶段归并（L1461） |
+| 导演包、整部作品生产、调度、跨批次续接 | 2026-11-06 导演包与持续生产（L691）、收尾修复 V3（L748）、跨批次续接轮（L789）、2026-11-21 中断拍摄恢复（L2443） |
+| UNKNOWN、对账、授权重发、死亡 worker | 2026-11-07 UNKNOWN 请求身份安全补充（L960）、2026-11-08 导演链路阻滞（L1030）、授权重发（L1055）、四阶段二轮复验（L1093）、2026-11-22 LLM 流式 UNKNOWN（L2567） |
+| 变体、候选权重、整备与安装链 | 2026-11-09 W6A8 候选轮（L1166）、2026-11-14 H3 资源自整备 V2.0（L1493）、2026-11-15 工作栈生命周期（L1682）、新装机对抗性审查（L1713）、2026-11-17 环境整备与钉死路径（L1946）、能力卡缺件（L1987）、2026-11-19「文件找到却用不了」（L2122） |
+| 启动器、supervisor、端口、入口归属 | 2026-11-15 解阻滞轮（L1801）、2026-11-17 supervisor 归入同一停止链（L2014）、端口归属与身份收敛（L2037）、接手轮（L2059）、2026-11-19 收尾建设（L2179） |
+| 素材：需求、采纳、逐镜注入、LoRA | 2026-11-17 素材缺口与一次采纳（L1916）、2026-11-19 逐镜素材注入（L2220）、④页单一选定面（L2244）、2026-11-25 统一素材生图 LoRA（L2617） |
+| 大纲、分集、每集秒数 | 2026-11-14 大纲版本管理（L1557）、大纲节奏三档（L1581）、2026-11-10 长文本分块（L1290）、2026-11-21 每集秒数（L2487） |
+| 成片、字幕、后期、验收 | 2026-11-10 成片库（L1257）、2026-11-17 字幕唯一生成入口（L2303）、2026-11-19 后期成片重构（L2372）、2026-11-19 重拍、选用与字幕烧录（L2349）、2026-11-10 输出目录与可读文件名（L1346） |
+| Copilot（AI 管家） | Copilot V2.1 合同规则（L2098）、V3.1 任务级一次授权（L2146）、2026-11-19 收尾建设（L2179） |
+| 两条业务线（七阶与四阶）、V3 工作流 | 2026-11-20 V2 双生产线（L2403）、2026-11-22 V3 P1–P4（L2509–L2551）、V3 最终收尾（L2558） |
+| LowVRAM、真实出片耗时 | 2026-11-23 LowVRAM 高水位门控（L2577）、2026-11-26 中世纪 8 镜穿测（L2665） |
+| 模拟测评团队（MiniMax Bot） | 2026-11-15 模拟测评团队轮（L1652） |
+| 该跑哪些测试文件 | 上表对应小节末尾的「回归入口」，以及本文件 §5.4 |
+
+### 7.2 仓库脚本里的位置引用
+
+开发与验收脚本一律通过 `scripts/shine_test_root.py` 取测试根。仓库里的脚本、测试与配置不再指向旧的验收目录或
+任何本机目录，`backend/tests/test_workspace_hygiene.py` 静态守护这一点；新增脚本照此办理。唯一的例外是
+`config/deployment/_upstream-pins/review-runtime-metadata.lock` 头部由 uv 自动生成的命令记录：它记的是生成当时的
+路径，属于事实记录；源输入清单已在同目录（`review-runtime-metadata.in`），不要为了改这两行注释去重新生成这份锁。
+
+## 8. 现行待收束
+
+收掉一项就删一行。产品功能层面的遗留项以 `docs/AGENTS_HISTORY.md` 各小节里的「未修 / 待定 / 待用户决定」为准。
+
+- **隔离栈重复缓存权重**：隔离数据目录的安装器会把规范安装里已有的权重再复制一份进自己的缓存（2026-11-27
+  一轮复制了 16 GiB）。应在产品层改为就地核验或同卷硬链接；改之前靠 §6.4 的竣工清理兜底。
+- **历史记录里的本机路径**：`docs/AGENTS_HISTORY.md` 与早期验收文档保留着原文里的本机路径，它们只是当时的事实
+  记录，不是现行落点；现行落点只看 §2 与本机的 `AGENTS.local.md`。

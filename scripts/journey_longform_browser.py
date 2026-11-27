@@ -8,7 +8,8 @@ Run:
     uv run --with playwright==1.64.1 python scripts/journey_longform_browser.py
 
 It drives whatever is already serving http://127.0.0.1:5173 (vite -> API) and
-creates its own project.  Screenshots land in .local-acceptance/journey-shots/.
+creates its own project.  Screenshots land in ``<test root>/acceptance/journey-shots/``;
+the test root comes from ``SHINE_TEST_ROOT`` (no machine directory is hardcoded).
 """
 
 from __future__ import annotations
@@ -23,9 +24,11 @@ from pathlib import Path
 
 from playwright.sync_api import Page, TimeoutError as PlaywrightTimeout, sync_playwright
 
+from shine_test_root import acceptance_dir, work_root
+
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:5173"
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / ".local-acceptance" / "journey-shots"
+OUT = acceptance_dir(work_root(), "journey-shots")
 OUT.mkdir(parents=True, exist_ok=True)
 
 PLAYWRIGHT_CACHE = Path(os.environ["LOCALAPPDATA"]) / "ms-playwright" if os.environ.get("LOCALAPPDATA") else None

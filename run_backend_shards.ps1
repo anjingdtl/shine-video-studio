@@ -201,7 +201,7 @@ Write-Output "logs: $outDir"
 
 # ---- 清理：分片 basetemp + 历史 run 目录 ----
 # 每次跑完必须落地：basetemp 里是各用例的 workspace，长期堆积会把测试盘吃满
-# （历史事故：3 次全量回归在 F:\ShineTest 留下 327 GB）。
+# （历史事故：3 次全量回归在测试根留下 327 GB）。
 function Remove-ShineDir([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return }
     for ($attempt = 1; $attempt -le 3; $attempt++) {

@@ -135,8 +135,8 @@ stop（exit-10 冗余停止删除），换代裁决归 start_shine。
 ### 工作栈身份显示（真机 UI）
 
 顶栏实测：`工作台后端在线 / D:\Shine\data / git:42639bd+改动 / 真实制作已就绪`。
-截图：`.launcher-accept/evidence-topbar-identity.png`、`.launcher-accept/evidence-grant-preview.png`
-（Git 忽略目录，不进安装包）。
+截图：`docs/evidence/20261119-launcher-accept/evidence-topbar-identity.png`、`docs/evidence/20261119-launcher-accept/evidence-grant-preview.png`
+（2026-11-27 从本机验收目录迁入证据库；`docs/evidence` 不进安装包）。
 
 ### 真实小样与自定义图装配（PARTIAL）
 

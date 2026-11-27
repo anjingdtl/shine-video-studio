@@ -316,6 +316,8 @@ Qwen-ASR SDK 完整构建/安装闭包仍未验收；不将上述服务依赖补
 
 新增 51 个精确发行包，总输入 154 个，实际大小/哈希全部核验。`review-runtime-metadata.lock` 是 Windows CPython 3.12 元数据解析证据，不替代实际 cu128 文件钉点；`review-runtime-audit.json` 保存从已校验发行包中读取的许可证元数据、依赖元数据及其哈希。sox 1.5.0 的 BSD-3-Clause 源包采用受控离线构建；其产物身份、包输入和构建命令进入原安装尝试审计。未将任何第三方源码收编到项目源码树。
 
+2026-11-28：`review-runtime-metadata.lock` 的源输入清单（生成该锁的精确版本列表）从本机验收目录迁入同目录的 `review-runtime-metadata.in`，与原文件逐字节一致（SHA-256 `211779b83bb57594f90add4fb4899bcab83f412cc69777e4a3ba268b1d8c7aa9`）。锁文件未改动；其头部由 uv 自动生成的命令记录里的 `.local-acceptance/...` 路径是生成当时的位置，仓库不再依赖该目录。
+
 PyTorch 官方索引 https://download.pytorch.org/whl/cu128/torch/ 明确链接 download-r2.pytorch.org 的 2.7.1+cu128 Windows CPython 3.12 wheel；三个 CUDA 包仍保留原精确版本和 SHA-256，只统一目录/安装器主机校验规则。
 
 soynlp 0.0.493 的已校验 wheel 自报 License=UNKNOWN。另核验上游 LGPL v3 许可证，精确 revision=264a05c96f0ccd1961f1a669a9df132076a67a15、文件哈希和 47/51 个 Python 文件对照结果见审计 JSON。四个文件未与该历史快照逐字节吻合，未把该快照冒称为发布 wheel 的完整源码身份；发布输入的身份仍是 PyPI wheel 的精确哈希。soxr 是 LGPL-2.1-or-later；这些依赖只在单独安装环境中使用，没有复制 GPL/LGPL 源码到主项目。该记录不构成额外的发行授权结论。

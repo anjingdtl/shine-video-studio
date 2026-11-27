@@ -6,6 +6,7 @@
 # that proved the positive path, so the refusal is tested against the very
 # project whose masters are approved and locked.
 param(
+    [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$RunName,
     [Parameter(Mandatory = $true)][string]$ScriptPath,
     [int]$ApiPort = 8140,
@@ -18,10 +19,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+# The acceptance data directory lives under the caller's test root, never inside the repository.
+$WorkRoot = (Resolve-Path -LiteralPath $WorkRoot).Path
 . (Join-Path $PSScriptRoot 'shine_local_config.ps1')
 $venvPython = (Get-ShineStackSettings $repoRoot).Python
 $ScriptPath = (Resolve-Path -LiteralPath $ScriptPath).Path
-$runDir = Join-Path $repoRoot ".local-acceptance/final-closure-v3/$RunName"
+$runDir = Join-Path $WorkRoot "acceptance/final-closure-v3/$RunName"
 $dataDir = Join-Path $runDir 'data'
 $recipePath = Join-Path $runDir 'managed_recipe.json'
 $recordPath = Join-Path $runDir 'real-production-record.json'

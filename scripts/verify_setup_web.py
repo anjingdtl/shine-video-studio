@@ -13,6 +13,7 @@ import httpx
 from playwright.sync_api import expect, sync_playwright
 
 import verify_v13_web as harness
+from shine_test_root import acceptance_dir, work_root
 
 
 def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
@@ -36,8 +37,8 @@ def exercise(api_base, ui_base, screenshot, temporary, browser_path=None):
                 page = browser.new_page(viewport={'width': 1440, 'height': 1100})
                 page.goto(ui_base, wait_until='networkidle')
                 page.locator('select').first.select_option(project)
-                chosen_root = ((screenshot.parent if screenshot else Path(__file__).resolve().parents[1]
-                                / '.local-acceptance') / f'selected-下载目录-{project}').resolve()
+                chosen_root = ((screenshot.parent if screenshot else acceptance_dir(work_root(), "setup-web"))
+                               / f'selected-下载目录-{project}').resolve()
                 storage = page.locator('#deployment-storage')
                 storage.get_by_label('下载安装目录', exact=True).fill(str(chosen_root))
                 storage.get_by_label('保存目录的操作员凭据', exact=True).fill(harness.TEST_CREDENTIAL)

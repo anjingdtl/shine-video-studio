@@ -16,6 +16,7 @@
 #      script only observes, downloads, decodes and plays the reel;
 #   8. the stack is stopped and the release of every owned resource is proved.
 param(
+    [Parameter(Mandatory = $true)][string]$WorkRoot,
     [Parameter(Mandatory = $true)][string]$RunName,
     [Parameter(Mandatory = $true)][string]$SourceDb,
     [Parameter(Mandatory = $true)][string]$SecretSourceDir,
@@ -40,6 +41,8 @@ $ErrorActionPreference = 'Stop'
 # stdout and is judged by its exit code instead.
 $PSNativeCommandUseErrorActionPreference = $false
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+# The acceptance data directory lives under the caller's test root, never inside the repository.
+$WorkRoot = (Resolve-Path -LiteralPath $WorkRoot).Path
 . (Join-Path $PSScriptRoot 'shine_local_config.ps1')
 $stackSettings = Get-ShineStackSettings $repoRoot
 $env:UV_PROJECT_ENVIRONMENT = $stackSettings.BackendEnv
@@ -53,7 +56,7 @@ if (-not $ReviewPython) {
     $ReviewPython = Join-Path $ComfyRoot 'python_embeded/python.exe'
 }
 $ReviewPython = (Resolve-Path -LiteralPath $ReviewPython).Path
-$runDir = Join-Path $repoRoot ".local-acceptance/final-closure-v3/$RunName"
+$runDir = Join-Path $WorkRoot "acceptance/final-closure-v3/$RunName"
 $dataDir = Join-Path $runDir 'data'
 $logDir = Join-Path $runDir 'logs'
 New-Item -ItemType Directory -Force -Path $runDir, $logDir | Out-Null

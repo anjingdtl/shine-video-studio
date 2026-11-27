@@ -32,6 +32,7 @@ from shine.comfyops.llm_readiness import TEXT_ROLES  # noqa: E402
 from shine.models import WorkerInstance, utcnow  # noqa: E402
 from tests.conftest import fake_deployment_host, make_studio  # noqa: E402,F401
 from tests.test_service_validation import _fake_object_info, _fake_review  # noqa: E402
+from shine_test_root import acceptance_dir, work_root  # noqa: E402
 from tests.test_runtime_dependencies import wheel  # noqa: E402
 
 
@@ -185,7 +186,7 @@ def test_browser_setup_routes(tmp_path, monkeypatch, fake_deployment_host, scena
                         # The text models are a parallel preparation: the wizard
                         # names what is missing and keeps preparing H3 (J03).
                         expect(wizard.get_by_text('文本模型还有角色未配置', exact=False).first).to_be_visible(timeout=45000)
-                        llm_shot = REPO / '.local-acceptance/director-browser/llm-first.png'
+                        llm_shot = acceptance_dir(work_root(), 'director-browser', 'llm-first.png')
                         llm_shot.parent.mkdir(exist_ok=True)
                         page.screenshot(path=str(llm_shot), full_page=True, animations='disabled')
                         wizard.get_by_label('模型配置名称', exact=True).fill('Browser core LLM')
@@ -235,7 +236,7 @@ def test_browser_setup_routes(tmp_path, monkeypatch, fake_deployment_host, scena
                     # Reload keeps READY with an idle renderer and issues no installation writes.
                     assert not any(r['url'].endswith('/production-series') for r in requests)
                     expect(page.locator('.mode-entry')).to_contain_text('真实制作已就绪')
-                    evidence = REPO / '.local-acceptance/director-browser'
+                    evidence = acceptance_dir(work_root(), 'director-browser')
                     evidence.mkdir(exist_ok=True)
                     page.screenshot(path=str(evidence / (scenario + '.png')), full_page=True, animations='disabled')
                     (evidence / (scenario + '.json')).write_text(json.dumps({
