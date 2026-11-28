@@ -404,9 +404,9 @@ def test_drama_writer_and_scene_director_prompts_align_with_scene_budget(api):
     writer_calls = [call for call in calls if call.title == "DramaSceneScript"]
     board_calls = [call for call in calls if call.title == "SceneShotBoard"]
     assert len(writer_calls) == 2 and len(board_calls) == 2
-    # Each scene receives half of 40s (20s) -> 3 to 4 beats / 3 to 4 shots instead of 8-14 / 6-10 bloat.
+    # Each scene receives half of 40s (20s) -> 2 to 3 cohesive beats / 3 to 4 shots instead of 8-14 / 6-10 bloat.
     for call in writer_calls:
-        assert "20-second scene compact at 3 to 4 beats" in call.system
+        assert "20-second scene focused at 2 to 3 cohesive beats" in call.system
         assert "8 to 14 beats" not in call.system
     for call in board_calls:
         assert "production_context.scene_budget_seconds (20s)" in call.system

@@ -295,13 +295,13 @@ def drama_screenwriter_prompt(
     checks it against.
     """
     if scene_budget_seconds is not None and scene_budget_seconds > 0 and scene_budget_seconds < 80:
-        min_beats = max(2, round(scene_budget_seconds / 7.5))
-        max_beats = min(15, max(min_beats + 1, round(scene_budget_seconds / 5.5)))
+        min_beats = max(2, round(scene_budget_seconds / 8.5))
+        max_beats = min(12, max(min_beats + 1, round(scene_budget_seconds / 6.5)))
         beat_sizing = (
-            f"Because each downstream video segment lasts 4 to 8 seconds, keep this "
-            f"{scene_budget_seconds:g}-second scene compact at {min_beats} to {max_beats} beats "
-            "(at most 15 beats) so beats map naturally to shot segments without padding extra "
-            "micro-beats beyond the source passage's real dramatic turns: "
+            f"Because each downstream video segment lasts 5 to 9 seconds, build ONE unified dramatic "
+            f"spine (setup -> escalation -> climax -> payoff) and keep this {scene_budget_seconds:g}-second "
+            f"scene focused at {min_beats} to {max_beats} cohesive beats (at most 12 beats) so every beat "
+            "carries a clear causal turn without fragmenting into choppy micro-beats: "
         )
     else:
         beat_sizing = "Keep each scene compact at 8 to 14 beats (at most 15 beats): "
@@ -333,9 +333,16 @@ def drama_screenwriter_prompt(
         "characters) from the scene slot the context "
         "gives (production_context.scene_slot), using its registered location name exactly; its "
         "dramatic_goal is what the scene is for. Follow the source passage's exact spatial order: finish "
-        "indoor counter exchanges before anyone opens the door to leave, and keep each beat's prop states "
-        "(opened, covered, intact, or brittle) consistent across the whole scene so an early beat never breaks "
-        "or puts away a prop a later beat still handles. "
+        "indoor counter exchanges before anyone opens the door to leave, and keep each beat's physical "
+        "state strictly causal across the whole scene — (a) mount/foot state (on foot vs mounted on "
+        "horseback/vehicle) and spatial zone (vanguard open ground vs inside a formation/crowd) must "
+        "stay consistent across consecutive beats unless a beat explicitly depicts mounting, dismounting, "
+        "or crossing space; (b) weapon and core-prop states (opened, covered, sheathed, held blade-up, "
+        "or planted blade-down into the ground) must advance strictly in causal order (never flip a "
+        "planted blade back to blade-up without first showing it pulled from the ground, and never pull "
+        "an already-raised blade out of the ground); (c) once armies, guards, or a crowd are established "
+        "in the scene, keep them present through the closing beat unless the source explicitly depicts "
+        "their withdrawal or dispersal. "
         "entry_bridge is the visible action or sound that picks up previous_scene.exit_state when "
         "transition_from_prev is continuous_time, keeping ongoing object states intact across the join; "
         "otherwise it is the image that opens the scene."

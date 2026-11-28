@@ -307,7 +307,7 @@ def test_a_line_copy_ignores_typography_but_not_one_word():
 
 def test_every_refusal_has_one_sentence_for_a_person_and_one_instruction_for_the_retry():
     every = engine.refusal_codes()
-    assert len(every) == len(set(every)) == 29
+    assert len(every) == len(set(every)) == 32
     assert all(engine.refusal_label(code) for code in every)
     assert engine.refusal_label("NOT_A_CODE") is None
     # Each refusal the engine can raise is told to the retry in the verdict's own words.

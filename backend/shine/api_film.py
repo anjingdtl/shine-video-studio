@@ -579,7 +579,8 @@ def _land_shot(
     style_warnings: list[dict],
 ) -> str:
     """Land one directed shot into the authoritative Shot + ShotBinding ledger."""
-    from shine.services import complete_character_bindings
+    from shine.asset_identity import character_reference_matches
+    from shine.services import complete_character_bindings, complete_prop_bindings
 
     bindings: list[ShotBindingInput] = []
     shot_notices: list[dict] = []
@@ -592,6 +593,15 @@ def _land_shot(
                 "asset_id": identity,
             })
             continue
+        if (
+            asset.kind == "image"
+            and asset.role == "character"
+            and cast
+            and asset.entity_id
+            and not any(character_reference_matches(name, asset.entity_id) for name in cast)
+        ):
+            # Never bind an off-camera character just because the director copied extra UUIDs into asset_ids.
+            continue
         use_as = {
             "image": "subject" if asset.role == "character" else "picture",
             "audio": "audio",
@@ -600,6 +610,19 @@ def _land_shot(
         bindings.append(ShotBindingInput(asset_id=identity, use_as=use_as, ordinal=len(bindings)))
     bindings = complete_character_bindings(db, project_id, cast, bindings)
     bindings, scene_request = complete_location_binding(db, project_id, location, bindings)
+    prop_cues: list[str] = [visual]
+    blocking_raw = extra_spec_fields.get("blocking")
+    if isinstance(blocking_raw, dict):
+        for pl in blocking_raw.get("placements") or []:
+            if isinstance(pl, dict):
+                prop_cues.append(str(pl.get("posture") or ""))
+                prop_cues.extend(str(p) for p in (pl.get("props") or []) if str(p or "").strip())
+    prop_cues.append(str(extra_spec_fields.get("entry_state") or ""))
+    prop_cues.append(str(extra_spec_fields.get("exit_state") or ""))
+    for win in extra_spec_fields.get("timeline") or []:
+        if isinstance(win, dict):
+            prop_cues.append(str(win.get("action") or ""))
+    bindings = complete_prop_bindings(db, project_id, prop_cues, bindings)
     camera_out = dict(camera_fields)
     sound_out = dict(sound_fields)
     style_resolution = None

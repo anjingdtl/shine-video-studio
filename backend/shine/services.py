@@ -783,6 +783,139 @@ def complete_location_binding(
     return result, RequestedAsset(family="scene", name=location[:80])
 
 
+_PROP_BILINGUAL_ALIASES: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("陌刀", ("modao", "mo-dao", "mo dao", "long-handled blade", "long-hafted blade", "tang broadsword")),
+    ("长刀", ("long blade", "broadsword", "modao", "saber", "sabre")),
+    ("战刀", ("war blade", "broadsword", "saber", "sabre")),
+    ("长剑", ("longsword", "sword")),
+    ("怀表", ("pocket watch", "brass watch", "watch")),
+    ("钥匙", ("silver key", "rusty key", "iron key", "key")),
+    ("提灯", ("lantern",)),
+    ("灯笼", ("lantern",)),
+    ("长矛", ("spear", "halberd")),
+    ("长枪", ("spear", "lance")),
+    ("弓", ("bow",)),
+    ("盾", ("shield",)),
+    ("匕首", ("dagger",)),
+    ("玉佩", ("jade pendant", "pendant")),
+    ("令牌", ("token", "command tablet")),
+    ("书信", ("letter",)),
+)
+
+
+def _prop_match_terms(asset: Asset, requirement_payload: dict | None = None) -> list[str]:
+    """Collect safe match terms (original entity_id + English aliases) for one approved prop master."""
+    terms: list[str] = []
+    entity = str(asset.entity_id or "").strip()
+    if entity:
+        terms.append(entity)
+    if isinstance(requirement_payload, dict):
+        for key in ("canonical_entity_id", "entity_id", "name"):
+            val = str(requirement_payload.get(key) or "").strip()
+            if val and val not in terms:
+                terms.append(val)
+    # Match distinctive bilingual aliases when the prop's Chinese entity_id contains them.
+    for zh_key, en_aliases in _PROP_BILINGUAL_ALIASES:
+        if zh_key in entity:
+            for alias in en_aliases:
+                if alias not in terms:
+                    terms.append(alias)
+    # Also inspect explicit English alias recorded in provenance brief if concise.
+    prov = asset.provenance if isinstance(asset.provenance, dict) else {}
+    raw_alias = str(prov.get("entity_en") or prov.get("prop_en") or "").strip()
+    if raw_alias and raw_alias not in terms:
+        terms.append(raw_alias)
+    return terms
+
+
+def _prop_term_in_text(term: str, lowered_text: str, raw_text: str) -> bool:
+    clean = term.strip()
+    if not clean:
+        return False
+    if re.search(r"[\u3400-\u9fff]", clean):
+        return clean in raw_text
+    if len(clean) < 3:
+        return False
+    return re.search(r"(?<!\w)" + re.escape(clean.lower()) + r"(?!\w)", lowered_text) is not None
+
+
+def complete_prop_bindings(
+    db: Session,
+    project_id: str,
+    prop_cues: list[str],
+    bindings: list[ShotBindingInput],
+) -> list[ShotBindingInput]:
+    """Auto-bind approved, locked core prop masters referenced in a shot's blocking or visual prose.
+
+    Mirrors ``complete_character_bindings`` and ``complete_location_binding``:
+    never invents assets, respects H3's image/total reference caps, and prevents
+    core weapons/objects from drifting when the director omits their UUIDs on later shots.
+    """
+    from shine.comfyops.assets import rights_status
+    from shine.comfyops.models import AssetRequirement
+    from shine.comfyops.preproduction import current_material_plan
+
+    cues = [str(item).strip() for item in prop_cues if str(item or "").strip()]
+    if not cues:
+        return bindings
+    raw_text = " ".join(cues)
+    lowered_text = raw_text.lower()
+
+    candidates = [
+        asset
+        for asset in db.scalars(select(Asset).where(
+            Asset.project_id == project_id,
+            Asset.kind == "image",
+            Asset.role == "prop",
+            Asset.approved.is_(True),
+            Asset.locked.is_(True),
+        ))
+        if not (asset.provenance or {}).get("offline_only") and not (asset.provenance or {}).get("is_mock")
+    ]
+    if not candidates:
+        return bindings
+
+    plan = current_material_plan(db, project_id)
+    req_by_asset: dict[str, dict] = {}
+    if plan:
+        for row in db.scalars(select(AssetRequirement).where(
+            AssetRequirement.plan_id == plan.id,
+            AssetRequirement.payload["family"].as_string() == "prop",
+        )):
+            payload = row.payload if isinstance(row.payload, dict) else {}
+            bound_id = str(payload.get("bound_asset_id") or "").strip()
+            if bound_id:
+                req_by_asset[bound_id] = payload
+
+    # Keep the latest approved master per entity_id (matching complete_location_binding).
+    latest_by_entity: dict[str, Asset] = {}
+    for asset in candidates:
+        key = str(asset.entity_id or asset.id).strip()
+        prev = latest_by_entity.get(key)
+        if prev is None or asset.created_at > prev.created_at:
+            latest_by_entity[key] = asset
+
+    result = [binding.model_copy() for binding in bindings]
+    bound_ids = {binding.asset_id for binding in result}
+    images = sum(1 for binding in result if binding.use_as.value in {"subject", "picture"})
+
+    for asset in latest_by_entity.values():
+        if asset.id in bound_ids:
+            continue
+        if images >= MAX_REFERENCE_COUNTS["image"] or len(result) >= MAX_TOTAL_REFERENCES:
+            break
+        if not rights_status(db, project_id, (asset.provenance or {}).get("rights_id"))["approved"]:
+            continue
+        terms = _prop_match_terms(asset, req_by_asset.get(asset.id))
+        if not any(_prop_term_in_text(term, lowered_text, raw_text) for term in terms):
+            continue
+        role = str(asset.entity_id or "").strip()[:64] or None
+        result.append(ShotBindingInput(asset_id=asset.id, use_as="picture", role=role, ordinal=len(result)))
+        bound_ids.add(asset.id)
+        images += 1
+    return result
+
+
 def protected_shot_ids(db: Session, project_id: str, shot_ids: list[str]) -> set[str]:
     """The shots that must not be revised right now.
 

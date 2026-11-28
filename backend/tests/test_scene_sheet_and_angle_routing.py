@@ -30,6 +30,7 @@ from shine.comfy.provider import ComfyReferenceError, ComfyUIRenderService
 from shine.h3.compiler import (
     COMPILER_VERSION,
     LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION,
+    LEGACY_SCENE_ANGLE_V27_COMPILER_VERSION,
     H3PromptCompiler,
 )
 from shine.schemas import (
@@ -477,7 +478,7 @@ def test_compiler_270_dual_angle_anchoring_and_260_byte_identical_replay(tmp_pat
         project_language="Chinese",
         mode_hint=GenerationMode.REF2VA,
     )
-    assert compiled_270.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.7.0"
+    assert compiled_270.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.8.0"
     defs = compiled_270.sections["subject_definitions"]
     ret = compiled_270.sections["retention_analysis"]
     desc = compiled_270.sections["detailed_description"]
@@ -536,6 +537,7 @@ def test_compiler_270_dual_angle_anchoring_and_260_byte_identical_replay(tmp_pat
         manifest=legacy_manifest,
         project_language="Chinese",
         mode_hint=GenerationMode.REF2VA,
+        compiler_version=LEGACY_SCENE_ANGLE_V27_COMPILER_VERSION,
     )
     assert v26_a.compiler_version == LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION == "shine-h3-compiler/2.6.0"
     assert v26_a.prompt_sha256 == v27_single.prompt_sha256

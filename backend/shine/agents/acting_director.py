@@ -47,6 +47,7 @@ _INTENSE_ENERGIES = frozenset({"turn_pause", "erupt", "aftermath"})
 _BREAK_MOTIVATIONS = frozenset({"time_or_space_jump", "establishing_reset"})
 _MIN_PRE_SPEECH_WINDOW_S = 0.25
 _SAFETY_TAIL_S = 0.15
+_SHOT_END_TAIL_S = 0.70
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +356,8 @@ def compute_pre_speech_budget(
         return PreSpeechPlan(target_pause_s, applied_pause_s, 0.0, None, raw_dialogue, slots)
 
     needed = target_pause_s - first_start
-    available_headroom = max(0.0, (sub_end - _SAFETY_TAIL_S) - last_end)
+    tail_guard = _SHOT_END_TAIL_S if sub_end >= duration_s - 1e-6 else _SAFETY_TAIL_S
+    available_headroom = max(0.0, (sub_end - tail_guard) - last_end)
     shift_s = round(min(needed, available_headroom), 3)
 
     adjusted = [dict(line) for line in raw_dialogue]
@@ -427,7 +429,11 @@ def acting_director_system_prompt() -> str:
         "an optional pure-English camera_beat (<=180 chars) on each window to synchronize camera acceleration, "
         "push/track/pan, settle/hold, or pull-back with pre_speech / delivery / aftermath windows (e.g. slow "
         "push-in through pre_speech -> settle and hold steady on eyes during delivery -> gentle breathing hold "
-        "or slow pull-back on aftermath). Leave camera_beat empty on static shots; never mention off-cast tokens."
+        "or slow pull-back on aftermath). Leave camera_beat empty on static shots; never mention off-cast tokens.\n"
+        "9. PHYSICAL STATE & CLEAN SPEECH COMPLETION: Never contradict entry_state/exit_state weapon orientation "
+        "(blade-up vs planted blade-down), mount/foot posture, or background armies/crowd presence; when a shot "
+        "has dialogue, finish speaking cleanly before the final aftermath window with lips closed in the closing "
+        "breath so speech is never truncated at the cut."
     )
 
 

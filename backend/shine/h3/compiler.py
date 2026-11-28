@@ -118,7 +118,13 @@ LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION = "shine-h3-compiler/2.6.0"
 # camera height and foreground parallax into natural English prose without
 # leaking internal enum keys. All <=2.6.0 historical versions stay
 # byte-identical for exact provenance replay.
-COMPILER_VERSION = "shine-h3-compiler/2.7.0"
+LEGACY_SCENE_ANGLE_V27_COMPILER_VERSION = "shine-h3-compiler/2.7.0"
+# 2.8.0 tightens narrative continuity in rendered Ref2VA prompts: preserves
+# described background ensembles/armies/crowds against empty scene plates so
+# pull-back wide shots never evaporate secondary figures, and instructs clean
+# final-syllable speech completion with a closed-mouth beat before the cut.
+# All <=2.7.0 historical versions stay byte-identical for exact provenance replay.
+COMPILER_VERSION = "shine-h3-compiler/2.8.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -134,6 +140,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
     LEGACY_ACTING_V25_COMPILER_VERSION,
     LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION,
+    LEGACY_SCENE_ANGLE_V27_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -189,6 +196,12 @@ LEGACY_250_VERSIONS = (
 LEGACY_260_VERSIONS = (
     *LEGACY_250_VERSIONS,
     LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION,
+)
+#: Versions that keep the 2.7.0 behaviour (pre-2.8.0 speech completion and
+#: empty-scene-plate background ensemble wording).
+LEGACY_270_VERSIONS = (
+    *LEGACY_260_VERSIONS,
+    LEGACY_SCENE_ANGLE_V27_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -273,6 +286,9 @@ class _Context:
     #: 2.7.0+: support scene_angle_opening:* / scene_angle_ending:* spatial anchors
     #: and natural English camera_height / foreground_parallax prose.
     scene_angle_v27: bool = False
+    #: 2.8.0+: preserve described background crowds/formations against empty scene
+    #: plates and enforce clean final-syllable speech completion before the cut.
+    narrative_continuity_v28: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -899,10 +915,18 @@ def _performance_sentence(ctx: _Context) -> str:
     if ctx.legacy_audio:
         return ""
     if ctx.spec.dialogue:
+        if ctx.legacy_sound:
+            return (
+                "Perform speech only for the timed dialogue blocks below. Between those lines, "
+                "use silent reactions and non-vocal scene sounds."
+            )
+        if ctx.narrative_continuity_v28:
+            return (
+                "Deliver only the timed dialogue blocks below, exactly as written, finishing every final "
+                "syllable cleanly before the shot ends with a calm closed-mouth beat afterward; between "
+                "those lines the performers react silently and the scene sound stays non-vocal."
+            )
         return (
-            "Perform speech only for the timed dialogue blocks below. Between those lines, "
-            "use silent reactions and non-vocal scene sounds."
-            if ctx.legacy_sound else
             "Deliver only the timed dialogue blocks below, exactly as written; between those "
             "lines the performers react silently and the scene sound stays non-vocal."
         )
@@ -1611,35 +1635,42 @@ def _subject_definitions(ctx: _Context) -> str:
                 )
             elif ctx.anchored_v21 and item.asset_role == "scene":
                 role_tag = str(item.role or "")
+                ensemble_guard = (
+                    " Keep any background crowds, formations, or secondary figures described in this shot "
+                    "present rather than emptying the frame to match the empty plate."
+                    if ctx.narrative_continuity_v28
+                    else ""
+                )
                 if ctx.scene_angle_v27 and role_tag.startswith("scene_angle_opening:"):
                     if last_frame_cont:
                         lines.append(
                             f"{item.label} is the opening camera-angle architectural and terrain reference "
                             "for [Shot 1]; establish the opening wall/horizon geometry and materials from it "
                             "without overriding the lighting, exposure or color temperature of the preceding "
-                            "shot's final frame."
+                            f"shot's final frame.{ensemble_guard}"
                         )
                     else:
                         lines.append(
                             f"{item.label} is the opening camera-angle architectural and terrain reference "
                             "for [Shot 1]; establish the opening wall/horizon geometry and materials from it."
+                            f"{ensemble_guard}"
                         )
                 elif ctx.scene_angle_v27 and role_tag.startswith("scene_angle_ending:"):
                     lines.append(
                         f"{item.label} is the destination camera-angle architectural and terrain reference "
                         "for [Shot 1]; as the camera moves, transition smoothly into this direction's "
-                        "geometry and landmarks without warping or repeating structures."
+                        f"geometry and landmarks without warping or repeating structures.{ensemble_guard}"
                     )
                 elif last_frame_cont:
                     lines.append(
                         f"{item.label} is the architectural and spatial layout reference for [Shot 1]; "
                         "use it for room geometry and materials only, without overriding the lighting, "
-                        "exposure or color temperature of the preceding shot's final frame."
+                        f"exposure or color temperature of the preceding shot's final frame.{ensemble_guard}"
                     )
                 else:
                     lines.append(
                         f"{item.label} is the empty environment and lighting reference for [Shot 1]; "
-                        "use it for the setting, architecture and atmosphere only."
+                        f"use it for the setting, architecture and atmosphere only.{ensemble_guard}"
                     )
             else:
                 lines.append(f"{item.label} is the composition reference for [Shot 1].")
@@ -1918,6 +1949,7 @@ class H3PromptCompiler:
         acting_v25 = compiler_version not in LEGACY_240_VERSIONS
         continuity_clean_v26 = compiler_version not in LEGACY_250_VERSIONS
         scene_angle_v27 = compiler_version not in LEGACY_260_VERSIONS
+        narrative_continuity_v28 = compiler_version not in LEGACY_270_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1952,6 +1984,7 @@ class H3PromptCompiler:
             acting_v25=acting_v25,
             continuity_clean_v26=continuity_clean_v26,
             scene_angle_v27=scene_angle_v27,
+            narrative_continuity_v28=narrative_continuity_v28,
         )
         if language_fallback:
             ctx.warnings.append(

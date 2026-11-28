@@ -235,7 +235,7 @@ def test_v25_interleaves_environment_pre_speech_delivery_and_continuation():
         project_language="Chinese",
         mode_hint=GenerationMode.REF2VA,
     )
-    assert compiled.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.7.0"
+    assert compiled.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.8.0"
     desc = compiled.sections["detailed_description"]
 
     # 1. Static environment and background story facts are fronted BEFORE timeline & dialogue.

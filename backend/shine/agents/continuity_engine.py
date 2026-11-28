@@ -56,6 +56,8 @@ MIN_SUB_SHOT_SECONDS = 2.0
 FASTEST_SPEECH_RATIO = 0.75
 #: Above this share of a shot taken by speech, the shot has no room to breathe.
 WALL_TO_WALL_SPEECH = 0.85
+#: Minimum silent breathing tail after a shot's final spoken line so H3 never cuts mid-syllable.
+MIN_DIALOGUE_END_TAIL_S = 0.5
 
 #: The dramatic reasons a shot continues the take of the shot before it.
 CONTINUE_MOTIVATIONS = frozenset({"continuous_action", "emotional_hold"})
@@ -326,11 +328,13 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
     _judge_dialogue(verdict, views, beats)
     _decide_boundaries(verdict, views, shots, bool(context.get("continuity_predecessor")))
     _judge_continuation_openings(verdict, views, shots, previous_shot=context.get("previous_shot"))
+    _judge_cross_shot_physical_state(verdict, views, shots, previous_shot=context.get("previous_shot"))
     _judge_axis(verdict, views, shots, previous_blocking=context.get("previous_blocking"))
     _report_props(verdict, views, shots)
     _report_bare_emotions(verdict, views, shots)
     _report_process_postures(verdict, views, shots)
     _report_camera_rhythm(verdict, views, shots)
+    _report_parallax_hygiene(verdict, views, shots)
     return verdict
 
 
@@ -537,6 +541,18 @@ def _judge_dialogue(verdict: BoardVerdict, views: list[ShotView], beats: dict[st
                                          "needs_seconds": round(pace * FASTEST_SPEECH_RATIO, 2),
                                          "given_seconds": round(end - start, 2)})
             spoken += end - start
+        if view.lines and view.duration_s:
+            last_end = max(float(line.get("end_s") or 0) for line in view.lines)
+            if last_end <= view.duration_s + 1e-6 and view.duration_s - last_end < MIN_DIALOGUE_END_TAIL_S - 1e-6:
+                verdict.refusals.append({
+                    "code": "DIALOGUE_TAIL_TOO_SHORT",
+                    "shot_id": view.id,
+                    "line": len(view.lines) - 1,
+                    "end_s": round(last_end, 2),
+                    "duration_s": round(view.duration_s, 2),
+                    "tail_seconds": round(max(0.0, view.duration_s - last_end), 2),
+                    "min_tail_seconds": MIN_DIALOGUE_END_TAIL_S,
+                })
         if view.duration_s and spoken > view.duration_s * WALL_TO_WALL_SPEECH:
             verdict.warnings.append({"code": "DIALOGUE_WALL_TO_WALL", "shot_id": view.id,
                                      "spoken_seconds": round(spoken, 2), "duration_s": view.duration_s})
@@ -899,15 +915,41 @@ def _report_camera_rhythm(verdict: BoardVerdict, views: list[ShotView], shots: l
         })
 
 
-_BLADE_SUBJECT_RE = r"(?:rune\s+sword|longsword|sword|blade|weapon|剑|长剑|符文长剑|剑尖|剑身)"
+_PARALLAX_CONTAMINATION_RE = re.compile(
+    r"\b(?:horse|horseback|steed|charger|mane|saddle|reins|modao|broadsword|longsword|sword|blade|"
+    r"halberd|spear|shaft|hilt|pommel|shield|shields|helmet|armor|armour|shoulder|arm|gauntlet)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _report_parallax_hygiene(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]]) -> None:
+    """Warn when foreground_parallax contains mounts, character weapons, or character shields/limbs."""
+    for view in views:
+        fg = str((shots[view.index].get("camera") or {}).get("foreground_parallax") or "").strip()
+        if not fg:
+            continue
+        match = _PARALLAX_CONTAMINATION_RE.search(fg)
+        if match:
+            verdict.warnings.append({
+                "code": "FOREGROUND_PARALLAX_CONTAMINATION",
+                "shot_id": view.id,
+                "cue": match.group(0).lower(),
+                "foreground_parallax": fg[:160],
+            })
+
+
+_BLADE_SUBJECT_RE = (
+    r"(?:rune\s+sword|longsword|broadsword|modao|saber|sabre|halberd|spear|polearm|glaive|axe|dagger|"
+    r"sword|blade|weapon|陌刀|长刀|大刀|战刀|长矛|符文长剑|长剑|剑尖|剑身|刀尖|刀身|刀刃|剑|刀)"
+)
 _BLADE_STATIC_RAISED_RE = re.compile(
-    rf"(?:{_BLADE_SUBJECT_RE}[^.;\n]{{0,40}}\b(?:raised|lifted|held\s+high|angled\s+up|pointed\s+up|upward|elevated)\b|"
-    rf"\b(?:holds?|holding)\b[^.;\n]{{0,30}}{_BLADE_SUBJECT_RE}[^.;\n]{{0,24}}\b(?:high|up|raised|upward)\b|"
-    r"(?:剑已抬起|剑已举起|已举剑|举剑|抬剑|剑身斜指上方|剑尖朝上))",
+    rf"(?:{_BLADE_SUBJECT_RE}[^.;\n]{{0,40}}\b(?:raised|lifted|held\s+high|angled\s+up|pointed\s+up|upward|upright|shouldered|overhead|elevated)\b|"
+    rf"\b(?:holds?|holding|resting|rests?)\b[^.;\n]{{0,30}}{_BLADE_SUBJECT_RE}[^.;\n]{{0,30}}\b(?:high|up|raised|upward|upright|over\s+(?:his|her)\s+shoulder|across\s+(?:his|her)\s+shoulder)\b|"
+    r"(?:剑已抬起|剑已举起|已举剑|举剑|抬剑|剑身斜指上方|剑尖朝上|刀口向上|刀刃向上|刀尖朝上|扛在肩上|高举))",
     flags=re.IGNORECASE,
 )
 _BLADE_TRANSITION_RAISE_RE = re.compile(
-    rf"(?:\b(?:raises?|lifts?|elevates?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:抬起|举起|拔起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|举剑|抬剑)",
+    rf"(?:\b(?:raises?|lifts?|elevates?|hefts?|swings?\s+up|hoists?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:抬起|举起|拔起|抡起|扬起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|举剑|抬剑|举刀|扬刀)",
     flags=re.IGNORECASE,
 )
 _BLADE_STATIC_LOWERED_RE = re.compile(
@@ -917,6 +959,37 @@ _BLADE_STATIC_LOWERED_RE = re.compile(
 )
 _BLADE_TRANSITION_LOWER_RE = re.compile(
     rf"(?:\b(?:dips?|lowers?|drops?|sheathes?)\b[^.;\n]{{0,32}}{_BLADE_SUBJECT_RE}|(?:压低|垂下|放下|收起)[^，。;\n]{{0,12}}{_BLADE_SUBJECT_RE}|压低剑尖)",
+    flags=re.IGNORECASE,
+)
+_BLADE_PLANTED_RE = re.compile(
+    rf"(?:{_BLADE_SUBJECT_RE}[^.;\n]{{0,48}}\b(?:planted|thrust|driven|stabbed|plunged|buried|wedged|stuck)\b[^.;\n]{{0,24}}\b(?:ground|earth|dirt|soil|dust|mud|floor)\b|"
+    rf"\b(?:plants?|thrusts?|drives?|stabs?|plunges?|buries?)\b[^.;\n]{{0,36}}{_BLADE_SUBJECT_RE}[^.;\n]{{0,28}}\b(?:into|in)\s+(?:the\s+)?(?:ground|earth|dirt|soil|dust|mud|floor)\b|"
+    rf"{_BLADE_SUBJECT_RE}[^.;\n]{{0,32}}\b(?:blade\s+down|tip\s+down|pointed\s+down)\b[^.;\n]{{0,24}}\b(?:ground|earth|dirt|soil|dust|mud|floor)\b|"
+    r"(?:插进|插入|贯入|倒插|插在|扎入)[^，。;\n]{0,12}(?:地面|泥土|黄土|土里|土中|地下))",
+    flags=re.IGNORECASE,
+)
+_BLADE_PULL_FROM_GROUND_RE = re.compile(
+    rf"(?:\b(?:pulls?|yanks?|wrenches?|draws?|lifts?|heaves?|rips?|frees?)\b[^.;\n]{{0,44}}{_BLADE_SUBJECT_RE}?[^.;\n]{{0,28}}\b(?:out\s+of|from)\s+(?:the\s+)?(?:ground|earth|dirt|soil|dust|mud|floor)\b|"
+    r"(?:拔出|抽出|起出)[^，。;\n]{0,12}(?:地面|泥土|黄土|土里|土中|地下)|从(?:地上|地面|泥土|黄土|土里|土中)拔出)",
+    flags=re.IGNORECASE,
+)
+_MOUNTED_RE = re.compile(
+    r"\b(?:mounted\s+on|mounted\b|astride\s+(?:a|the|his|her)?\s*(?:black\s+|war)?(?:horse|steed|charger)|"
+    r"on\s+horseback|in\s+the\s+saddle|riding\s+(?:a|the|his|her)?\s*(?:black\s+|war)?(?:horse|steed|charger))\b|"
+    r"(?:骑马|骑在马上|跨上战马|马背上|马上)",
+    flags=re.IGNORECASE,
+)
+_ON_FOOT_RE = re.compile(
+    r"\b(?:on\s+foot|standing\s+(?:on\s+the\s+ground|in\s+the\s+dust|firmly\s+on\s+the\s+earth|astride\s+the\s+earth)|"
+    r"boots?\s+planted\s+(?:in|on)\s+(?:the\s+)?(?:dust|dirt|earth|ground)|strides?\s+forward\s+on\s+foot|"
+    r"stands?\s+(?:grounded|on\s+foot))\b|(?:徒步|步战|立于阵前|双脚踩在)",
+    flags=re.IGNORECASE,
+)
+_MOUNT_TRANSITION_RE = re.compile(
+    r"\b(?:mounts?\s+(?:a|the|his|her)?\s*(?:black\s+|war)?(?:horse|steed|charger|saddle)|"
+    r"dismounts?|leaps?\s+(?:onto|from|off)\s+(?:the\s+)?(?:horse|steed|saddle)|"
+    r"swings?\s+(?:into|out\s+of)\s+(?:the\s+)?saddle|drops?\s+(?:from|off)\s+(?:the\s+)?(?:horse|saddle))\b|"
+    r"(?:翻身上马|跨上马背|下马|翻身下马|跃下马背)",
     flags=re.IGNORECASE,
 )
 _LIGHT_EXTINGUISHED_RE = re.compile(
@@ -1077,6 +1150,160 @@ def _judge_continuation_openings(
         )
 
 
+def _closing_weapon_state(shot: dict[str, Any] | None) -> str | None:
+    """Classify a shot's closing weapon state into ``planted | raised | None``."""
+    if not isinstance(shot, dict):
+        return None
+    exit_text = str(shot.get("exit_state") or "")
+    if _BLADE_PLANTED_RE.search(exit_text) and not _BLADE_PULL_FROM_GROUND_RE.search(exit_text):
+        return "planted"
+    timeline = sorted(
+        (w for w in (shot.get("timeline") or []) if isinstance(w, dict)),
+        key=lambda w: float(w.get("start_s") or 0.0),
+    )
+    planted = bool(_BLADE_PLANTED_RE.search(_blocking_posture_text(shot)))
+    for w in timeline:
+        act = str(w.get("action") or "")
+        if _BLADE_PLANTED_RE.search(act):
+            planted = True
+        if _BLADE_PULL_FROM_GROUND_RE.search(act):
+            planted = False
+    if planted and not _BLADE_PULL_FROM_GROUND_RE.search(exit_text):
+        return "planted"
+    if _closing_blade_pole(shot) == "raised":
+        return "raised"
+    return None
+
+
+def _mount_state_from_text(text: str) -> str | None:
+    if not text:
+        return None
+    mounted = bool(_MOUNTED_RE.search(text))
+    on_foot = bool(_ON_FOOT_RE.search(text))
+    if mounted and not on_foot:
+        return "mounted"
+    if on_foot and not mounted:
+        return "on_foot"
+    return None
+
+
+def _character_mount_states(shot: dict[str, Any], *, phase: str) -> dict[str, str]:
+    """Extract unambiguous per-character ``mounted | on_foot`` state at shot opening or closing."""
+    out: dict[str, str] = {}
+    placements = [
+        pl for pl in ((shot.get("blocking") or {}).get("placements") or [])
+        if isinstance(pl, dict) and str(pl.get("character") or "").strip()
+    ]
+    for pl in placements:
+        name = str(pl.get("character") or "").strip()
+        state = _mount_state_from_text(str(pl.get("posture") or ""))
+        if state:
+            out[name] = state
+    if len(placements) == 1:
+        only_name = str(placements[0].get("character") or "").strip()
+        state_text = str(shot.get("entry_state" if phase == "open" else "exit_state") or "")
+        extra = _mount_state_from_text(state_text)
+        if extra:
+            out[only_name] = extra
+    return out
+
+
+def _shot_has_mount_transition(shot: dict[str, Any]) -> bool:
+    chunks = [
+        str(shot.get("visual_description") or ""),
+        str(shot.get("entry_state") or ""),
+        str(shot.get("exit_state") or ""),
+        _blocking_posture_text(shot),
+    ]
+    for w in shot.get("timeline") or []:
+        if isinstance(w, dict):
+            chunks.append(str(w.get("action") or ""))
+    return bool(_MOUNT_TRANSITION_RE.search(" ".join(chunks)))
+
+
+def _judge_cross_shot_physical_state(
+    verdict: BoardVerdict,
+    views: list[ShotView],
+    shots: list[dict[str, Any]],
+    *,
+    previous_shot: dict[str, Any] | None = None,
+) -> None:
+    """Enforce causal cross-shot physical state across BOTH cuts and last_frame joins.
+
+    Skips ``time_or_space_jump`` and explicit location changes.  Refuses only
+    unambiguous physical impossibilities:
+    1. Weapon planted blade-down in ground -> opens blade-up/raised without pulling it out;
+    2. Weapon already raised (not planted) -> first action pulls it out of the ground;
+    3. Same character flips unambiguously between ``on_foot`` and ``mounted`` with no mount/dismount beat.
+    """
+    for view in views:
+        cur = shots[view.index]
+        prev = shots[view.index - 1] if view.index > 0 else previous_shot
+        if not isinstance(prev, dict):
+            continue
+        if view.motivation == "time_or_space_jump":
+            continue
+        prev_loc = str(prev.get("location") or prev.get("location_id") or "").strip()
+        cur_loc = str(cur.get("location") or cur.get("location_id") or "").strip()
+        if prev_loc and cur_loc and prev_loc != cur_loc:
+            continue
+
+        # 1. Cross-shot 3-state weapon orientation check (planted vs raised vs pull-from-ground).
+        prev_weapon = _closing_weapon_state(prev)
+        entry_text = str(cur.get("entry_state") or "")
+        blocking_text = _blocking_posture_text(cur)
+        timeline = sorted(
+            (w for w in (cur.get("timeline") or []) if isinstance(w, dict)),
+            key=lambda w: float(w.get("start_s") or 0.0),
+        )
+        first_action = str(timeline[0].get("action") or "") if timeline else ""
+        if prev_weapon == "planted":
+            cur_opens_planted = bool(
+                _BLADE_PLANTED_RE.search(entry_text)
+                or _BLADE_PLANTED_RE.search(blocking_text)
+                or _BLADE_PULL_FROM_GROUND_RE.search(entry_text)
+                or _BLADE_PULL_FROM_GROUND_RE.search(first_action)
+            )
+            entry_pole, blocking_pole = _opening_blade_pole(cur)
+            if not cur_opens_planted and (entry_pole == "raised" or blocking_pole == "raised"):
+                verdict.refusals.append({
+                    "code": "CROSS_SHOT_PROP_STATE_CONFLICT",
+                    "shot_id": view.id,
+                    "detail": "planted_to_raised_without_pull",
+                    "previous_state": "planted_in_ground",
+                    "opening_state": "raised_blade_up",
+                })
+        elif prev_weapon == "raised":
+            cur_plants_first = bool(
+                _BLADE_PLANTED_RE.search(entry_text)
+                or _BLADE_PLANTED_RE.search(blocking_text)
+                or _BLADE_PLANTED_RE.search(first_action)
+            )
+            if not cur_plants_first and _BLADE_PULL_FROM_GROUND_RE.search(first_action):
+                verdict.refusals.append({
+                    "code": "CROSS_SHOT_PROP_STATE_CONFLICT",
+                    "shot_id": view.id,
+                    "detail": "pull_from_ground_when_not_planted",
+                    "previous_state": "raised_blade_up",
+                    "opening_state": "pull_from_ground",
+                })
+
+        # 2. Cross-shot per-character mount/foot consistency check.
+        if not _shot_has_mount_transition(prev) and not _shot_has_mount_transition(cur):
+            prev_mounts = _character_mount_states(prev, phase="close")
+            cur_mounts = _character_mount_states(cur, phase="open")
+            for char_name, cur_state in cur_mounts.items():
+                prev_state = prev_mounts.get(char_name)
+                if prev_state and prev_state != cur_state:
+                    verdict.refusals.append({
+                        "code": "CROSS_SHOT_MOUNT_CONFLICT",
+                        "shot_id": view.id,
+                        "character": char_name,
+                        "previous_state": prev_state,
+                        "opening_state": cur_state,
+                    })
+
+
 # --- What a refusal says ---------------------------------------------------------
 
 #: One plain sentence per refusal, for the person who sees a blocked scene.
@@ -1096,6 +1323,7 @@ REFUSAL_LABELS = {
     "DIALOGUE_OUTSIDE_SUB_SHOT": "有台词落在了不属于它的画面之外",
     "DIALOGUE_OVERLAP": "两句台词在时间上重叠",
     "DIALOGUE_TOO_FAST_TO_SPEAK": "台词分到的时间按正常语速说不完",
+    "DIALOGUE_TAIL_TOO_SHORT": "最后一句台词紧贴镜头结尾，容易话未说完就被硬切",
     "PLACEMENT_NOT_IN_CAST": "镜头里站了这场戏里没有的人",
     "PROSE_CHARACTER_NOT_IN_CAST": "画面正文描写了不在本镜出场人物列表中的角色",
     "SINGLE_CAST_MULTI_PERSON_PROSE": "单人镜头的画面正文描写了多名角色同框，会导致角色乱入",
@@ -1109,6 +1337,8 @@ REFUSAL_LABELS = {
     "AXIS_FACING_REVERSED": "人物的视线背离了对话对象，轴线错位",
     "AXIS_CHANGED_WITHOUT_BREAK": "人物站位在没有转场理由的地方变了",
     "CONTINUATION_OPENING_CONFLICT": "接拍镜头的起手姿态与上一镜末帧或首个动作自相矛盾，会导致动作重置重复",
+    "CROSS_SHOT_PROP_STATE_CONFLICT": "相邻镜头间的武器/道具物理朝向或插地状态发生矛盾跳变",
+    "CROSS_SHOT_MOUNT_CONFLICT": "同一角色在相邻镜头间无过渡地从徒步瞬移上马或从马背瞬移徒步",
     "EXCLUDED_REFERENCE_USED": "镜头把风格图或末帧图当成了参考图",
 }
 
@@ -1157,6 +1387,10 @@ _REPAIRS = {
     "DIALOGUE_TOO_FAST_TO_SPEAK": "The previous answer gave a line too little time ({where}). A line of "
                                   "{characters} characters needs at least {needs_seconds} seconds: give it that "
                                   "long plus a little air, and lengthen the shot if it must.",
+    "DIALOGUE_TAIL_TOO_SHORT": "The previous answer ended spoken dialogue too close to the shot cut ({where}: "
+                               "end_s={end_s}, duration_s={duration_s}). Leave at least {min_tail_seconds} s of "
+                               "post-speech breathing tail before the shot ends so the speaker is never cut off "
+                               "mid-sentence (lengthen duration_s or start the line earlier).",
     "PLACEMENT_NOT_IN_CAST": "The previous answer placed someone the shot's beats do not show ({where}): "
                              "{character}. blocking places only the people its beats name.",
     "PROSE_CHARACTER_NOT_IN_CAST": "The previous answer referenced an off-cast character token in visual prose "
@@ -1196,6 +1430,15 @@ _REPAIRS = {
                                      "continuous_action/emotional_hold shot, entry_state and opening blocking "
                                      "must start directly from the previous shot's closing posture and held "
                                      "props without anticipating timeline[0]'s transition or resetting it.",
+    "CROSS_SHOT_PROP_STATE_CONFLICT": "The previous answer broke cross-shot weapon/prop physical continuity "
+                                      "({where}: previous={previous_state}, opening={opening_state}). If a blade "
+                                      "was planted in the ground at the end of the previous shot, the next shot "
+                                      "must open with it still planted until visibly pulled out; conversely, never "
+                                      "pull an already-raised blade out of the ground.",
+    "CROSS_SHOT_MOUNT_CONFLICT": "The previous answer teleported {character} between on-foot and mounted states "
+                                 "({where}: previous={previous_state}, opening={opening_state}). Keep mount/foot "
+                                 "state consistent across consecutive shots unless an explicit mount or dismount "
+                                 "action is staged.",
     "EXCLUDED_REFERENCE_USED": "The previous answer listed a style or last-frame image in asset_ids. Those are "
                                "never shot references: list only character, place and prop masters.",
 }
