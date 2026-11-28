@@ -94,7 +94,24 @@ LEGACY_HANDOFF_V23_COMPILER_VERSION = "shine-h3-compiler/2.3.0"
 # never overrides the preceding final frame's lighting, exposure, or color
 # temperature, and instructs strict forward motion without rewinding.  CUT shots
 # remain byte-identical to 2.3.0, and <=2.3.0 historical requests keep their bytes.
-COMPILER_VERSION = "shine-h3-compiler/2.4.0"
+LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION = "shine-h3-compiler/2.4.0"
+# 2.5.0 introduces acting-driven compilation (Plan 20261127): fronts static set
+# environment (Space/Light/Air) and scoped story facts before performance,
+# interleaves timeline windows with timed dialogue in chronological order inside
+# each [Shot N] block so pre-speech micro-expression ramps sit immediately before
+# their spoken line, and renders controlled 4D vocal delivery cues outside <d>.
+# All <=2.4.0 historical versions stay byte-identical for exact provenance replay.
+LEGACY_ACTING_V25_COMPILER_VERSION = "shine-h3-compiler/2.5.0"
+# 2.6.0 fixes three real-render continuity/repetition defects found in 2.5.0
+# sample verification while keeping <=2.5.0 byte-identical for provenance replay:
+# (1) resolves {{Ck}} tokens inside blocking.placements[].posture/props so raw
+#     tokens never leak into "In frame:",
+# (2) avoids duplicating the full-shot story_beat spoiler before a populated
+#     second-by-second timeline (preventing H3 from executing one-shot prop
+#     actions twice, e.g. placing a second key over the first), and
+# (3) reinforces spatial landmark-side and continuous visible-motion anchoring
+#     on last_frame joins so performers and hidden props never teleport.
+COMPILER_VERSION = "shine-h3-compiler/2.6.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -107,6 +124,8 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
     LEGACY_SCOPED_FACTS_COMPILER_VERSION,
     LEGACY_HANDOFF_V23_COMPILER_VERSION,
+    LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+    LEGACY_ACTING_V25_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -144,6 +163,18 @@ LEGACY_220_VERSIONS = (
 LEGACY_230_VERSIONS = (
     *LEGACY_220_VERSIONS,
     LEGACY_HANDOFF_V23_COMPILER_VERSION,
+)
+#: Versions that keep the 2.4.0 layout (timeline before environment before dialogue,
+#: no 4D vocal delivery phrase).
+LEGACY_240_VERSIONS = (
+    *LEGACY_230_VERSIONS,
+    LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+)
+#: Versions that keep the 2.5.0 behaviour (pre-timeline story_beat spoiler,
+#: unresolved blocking posture tokens, pre-2.6.0 last_frame wording).
+LEGACY_250_VERSIONS = (
+    *LEGACY_240_VERSIONS,
+    LEGACY_ACTING_V25_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -218,6 +249,13 @@ class _Context:
     #: 2.4.0+: on last_frame shots, downgrade scene plate to architecture-only
     #: and anchor color/exposure/forward-time progression on continuity_derivative.
     continuity_color_v24: bool = False
+    #: 2.5.0+: static environment fronted, timeline/dialogue interleaved chronologically,
+    #: and controlled 4D vocal delivery phrases rendered before <d> tags.
+    acting_v25: bool = False
+    #: 2.6.0+: resolve {{Ck}} tokens inside blocking posture/props, omit redundant
+    #: pre-timeline story_beat spoiler when timeline is populated, and anchor
+    #: landmark-side & visible prop motion on last_frame joins.
+    continuity_clean_v26: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -525,6 +563,31 @@ def _validate_dialogue(ctx: _Context, mode: GenerationMode) -> None:
             used.add(label)
 
 
+_PITCH_PHRASE = {
+    "low_flat": "a low, flat pitch",
+    "steady": "a steady pitch",
+    "rising": "a rising pitch",
+    "falling": "a falling pitch",
+    "cracking": "a cracking pitch",
+}
+
+
+def _delivery_modifier(line: DialogueLine) -> str:
+    """Compile non-empty 4D vocal delivery cues into an English clause outside ``<d>``."""
+    delivery = line.delivery
+    if delivery is None or delivery.is_empty():
+        return ""
+    adjs = [value for value in (delivery.volume, delivery.pace, delivery.voice_quality) if value]
+    pitch_phrase = _PITCH_PHRASE.get(delivery.pitch or "")
+    if adjs and pitch_phrase:
+        return f"in a {', '.join(adjs)} voice with {pitch_phrase}"
+    if adjs:
+        return f"in a {', '.join(adjs)} voice"
+    if pitch_phrase:
+        return f"with {pitch_phrase}"
+    return ""
+
+
 def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
     language = _language_tag(line.text, ctx.project_language)
     speakers = _speakers_of(line)
@@ -540,6 +603,13 @@ def _dialogue_sentence(ctx: _Context, line: DialogueLine) -> str:
         line.text if (ctx.legacy_semantics or ctx.pre_sanitize)
         else (sanitize_h3_dialogue_text(line.text) or line.text)
     )
+    if ctx.acting_v25:
+        modifier = _delivery_modifier(line)
+        if modifier:
+            return (
+                f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}), {modifier}, speaks: "
+                f"<d>[{language}] {spoken_line}</d>"
+            )
     return (
         f"At {_format_timestamp(line.start_s)}, {subject} ({speaker}) says: "
         f"<d>[{language}] {spoken_line}</d>"
@@ -696,6 +766,15 @@ def _continuity_sentences(ctx: _Context) -> list[str]:
     continuation = next((ref for ref in ctx.manifest if ref.role == "continuity_derivative"), None)
     if continuation:
         if mode == ContinuityMode.LAST_FRAME:
+            if ctx.continuity_clean_v26:
+                return [
+                    f"At 0.0s, continue directly from {continuation.label} (the preceding shot's final frame) "
+                    "with identical color grading, white balance, exposure, shadow depth, framing, character "
+                    "posture, gaze direction, and held prop placement; advance strictly forward in time from "
+                    f"the final instant of {continuation.label} without rewinding, replaying earlier motion, or "
+                    "resetting the lighting; keep each performer on the same physical side of fixed set "
+                    "landmarks and never materialize an unseen prop without a visible continuous motion."
+                ]
             if ctx.continuity_color_v24:
                 return [
                     f"At 0.0s, continue directly from {continuation.label} (the preceding shot's final frame) "
@@ -725,6 +804,15 @@ def _continuity_sentences(ctx: _Context) -> list[str]:
             ]
         return []
     if mode == ContinuityMode.LAST_FRAME and prev_shot_id:
+        if ctx.continuity_clean_v26:
+            return [
+                "At 0.0s, continue directly from the approved final frame of shot "
+                f"{prev_shot_id} with identical color grading, white balance, exposure, shadow depth, "
+                "framing, posture, gaze direction, and held prop placement; advance strictly forward in "
+                "time without rewinding, replaying earlier motion, or resetting the lighting; keep each "
+                "performer on the same physical side of fixed set landmarks and never materialize an "
+                "unseen prop without a visible continuous motion."
+            ]
         if ctx.continuity_color_v24:
             return [
                 "At 0.0s, continue directly from the approved final frame of shot "
@@ -805,9 +893,15 @@ def _placement_sentence(ctx: _Context) -> str:
             continue
         phrase = f"{label} is in the {_zone_phrase(placement.zone)}, {_FACING_PHRASE[placement.facing]}"
         if placement.posture.strip():
-            phrase += f", {placement.posture.strip().rstrip('.')}"
+            posture_text = placement.posture.strip().rstrip(".")
+            if ctx.continuity_clean_v26:
+                posture_text = _resolve_character_tokens(posture_text, ctx)
+            phrase += f", {posture_text}"
         if placement.props:
-            phrase += ", holding " + ", ".join(prop.strip().rstrip(".") for prop in placement.props)
+            prop_items = [prop.strip().rstrip(".") for prop in placement.props]
+            if ctx.continuity_clean_v26:
+                prop_items = [_resolve_character_tokens(prop, ctx) for prop in prop_items]
+            phrase += ", holding " + ", ".join(prop_items)
         placements.append(phrase)
     if not placements:
         return ""
@@ -1145,22 +1239,18 @@ def _shot_text_thin(ctx: _Context) -> str:
     )
     if top_last_frame_continuity:
         blocks[0].extend(_continuity_sentences(ctx))
+    include_story_beat = not (ctx.continuity_clean_v26 and bool(spec.timeline))
     for sentence in (
         _placement_sentence(ctx),
         f"It opens on {_clause(_resolve_character_tokens(spec.entry_state, ctx))}" if spec.entry_state.strip() else "",
-        _resolve_character_tokens(spec.story_beat.strip(), ctx),
+        _resolve_character_tokens(spec.story_beat.strip(), ctx) if include_story_beat else "",
         _resolve_character_tokens(_camera_narrative(spec), ctx),
     ):
         if sentence:
             blocks[0].append(sentence)
-    for beat in sorted(spec.timeline, key=lambda item: item.start_s):
-        blocks[block_of(beat.start_s)].append(_resolve_character_tokens(_timeline_sentence([beat]), ctx))
     environment = spec.sound.get("environment")
     if environment and not spec.dialogue:
         environment = non_vocal_ambience_text(environment)
-    if environment:
-        blocks[0].append(f"The scene is set in {environment}.")
-    blocks[0].extend(_resolve_character_tokens(line, ctx) for line in _environment_sentences(ctx))
     facts = spec.locked_story_facts
     raw_zh_facts = list(facts)
     if any(re.search(r"[\u3400-\u9fff]", fact) for fact in facts):
@@ -1171,15 +1261,51 @@ def _shot_text_thin(ctx: _Context) -> str:
                                          "Chinese locked facts require corresponding English prompt translations")
         facts = translated
     facts = _scoped_story_facts(ctx, raw_zh_facts, list(facts))
-    if facts:
-        blocks[0].append(
-            "Background story facts, for the picture only and never heard: "
-            + " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
-        )
-    if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
-        blocks[0].append(narrator_sentence())
-    for line in sorted(spec.dialogue, key=lambda item: item.start_s):
-        blocks[block_of(line.start_s)].append(_dialogue_sentence(ctx, line))
+
+    if ctx.acting_v25:
+        if environment:
+            blocks[0].append(f"The scene is set in {environment}.")
+        blocks[0].extend(_resolve_character_tokens(line, ctx) for line in _environment_sentences(ctx))
+        if facts:
+            blocks[0].append(
+                "Background story facts, for the picture only and never heard: "
+                + " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
+            )
+        if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
+            blocks[0].append(narrator_sentence())
+        # Interleave timeline windows and timed dialogue chronologically per [Shot N]
+        # block. On equal start_s, dialogue (kind_order=0) precedes the concurrent
+        # continuation window (kind_order=1), while a pre-speech beat ending at
+        # line.start_s naturally has an earlier start_s and stays immediately before
+        # the spoken line.
+        per_block_events: list[list[tuple[float, int, int, str]]] = [[] for _ in range(len(blocks))]
+        for idx, line in enumerate(sorted(spec.dialogue, key=lambda item: item.start_s)):
+            per_block_events[block_of(line.start_s)].append(
+                (float(line.start_s), 0, idx, _dialogue_sentence(ctx, line))
+            )
+        for idx, beat in enumerate(sorted(spec.timeline, key=lambda item: item.start_s)):
+            per_block_events[block_of(beat.start_s)].append(
+                (float(beat.start_s), 1, idx, _resolve_character_tokens(_timeline_sentence([beat]), ctx))
+            )
+        for block_idx, events in enumerate(per_block_events):
+            events.sort(key=lambda item: (item[0], item[1], item[2]))
+            for _start, _kind, _idx, sentence in events:
+                blocks[block_idx].append(sentence)
+    else:
+        for beat in sorted(spec.timeline, key=lambda item: item.start_s):
+            blocks[block_of(beat.start_s)].append(_resolve_character_tokens(_timeline_sentence([beat]), ctx))
+        if environment:
+            blocks[0].append(f"The scene is set in {environment}.")
+        blocks[0].extend(_resolve_character_tokens(line, ctx) for line in _environment_sentences(ctx))
+        if facts:
+            blocks[0].append(
+                "Background story facts, for the picture only and never heard: "
+                + " ".join(f"{fact.strip().rstrip('.')}." for fact in facts)
+            )
+        if any(is_narrator_speaker(speaker) for speaker in ctx.speaker_order):
+            blocks[0].append(narrator_sentence())
+        for line in sorted(spec.dialogue, key=lambda item: item.start_s):
+            blocks[block_of(line.start_s)].append(_dialogue_sentence(ctx, line))
     if not top_last_frame_continuity:
         blocks[0].extend(_continuity_sentences(ctx))
     if spec.exit_state.strip():
@@ -1699,6 +1825,8 @@ class H3PromptCompiler:
         scoped_facts = compiler_version not in LEGACY_210_VERSIONS
         handoff_v23 = compiler_version not in LEGACY_220_VERSIONS
         continuity_color_v24 = compiler_version not in LEGACY_230_VERSIONS
+        acting_v25 = compiler_version not in LEGACY_240_VERSIONS
+        continuity_clean_v26 = compiler_version not in LEGACY_250_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1730,6 +1858,8 @@ class H3PromptCompiler:
             scoped_facts=scoped_facts,
             handoff_v23=handoff_v23,
             continuity_color_v24=continuity_color_v24,
+            acting_v25=acting_v25,
+            continuity_clean_v26=continuity_clean_v26,
         )
         if language_fallback:
             ctx.warnings.append(

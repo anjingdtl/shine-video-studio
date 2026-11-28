@@ -128,6 +128,31 @@ class StyleFreezeRequest(APIModel):
     expected_style: StyleBible | None = None
 
 
+VolumeLevel = Literal["whispered", "hushed", "soft", "conversational", "raised", "shouting"]
+SpeechPace = Literal["halting", "slow", "measured", "brisk", "rushed"]
+VoiceQuality = Literal["breathy", "hoarse", "trembling", "crisp", "strained", "warm", "flat"]
+PitchContour = Literal["low_flat", "steady", "rising", "falling", "cracking"]
+
+
+class VocalDelivery(APIModel):
+    """Four-dimensional controlled acoustic delivery cues compiled before ``<d>`` dialogue."""
+
+    volume: VolumeLevel | None = None
+    pace: SpeechPace | None = None
+    voice_quality: VoiceQuality | None = None
+    pitch: PitchContour | None = None
+
+    def is_empty(self) -> bool:
+        return not any((self.volume, self.pace, self.voice_quality, self.pitch))
+
+    @model_serializer(mode="wrap")
+    def _omit_unset(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            return {key: value for key, value in data.items() if value is not None}
+        return data
+
+
 class DialogueLine(APIModel):
     speaker_id: str = Field(
         min_length=1,
@@ -146,6 +171,15 @@ class DialogueLine(APIModel):
         gt=0,
         description="Seconds from the start of the containing beat or shot; must fit inside the planned shot duration.",
     )
+    delivery: VocalDelivery | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_delivery(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            if self.delivery is None or self.delivery.is_empty() or not data.get("delivery"):
+                data.pop("delivery", None)
+        return data
 
     @model_validator(mode="after")
     def ordered_times(self) -> DialogueLine:

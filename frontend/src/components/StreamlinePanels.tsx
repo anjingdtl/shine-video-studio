@@ -55,7 +55,7 @@ import {
   type StyleDimension,
   type StyleVersion,
 } from '../api';
-import { DEFAULT_MAX_SHOT_SECONDS, MIN_SHOT_SECONDS, styleFields } from '../constants';
+import { DEFAULT_MAX_SHOT_SECONDS, styleFields } from '../constants';
 import { AssetCenterPicker } from '../shared/AssetCenterPicker';
 import { assignLibraryVersion, searchLibraryForProject, type LibraryAsset, type LibraryVersion } from '../asset-center/api';
 import {
@@ -112,8 +112,6 @@ export function StoryboardBookPanel({
   const [filmType, setFilmType] = useState('live_action');
   const [episodeCount, setEpisodeCount] = useState(2);
   const [targetSeconds, setTargetSeconds] = useState(60);
-  // 新分镜书的单镜上限初始值与上限：与后端 schemas.DEFAULT_MAX_SHOT_SECONDS 同源同值（4–10 秒）。
-  const [maxShotSeconds, setMaxShotSeconds] = useState(DEFAULT_MAX_SHOT_SECONDS);
   const [narrationLevel, setNarrationLevel] = useState<NarrationLevelId>('none');
   const [dimensions, setDimensions] = useState<Style>(() => ({ ...STYLE_PRESETS[0].values }));
   const [dimensionsTouched, setDimensionsTouched] = useState(false);
@@ -198,10 +196,6 @@ export function StoryboardBookPanel({
           if (count) setEpisodeCount(count);
           const seconds = basis.payload?.target_seconds ?? basis.target_seconds;
           if (seconds) setTargetSeconds(seconds);
-          const planMaxShot = basis.payload?.source?.max_shot_seconds;
-          if (typeof planMaxShot === 'number' && Number.isFinite(planMaxShot)) {
-            setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, planMaxShot)));
-          }
         }
         if (latestDraft && (!confirmed || latestDraft.version > confirmed.version)) {
           setConfirmedPlan(null);
@@ -248,10 +242,6 @@ export function StoryboardBookPanel({
         if (filmTypeValue === 'live_action' || filmTypeValue === 'animation') setFilmType(filmTypeValue);
         const narration = facts.narration_level;
         if (narration === 'none' || narration === 'low' || narration === 'high') setNarrationLevel(narration);
-        const maxSeconds = Number(facts.max_shot_seconds);
-        if (Number.isFinite(maxSeconds) && maxSeconds > 0) {
-          setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, maxSeconds)));
-        }
       })
       .catch(() => setStyleLoaded(true));
     return () => { cancelled = true; };
@@ -297,14 +287,10 @@ export function StoryboardBookPanel({
   async function generate() {
     setBusy(true); setProblem(''); setFailure(null);
     try {
-      // Scale episode duration tolerance with targetSeconds so short targets (e.g. 20-30s)
-      // never swallow multiple extra scenes up to +30s.
-      const toleranceSeconds = Math.min(30, Math.max(4, Math.round(targetSeconds * 0.25)));
       const body = await generateStoryboardBook(projectId, {
         episode_count: episodeCount,
         target_seconds: targetSeconds,
-        tolerance_seconds: toleranceSeconds,
-        max_shot_seconds: maxShotSeconds,
+        tolerance_seconds: 10,
       });
       setBook(body);
       // 新生成的一版尚未确认：旧的确认态不能继续挡住确认按钮。
@@ -346,7 +332,7 @@ export function StoryboardBookPanel({
           strength,
           film_type: filmType,
           narration_level: narrationLevel,
-          max_shot_seconds: maxShotSeconds,
+          max_shot_seconds: DEFAULT_MAX_SHOT_SECONDS,
           ...(sevenDimensions ? { dimensions: sevenDimensions } : {}),
         },
         acknowledge_deviation: acknowledge,
@@ -362,7 +348,7 @@ export function StoryboardBookPanel({
         strength,
         film_type: filmType,
         narration_level: narrationLevel,
-        max_shot_seconds: maxShotSeconds,
+        max_shot_seconds: DEFAULT_MAX_SHOT_SECONDS,
       });
       onMessage?.('分镜书已确认：分集计划与导演风格已一起定稿。');
       onConfirmed?.();
@@ -389,8 +375,6 @@ export function StoryboardBookPanel({
     || (persistedStyle.narration_level === 'none' || persistedStyle.narration_level === 'low'
       || persistedStyle.narration_level === 'high'
       ? narrationLevel !== persistedStyle.narration_level : false)
-    || (typeof persistedStyle.max_shot_seconds === 'number'
-      && maxShotSeconds !== Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS, persistedStyle.max_shot_seconds)))
     || (persistedHasSeven && allSevenFilled
       && styleFields.some(([field]) => dimensions[field].trim() !== String(persistedStyle[field] ?? '').trim()))
     || (dimensionsTouched && !allSevenFilled)
@@ -409,7 +393,7 @@ export function StoryboardBookPanel({
         : null);
   useStageRail('storyboard-book', { priority: 1, primary },
     [book, busy, confirmedPlan, profileId, strength, filmType, narrationLevel,
-      episodeCount, targetSeconds, maxShotSeconds, dimensions, dimensionsTouched, planDeviation,
+      episodeCount, targetSeconds, dimensions, dimensionsTouched, planDeviation,
       styleDirty, basisPlan, styleLoaded]);
 
   return <section className="card section-card" id="storyboard-book">
@@ -417,7 +401,7 @@ export function StoryboardBookPanel({
       <div>
         <div className="section-kicker">第 2 阶段 · 分镜书</div>
         <h2>设定范围与风格，一次确认</h2>
-        <p>导演风格、影片类型、集数、每集目标秒数与单镜上限共用这一套决定。场次按自然边界
+        <p>导演风格、影片类型、集数与每集目标秒数共用这一套决定。场次按自然边界
           整场装入并严格控制在设定集数内；超出部分不排入本次计划，可在下方预览看到当前覆盖到大纲的哪一章以及后续还需拍多少集。</p>
       </div>
       {confirmedPlan && <span className="head-chip ok">
@@ -450,16 +434,13 @@ export function StoryboardBookPanel({
         <input type="number" min={8} max={3600} value={targetSeconds}
           onChange={(event) => setTargetSeconds(Math.max(8, Number(event.target.value) || 60))} />
       </label>
-      <label>单镜秒数上限
-        <input type="number" min={MIN_SHOT_SECONDS} max={DEFAULT_MAX_SHOT_SECONDS} step={0.5} value={maxShotSeconds}
-          title="第③步镜头拆解里每个渲染镜头的时长上限；本地安全生产可调范围 4–10 秒"
-          onChange={(event) => setMaxShotSeconds(Math.min(DEFAULT_MAX_SHOT_SECONDS, Math.max(MIN_SHOT_SECONDS,
-            Number(event.target.value) || DEFAULT_MAX_SHOT_SECONDS)))} />
-      </label>
       <button type="button" className="btn-secondary" disabled={busy} onClick={() => void generate()}>
         <Sparkles size={13} /> 生成分镜书
       </button>
     </div>
+    <p className="run-hint">
+      单镜由导演按表演在 4–10 秒内自动分配（10 秒为显存安全红线），每集允许 ±10 秒自然弹性。
+    </p>
 
     <div className="book-tone">
       <div className="tone-group" role="group" aria-label="旁白设定">
@@ -599,8 +580,8 @@ export function StoryboardBookPanel({
     {book && <div className="book-preview">
       <div className="book-preview-head">
         <b>
-          {book.preview.episode_count} 集 · 每集目标 {book.preview.target_seconds} 秒 · 单镜上限{' '}
-          {book.preview.max_shot_seconds ?? maxShotSeconds} 秒 · 计划总时长 {Math.round(book.preview.total_planned_seconds)} 秒
+          {book.preview.episode_count} 集 · 每集目标 {book.preview.target_seconds} 秒（±10 秒弹性）· 单镜上限{' '}
+          {book.preview.max_shot_seconds ?? DEFAULT_MAX_SHOT_SECONDS} 秒 · 计划总时长 {Math.round(book.preview.total_planned_seconds)} 秒
         </b>
         {!confirmedPlan && !railPresent && <button type="button" className="btn-primary" disabled={busy} onClick={() => void confirm()}>
           <Check size={13} /> 确认分镜书（分集 + 风格）

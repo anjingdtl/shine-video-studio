@@ -23,9 +23,210 @@ This module is that second step.  It is deliberately lossless and timid:
 
 from __future__ import annotations
 
+import re
+import types
 from typing import Any, Union
 
 from pydantic import BaseModel, ValidationError
+
+#: Controlled 4-dimensional vocal delivery vocabulary (Plan 20261127 §4.2–4.3).
+_VOCAL_CANONICAL: dict[str, frozenset[str]] = {
+    "volume": frozenset({"whispered", "hushed", "soft", "conversational", "raised", "shouting"}),
+    "pace": frozenset({"halting", "slow", "measured", "brisk", "rushed"}),
+    "voice_quality": frozenset({"breathy", "hoarse", "trembling", "crisp", "strained", "warm", "flat"}),
+    "pitch": frozenset({"low_flat", "steady", "rising", "falling", "cracking"}),
+}
+_VOCAL_FIELD_ALIASES: dict[str, str] = {
+    "loudness": "volume",
+    "vol": "volume",
+    "speed": "pace",
+    "rate": "pace",
+    "tempo": "pace",
+    "timbre": "voice_quality",
+    "quality": "voice_quality",
+    "tone_quality": "voice_quality",
+    "vocal_quality": "voice_quality",
+    "intonation": "pitch",
+    "tone": "pitch",
+    "pitch_contour": "pitch",
+}
+_VOCAL_SYNONYMS: dict[str, dict[str, str]] = {
+    "volume": {
+        "whisper": "whispered",
+        "whispering": "whispered",
+        "barely_audible": "whispered",
+        "quiet": "hushed",
+        "low": "hushed",
+        "muted": "hushed",
+        "murmured": "hushed",
+        "murmur": "hushed",
+        "low_voice": "hushed",
+        "subdued": "hushed",
+        "gentle": "soft",
+        "delicate": "soft",
+        "tender": "soft",
+        "normal": "conversational",
+        "medium": "conversational",
+        "moderate": "conversational",
+        "natural": "conversational",
+        "regular": "conversational",
+        "neutral": "conversational",
+        "firm": "raised",
+        "loud": "raised",
+        "sharp": "raised",
+        "elevated": "raised",
+        "forceful": "raised",
+        "yelling": "shouting",
+        "yell": "shouting",
+        "screaming": "shouting",
+        "scream": "shouting",
+        "roaring": "shouting",
+        "roared": "shouting",
+        "shouted": "shouting",
+        "shout": "shouting",
+    },
+    "pace": {
+        "hesitant": "halting",
+        "stammering": "halting",
+        "broken": "halting",
+        "stumbling": "halting",
+        "paused": "halting",
+        "choppy": "halting",
+        "deliberate": "slow",
+        "unhurried": "slow",
+        "drawn_out": "slow",
+        "lingering": "slow",
+        "heavy": "slow",
+        "steady": "measured",
+        "even": "measured",
+        "moderate": "measured",
+        "calm": "measured",
+        "controlled": "measured",
+        "paced": "measured",
+        "fast": "brisk",
+        "quick": "brisk",
+        "urgent": "brisk",
+        "clipped": "brisk",
+        "rapid": "brisk",
+        "snappy": "brisk",
+        "frantic": "rushed",
+        "breathless": "rushed",
+        "hurried": "rushed",
+        "racing": "rushed",
+        "panicked": "rushed",
+    },
+    "voice_quality": {
+        "airy": "breathy",
+        "sighing": "breathy",
+        "whispery": "breathy",
+        "raspy": "hoarse",
+        "gravelly": "hoarse",
+        "rough": "hoarse",
+        "husky": "hoarse",
+        "gruff": "hoarse",
+        "shaky": "trembling",
+        "quivering": "trembling",
+        "wavering": "trembling",
+        "unsteady": "trembling",
+        "tearful": "trembling",
+        "clear": "crisp",
+        "sharp": "crisp",
+        "clipped": "crisp",
+        "clean": "crisp",
+        "resonant": "crisp",
+        "tight": "strained",
+        "tense": "strained",
+        "choked": "strained",
+        "clenched": "strained",
+        "tight_throated": "strained",
+        "strangled": "strained",
+        "soft_warm": "warm",
+        "gentle": "warm",
+        "tender": "warm",
+        "soothing": "warm",
+        "dry": "flat",
+        "deadpan": "flat",
+        "numb": "flat",
+        "hollow": "flat",
+        "monotone": "flat",
+        "cold": "flat",
+    },
+    "pitch": {
+        "low": "low_flat",
+        "monotone": "low_flat",
+        "flat": "low_flat",
+        "deadpan": "low_flat",
+        "deep": "low_flat",
+        "low_monotone": "low_flat",
+        "level": "steady",
+        "even": "steady",
+        "neutral": "steady",
+        "balanced": "steady",
+        "mid": "steady",
+        "high": "rising",
+        "upward": "rising",
+        "questioning": "rising",
+        "lifting": "rising",
+        "ascending": "rising",
+        "dropping": "falling",
+        "downward": "falling",
+        "sinking": "falling",
+        "trailing": "falling",
+        "descending": "falling",
+        "breaking": "cracking",
+        "strained_high": "cracking",
+        "cracked": "cracking",
+        "quivering_high": "cracking",
+    },
+}
+
+
+def _slug_token(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[\s\-/]+", "_", text)
+    return re.sub(r"[^a-z0-9_]", "", text).strip("_")
+
+
+def normalize_vocal_delivery(raw: Any, *, path: str = "delivery") -> tuple[dict[str, str] | None, list[str]]:
+    """Deterministically normalise a 4D ``VocalDelivery`` dict with synonym folding.
+
+    An unrecognised token drops only that single dimension and records a salvage
+    note; it never raises ``ValidationError`` or rejects the surrounding line.
+    """
+    notes: list[str] = []
+    if raw is None:
+        return None, notes
+    if not isinstance(raw, dict):
+        notes.append(f"{path}:non_object_dropped")
+        return None, notes
+    out: dict[str, str] = {}
+    for raw_key, raw_val in raw.items():
+        norm_key = _slug_token(raw_key)
+        canonical_key = norm_key if norm_key in _VOCAL_CANONICAL else _VOCAL_FIELD_ALIASES.get(norm_key)
+        if not canonical_key:
+            notes.append(f"{path}.{raw_key}:unknown_dimension_dropped")
+            continue
+        if canonical_key in out:
+            notes.append(f"{path}.{raw_key}:duplicate_dimension_ignored({canonical_key})")
+            continue
+        if raw_val is None or str(raw_val).strip() == "":
+            continue
+        token = _slug_token(raw_val)
+        if not token:
+            notes.append(f"{path}.{canonical_key}:empty_value_dropped")
+            continue
+        if token in _VOCAL_CANONICAL[canonical_key]:
+            out[canonical_key] = token
+            if str(raw_val) != token or raw_key != canonical_key:
+                notes.append(f"{path}.{raw_key}:normalized_to_{canonical_key}={token}")
+            continue
+        folded = _VOCAL_SYNONYMS[canonical_key].get(token)
+        if folded:
+            out[canonical_key] = folded
+            notes.append(f"{path}.{raw_key}:synonym_folded_{token}_to_{folded}")
+            continue
+        notes.append(f"{path}.{canonical_key}:unknown_value_dropped({raw_val})")
+    return (out or None), notes
 
 #: Field aliases real models write instead of the canonical contract name.
 #: Applied only when the canonical field is absent; the original key is
@@ -73,7 +274,7 @@ def _is_model(annotation: Any) -> bool:
     if annotation is None:
         return False
     origin = getattr(annotation, "__origin__", None)
-    if origin is Union:
+    if origin in (Union, types.UnionType) or isinstance(annotation, types.UnionType):
         args = [a for a in getattr(annotation, "__args__", ()) if a is not type(None)]
         return len(args) == 1 and isinstance(args[0], type) and issubclass(args[0], BaseModel)
     return isinstance(annotation, type) and issubclass(annotation, BaseModel)
@@ -83,7 +284,7 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
     if not _is_model(annotation):
         return None
     origin = getattr(annotation, "__origin__", None)
-    if origin is Union:
+    if origin in (Union, types.UnionType) or isinstance(annotation, types.UnionType):
         for arg in getattr(annotation, "__args__", ()):
             if isinstance(arg, type) and issubclass(arg, BaseModel):
                 return arg
@@ -91,10 +292,79 @@ def _model_of(annotation: Any) -> type[BaseModel] | None:
     return annotation
 
 
+_DRAMA_BEAT_TYPES = frozenset({
+    "establishing", "action", "dialogue_exchange", "reaction", "reveal", "transition_out",
+})
+_DRAMA_BEAT_ENERGIES = frozenset({"calm", "probe", "pressure", "turn_pause", "erupt", "aftermath"})
+_DRAMA_BEAT_TYPE_SYNONYMS: dict[str, str] = {
+    "establish": "establishing",
+    "opening": "establishing",
+    "setup": "establishing",
+    "dialogue": "dialogue_exchange",
+    "dialog": "dialogue_exchange",
+    "speech": "dialogue_exchange",
+    "conversation": "dialogue_exchange",
+    "exchange": "dialogue_exchange",
+    "confrontation": "dialogue_exchange",
+    "argument": "dialogue_exchange",
+    "react": "reaction",
+    "pause": "reaction",
+    "silence": "reaction",
+    "tension": "reaction",
+    "turn": "reaction",
+    "turn_pause": "reaction",
+    "aftermath": "reaction",
+    "climax": "reveal",
+    "revelation": "reveal",
+    "discovery": "reveal",
+    "transition": "transition_out",
+    "closing": "transition_out",
+    "exit": "transition_out",
+    "ending": "transition_out",
+    "outro": "transition_out",
+}
+
+
+def _normalize_drama_beat(working: dict[str, Any], notes: list[str], *, path: str) -> None:
+    """Losslessly normalize DramaBeat enum typos (including beat_energy <-> beat_type swaps)."""
+    has_lines = bool(working.get("spoken_lines"))
+    raw_energy = working.get("beat_energy")
+    if raw_energy is not None:
+        tok_e = _slug_token(raw_energy)
+        if tok_e in _DRAMA_BEAT_ENERGIES:
+            if raw_energy != tok_e:
+                working["beat_energy"] = tok_e
+                notes.append(f"{path}.beat_energy:normalized_to_{tok_e}")
+        else:
+            working["beat_energy"] = None
+            notes.append(f"{path}.beat_energy:unknown_value_dropped({raw_energy})")
+
+    raw_type = working.get("beat_type")
+    if raw_type is not None:
+        tok_t = _slug_token(raw_type)
+        if tok_t in _DRAMA_BEAT_TYPES:
+            if raw_type != tok_t:
+                working["beat_type"] = tok_t
+                notes.append(f"{path}.beat_type:normalized_to_{tok_t}")
+        else:
+            if tok_t in _DRAMA_BEAT_ENERGIES and not working.get("beat_energy"):
+                working["beat_energy"] = tok_t
+                notes.append(f"{path}.beat_type:moved_energy_{tok_t}_to_beat_energy")
+            mapped = _DRAMA_BEAT_TYPE_SYNONYMS.get(tok_t)
+            if mapped is None:
+                mapped = "dialogue_exchange" if has_lines else "action"
+            working["beat_type"] = mapped
+            notes.append(f"{path}.beat_type:folded_{raw_type}_to_{mapped}")
+
+
 def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
                *, path: str = "$", counter: dict[str, int]) -> Any:
     if model is None:
         return data
+    if model.__name__ == "VocalDelivery":
+        cleaned, vocal_notes = normalize_vocal_delivery(data, path=path)
+        notes.extend(vocal_notes)
+        return cleaned
     if not isinstance(data, dict):
         return data
     aliases = _FIELD_ALIASES.get(model.__name__, {})
@@ -103,6 +373,8 @@ def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
     # (for example `shot["camera"]["blocking"]` on DirectedShot): lift only keys
     # unknown to the child model that are valid parent fields missing above.
     working = dict(data)
+    if model.__name__ == "DramaBeat":
+        _normalize_drama_beat(working, notes, path=path)
     if model.__name__ == "DirectedShot":
         beat_ids = working.get("beat_ids")
         cuts = working.get("internal_cuts")
@@ -186,7 +458,9 @@ def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
         nested = _model_of(field.annotation)
         item = _annotation_items(field.annotation)
         if nested is not None and isinstance(value, dict):
-            out[target] = _normalize(value, nested, notes, path=f"{path}.{target}", counter=counter)
+            normalized_child = _normalize(value, nested, notes, path=f"{path}.{target}", counter=counter)
+            if normalized_child is not None or not field.is_required():
+                out[target] = normalized_child
         elif item is not None and isinstance(item, type) and issubclass(item, BaseModel) \
                 and isinstance(value, list):
             out[target] = [_normalize(row, item, notes, path=f"{path}.{target}[{i}]",

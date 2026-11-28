@@ -53,7 +53,7 @@ it('旁白设定随分镜书一起提交并进入冻结风格，小说入口不�
   stub.restore();
 });
 
-it('单镜秒数上限随分镜书确认进入冻结风格（同一控制链路）', async () => {
+it('单镜上限固化为 10 秒系统红线（无手动输入框），确认后随风格一并冻结', async () => {
   const confirms: Array<Record<string, unknown>> = [];
   const stub = new StudioStub([
     { method: 'GET', pattern: /\/director-styles$/, respond: () => jsonResponse([
@@ -69,7 +69,8 @@ it('单镜秒数上限随分镜书确认进入冻结风格（同一控制链路�
   const user = userEvent.setup();
   render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
   await screen.findByRole('option', { name: /电影专业 Skills 自动/ });
-  fireEvent.change(screen.getByLabelText('单镜秒数上限'), { target: { value: '10' } });
+  expect(screen.queryByLabelText('单镜秒数上限')).toBeNull();
+  expect(screen.getByText(/单镜由导演按表演在 4–10 秒内自动分配/)).toBeInTheDocument();
   await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
   await screen.findByText(/计划总时长/);
   await user.click(screen.getByRole('button', { name: /确认分镜书/ }));
@@ -102,7 +103,6 @@ it('切页回来读回已持久化的决定，而不是硬编码默认值（三�
     expect((screen.getByLabelText('影片类型') as HTMLSelectElement).value).toBe('animation');
     expect((screen.getByLabelText('集数') as HTMLInputElement).value).toBe('1');
     expect((screen.getByLabelText('每集目标秒数') as HTMLInputElement).value).toBe('60');
-    expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
   });
   expect(screen.getByRole('button', { name: '少旁白' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByText(/第 1 版已确认/)).toBeInTheDocument();
@@ -111,7 +111,7 @@ it('切页回来读回已持久化的决定，而不是硬编码默认值（三�
   render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
   await waitFor(() => {
     expect((screen.getByLabelText('导演风格') as HTMLSelectElement).value).toBe('mamoru-oshii');
-    expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
+    expect((screen.getByLabelText('每集目标秒数') as HTMLInputElement).value).toBe('60');
   });
   stub.restore();
 });
@@ -192,13 +192,10 @@ it('页面操作栏的生成分镜书携带当前集数与秒数，而不是注�
   // The number is the backend's schemas.DEFAULT_MAX_SHOT_SECONDS: one setting,
   // the same first value on both sides.
   expect(DEFAULT_MAX_SHOT_SECONDS).toBe(10);
-  expect(bodies[0]).toMatchObject({
-    episode_count: 3, target_seconds: 45, tolerance_seconds: 11, max_shot_seconds: DEFAULT_MAX_SHOT_SECONDS,
+  expect(bodies[0]).toEqual({
+    episode_count: 3, target_seconds: 45, tolerance_seconds: 10,
   });
-  expect((screen.getByLabelText('单镜秒数上限') as HTMLInputElement).value).toBe('10');
-  // 新本地生产安全上限为 4–10 秒（由后端 DEFAULT_MAX_SHOT_SECONDS 统一收敛）。
-  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('max', '10');
-  expect(screen.getByLabelText('单镜秒数上限')).toHaveAttribute('min', '4');
+  expect(screen.queryByLabelText('单镜秒数上限')).toBeNull();
   stub.restore();
 });
 
@@ -267,7 +264,6 @@ it('大纲超出设定集数时，显示当前覆盖章节、后续预计集数�
   const user = userEvent.setup();
   const { unmount } = render(<StoryboardBookPanel projectId="proj-1" onMessage={vi.fn()} />);
   await screen.findByRole('option', { name: /黑色电影/ });
-  fireEvent.change(screen.getByLabelText('单镜秒数上限'), { target: { value: '10' } });
   await user.click(screen.getByRole('button', { name: /生成分镜书/ }));
 
   expect(await screen.findByText(/单镜上限 10 秒/)).toBeInTheDocument();

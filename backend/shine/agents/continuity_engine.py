@@ -328,6 +328,8 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
     _judge_continuation_openings(verdict, views, shots, previous_shot=context.get("previous_shot"))
     _judge_axis(verdict, views, shots, previous_blocking=context.get("previous_blocking"))
     _report_props(verdict, views, shots)
+    _report_bare_emotions(verdict, views, shots)
+    _report_process_postures(verdict, views, shots)
     return verdict
 
 
@@ -539,25 +541,126 @@ def _judge_dialogue(verdict: BoardVerdict, views: list[ShotView], beats: dict[st
                                      "spoken_seconds": round(spoken, 2), "duration_s": view.duration_s})
 
 
+_CLOSE_SCALE_RE = re.compile(
+    r"\b(?:extreme[\s_-]*close|ecu|xcu|close[\s_-]*up|closeup|cu|close[\s_-]*two[\s_-]*shot|"
+    r"medium[\s_-]*close[\s_-]*up|medium[\s_-]*close|mcu|tight|choker|insert|detail)\b",
+    flags=re.IGNORECASE,
+)
+_WIDE_SCALE_RE = re.compile(
+    r"\b(?:extreme[\s_-]*wide|ews|extreme[\s_-]*long|els|wide[\s_-]*shot|wide|ws|long[\s_-]*shot|ls|"
+    r"establishing|full[\s_-]*shot|fs)\b",
+    flags=re.IGNORECASE,
+)
+_MEDIUM_SCALE_RE = re.compile(
+    r"\b(?:medium[\s_-]*two[\s_-]*shot|medium[\s_-]*shot|medium|ms|two[\s_-]*shot|cowboy)\b",
+    flags=re.IGNORECASE,
+)
+_PROCESS_POSTURE_RE = re.compile(
+    r"\b(?:then\s+[a-z]+|withdraws?\b|removes?\b|pushes?\b|slides?\b|enters?\b|"
+    r"steps?\s+(?:to|into|toward)\b|walks?\s+(?:to|into|toward)\b)",
+    flags=re.IGNORECASE,
+)
+
+
+def _shot_scale_tier(shot: dict[str, Any]) -> str | None:
+    """Classify explicit ``camera.shot_size`` into ``close | medium | wide`` (or ``None`` if unset)."""
+    size = str((shot.get("camera") or {}).get("shot_size") or "").strip()
+    if not size:
+        return None
+    if _CLOSE_SCALE_RE.search(size):
+        return "close"
+    if _WIDE_SCALE_RE.search(size):
+        return "wide"
+    if _MEDIUM_SCALE_RE.search(size):
+        return "medium"
+    return None
+
+
+def _is_static_camera(shot: dict[str, Any]) -> bool:
+    move = str((shot.get("camera") or {}).get("move") or "static").strip().lower()
+    return move in {"", "static"}
+
+
+def _placed_sides(shot: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+    return tuple(sorted((name, side) for name, side, _ in _placed(shot)))
+
+
 def _decide_boundaries(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]],
                        has_predecessor: bool) -> None:
     """The mode of every boundary, from the director's stated reason."""
     consecutive_last_frame = 0
     for view in views:
-        motivation = str(shots[view.index].get("transition_motivation") or "")
+        cur_shot = shots[view.index]
+        motivation = str(cur_shot.get("transition_motivation") or "")
         continues = motivation in CONTINUE_MOTIVATIONS
-        if view.index > 0 and continues:
-            prev_loc = str(shots[view.index - 1].get("location") or "").strip()
-            cur_loc = str(shots[view.index].get("location") or "").strip()
-            if prev_loc and cur_loc and prev_loc != cur_loc:
-                # Never carry a final frame across two distinct physical places.
-                verdict.warnings.append({
-                    "code": "CONTINUATION_IGNORED_ON_LOCATION_CHANGE",
-                    "shot_id": view.id,
-                    "from": prev_loc,
-                    "to": cur_loc,
-                })
-                continues = False
+        if view.index > 0:
+            prev_shot = shots[view.index - 1]
+            prev_loc = str(prev_shot.get("location") or "").strip()
+            cur_loc = str(cur_shot.get("location") or "").strip()
+            prev_scale = _shot_scale_tier(prev_shot)
+            cur_scale = _shot_scale_tier(cur_shot)
+            static_cam = _is_static_camera(cur_shot)
+            if continues:
+                if prev_loc and cur_loc and prev_loc != cur_loc:
+                    # Never carry a final frame across two distinct physical places.
+                    verdict.warnings.append({
+                        "code": "CONTINUATION_IGNORED_ON_LOCATION_CHANGE",
+                        "shot_id": view.id,
+                        "from": prev_loc,
+                        "to": cur_loc,
+                    })
+                    continues = False
+                elif prev_scale and cur_scale and prev_scale != cur_scale and static_cam:
+                    # A physically anchored last_frame on a static camera cannot jump across
+                    # framing scales (e.g. MCU -> medium two-shot or close -> medium counter).
+                    verdict.warnings.append({
+                        "code": "CONTINUATION_IGNORED_ON_SCALE_CHANGE",
+                        "shot_id": view.id,
+                        "from_scale": prev_scale,
+                        "to_scale": cur_scale,
+                    })
+                    continues = False
+                else:
+                    prev_cast = set(views[view.index - 1].cast)
+                    added_cast = sorted(set(view.cast) - prev_cast)
+                    if added_cast and prev_scale == "close" and static_cam:
+                        # A tight close-up's static last frame has no spatial room for an
+                        # off-frame performer to walk in naturally without spatial distortion.
+                        verdict.warnings.append({
+                            "code": "CONTINUATION_IGNORED_ON_CAST_ENTRY",
+                            "shot_id": view.id,
+                            "added_characters": added_cast,
+                        })
+                        continues = False
+            elif motivation == "shot_reverse_shot":
+                # Guard against pseudo shot-reverse-shot jump cuts: two consecutive static
+                # two-shots at the exact same location, axis, scale, and left-right blocking
+                # carry no editorial reverse-angle change and cause Ref2VA spatial teleports.
+                prev_axis = str((prev_shot.get("blocking") or {}).get("axis") or "").strip()
+                cur_axis = str((cur_shot.get("blocking") or {}).get("axis") or "").strip()
+                prev_sides = _placed_sides(prev_shot)
+                cur_sides = _placed_sides(cur_shot)
+                same_location = (not prev_loc or not cur_loc or prev_loc == cur_loc)
+                same_axis = bool(prev_axis and cur_axis and prev_axis == cur_axis)
+                same_multi_blocking = len(cur_sides) >= 2 and prev_sides == cur_sides
+                same_explicit_scale = bool(prev_scale and cur_scale and prev_scale == cur_scale)
+                no_new_held_props = not (_props(cur_shot) - _props(prev_shot))
+                if (
+                    same_location
+                    and same_axis
+                    and same_multi_blocking
+                    and same_explicit_scale
+                    and static_cam
+                    and no_new_held_props
+                    and consecutive_last_frame < 2
+                    and not check_continuation_opening(prev_shot, cur_shot, mode="last_frame", shot_id=view.id)
+                ):
+                    continues = True
+                    verdict.warnings.append({
+                        "code": "SAME_FRAMING_CUT_PROMOTED_TO_LAST_FRAME",
+                        "shot_id": view.id,
+                        "scale": cur_scale,
+                    })
         if view.index == 0 and continues and not has_predecessor:
             # Nothing of an earlier episode or unit exists to continue: the
             # shot opens on a cut, and the board records that it does.
@@ -670,6 +773,75 @@ def _report_props(verdict: BoardVerdict, views: list[ShotView], shots: list[dict
 def _props(shot: dict[str, Any]) -> set[str]:
     return {str(prop).strip() for placement in (shot.get("blocking") or {}).get("placements") or []
             for prop in placement.get("props") or [] if str(prop).strip()}
+
+
+_BARE_EMOTION_RE = re.compile(
+    r"\b(?:angry|furious|enraged|sad|sorrowful|depressed|shocked|stunned|surprised|"
+    r"fearful|scared|terrified|afraid|happy|joyful|delighted|nervous|anxious|worried|"
+    r"upset|frustrated|disappointed|jealous|guilty|ashamed|confused|relieved|heartbroken)\b",
+    flags=re.IGNORECASE,
+)
+_FACIAL_ANATOMY_RE = re.compile(
+    r"\b(?:brow|brows|eyebrow|eyebrows|forehead|eyelid|eyelids|lid|lids|eye|eyes|"
+    r"pupil|pupils|iris|gaze|blink|blinks|blinking|squint|squints|squinting|"
+    r"nostril|nostrils|nose|cheek|cheeks|cheekbone|cheekbones|lip|lips|mouth|"
+    r"corner|corners|jaw|jawline|chin|throat|neck|breath|breathe|breathing|"
+    r"inhale|inhales|inhaling|exhale|exhales|exhaling|swallow|swallows|swallowing|"
+    r"tear|tears|lash|lashes|temple|temples|clench|clenches|clenching|tighten|tightens|"
+    r"tightening|twitch|twitches|flinch|flinches|tremble|trembles|trembling|frown|frowns|"
+    r"wrinkle|wrinkles|furrow|furrows|part|parts|parting)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def detect_bare_emotion_words(expression: str) -> list[str]:
+    """Return bare abstract emotion words when ``expression`` lacks observable facial anatomy.
+
+    Part of the single continuity verdict (never a second gate): concrete
+    anatomical descriptions (brow/eyelid/gaze/nostril/lip/jaw/throat/breath)
+    always pass cleanly even if they also mention an emotional colour.
+    """
+    text = str(expression or "").strip()
+    if not text:
+        return []
+    if _FACIAL_ANATOMY_RE.search(text):
+        return []
+    matches = _BARE_EMOTION_RE.findall(text)
+    return list(dict.fromkeys(word.lower() for word in matches))
+
+
+def _report_bare_emotions(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]]) -> None:
+    for view in views:
+        shot = shots[view.index]
+        for idx, window in enumerate(shot.get("timeline") or []):
+            if not isinstance(window, dict):
+                continue
+            words = detect_bare_emotion_words(str(window.get("expression") or ""))
+            if words:
+                verdict.warnings.append({
+                    "code": "BARE_EMOTION_WORD",
+                    "shot_id": view.id,
+                    "window": idx,
+                    "words": words,
+                })
+
+
+def _report_process_postures(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]]) -> None:
+    """Warn when 0.0s opening blocking.posture leaks multi-step process actions."""
+    for view in views:
+        shot = shots[view.index]
+        for idx, pl in enumerate((shot.get("blocking") or {}).get("placements") or []):
+            if not isinstance(pl, dict):
+                continue
+            posture = str(pl.get("posture") or "").strip()
+            match = _PROCESS_POSTURE_RE.search(posture)
+            if match:
+                verdict.warnings.append({
+                    "code": "BLOCKING_POSTURE_PROCESS_ACTION",
+                    "shot_id": view.id,
+                    "placement": idx,
+                    "cue": match.group(0),
+                })
 
 
 _BLADE_SUBJECT_RE = r"(?:rune\s+sword|longsword|sword|blade|weapon|剑|长剑|符文长剑|剑尖|剑身)"

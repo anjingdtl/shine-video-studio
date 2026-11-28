@@ -635,6 +635,7 @@ WRITE_ACTIONS: tuple[CapabilityDeclaration, ...] = (
         api_route="POST /api/v1/projects/{project_id}/director/storyboard-book",
         request_schema="shine.api_streamline:StoryboardBookBody",
         response_schema=None,
+        contract_revision=3,
         executor="shine.director.streamline.create_storyboard_book",
         authority="GET /api/v1/projects/{project_id}/director/storyboard-book",
         permission_tier="EXECUTE_GUARDED",

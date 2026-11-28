@@ -26,6 +26,10 @@ QUOTED_OR_DIALOGUE = re.compile(
     re.S,
 )
 _QUOTED_OR_DIALOGUE = QUOTED_OR_DIALOGUE
+DIALOGUE_SENTENCE_RE = re.compile(
+    r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\)(?:,\s*(?:in|with) [^\n]*?)?\s+(?:says|speaks):\s*<d>.*?</d>",
+    flags=re.S,
+)
 _TIMESTAMP = re.compile(r"At (\d{2}):(\d{2}\.\d{3})")
 MAX_PROMPT_CHARS = 12000
 """A soft ceiling: past this the shot description usually repeats itself."""
@@ -170,9 +174,7 @@ def review_h3_prompt(
     if duration_s is not None:
         if not 4 <= float(duration_s) <= 15:
             findings.append(_finding("H3_LIMITS", "H3 单段生成只支持 4–15 秒"))
-        visual = re.sub(
-            r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\) says: <d>.*?</d>", "", text, flags=re.S
-        )
+        visual = DIALOGUE_SENTENCE_RE.sub("", text)
         times = [int(m) * 60 + float(s) for m, s in _TIMESTAMP.findall(visual)]
         if times:
             if times != sorted(times) or len(set(times)) != len(times):

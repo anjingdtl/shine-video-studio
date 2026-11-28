@@ -1674,19 +1674,51 @@ class FilmAgentDispatcher:
             if isinstance(proposal, scene_director.SceneShotBoard):
                 scene_artifact = next((a for a in inputs if a.kind == "DramaSceneScript"), inputs[0])
                 production = context.get("production_context") or {}
+                verdict_context = {
+                    "max_shot_seconds": context.get("max_shot_seconds"),
+                    "continuity_predecessor": bool(production.get("continuity_predecessor")),
+                    "previous_blocking": production.get("previous_shot_blocking"),
+                    "previous_shot": production.get("previous_shot"),
+                    "registered_locations": production.get("registered_locations") or [],
+                    "character_tokens": production.get("character_tokens") or [],
+                }
+                acting_warnings: list[dict] = []
+                acting_meta: dict | None = None
+                if not body.offline_preview:
+                    from shine.agents.acting_director import (
+                        ActingGroupPatch,
+                        polish_scene_board_acting,
+                    )
+
+                    acting_schema = ActingGroupPatch.model_json_schema()
+
+                    def _call_acting_llm(sys_prompt: str, user_payload: dict, _label: str):
+                        res = self.gateway.complete_for_role(
+                            db,
+                            role,
+                            system=sys_prompt,
+                            user=json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
+                            schema=acting_schema,
+                            budget={"completion_cap": 2048},
+                        )
+                        return res.parsed if res.parsed is not None else res.raw_text
+
+                    payload, acting_warnings, acting_meta = polish_scene_board_acting(
+                        payload,
+                        scene_artifact.payload_json,
+                        verdict_context,
+                        call_llm=_call_acting_llm,
+                    )
                 verdict = continuity_engine.review_scene_board(
                     payload,
                     scene_artifact.payload_json,
-                    {
-                        "max_shot_seconds": context.get("max_shot_seconds"),
-                        "continuity_predecessor": bool(production.get("continuity_predecessor")),
-                        "previous_blocking": production.get("previous_shot_blocking"),
-                        "previous_shot": production.get("previous_shot"),
-                        "registered_locations": production.get("registered_locations") or [],
-                        "character_tokens": production.get("character_tokens") or [],
-                    },
+                    verdict_context,
                 )
+                if acting_warnings:
+                    verdict.warnings.extend(acting_warnings)
                 payload.update(scene_director.board_server_fields(payload, scene_artifact, context, verdict))
+                if acting_meta is not None:
+                    task.trace = {**task.trace, "acting_polish": acting_meta}
             artifact = AgentArtifact(
                 project_id=project_id,
                 kind=contract.__name__,

@@ -2036,7 +2036,7 @@
             "type": "integer"
           },
           "tolerance_seconds": {
-            "default": 15,
+            "default": 10,
             "maximum": 900.0,
             "minimum": 0.0,
             "type": "integer"
@@ -2074,7 +2074,7 @@
               "type": "integer"
             },
             "tolerance_seconds": {
-              "default": 15,
+              "default": 10,
               "maximum": 900.0,
               "minimum": 0.0,
               "type": "integer"
@@ -2085,7 +2085,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "944cd3cfa268e61b4ce798af5582da28c683084688f9c35f20827842b0f49b3e"
+        "schema_digest": "99b861b112807a11b7ab581b0e56fa62a0abab4a8107262938e9ee9f681baa11"
       },
       "operation": "POST /api/v1/projects/{}/director/storyboard-book",
       "parameters": [
@@ -6404,7 +6404,7 @@
     },
     {
       "action_id": "storyboard_book_generate",
-      "api_contract_digest": "7235df2d3712d8046a141cb01f900c28fd34f52bf83501449d7046db618a26c3",
+      "api_contract_digest": "560fcd36fb638427c2fad42a7d83d9bc8c77603fed501bb29315c09aec324da7",
       "api_operations": [
         "POST /api/v1/projects/{}/director/storyboard-book",
         "GET /api/v1/projects/{}/director/storyboard-book"
@@ -6413,8 +6413,8 @@
       "authority": "GET /api/v1/projects/{project_id}/director/storyboard-book",
       "availability": "AVAILABLE",
       "confirmation_policy": "显示集数和时长，确认后生成草稿。",
-      "contract_digest": "46a477fe76cd42ef5d3c4228436c96232912959443a7234ba600b7d2b21c09c4",
-      "contract_revision": 2,
+      "contract_digest": "f20c39ebffc26f136c0676093bb771e3916ff4b717aaab4bfbb34ccb50e493b8",
+      "contract_revision": 3,
       "description": "按集数、每集目标和单镜时长生成分镜书草稿。短片两镜可选择 1 集、10 秒目标和 5 秒单镜上限。",
       "dispatch": "storyboard_book_generate",
       "examples": [
@@ -6487,7 +6487,7 @@
         },
         {
           "binding": "body",
-          "default": 15,
+          "default": 10,
           "enum": [],
           "has_default": true,
           "max_length": null,
@@ -9141,9 +9141,9 @@
     }
   ],
   "digests": {
-    "api_contract": "cb08b2675f60c65922876ef5e5e99c9f36f0df54a2b7f25d5fba24fc29eb4558",
-    "api_schema": "f13e88b0360f7acf07059ea40f8c741749d22999ee3598e993386102fdd960dd",
-    "contracts": "d86cfb56bcbd6b145f018cecb06fafdbd804b32f263dec5104fadb45396750de"
+    "api_contract": "ad7755cb956fa6147e133c17df839ea0eb5c5021ee6b29506c7b32656ba087c6",
+    "api_schema": "a1196a4baa16d69af83111e79e288875b569eaf0b43c48284cca311491d82871",
+    "contracts": "c074a23e6ab8f3d8c55397d58aac52e5e31284f7a1fe9874691c2c9a05ad986d"
   },
   "discovered": [
     {
@@ -11676,6 +11676,12 @@
       "executable": false,
       "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
       "route": "POST /api/v1/shots/{}/continuity",
+      "status": "DISCOVERED"
+    },
+    {
+      "executable": false,
+      "reason": "构建期发现但未声明受控合同；只作说明，不获得执行权。",
+      "route": "POST /api/v1/shots/{}/repolish-acting",
       "status": "DISCOVERED"
     },
     {

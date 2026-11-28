@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from shine.schemas import STYLE_BIBLE_FIELDS, APIModel, DialogueLine, ShotSpec, StyleBible, StyleInputCheck
 
@@ -275,6 +275,9 @@ class SpokenLine(APIModel):
     text: str = Field(min_length=1, max_length=200)
 
 
+BeatEnergy = Literal["calm", "probe", "pressure", "turn_pause", "erupt", "aftermath"]
+
+
 class DramaBeat(APIModel):
     """One beat of a shootable scene: what is seen, who is in it, what is said."""
 
@@ -285,6 +288,18 @@ class DramaBeat(APIModel):
     characters: list[str] = Field(default_factory=list, max_length=20)
     spoken_lines: list[SpokenLine] = Field(default_factory=list, max_length=12)
     subtext: str = Field(default="", max_length=300)
+    beat_energy: BeatEnergy | None = Field(
+        default=None,
+        description="Optional dramatic energy tier along the scene arc: calm, probe, pressure, "
+                    "turn_pause, erupt, or aftermath.",
+    )
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_beat_energy(self, handler):
+        data = handler(self)
+        if isinstance(data, dict) and data.get("beat_energy") is None:
+            data.pop("beat_energy", None)
+        return data
 
 
 class DramaSceneScript(APIModel):

@@ -539,4 +539,107 @@ def test_last_frame_lighting_rewind_is_refused_and_chain_warning_emitted():
     assert any(w.get("code") == "CONTINUATION_CHAIN_LONG" for w in chain_verdict.warnings)
 
 
+def test_cross_scale_static_last_frame_and_cast_entry_cut_cleanly():
+    """Static last_frame across scale jumps (MCU -> medium two-shot, close -> medium) must convert to cut."""
+    s1 = first_of()
+    s1["camera"] = {**s1["camera"], "shot_size": "medium close-up"}
+    s2 = {
+        **SECOND_SHOT,
+        "transition_motivation": "continuous_action",
+        "camera": {**SECOND_SHOT["camera"], "shot_size": "medium two-shot"},
+    }
+    s3 = {
+        **LAST_SHOT,
+        "transition_motivation": "emotional_hold",
+        "camera": {**LAST_SHOT["camera"], "shot_size": "close-up"},
+    }
+    verdict = engine.review_scene_board(board(s1, s2, s3), SCENE, CONTEXT)
+    assert verdict.accepted, verdict.refusals
+    assert [b["mode"] for b in verdict.boundaries] == ["cut", "cut", "cut"]
+    warn_codes = [w["code"] for w in verdict.warnings]
+    assert warn_codes.count("CONTINUATION_IGNORED_ON_SCALE_CHANGE") == 2
+
+    # When camera explicitly pulls back, continuous last_frame across scale is allowed.
+    s2_pull = {
+        **s2,
+        "camera": {
+            **s2["camera"],
+            "move": "pull_back",
+            "motive": "reveal the guest stepping in from the door",
+            "movement": "The camera pulls back steadily.",
+        },
+    }
+    v_pull = engine.review_scene_board(board(s1, s2_pull, LAST_SHOT), SCENE, CONTEXT)
+    assert v_pull.accepted, v_pull.refusals
+    assert v_pull.boundaries[1]["mode"] == "last_frame"
+
+    # Tight close shot adding an off-frame performer on a static camera also cuts cleanly.
+    s2_same_close_entry = {
+        **SECOND_SHOT,
+        "transition_motivation": "continuous_action",
+        "camera": {**SECOND_SHOT["camera"], "shot_size": "close two-shot"},
+    }
+    v_entry = engine.review_scene_board(board(s1, s2_same_close_entry, LAST_SHOT), SCENE, CONTEXT)
+    assert v_entry.accepted, v_entry.refusals
+    assert v_entry.boundaries[1]["mode"] == "cut"
+    assert any(w["code"] == "CONTINUATION_IGNORED_ON_CAST_ENTRY" for w in v_entry.warnings)
+
+
+def test_pseudo_shot_reverse_shot_same_two_shot_promotes_to_last_frame_while_true_srs_stays_cut():
+    """Two identical static two-shots at the same scale/positions must not jump-cut on shot_reverse_shot."""
+    two_hander = {
+        "location": "钟表铺",
+        "beats": [
+            {"beat_type": "action", "visible_action": "老周擦表，客人站定。", "characters": [ZHOU, GUEST],
+             "spoken_lines": [{"speaker": ZHOU, "emotion": "平", "text": FIRST}]},
+            {"beat_type": "dialogue_exchange", "visible_action": "两人隔柜台对视。", "characters": [ZHOU, GUEST],
+             "spoken_lines": [{"speaker": GUEST, "emotion": "冷", "text": SECOND}]},
+            {"beat_type": "action", "visible_action": "客人沉默。", "characters": [GUEST], "spoken_lines": []},
+        ],
+    }
+    s1 = first_of(placements=BOTH)
+    s1["camera"] = {**s1["camera"], "shot_size": "close two-shot"}
+    s2_pseudo_srs = {
+        **SECOND_SHOT,
+        "transition_motivation": "shot_reverse_shot",
+        "camera": {**SECOND_SHOT["camera"], "shot_size": "close two-shot"},
+    }
+    s3_true_srs = {
+        **LAST_SHOT,
+        "transition_motivation": "shot_reverse_shot",
+        "camera": {**LAST_SHOT["camera"], "shot_size": "close-up"},
+    }
+    verdict = engine.review_scene_board(board(s1, s2_pseudo_srs, s3_true_srs), two_hander, CONTEXT)
+    assert verdict.accepted, verdict.refusals
+    # S2 identical static close two-shot promotes to last_frame; S3 single close-up stays cut.
+    assert [b["mode"] for b in verdict.boundaries] == ["cut", "last_frame", "cut"]
+    assert any(
+        w["code"] == "SAME_FRAMING_CUT_PROMOTED_TO_LAST_FRAME" and w["shot_id"] == "S2"
+        for w in verdict.warnings
+    )
+
+
+def test_process_action_in_blocking_posture_emits_non_blocking_warning():
+    leaky = {
+        **SECOND_SHOT,
+        "blocking": {
+            "axis": "counter",
+            "placements": [
+                placement(ZHOU, "left_fg", "facing_right"),
+                {
+                    "character": GUEST,
+                    "zone": "right_fg",
+                    "facing": "facing_left",
+                    "posture": "withdraws a rusted silver key and pushes it across the counter",
+                    "props": [],
+                },
+            ],
+        },
+    }
+    verdict = engine.review_scene_board(board(first_of(), leaky, LAST_SHOT), SCENE, CONTEXT)
+    assert verdict.accepted, verdict.refusals
+    assert any(w["code"] == "BLOCKING_POSTURE_PROCESS_ACTION" and w["shot_id"] == "S2" for w in verdict.warnings)
+
+
+
 

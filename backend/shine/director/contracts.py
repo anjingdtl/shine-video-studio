@@ -20,7 +20,7 @@ from shine.schemas import APIModel, ShotSpec
 MAX_EPISODES = 200
 MAX_SHOTS_PER_EPISODE = 400
 DEFAULT_TARGET_SECONDS = 60
-DEFAULT_TOLERANCE_SECONDS = 15
+DEFAULT_TOLERANCE_SECONDS = 10
 MAX_REPAIRS_PER_SHOT = 20
 MAX_BATCH_SHOT_LIMIT = 50
 
@@ -206,7 +206,7 @@ def duration_target_verdict(actual_seconds: float, target_seconds: float,
     either adjusts the durations or explicitly acknowledges the deviation —
     never a silent pass. Returns None when the total fits.
     """
-    low = max(0.0, target_seconds - tolerance_seconds)
+    low = max(4.0, target_seconds - tolerance_seconds)
     high = target_seconds + tolerance_seconds
     if low <= actual_seconds <= high:
         return None

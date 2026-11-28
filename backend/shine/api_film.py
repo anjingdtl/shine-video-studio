@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -2690,4 +2691,73 @@ def character_binding_apply(project_id: str, body: CharacterBindingApply, db: DB
         ],
         "resume_steps": {"scriptwriter": artifact.id},
         "next": "FREEZE_AND_RESUME",
+    }
+
+
+class ShotRepolishActingBody(APIModel):
+    previous_exit_state: str = Field(default="", max_length=200)
+    beat_energies: list[str] = Field(default_factory=list, max_length=8)
+
+
+@router.post("/shots/{shot_id}/repolish-acting")
+def repolish_shot_acting(
+    shot_id: str,
+    db: DBSession,
+    gateway: Annotated[LLMGateway, Depends(llm_gateway)],
+    actor: Operator,
+    body: ShotRepolishActingBody | None = None,
+) -> dict:
+    """Run the non-blocking Acting Pass on one landed shot and bump its revision."""
+    from shine.agents.acting_director import ActingGroupPatch, polish_single_shot_spec
+    from shine.services import revise_shot_record
+
+    shot = db.get(Shot, shot_id)
+    if shot is None:
+        raise HTTPException(404, "SHOT_NOT_FOUND")
+    project = require_project(db, shot.project_id)
+    req_body = body or ShotRepolishActingBody()
+    acting_schema = ActingGroupPatch.model_json_schema()
+
+    def _call_acting_llm(sys_prompt: str, user_payload: dict, _label: str):
+        res = gateway.complete_for_role(
+            db,
+            "director",
+            system=sys_prompt,
+            user=json.dumps(user_payload, ensure_ascii=False, separators=(",", ":")),
+            schema=acting_schema,
+            budget={"completion_cap": 1536},
+        )
+        return res.parsed if res.parsed is not None else res.raw_text
+
+    merged_dict, warnings, meta = polish_single_shot_spec(
+        dict(shot.spec or {}),
+        shot_id=shot.id,
+        call_llm=_call_acting_llm,
+        previous_exit_state=req_body.previous_exit_state,
+        beat_energies=req_body.beat_energies,
+    )
+    if not meta.get("polished"):
+        return {
+            "shot_id": shot.id,
+            "revision": shot.revision,
+            "polished": False,
+            "warnings": warnings,
+            "meta": meta,
+            "spec": shot.spec,
+        }
+    validated = ShotSpec.model_validate(merged_dict)
+    revised = revise_shot_record(db, project, shot, spec=validated, actor=actor)
+    add_audit(
+        db, actor, "SHOT_ACTING_REPOLISHED", "shot", shot.id,
+        {"revision": revised["revision"], "meta": meta, "warnings": warnings},
+        project_id=project.id,
+    )
+    db.commit()
+    return {
+        "shot_id": shot.id,
+        "revision": revised["revision"],
+        "polished": True,
+        "warnings": warnings,
+        "meta": meta,
+        "spec": revised["spec"],
     }

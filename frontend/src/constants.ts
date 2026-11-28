@@ -282,6 +282,7 @@ export const auditEventLabels: Record<string, string> = {
   SHOT_CREATED: '新建分镜', SHOT_BINDINGS_UPDATED: '更新分镜素材绑定',
   SHOT_CONTINUITY_SET: '设置分镜连续性', SHOT_REVISION_REWRITTEN: '重写分镜修订',
   SHOT_PROMPT_SAVED: '保存分镜提示词', SHOT_PROMPT_FROZEN: '冻结分镜提示词',
+  SHOT_ACTING_REPOLISHED: '重导演技与声学表演',
   SHOT_PROMPT_UNFROZEN: '解冻分镜提示词',
   SHOT_SUBTITLE_SAVED: '保存分镜字幕', SHOT_SUBTITLE_FROZEN: '冻结分镜字幕',
   SUBTITLE_REVISION_SAVED: '保存字幕修订', SUBTITLE_REVISION_APPROVED: '批准字幕修订',

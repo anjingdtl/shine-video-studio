@@ -1094,7 +1094,7 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     compiler = H3PromptCompiler()
     # 当前版本的哨兵：提升版本号必须是有意为之，并同时保证每个已发布版本的字节不变
     # （见 test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay）。
-    assert COMPILER_VERSION == "shine-h3-compiler/2.4.0"
+    assert COMPILER_VERSION == "shine-h3-compiler/2.6.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1314,12 +1314,14 @@ def test_the_rich_timeline_becomes_second_by_second_prose():
     ) in desc
     assert "It opens on the cup halfway to the table." in desc
     assert desc.index("In frame:") < desc.index("From 0.0s")
-    # ...the performance is a timeline of action, face and camera...
-    assert (
+    # ...the performance is a timeline of action, face and camera, interleaved in 2.5.0 with timed dialogue...
+    w1 = (
         "From 0.0s to 2.4s, She sets the brass cup down without a sound; her eyes stay on the door. "
-        "The camera holds still. From 2.4s to 5.0s, He turns his head a fraction toward the window; "
-        "his jaw tightens, then releases."
-    ) in desc
+        "The camera holds still."
+    )
+    w2 = "From 2.4s to 5.0s, He turns his head a fraction toward the window; his jaw tightens, then releases."
+    assert w1 in desc and w2 in desc
+    assert desc.index(w1) < desc.index("<d>[Chinese] 你听见了吗？</d>") < desc.index(w2)
     # ...the physical set is stated once, in its own three facts...
     assert (
         "Space: Desk in the foreground, rain-streaked window behind. "
@@ -1642,7 +1644,9 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     from shine.h3.compiler import (
         COMPILER_VERSION,
         KNOWN_COMPILER_VERSIONS,
+        LEGACY_ACTING_V25_COMPILER_VERSION,
         LEGACY_ANCHORED_TOKENS_COMPILER_VERSION,
+        LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
         LEGACY_HANDOFF_V23_COMPILER_VERSION,
         LEGACY_SCOPED_FACTS_COMPILER_VERSION,
         SKILL_SHA256,
@@ -1707,11 +1711,21 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
         spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
         compiler_version=LEGACY_HANDOFF_V23_COMPILER_VERSION,
     )
-    current_240 = compile_prompt(manifest, shot=shot, style=en_style)
+    continuity_240 = compiler.compile(
+        spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+    )
+    acting_250 = compiler.compile(
+        spec=shot, style=en_style, manifest=manifest, project_language="Chinese",
+        compiler_version=LEGACY_ACTING_V25_COMPILER_VERSION,
+    )
+    current_260 = compile_prompt(manifest, shot=shot, style=en_style)
 
-    # Current version is 2.4.0; 2.2.0 and 2.3.0 keep their exact released bytes.
-    assert COMPILER_VERSION == "shine-h3-compiler/2.4.0"
-    assert current_240.compiler_version == COMPILER_VERSION
+    # Current version is 2.6.0; 2.2.0..2.5.0 keep their exact released bytes.
+    assert COMPILER_VERSION == "shine-h3-compiler/2.6.0"
+    assert current_260.compiler_version == COMPILER_VERSION
+    assert acting_250.compiler_version == LEGACY_ACTING_V25_COMPILER_VERSION
+    assert continuity_240.compiler_version == LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION
     assert scoped_220.compiler_version == LEGACY_SCOPED_FACTS_COMPILER_VERSION
     assert handoff_230.compiler_version == LEGACY_HANDOFF_V23_COMPILER_VERSION
     released_desc = released.sections["detailed_description"]
@@ -1738,7 +1752,9 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
         (released, LEGACY_ANCHORED_TOKENS_COMPILER_VERSION),
         (scoped_220, LEGACY_SCOPED_FACTS_COMPILER_VERSION),
         (handoff_230, LEGACY_HANDOFF_V23_COMPILER_VERSION),
-        (current_240, COMPILER_VERSION),
+        (continuity_240, LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION),
+        (acting_250, LEGACY_ACTING_V25_COMPILER_VERSION),
+        (current_260, COMPILER_VERSION),
     ):
         replayed, variant = recompile_for_provenance(frozen(stored, version))
         assert variant is None
@@ -1778,7 +1794,8 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     assert verify_request_provenance(tampered, pack, historical_evidence=real_ev)["passed"] is False
     assert all(ver in KNOWN_COMPILER_VERSIONS for ver in (
         LEGACY_ANCHORED_TOKENS_COMPILER_VERSION, LEGACY_SCOPED_FACTS_COMPILER_VERSION,
-        LEGACY_HANDOFF_V23_COMPILER_VERSION, COMPILER_VERSION,
+        LEGACY_HANDOFF_V23_COMPILER_VERSION, LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+        LEGACY_ACTING_V25_COMPILER_VERSION, COMPILER_VERSION,
     ))
 
 

@@ -144,7 +144,12 @@ def review_h3_prompt(
     if duration_s is not None:
         if not 4.0 <= float(duration_s) <= 15.0:
             findings.append(_finding("H3_LIMITS", "H3 单镜时长通常为 4–15 秒。"))
-        visual = re.sub(r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\) says: <d>.*?</d>", "", text, flags=re.S)
+        visual = re.sub(
+            r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\)(?:,\s*(?:in|with) [^\n]*?)?\s+(?:says|speaks):\s*<d>.*?</d>",
+            "",
+            text,
+            flags=re.S,
+        )
         times = [int(m) * 60 + float(s) for m, s in _TIMESTAMP.findall(visual)]
         if times:
             if times != sorted(times) or len(set(times)) != len(times):

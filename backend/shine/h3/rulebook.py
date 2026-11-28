@@ -32,7 +32,7 @@ from shine.h3.compiler import (
     PromptCompilationError,
     validate_reference_manifest,
 )
-from shine.h3.spec_review import QUOTED_OR_DIALOGUE, review_h3_prompt
+from shine.h3.spec_review import DIALOGUE_SENTENCE_RE, QUOTED_OR_DIALOGUE, review_h3_prompt
 from shine.models import ProjectRuleLock, RulePack, utcnow
 from shine.schemas import APIModel, GenerationMode, RenderRequest
 
@@ -662,10 +662,7 @@ class H3RulebookRegistry:
         # editorial cuts even though the compiler appends dialogue after visuals.
         # A chorus line credits several speakers in one sentence, so the
         # sentence may carry more than one reference label.
-        visual_timeline = re.sub(
-            r"At \d{2}:\d{2}\.\d{3}, [^\n]*?\([^)]*\) says: <d>.*?</d>",
-            "", text, flags=re.S,
-        )
+        visual_timeline = DIALOGUE_SENTENCE_RE.sub("", text)
         times = [int(m) * 60 + float(s) for m, s in re.findall(r"At (\d{2}):(\d{2}\.\d{3})", visual_timeline)]
         if times != sorted(set(times)) or any(t <= 0 or t >= request.expected_duration_s for t in times):
             reject("H3_TIMING", "compiled_prompt", "Cut timestamps are not increasing inside the duration")

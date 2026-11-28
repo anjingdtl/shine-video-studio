@@ -415,9 +415,27 @@ def test_h3_compiler_v21_resolves_character_tokens_anchors_outfit_and_distinguis
     )
     assert handoff_230.compiler_version == LEGACY_HANDOFF_V23_COMPILER_VERSION == "shine-h3-compiler/2.3.0"
     assert handoff_230.prompt == compiled.prompt
+    from shine.h3.compiler import (
+        LEGACY_ACTING_V25_COMPILER_VERSION,
+        LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+    )
+
+    continuity_240 = compiler.compile(
+        spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA,
+        compiler_version=LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
+    )
+    assert continuity_240.compiler_version == LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION == "shine-h3-compiler/2.4.0"
+    assert continuity_240.prompt == compiled.prompt
+    acting_250 = compiler.compile(
+        spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA,
+        compiler_version=LEGACY_ACTING_V25_COMPILER_VERSION,
+    )
+    assert acting_250.compiler_version == LEGACY_ACTING_V25_COMPILER_VERSION == "shine-h3-compiler/2.5.0"
+    assert acting_250.prompt == compiled.prompt
     current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA)
-    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.4.0"
-    assert current.prompt == compiled.prompt
+    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.6.0"
+    assert "{{C2}}" not in current.sections["detailed_description"]
+    assert "<Subject 1> steps inside and stops" in current.sections["detailed_description"]
     desc = compiled.sections["detailed_description"]
     assert "{{C2}}" not in desc and "{{C1}}" not in desc
     assert "<Subject 1> enters the wooden doorway" in desc

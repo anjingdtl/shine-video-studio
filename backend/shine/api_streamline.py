@@ -19,6 +19,7 @@ from shine.api_loras import resolve_image_style_request
 from shine.api_operator import Operator
 from shine.config import Settings
 from shine.director import streamline
+from shine.director.contracts import DEFAULT_TOLERANCE_SECONDS
 from shine.materialprep.contracts import ImageLoraSelection, ImageStyleRequest
 from shine.models import AgentArtifact, utcnow
 from shine.schemas import DEFAULT_MAX_SHOT_SECONDS, APIModel
@@ -135,7 +136,7 @@ def confirm_outline(project_id: str, body: OutlineConfirmBody, actor: Operator, 
 class StoryboardBookBody(APIModel):
     episode_count: int = Field(ge=1, le=200)
     target_seconds: int = Field(default=60, ge=8, le=3600)
-    tolerance_seconds: int = Field(default=15, ge=0, le=900)
+    tolerance_seconds: int = Field(default=DEFAULT_TOLERANCE_SECONDS, ge=0, le=900)
     # The person's own per-shot ceiling.  A book that does not name one starts
     # from the same default the workbench shows; an explicit null keeps the
     # style's current value.  New books cap at DEFAULT_MAX_SHOT_SECONDS (10 s)
