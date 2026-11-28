@@ -2260,6 +2260,9 @@ export type MaterialPreferences = {
   character_sheet_mode: boolean;
   effective_character_sheet_mode: boolean;
   character_sheet_lora_ready: boolean;
+  scene_sheet_mode?: boolean;
+  effective_scene_sheet_mode?: boolean;
+  scene_sheet_lora_ready?: boolean;
 };
 
 export type AdoptionReport = {
@@ -2316,11 +2319,16 @@ export const fetchDirectorRequirements = (projectId: string, episodeIds?: string
   return api<DirectorMaterialsView>(`/projects/${projectId}/director/materials/requirements${query}`);
 };
 
-export const updateMaterialPreferences = (projectId: string, characterSheetMode: boolean) =>
-  api<MaterialPreferences>(
+export const updateMaterialPreferences = (
+  projectId: string,
+  input: boolean | { character_sheet_mode?: boolean; scene_sheet_mode?: boolean },
+) => {
+  const payload = typeof input === 'boolean' ? { character_sheet_mode: input } : input;
+  return api<MaterialPreferences>(
     `/projects/${projectId}/material-preparation/preferences`,
-    json('PUT', { character_sheet_mode: characterSheetMode }),
+    json('PUT', payload),
   );
+};
 
 export type DirectorMaterialCommitResult = {
   confirmation: {
@@ -2343,6 +2351,7 @@ export const commitDirectorMaterials = (
                        asset_id?: string | null }>;
     queue_generation?: boolean;
     character_sheet_mode?: boolean;
+    scene_sheet_mode?: boolean;
     notes?: string;
   },
 ) => api<DirectorMaterialCommitResult>(`/projects/${projectId}/director/materials/commit`, json('POST', body));

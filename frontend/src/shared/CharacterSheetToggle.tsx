@@ -16,20 +16,30 @@ const DEFAULT_SETUP_HINT = '请前往「设置 → 制作环境 → 角色五视
 type Props = {
   checked: boolean;
   onChange: (next: boolean) => void;
+  sceneChecked?: boolean;
+  onSceneChange?: (next: boolean) => void;
   disabled?: boolean;
   onGoSetup?: () => void;
 };
 
 /**
- * 人物 16:9 五视图定妆照一步勾选开关。
+ * 人物 16:9 五视图定妆照 & 场景 16:9 四视图母版一步勾选开关。
  *
  * 三原则：
  * - 一套事实：仅读取服务端 `/api/v1/loras?base_model=qwen_image_21` 返回的
- *   `character_sheet` 统一实时投影，前端绝不自行拼第二套就绪判断。
+ *   `character_sheet` / `scene_sheet` 统一实时投影（二者复用同一 Qwen 多视角镜头 LoRA），
+ *   前端绝不自行拼第二套就绪判断。
  * - 未下载整备时默认关闭且禁用，给出中文引导与「设置 → 制作环境」直达入口；
  *   下载整备完成后立即可一步勾选。
  */
-export function CharacterSheetToggle({ checked, onChange, disabled = false, onGoSetup }: Props) {
+export function CharacterSheetToggle({
+  checked,
+  onChange,
+  sceneChecked = false,
+  onSceneChange,
+  disabled = false,
+  onGoSetup,
+}: Props) {
   const [projection, setProjection] = useState<CharacterSheetProjection | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -67,6 +77,12 @@ export function CharacterSheetToggle({ checked, onChange, disabled = false, onGo
     }
   }, [loaded, ready, checked, onChange]);
 
+  useEffect(() => {
+    if (loaded && !ready && sceneChecked && onSceneChange) {
+      onSceneChange(false);
+    }
+  }, [loaded, ready, sceneChecked, onSceneChange]);
+
   const hint = projection?.setup_hint || DEFAULT_SETUP_HINT;
 
   function goSetup() {
@@ -89,13 +105,27 @@ export function CharacterSheetToggle({ checked, onChange, disabled = false, onGo
         <Sparkles size={14} />
         <span><b>人物生成 16:9 五视图定妆照</b></span>
       </label>
+      {onSceneChange && (
+        <label className="character-sheet-toggle-label">
+          <input
+            type="checkbox"
+            checked={ready ? sceneChecked : false}
+            disabled={disabled || !ready}
+            onChange={(event) => onSceneChange(event.target.checked)}
+          />
+          <Sparkles size={14} />
+          <span><b>场景生成 16:9 四视图母版</b></span>
+        </label>
+      )}
       {ready ? (
         <span className="material-hint">
-          已就绪：勾选后人物素材在单次显卡租约内串行产出 16:9 五视图定妆照；未勾选时走单步直出，场景与道具保持单步出图。
+          {onSceneChange
+            ? '已就绪：勾选后在单次显卡租约内串行产出多视角母版（人物 16:9 五视图 / 场景四视角 1344×768 原图 + 4 合 1 母版，出片时按镜头朝向自动路由单/双角原图）；未勾选时走单步直出。'
+            : '已就绪：勾选后人物素材在单次显卡租约内串行产出 16:9 五视图定妆照；未勾选时走单步直出，场景与道具保持单步出图。'}
         </span>
       ) : (
         <span className="material-hint">
-          {loaded ? hint : '正在读取角色五视图定妆照权重状态…'}
+          {loaded ? hint : '正在读取多视角镜头 LoRA 权重状态…'}
           {loaded && (
             <>
               {' '}

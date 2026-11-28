@@ -356,6 +356,7 @@ def refresh_reference_paths(db, request):
     created.  Moving the output root changes that path without changing the
     bytes or the asset identity, so in-memory consumers are refreshed here.
     """
+    from shine.asset_center.scene_sheet import find_scene_sheet_view_by_sha
     from shine.models import Asset, MediaArtifact
 
     changed = False
@@ -363,7 +364,8 @@ def refresh_reference_paths(db, request):
     for item in request.reference_manifest:
         asset = db.get(Asset, item.asset_id)
         if asset is not None:
-            current = asset.storage_path
+            view_match = find_scene_sheet_view_by_sha(getattr(asset, "provenance", None), item.sha256)
+            current = view_match[1]["storage_path"] if view_match is not None else asset.storage_path
         else:
             artifact = db.get(MediaArtifact, item.asset_id)
             current = artifact.storage_path if artifact is not None else None
@@ -793,12 +795,20 @@ def _referenced_paths(db) -> set[str]:
     from shine.models import Asset, JobAttempt, MediaArtifact
 
     paths: set[str] = set()
+    from shine.asset_center.scene_sheet import scene_sheet_views_from_provenance
+
     for value in db.scalars(select(Asset.storage_path)).all():
         if value:
             paths.add(str(value))
+    for provenance in db.scalars(select(Asset.provenance)).all():
+        for view in scene_sheet_views_from_provenance(provenance).values():
+            paths.add(view["storage_path"])
     for payload in db.scalars(select(CandidateAsset.payload)).all():
         if payload and payload.get("storage_path"):
             paths.add(str(payload["storage_path"]))
+        if isinstance(payload, dict):
+            for view in scene_sheet_views_from_provenance(payload.get("provenance")).values():
+                paths.add(view["storage_path"])
     for value in db.scalars(select(LibraryMedia.storage_path)).all():
         paths.add(str(value))
     for value in db.scalars(select(LibraryVersion.storage_path)).all():

@@ -1094,7 +1094,7 @@ def test_the_released_140_compiler_keeps_its_exact_prompt_bytes():
     compiler = H3PromptCompiler()
     # 当前版本的哨兵：提升版本号必须是有意为之，并同时保证每个已发布版本的字节不变
     # （见 test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay）。
-    assert COMPILER_VERSION == "shine-h3-compiler/2.6.0"
+    assert COMPILER_VERSION == "shine-h3-compiler/2.7.0"
     for name, (shot, manifest, style) in _v14_hash_fixtures().items():
         compiled = compiler.compile(
             spec=shot, style=style, manifest=manifest,
@@ -1721,8 +1721,8 @@ def test_fact_scoping_lands_in_220_and_stored_210_requests_still_replay():
     )
     current_260 = compile_prompt(manifest, shot=shot, style=en_style)
 
-    # Current version is 2.6.0; 2.2.0..2.5.0 keep their exact released bytes.
-    assert COMPILER_VERSION == "shine-h3-compiler/2.6.0"
+    # Current version is 2.7.0; 2.2.0..2.6.0 keep their exact released bytes.
+    assert COMPILER_VERSION == "shine-h3-compiler/2.7.0"
     assert current_260.compiler_version == COMPILER_VERSION
     assert acting_250.compiler_version == LEGACY_ACTING_V25_COMPILER_VERSION
     assert continuity_240.compiler_version == LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION

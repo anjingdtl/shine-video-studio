@@ -2695,6 +2695,10 @@
           "rights_id": {
             "type": "string"
           },
+          "scene_sheet_mode": {
+            "default": false,
+            "type": "boolean"
+          },
           "seeds": {
             "type": "object"
           },
@@ -2757,6 +2761,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "scene_sheet_mode": {
+              "default": false,
+              "type": "boolean"
             },
             "seeds": {
               "additionalProperties": {
@@ -2826,7 +2834,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "ec3178fffd64f97af8ade8fc2def01399e9724ae5ce3937764d91e77d99a0534"
+        "schema_digest": "f9222456883ffcf56d0bad3e48dcadec812c31ba9376ec83d2d69f1f667192d4"
       },
       "operation": "POST /api/v1/projects/{}/material-preparation/generate",
       "parameters": [
@@ -2889,6 +2897,9 @@
           "character_sheet_mode": {
             "default": false,
             "type": "boolean"
+          },
+          "scene_sheet_mode": {
+            "type": "boolean"
           }
         },
         "required": true,
@@ -2899,11 +2910,21 @@
             "character_sheet_mode": {
               "default": false,
               "type": "boolean"
+            },
+            "scene_sheet_mode": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "type": "object"
         },
-        "schema_digest": "10999efd4506e287eceb96caa11cdd652e0da72d2a3d92e87c6c902495e1f284"
+        "schema_digest": "969a3cd78094aaa9b99a699a10c17ce6eb2ca241235d28a72d10a1b625d07dce"
       },
       "operation": "PUT /api/v1/projects/{}/material-preparation/preferences",
       "parameters": [
@@ -2969,6 +2990,10 @@
           "rights_id": {
             "type": "string"
           },
+          "scene_sheet_mode": {
+            "default": false,
+            "type": "boolean"
+          },
           "seed": {
             "default": 0,
             "minimum": 0.0,
@@ -3028,6 +3053,10 @@
                   "type": "null"
                 }
               ]
+            },
+            "scene_sheet_mode": {
+              "default": false,
+              "type": "boolean"
             },
             "seed": {
               "default": 0,
@@ -3097,7 +3126,7 @@
           ],
           "type": "object"
         },
-        "schema_digest": "13d0233aaaaa9cac308ba94f101d862082493823405c4ad20b661ee5fabd2399"
+        "schema_digest": "638453198b8f3488ee7b7a2557aad349fcd05afd2251e8e7ddd2ece4c51ccb79"
       },
       "operation": "POST /api/v1/projects/{}/material-preparation/regenerate",
       "parameters": [
@@ -6944,7 +6973,7 @@
     },
     {
       "action_id": "material_preferences_update",
-      "api_contract_digest": "d8d87dcc9c92464a82280e22919c7d84e86ba30402e24799081caf0dfc3f5ea8",
+      "api_contract_digest": "37002f15da427419251a4cb92c6725071c6e07a33da6895776891b7896d9d32f",
       "api_operations": [
         "PUT /api/v1/projects/{}/material-preparation/preferences",
         "GET /api/v1/projects/{}/material-preparation"
@@ -7022,7 +7051,7 @@
     },
     {
       "action_id": "material_generate",
-      "api_contract_digest": "1f6217e30d83e95f7ab8f0094149dec1232d63d77fa2ddac6ce9a85240c6a53e",
+      "api_contract_digest": "105001180bd5696158c014e152ff81a7dfc83ec400f2ce18469892e507aa686f",
       "api_operations": [
         "POST /api/v1/projects/{}/material-preparation/generate",
         "GET /api/v1/projects/{}/material-preparation/generation-progress"
@@ -7212,7 +7241,7 @@
     },
     {
       "action_id": "material_regenerate",
-      "api_contract_digest": "4b276ec49aad0552e8c64864ee3b492fe715a8aae7e0dc53895e3d8a761ffdc9",
+      "api_contract_digest": "368d9cbe39fb029546a816d1da406d0ce56b3d37b98f05ef00d7984426b7270b",
       "api_operations": [
         "POST /api/v1/projects/{}/material-preparation/regenerate",
         "GET /api/v1/projects/{}/material-preparation"
@@ -9141,8 +9170,8 @@
     }
   ],
   "digests": {
-    "api_contract": "ad7755cb956fa6147e133c17df839ea0eb5c5021ee6b29506c7b32656ba087c6",
-    "api_schema": "a1196a4baa16d69af83111e79e288875b569eaf0b43c48284cca311491d82871",
+    "api_contract": "d95dff718250d157fd32bf40b93182b10e6854bb6eea3f3038beda2ca16bf355",
+    "api_schema": "196dfc05729a7c93ee39a64d9211a810de5aeb8a97735702dca6ae31735bdae7",
     "contracts": "c074a23e6ab8f3d8c55397d58aac52e5e31284f7a1fe9874691c2c9a05ad986d"
   },
   "discovered": [

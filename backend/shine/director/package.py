@@ -608,7 +608,7 @@ def _compiled_shot_blockers(
             from shine.director.prompt_revisions import resolve_manual_prompt
 
             ordered = order_bindings_for_cast(bindings, list(spec.characters), assets)
-            reference_manifest = build_reference_manifest(ordered, assets)
+            reference_manifest = build_reference_manifest(ordered, assets, shot_spec=spec)
             try:
                 compiled = compiler.compile(
                     spec=spec, style=bible, manifest=reference_manifest,

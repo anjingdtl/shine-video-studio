@@ -466,12 +466,39 @@ class ComfyUIRenderService:
         # The manifest path is a historical storage location; the asset's
         # SHA-256 is its identity.  An output-root change may have moved the
         # file, so the path is not part of this equality.
-        if (asset.sha256 != item.sha256 or asset.content_type != item.content_type):
-            raise ComfyReferenceError(
-                "The reference manifest hash does not match the current master asset",
-                details={"asset_id": asset.id, "label": item.label},
-            )
-        path = safe_asset_path(self.asset_root, asset.storage_path)
+        # For a 4-view scene master expanded into a single-angle plate, the
+        # manifest item carries that angle view's provenance-pinned SHA-256
+        # and storage_path rather than the 2x2 composite preview sheet.
+        from shine.asset_center.scene_sheet import find_scene_sheet_view_by_sha
+
+        is_scene_angle = (
+            item.use_as.value == "picture"
+            and getattr(asset, "role", None) == "scene"
+            and str(item.role or "").startswith(("scene_angle:", "scene_angle_opening:", "scene_angle_ending:"))
+        )
+        scene_view_match = (
+            find_scene_sheet_view_by_sha(getattr(asset, "provenance", None), item.sha256)
+            if is_scene_angle
+            else None
+        )
+        if scene_view_match is not None:
+            _angle_key, view_meta = scene_view_match
+            expected_sha = view_meta["sha256"]
+            resolved_storage_path = view_meta["storage_path"]
+            if asset.content_type != item.content_type:
+                raise ComfyReferenceError(
+                    "The reference manifest content type does not match the current master asset",
+                    details={"asset_id": asset.id, "label": item.label},
+                )
+        else:
+            expected_sha = asset.sha256
+            resolved_storage_path = asset.storage_path
+            if (asset.sha256 != item.sha256 or asset.content_type != item.content_type):
+                raise ComfyReferenceError(
+                    "The reference manifest hash does not match the current master asset",
+                    details={"asset_id": asset.id, "label": item.label},
+                )
+        path = safe_asset_path(self.asset_root, resolved_storage_path)
         if not path.is_file():
             raise ComfyReferenceError(
                 "A reference asset file is missing on disk",
@@ -479,10 +506,10 @@ class ComfyUIRenderService:
             )
         content = path.read_bytes()
         digest = sha256_bytes(content)
-        if digest != asset.sha256:
+        if digest != expected_sha:
             raise ComfyReferenceError(
                 "The reference asset file changed on disk after it was approved",
-                details={"asset_id": asset.id, "label": item.label, "expected": asset.sha256, "actual": digest},
+                details={"asset_id": asset.id, "label": item.label, "expected": expected_sha, "actual": digest},
             )
         expected_family = family_for_content_type(asset.content_type)
         declared_family = {"subject": "image", "picture": "image"}.get(item.use_as.value, item.use_as.value)
@@ -532,7 +559,12 @@ class ComfyUIRenderService:
                 else transfer_from_profile({}, family, asset.content_type)
             )
             extension = extension_for(asset.content_type, asset.filename)
-            upload_name = f"shine_{asset.id}{extension}"
+            if item.sha256 != asset.sha256 and str(item.role or "").startswith(
+                ("scene_angle:", "scene_angle_opening:", "scene_angle_ending:")
+            ):
+                upload_name = f"shine_{asset.id}_{item.sha256[:12]}{extension}"
+            else:
+                upload_name = f"shine_{asset.id}{extension}"
             response = self.client.upload_file(
                 upload_name,
                 content,

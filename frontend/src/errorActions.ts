@@ -25,6 +25,11 @@ export const ERROR_ACTIONS: Record<string, ErrorAction> = {
     why: '角色定妆照不会静默降级为无 LoRA 生图；请先下载并纳管该权重，或关闭「人物生成 16:9 五视图定妆照」开关。',
     action: { label: '去制作环境下载', target: 'setup-env' },
   },
+  SCENE_SHEET_LORA_REQUIRED: {
+    reason: '缺少「场景四视图母版」所需的 Qwen 多视角镜头 LoRA 权重',
+    why: '场景四视图不会静默降级为无 LoRA 生图；请先下载并纳管该权重，或关闭「场景生成 16:9 四视图母版」开关。',
+    action: { label: '去制作环境下载', target: 'setup-env' },
+  },
   WORKFLOW_SIZE_NOT_MAPPED: { reason: '生成方案没有接入画幅设置', action: { label: '去基础配置登记', target: 'setup-models' } },
   PROFILE_NOT_VALIDATED: { reason: '生成方案还没在本机验证节点', action: { label: '去验证本机节点', target: 'setup-models' } },
   H3_CHARACTER_REFERENCE_MISSING: { reason: '有出场人物没有主素材', action: { label: '去准备素材', target: 'assets-stage' } },

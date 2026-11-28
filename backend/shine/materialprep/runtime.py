@@ -520,6 +520,7 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
             layer = LAYER_GRAPH_VERIFIED
 
     from shine.asset_center.character_sheet import project_character_sheet_lora
+    from shine.asset_center.scene_sheet import project_scene_sheet_lora
 
     verified = render_verified_families(db, fingerprint) if layer == LAYER_GRAPH_VERIFIED else {}
     families = {
@@ -530,6 +531,12 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         }
         for family in FAMILIES
     }
+    character_sheet_lora = project_character_sheet_lora(
+        db, settings, object_info=object_info, probe_comfy=False
+    )
+    scene_sheet_lora = project_scene_sheet_lora(
+        db, settings, object_info=object_info, probe_comfy=False
+    )
     return {
         "configured": configured,
         "runnable": binding_state == "READY" and layer != LAYER_NOT_CONFIGURED,
@@ -537,9 +544,8 @@ def readiness(db, settings, *, object_info: dict[str, Any] | None = None) -> dic
         "recipe": recipe,
         "layer": layer,
         "families": families,
-        "character_sheet_lora": project_character_sheet_lora(
-            db, settings, object_info=object_info, probe_comfy=False
-        ),
+        "character_sheet_lora": character_sheet_lora,
+        "scene_sheet_lora": scene_sheet_lora,
         "renderer": renderer,
         "fingerprint": fingerprint,
         "config_revision": config.config_revision,

@@ -684,11 +684,18 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             resolved = resolve_runtime(factory, settings, family, kind=kind)
             config = resolved["config"]
             fingerprint = resolved["fingerprint"]
-            width = int(context["item_payload"].get("width") or config.width)
-            height = int(context["item_payload"].get("height") or config.height)
+            payload = context["item_payload"]
+            use_scene_sheet = family == "scene" and kind == "production" and bool(payload.get("scene_sheet_mode"))
+            if use_scene_sheet:
+                from shine.asset_center.scene_sheet import SCENE_VIEW_HEIGHT, SCENE_VIEW_WIDTH
+
+                width = int(payload.get("width") or SCENE_VIEW_WIDTH)
+                height = int(payload.get("height") or SCENE_VIEW_HEIGHT)
+            else:
+                width = int(payload.get("width") or config.width)
+                height = int(payload.get("height") or config.height)
             client = ComfyUIClient(resolved["base_url"], max_retries=0)
             clients["client"] = client
-            payload = context["item_payload"]
             style_loras = resolve_live_image_loras(
                 factory, settings, payload, object_info=resolved["object_info"],
             ) if payload.get("style_loras") else ()
@@ -699,6 +706,11 @@ def execute_item(factory, settings, item_id: str, worker_id: str) -> dict[str, A
             graph_sha = graph_hash(graph)
             if family == "character" and kind == "production" and bool(payload.get("character_sheet_mode")):
                 return _render_character_sheet_inside_lease(
+                    factory, settings, context, version, client, lease_id, graph, graph_sha,
+                    fingerprint, family, prompt, renderer, object_info=resolved.get("object_info"),
+                )
+            if use_scene_sheet:
+                return _render_scene_sheet_inside_lease(
                     factory, settings, context, version, client, lease_id, graph, graph_sha,
                     fingerprint, family, prompt, renderer, object_info=resolved.get("object_info"),
                 )
@@ -876,6 +888,25 @@ def _set_character_sheet_progress(factory, item_id: str, version: int, progress:
         return item.state_version
 
 
+def _set_scene_sheet_progress(factory, item_id: str, version: int, progress: dict[str, Any],
+                              *, scene_sheet_lora: dict[str, Any] | None = None) -> int:
+    with factory.begin() as db:
+        item = db.get(MaterialItem, item_id)
+        if item is None or item.state_version != version:
+            raise ImageExecutionError("CLAIM_LOST", item_id=item_id)
+        payload = {
+            **(item.payload or {}),
+            "scene_sheet_mode": True,
+            "scene_sheet_progress": progress,
+            **({"scene_sheet_lora": scene_sheet_lora} if scene_sheet_lora is not None else {}),
+        }
+        item.payload = payload
+        item.sha256 = graph_hash(payload)
+        item.state_version += 1
+        item.heartbeat_at = utcnow()
+        return item.state_version
+
+
 def _execute_step_attempt(
     factory,
     settings,
@@ -897,6 +928,7 @@ def _execute_step_attempt(
     renderer: dict[str, Any],
     stage_key: str,
     extra_attempt_payload: dict[str, Any] | None = None,
+    template_version: str = "character-sheet-v2",
 ) -> tuple[bool, dict[str, Any]]:
     """Run one ComfyUI graph inside the active lease with durable SUBMIT_INTENT / non-replay rules."""
     item_id = context["item_id"]
@@ -906,7 +938,7 @@ def _execute_step_attempt(
         attempt_prompt = image_prompts.ImagePrompt(
             prompt=prompt_text,
             negative_prompt=negative_prompt_text,
-            template_version="character-sheet-v2",
+            template_version=template_version,
             sha256=graph_hash({"prompt": prompt_text, "negative_prompt": negative_prompt_text, "stage": stage_key}),
         )
 
@@ -1396,6 +1428,440 @@ def _render_character_sheet_inside_lease(
             "prompt_id": final_prompt_id,
             "graph_sha256": final_graph_sha,
             "pipeline": "t2i_to_character_sheet_v2",
+            "technical": qc["qc"].get("technical"),
+            "semantic": qc["qc"].get("semantic"),
+        },
+    )
+    return {
+        "item_id": item_id,
+        "status": ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+        "attempt_id": final_attempt_id,
+        "candidate_id": candidate_id,
+        "content_sha256": content_sha,
+        "prompt_id": final_prompt_id,
+        "graph_sha256": final_graph_sha,
+        "runtime_fingerprint": fingerprint,
+    }
+
+
+def _render_scene_sheet_inside_lease(
+    factory,
+    settings,
+    context: dict[str, Any],
+    version: int,
+    client: ComfyUIClient,
+    lease_id: str,
+    t2i_graph: dict[str, Any],
+    t2i_graph_sha: str,
+    fingerprint: str,
+    family: str,
+    prompt: image_prompts.ImagePrompt,
+    renderer: dict[str, Any],
+    *,
+    object_info: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Generate a production scene as 4 full-size 16:9 single-angle views + 4-in-1 master sheet in 1 lease."""
+    import hashlib
+
+    from shine.asset_center.contracts import build_qwen_edit_graph
+    from shine.asset_center.execution import _reference_prompt
+    from shine.asset_center.scene_sheet import (
+        ALL_STEP_SPECS,
+        EDIT_STEP_SPECS,
+        FRONT_STEP_SPEC,
+        SCENE_SHEET_LAYOUT_VERSION,
+        SCENE_SHEET_LORA_SAMPLING,
+        SCENE_SHEET_OPERATION,
+        SCENE_SHEET_PIPELINE,
+        SCENE_SHEET_SETUP_HINT,
+        build_scene_step_prompts,
+        compose_scene_sheet,
+        extract_scene_sheet_note_from_material,
+        freeze_scene_sheet_lora,
+    )
+    from shine.comfy.workflow import validate_against_object_info
+    from shine.media.output_layout import ensure_storage_writable, store_project_asset
+    from shine.security import probe_upload, verify_upload
+
+    item_id = context["item_id"]
+    live_object_info = object_info if object_info is not None else client.object_info()
+
+    # Fail-closed before running T2I: re-verify frozen multiple-angles LoRA + live
+    # ComfyUI visibility + Qwen edit graph contract. Never silently downgrade.
+    ss_frozen = context["item_payload"].get("scene_sheet_lora")
+    if not isinstance(ss_frozen, dict) or not ss_frozen.get("style_loras"):
+        with factory.begin() as db:
+            ss_frozen = freeze_scene_sheet_lora(db, settings)
+    ss_style_payload = {
+        "style_loras": ss_frozen["style_loras"],
+        "style_sampling": ss_frozen.get("style_sampling") or dict(SCENE_SHEET_LORA_SAMPLING),
+    }
+    ss_loras = resolve_live_image_loras(factory, settings, ss_style_payload, object_info=live_object_info)
+    if not ss_loras:
+        raise StyleLoraError(
+            "SCENE_SHEET_LORA_REQUIRED",
+            f"缺少「Qwen 多视角镜头」LoRA 权重。{SCENE_SHEET_SETUP_HINT}",
+        )
+    probe_graph = build_qwen_edit_graph(
+        prompt="probe",
+        negative_prompt="probe",
+        uploaded_names=["probe.png"],
+        width=EDIT_STEP_SPECS[0].target_width,
+        height=EDIT_STEP_SPECS[0].target_height,
+        seed=1,
+        style_loras=ss_loras,
+        **SCENE_SHEET_LORA_SAMPLING,
+    )
+    validate_graph(probe_graph, required_nodes=[str(node["class_type"]) for node in probe_graph.values()])
+    edit_report = validate_against_object_info(probe_graph, {}, live_object_info)
+    if edit_report["missing_nodes"] or edit_report["missing_inputs"]:
+        raise ImageExecutionError("QWEN_EDIT_WORKFLOW_CONTRACT_CHANGED", **edit_report)
+
+    total_steps = len(ALL_STEP_SPECS)
+    version = _set_scene_sheet_progress(
+        factory,
+        item_id,
+        version,
+        {
+            "current_step": FRONT_STEP_SPEC.key,
+            "current_step_label": FRONT_STEP_SPEC.label,
+            "completed_steps": [],
+            "total_steps": total_steps,
+        },
+        scene_sheet_lora=ss_frozen,
+    )
+
+    base_seed = int(context["item_payload"].get("seed") or 0)
+    t2i_latent = t2i_graph[qwen_workflow.EMPTY_LATENT_NODE]["inputs"]
+    front_w, front_h = int(t2i_latent["width"]), int(t2i_latent["height"])
+
+    # Step 0: front_wide via T2I (1344x768)
+    ok, res = _execute_step_attempt(
+        factory,
+        settings,
+        context,
+        version=version,
+        client=client,
+        lease_id=lease_id,
+        graph=t2i_graph,
+        graph_sha=t2i_graph_sha,
+        fingerprint=fingerprint,
+        family=family,
+        prompt=prompt,
+        prompt_text=prompt.prompt,
+        negative_prompt_text=prompt.negative_prompt,
+        seed=base_seed,
+        width=front_w,
+        height=front_h,
+        renderer=renderer,
+        stage_key=FRONT_STEP_SPEC.key,
+        extra_attempt_payload={"scene_sheet_stage": FRONT_STEP_SPEC.key, "step_index": 0},
+        template_version="scene-sheet-v1",
+    )
+    if not ok:
+        return res
+
+    version = res["version"]
+    front_bytes = res["content"]
+    front_type = verify_upload("image", f"{FRONT_STEP_SPEC.key}.png", front_bytes, settings.max_upload_bytes)
+    front_info = probe_upload("image", front_bytes, front_type)
+    front_sha = hashlib.sha256(front_bytes).hexdigest()
+    front_record = {
+        "step_key": FRONT_STEP_SPEC.key,
+        "angle_key": FRONT_STEP_SPEC.angle_key,
+        "label": FRONT_STEP_SPEC.label,
+        "prompt_id": res["prompt_id"],
+        "graph_sha256": t2i_graph_sha,
+        "sha256": front_sha,
+        "seed": base_seed,
+        "width": front_info.width,
+        "height": front_info.height,
+        "uses_lora": False,
+    }
+    _close_attempt(
+        factory,
+        res["attempt_id"],
+        status=ATTEMPT_SUCCEEDED,
+        outcome=OUTCOME_SUCCEEDED,
+        content_sha256=front_sha,
+        harvest=res["harvest"],
+        details={"stage": FRONT_STEP_SPEC.key, "step_record": front_record},
+        release_intent=True,
+    )
+
+    scene_note = extract_scene_sheet_note_from_material(
+        context["requirement_payload"],
+        context["item_payload"].get("brief"),
+        str(context["item_payload"].get("brief_note") or ""),
+    )
+    uploaded = client.upload_image(
+        f"mat_scene_{front_sha[:16]}.png",
+        front_bytes,
+        subfolder="",
+        content_type=front_type,
+    )
+    uploaded_front_name = str(uploaded.get("name") or "")
+    if not uploaded_front_name or "/" in uploaded_front_name or "\\" in uploaded_front_name:
+        raise ImageExecutionError("COMFY_INPUT_UPLOAD_RESPONSE_INVALID", stage=FRONT_STEP_SPEC.key)
+
+    view_bytes: dict[str, bytes] = {FRONT_STEP_SPEC.angle_key: front_bytes}
+    view_dims: dict[str, tuple[int, int]] = {FRONT_STEP_SPEC.angle_key: (front_info.width, front_info.height)}
+    view_shas: dict[str, str] = {FRONT_STEP_SPEC.angle_key: front_sha}
+    step_records: list[dict[str, Any]] = [front_record]
+    completed_progress_steps: list[dict[str, Any]] = [front_record]
+    final_attempt_id = res["attempt_id"]
+    final_prompt_id = res["prompt_id"]
+    final_graph_sha = t2i_graph_sha
+    final_harvest = res["harvest"]
+
+    # Steps 1..3: left_quarter, right_quarter, reverse_wide via Qwen-Image Edit + <mva>
+    for step_index, spec in enumerate(EDIT_STEP_SPECS, start=1):
+        version = _set_scene_sheet_progress(
+            factory,
+            item_id,
+            version,
+            {
+                "current_step": spec.key,
+                "current_step_label": spec.label,
+                "completed_steps": list(completed_progress_steps),
+                "total_steps": total_steps,
+            },
+        )
+        step_seed = (base_seed + step_index) & qwen_workflow.MAX_SEED
+        step_w, step_h = front_w, front_h
+        step_sampling = dict(SCENE_SHEET_LORA_SAMPLING)
+        step_pos, step_neg = build_scene_step_prompts(
+            spec.key,
+            note=scene_note,
+            style_loras=ss_frozen["style_loras"],
+        )
+        graph_refs = [{"order": 0, "role": "scene", "sha256": front_sha}]
+        step_graph = build_qwen_edit_graph(
+            prompt=_reference_prompt(step_pos, graph_refs),
+            negative_prompt=step_neg,
+            uploaded_names=[uploaded_front_name],
+            width=step_w,
+            height=step_h,
+            seed=step_seed,
+            style_loras=ss_loras,
+            **step_sampling,
+        )
+        validate_graph(step_graph, required_nodes=[str(node["class_type"]) for node in step_graph.values()])
+        step_graph_sha = graph_hash(step_graph)
+
+        ok, step_res = _execute_step_attempt(
+            factory,
+            settings,
+            context,
+            version=version,
+            client=client,
+            lease_id=lease_id,
+            graph=step_graph,
+            graph_sha=step_graph_sha,
+            fingerprint=fingerprint,
+            family=family,
+            prompt=None,
+            prompt_text=step_pos,
+            negative_prompt_text=step_neg,
+            seed=step_seed,
+            width=step_w,
+            height=step_h,
+            renderer=renderer,
+            stage_key=spec.key,
+            extra_attempt_payload={
+                "scene_sheet_stage": spec.key,
+                "step_index": step_index,
+                "style_loras": ss_frozen["style_loras"],
+            },
+            template_version="scene-sheet-v1",
+        )
+        if not ok:
+            return step_res
+
+        version = step_res["version"]
+        step_bytes = step_res["content"]
+        harvested_type = verify_upload("image", f"{spec.key}.png", step_bytes, settings.max_upload_bytes)
+        harvested_info = probe_upload("image", step_bytes, harvested_type)
+        if harvested_info.width != step_w or harvested_info.height != step_h:
+            _close_attempt(
+                factory,
+                step_res["attempt_id"],
+                status=ATTEMPT_FAILED,
+                outcome=OUTCOME_FAILED,
+                error_code="IMAGE_STEP_DIMENSIONS_MISMATCH",
+                details={
+                    "stage": spec.key,
+                    "expected": [step_w, step_h],
+                    "actual": [harvested_info.width, harvested_info.height],
+                },
+                release_intent=True,
+            )
+            touch_item(factory, item_id, version, status=ITEM_FAILED, error_code="IMAGE_STEP_DIMENSIONS_MISMATCH")
+            return {
+                "item_id": item_id,
+                "status": ITEM_FAILED,
+                "code": "IMAGE_STEP_DIMENSIONS_MISMATCH",
+                "attempt_id": step_res["attempt_id"],
+            }
+
+        step_sha = hashlib.sha256(step_bytes).hexdigest()
+        record = {
+            "step_key": spec.key,
+            "angle_key": spec.angle_key,
+            "label": spec.label,
+            "prompt_id": step_res["prompt_id"],
+            "graph_sha256": step_graph_sha,
+            "sha256": step_sha,
+            "seed": step_seed,
+            "width": harvested_info.width,
+            "height": harvested_info.height,
+            "uses_lora": True,
+            "sampling": step_sampling,
+        }
+        view_bytes[spec.angle_key] = step_bytes
+        view_dims[spec.angle_key] = (harvested_info.width, harvested_info.height)
+        view_shas[spec.angle_key] = step_sha
+        step_records.append(record)
+        completed_progress_steps.append(record)
+
+        final_attempt_id = step_res["attempt_id"]
+        final_prompt_id = step_res["prompt_id"]
+        final_graph_sha = step_graph_sha
+        final_harvest = step_res["harvest"]
+        is_last = step_index == len(EDIT_STEP_SPECS)
+        if not is_last:
+            _close_attempt(
+                factory,
+                step_res["attempt_id"],
+                status=ATTEMPT_SUCCEEDED,
+                outcome=OUTCOME_SUCCEEDED,
+                content_sha256=step_sha,
+                harvest=step_res["harvest"],
+                details={"stage": spec.key, "step_record": record},
+                release_intent=True,
+            )
+
+    # Atomically store all 4 full-size single-angle PNGs into the project asset directory
+    # so they travel with the single master asset's provenance["scene_sheet"]["views"].
+    stored_views: dict[str, dict[str, Any]] = {}
+    with factory.begin() as db:
+        project = db.get(Project, context["project_id"])
+        ensure_storage_writable(db)
+        requirement = context["requirement_payload"]
+        entity_id = str(requirement.get("entity_id") or context["item_payload"].get("entity_id") or "scene")
+        for spec in ALL_STEP_SPECS:
+            raw = view_bytes[spec.angle_key]
+            sha = view_shas[spec.angle_key]
+            vw, vh = view_dims[spec.angle_key]
+            rel_path, _stored_name = store_project_asset(
+                db,
+                settings,
+                project,
+                raw,
+                sha,
+                kind="image",
+                base=f"{entity_id}_{spec.key}",
+                extension=".png",
+            )
+            stored_views[spec.angle_key] = {
+                "key": spec.key,
+                "storage_path": rel_path,
+                "sha256": sha,
+                "width": vw,
+                "height": vh,
+            }
+
+    composed = compose_scene_sheet(
+        front_bytes=view_bytes["front"],
+        left_bytes=view_bytes["left"],
+        right_bytes=view_bytes["right"],
+        reverse_bytes=view_bytes["reverse"],
+    )
+    composite_bytes = composed["composite_sheet_bytes"]
+    composite_sha = hashlib.sha256(composite_bytes).hexdigest()
+    composite_provenance = {
+        "pipeline": SCENE_SHEET_PIPELINE,
+        "scene_sheet": {
+            "operation": SCENE_SHEET_OPERATION,
+            "artifact_role": "composite_sheet",
+            "artifact_label": "16:9 场景四视图母版（主全景 / 左 45° / 右 45° / 180° 反打）",
+            "layout_version": SCENE_SHEET_LAYOUT_VERSION,
+            "layout": composed["layout"],
+            "source_reference_sha256": front_sha,
+            "note": scene_note,
+            "lora": dict(ss_frozen["style_loras"][0]),
+            "views": stored_views,
+            "steps": step_records,
+        },
+    }
+    candidate_id, content_sha = _register_candidate(
+        factory,
+        settings,
+        context,
+        final_attempt_id,
+        composite_bytes,
+        family,
+        extra_provenance=composite_provenance,
+    )
+    _close_attempt(
+        factory,
+        final_attempt_id,
+        status=ATTEMPT_QC_PENDING,
+        outcome=OUTCOME_SUCCEEDED,
+        content_sha256=content_sha,
+        keep_intent=True,
+        harvest=final_harvest,
+        details={
+            "stage": EDIT_STEP_SPECS[-1].key,
+            "composite_sha256": composite_sha,
+            "composite_dimensions": composed["composite_sheet_size"],
+            "scene_sheet_views": stored_views,
+        },
+    )
+    next_version = touch_item(factory, item_id, version, status="OUTPUT_STORED")
+    version = next_version if next_version is not None else version
+
+    qc = _technical_qc(factory, settings, candidate_id)
+    passed = qc["candidate_status"] == "READY_FOR_REVIEW"
+    _close_attempt(
+        factory,
+        final_attempt_id,
+        status=ATTEMPT_SUCCEEDED if passed else ATTEMPT_FAILED,
+        outcome=OUTCOME_SUCCEEDED if passed else OUTCOME_FAILED,
+        error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED",
+        qc=qc["qc"],
+        release_intent=True,
+    )
+    version = _set_scene_sheet_progress(
+        factory,
+        item_id,
+        version,
+        {
+            "current_step": None,
+            "current_step_label": None,
+            "completed_steps": list(completed_progress_steps),
+            "total_steps": total_steps,
+        },
+    )
+    touch_item(
+        factory,
+        item_id,
+        version,
+        status=ITEM_CANDIDATE_READY if passed else ITEM_FAILED,
+        error_code=None if passed else "IMAGE_TECHNICAL_QC_FAILED",
+    )
+    _audit(
+        factory,
+        context,
+        "MATERIAL_IMAGE_CANDIDATE_READY" if passed else "MATERIAL_IMAGE_QC_FAILED",
+        {
+            "attempt_id": final_attempt_id,
+            "candidate_id": candidate_id,
+            "content_sha256": content_sha,
+            "prompt_id": final_prompt_id,
+            "graph_sha256": final_graph_sha,
+            "pipeline": SCENE_SHEET_PIPELINE,
+            "views": {k: v["sha256"] for k, v in stored_views.items()},
             "technical": qc["qc"].get("technical"),
             "semantic": qc["qc"].get("semantic"),
         },

@@ -37,6 +37,8 @@ type ProgressItem = {
   error_code: string | null;
   character_sheet_mode?: boolean;
   character_sheet_progress?: CharacterSheetProgressInfo | null;
+  scene_sheet_mode?: boolean;
+  scene_sheet_progress?: CharacterSheetProgressInfo | null;
   candidates?: CandidateInfo[];
 };
 
@@ -292,9 +294,12 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
         {inflightItems.length > 0 && <p className="mgp-now">
           正在处理：{inflightItems.slice(0, 4).map((item) => {
             const cs = item.character_sheet_progress;
+            const ss = item.scene_sheet_progress;
             const csText = item.character_sheet_mode && cs?.current_step_label
               ? ` · 定妆照 ${Math.min((cs.completed_steps?.length ?? 0) + 1, cs.total_steps ?? 6)}/${cs.total_steps ?? 6} ${cs.current_step_label}`
-              : '';
+              : item.scene_sheet_mode && ss?.current_step_label
+                ? ` · 场景四视图 ${Math.min((ss.completed_steps?.length ?? 0) + 1, ss.total_steps ?? 4)}/${ss.total_steps ?? 4} ${ss.current_step_label}`
+                : '';
             return `${item.entity_id ?? '素材'}（${ITEM_LABEL[item.status] ?? item.status}${csText}）`;
           }).join('、')}
         </p>}
@@ -317,7 +322,7 @@ export function MaterialGenerationProgress({ projectId, onOpenLibrary, onPromote
             <span>{FAMILY_LABEL[item.family ?? ''] ?? item.family} · {item.entity_id ?? '素材'}</span>
             <em className={item.status === 'FAILED' || item.status === 'NEEDS_REVIEW' ? 'warn' : ''}>
               {ITEM_LABEL[item.status] ?? item.status}
-              {item.error_code === 'CHARACTER_SHEET_LORA_REQUIRED'
+              {item.error_code === 'CHARACTER_SHEET_LORA_REQUIRED' || item.error_code === 'SCENE_SHEET_LORA_REQUIRED'
                 ? '（缺少「Qwen 多视角镜头」LoRA，请前往「设置 → 制作环境 → 角色五视图定妆照」勾选下载）'
                 : item.error_code ? `（${item.error_code}）` : ''}</em>
           </li>)}</ul>

@@ -563,6 +563,7 @@ def create_batch(
     commit: bool = True,
     image_style: dict[str, Any] | None = None,
     character_sheet_mode: bool = False,
+    scene_sheet_mode: bool = False,
     settings: Any | None = None,
 ) -> dict[str, Any]:
     """Create the durable batch and its items, then return.  Never renders.
@@ -581,6 +582,7 @@ def create_batch(
         raise HTTPException(409, "MATERIAL_PLAN_STALE")
 
     use_character_sheet = bool(character_sheet_mode) and kind == "production"
+    use_scene_sheet = bool(scene_sheet_mode) and kind == "production"
     request_payload = {
         "confirmation_id": confirmation_id,
         "confirmation_hash": confirmation_hash,
@@ -593,6 +595,7 @@ def create_batch(
         "briefs": {key: briefs[key] for key in sorted(briefs or {})},
         "new_revision": new_revision,
         **({"character_sheet_mode": True} if use_character_sheet else {}),
+        **({"scene_sheet_mode": True} if use_scene_sheet else {}),
         **(image_style or {}),
     }
     request_hash = graph_hash(request_payload)
@@ -642,6 +645,26 @@ def create_batch(
                     detail={"code": exc.code, "message": exc.message, "details": exc.details},
                 ) from exc
 
+    frozen_scene_sheet_lora: dict[str, Any] | None = None
+    if use_scene_sheet:
+        has_scene = False
+        for rid in generate_ids:
+            req_row = db.get(AssetRequirement, rid)
+            if req_row is not None and str((req_row.payload or {}).get("family") or "") == "scene":
+                has_scene = True
+                break
+        if has_scene:
+            from shine.asset_center.scene_sheet import freeze_scene_sheet_lora
+            from shine.comfyops.loras import StyleLoraError
+
+            try:
+                frozen_scene_sheet_lora = freeze_scene_sheet_lora(db, settings)
+            except StyleLoraError as exc:
+                raise HTTPException(
+                    exc.http_status,
+                    detail={"code": exc.code, "message": exc.message, "details": exc.details},
+                ) from exc
+
     if new_revision:
         # Fence allocation before computing the next revision. A second tab
         # cannot turn a duplicate click into another legitimate generation.
@@ -666,6 +689,7 @@ def create_batch(
         payload={"kind": kind, "rights_id": rights_id, "requirement_ids": generate_ids,
                  "confirmation_snapshot": confirmation_hash,
                  **({"character_sheet_mode": True} if use_character_sheet else {}),
+                 **({"scene_sheet_mode": True} if use_scene_sheet else {}),
                  **(image_style or {})},
         sha256=graph_hash(request_payload),
     )
@@ -695,6 +719,12 @@ def create_batch(
                 "character_sheet_mode": True,
                 "character_sheet_lora": frozen_character_sheet_lora,
             }
+        extra_scene_sheet: dict[str, Any] = {}
+        if use_scene_sheet and item_family == "scene" and frozen_scene_sheet_lora is not None:
+            extra_scene_sheet = {
+                "scene_sheet_mode": True,
+                "scene_sheet_lora": frozen_scene_sheet_lora,
+            }
         seed = int((seeds or {}).get(requirement_id, 0))
         brief = (briefs or {}).get(requirement_id)
         item = MaterialItem(
@@ -713,6 +743,7 @@ def create_batch(
                 "kind": kind,
                 **(image_style or {}),
                 **extra_character_sheet,
+                **extra_scene_sheet,
                 # A batch without a brief is queued but cannot render yet: the
                 # producer owns the appearance text, and the server refuses to
                 # invent one rather than rendering an unconfirmed look.
@@ -1169,6 +1200,8 @@ def public_item(db, item: MaterialItem) -> dict[str, Any]:
         "brief": (item.payload or {}).get("brief"),
         "character_sheet_mode": bool((item.payload or {}).get("character_sheet_mode")),
         "character_sheet_progress": (item.payload or {}).get("character_sheet_progress"),
+        "scene_sheet_mode": bool((item.payload or {}).get("scene_sheet_mode")),
+        "scene_sheet_progress": (item.payload or {}).get("scene_sheet_progress"),
         **image_style_payload(item.payload or {}),
         "allowed_actions": (["resume"] if item.status == ITEM_FAILED else
                             ["reconcile"] if item.status == ITEM_NEEDS_REVIEW else []) +
@@ -1849,6 +1882,7 @@ def get_material_preferences(db, project_id: str, settings: Any | None = None) -
     row = db.get(AppSetting, f"material-prefs:{project_id}")
     raw_value = dict(row.value or {}) if row is not None and isinstance(row.value, dict) else {}
     saved_mode = bool(raw_value.get("character_sheet_mode", False))
+    saved_scene_mode = bool(raw_value.get("scene_sheet_mode", False))
     lora_ready = False
     try:
         lora_info = project_character_sheet_lora(db, settings, probe_comfy=False)
@@ -1859,6 +1893,9 @@ def get_material_preferences(db, project_id: str, settings: Any | None = None) -
         "character_sheet_mode": saved_mode,
         "effective_character_sheet_mode": bool(saved_mode and lora_ready),
         "character_sheet_lora_ready": lora_ready,
+        "scene_sheet_mode": saved_scene_mode,
+        "effective_scene_sheet_mode": bool(saved_scene_mode and lora_ready),
+        "scene_sheet_lora_ready": lora_ready,
     }
 
 
@@ -1866,7 +1903,8 @@ def set_material_preferences(
     db,
     project_id: str,
     *,
-    character_sheet_mode: bool,
+    character_sheet_mode: bool | None = None,
+    scene_sheet_mode: bool | None = None,
     actor: str,
     settings: Any | None = None,
 ) -> dict[str, Any]:
@@ -1876,8 +1914,14 @@ def set_material_preferences(
     require_project(db, project_id)
     key = f"material-prefs:{project_id}"
     row = db.get(AppSetting, key)
-    value = {**(dict(row.value or {}) if row is not None and isinstance(row.value, dict) else {}),
-             "character_sheet_mode": bool(character_sheet_mode)}
+    value = dict(row.value or {}) if row is not None and isinstance(row.value, dict) else {}
+    audit_delta: dict[str, Any] = {}
+    if character_sheet_mode is not None:
+        value["character_sheet_mode"] = bool(character_sheet_mode)
+        audit_delta["character_sheet_mode"] = bool(character_sheet_mode)
+    if scene_sheet_mode is not None:
+        value["scene_sheet_mode"] = bool(scene_sheet_mode)
+        audit_delta["scene_sheet_mode"] = bool(scene_sheet_mode)
     if row is None:
         db.add(AppSetting(key=key, value=value))
     else:
@@ -1888,7 +1932,7 @@ def set_material_preferences(
         "MATERIAL_PREFERENCES_UPDATED",
         "project",
         project_id,
-        {"character_sheet_mode": bool(character_sheet_mode)},
+        audit_delta,
         project_id=project_id,
     )
     db.flush()
@@ -2070,6 +2114,7 @@ def regenerate_material_requirement(
     style_preset: str | None = None,
     style_loras: list[dict[str, Any]] | None = None,
     character_sheet_mode: bool | None = None,
+    scene_sheet_mode: bool | None = None,
     rights_id: str | None = None,
 ) -> dict[str, Any]:
     """Queue a new generation revision for one requirement under existing plan confirmation."""
@@ -2094,6 +2139,8 @@ def regenerate_material_requirement(
             raise HTTPException(exc.http_status, detail={"code": exc.code, "message": exc.message}) from exc
     if character_sheet_mode is None:
         character_sheet_mode = bool((state.get("preferences") or {}).get("character_sheet_mode"))
+    if scene_sheet_mode is None:
+        scene_sheet_mode = bool((state.get("preferences") or {}).get("scene_sheet_mode"))
     brief_raw = (row.payload or {}).get("brief") or {}
     if not brief_raw:
         item = db.scalars(
@@ -2107,7 +2154,10 @@ def regenerate_material_requirement(
     if isinstance(brief_raw, dict) and brief_raw:
         validated = MaterialImageBrief.model_validate(brief_raw).model_dump(mode="json")
         if validated.get("questions"):
-            raise HTTPException(422, {"code": "MATERIAL_BRIEF_QUESTIONS_UNANSWERED", "questions": validated["questions"]})
+            raise HTTPException(
+                422,
+                {"code": "MATERIAL_BRIEF_QUESTIONS_UNANSWERED", "questions": validated["questions"]},
+            )
         briefs = {requirement_id: validated}
     return create_batch(
         db,
@@ -2122,6 +2172,7 @@ def regenerate_material_requirement(
         new_revision=True,
         image_style=image_style or None,
         character_sheet_mode=bool(character_sheet_mode),
+        scene_sheet_mode=bool(scene_sheet_mode),
         settings=settings,
     )
 

@@ -330,6 +330,7 @@ def review_scene_board(board: dict[str, Any], scene: dict[str, Any], context: di
     _report_props(verdict, views, shots)
     _report_bare_emotions(verdict, views, shots)
     _report_process_postures(verdict, views, shots)
+    _report_camera_rhythm(verdict, views, shots)
     return verdict
 
 
@@ -842,6 +843,60 @@ def _report_process_postures(verdict: BoardVerdict, views: list[ShotView], shots
                     "placement": idx,
                     "cue": match.group(0),
                 })
+
+
+_HIGH_AMPLITUDE_CAMERA_MOVES = frozenset({"orbit", "whip_pan", "crane"})
+
+
+def _report_camera_rhythm(verdict: BoardVerdict, views: list[ShotView], shots: list[dict[str, Any]]) -> None:
+    """Lightweight non-blocking pacing warnings for camera movement rhythm."""
+    if not views:
+        return
+    moves = [
+        (view.id, str((shots[view.index].get("camera") or {}).get("move") or "static").strip().lower())
+        for view in views
+    ]
+
+    if len(moves) >= 5:
+        static_run: list[str] = []
+        for sid, move in moves:
+            if move == "static":
+                static_run.append(sid)
+            else:
+                if len(static_run) >= 4:
+                    verdict.warnings.append({
+                        "code": "STATIC_CAMERA_MONOTONY",
+                        "shot_ids": list(static_run),
+                        "run_length": len(static_run),
+                    })
+                static_run = []
+        if len(static_run) >= 4:
+            verdict.warnings.append({
+                "code": "STATIC_CAMERA_MONOTONY",
+                "shot_ids": list(static_run),
+                "run_length": len(static_run),
+            })
+
+    big_run: list[tuple[str, str]] = []
+    for sid, move in moves:
+        if move in _HIGH_AMPLITUDE_CAMERA_MOVES:
+            big_run.append((sid, move))
+        else:
+            if len(big_run) >= 3:
+                verdict.warnings.append({
+                    "code": "EXCESSIVE_CAMERA_MOTION",
+                    "shot_ids": [item[0] for item in big_run],
+                    "moves": [item[1] for item in big_run],
+                    "run_length": len(big_run),
+                })
+            big_run = []
+    if len(big_run) >= 3:
+        verdict.warnings.append({
+            "code": "EXCESSIVE_CAMERA_MOTION",
+            "shot_ids": [item[0] for item in big_run],
+            "moves": [item[1] for item in big_run],
+            "run_length": len(big_run),
+        })
 
 
 _BLADE_SUBJECT_RE = r"(?:rune\s+sword|longsword|sword|blade|weapon|剑|长剑|符文长剑|剑尖|剑身)"

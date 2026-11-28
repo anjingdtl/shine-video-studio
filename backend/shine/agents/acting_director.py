@@ -60,6 +60,7 @@ class ActingWindowPatch(APIModel):
     end_s: float = Field(gt=0, allow_inf_nan=False)
     action: str = Field(min_length=1, max_length=400)
     expression: str = Field(min_length=1, max_length=400)
+    camera_beat: str = Field(default="", max_length=200)
 
 
 class ActingDialoguePatch(APIModel):
@@ -421,7 +422,12 @@ def acting_director_system_prompt() -> str:
         "(such as taking out/placing a key or crossing a room) across multiple windows of the same shot — "
         "perform each discrete gesture once in one window and advance forward in later windows (reaction, "
         "stillness, gaze hold). Preserve each character's physical side of fixed set landmarks (e.g. behind "
-        "vs in front of the counter) and never materialize a hidden prop without a visible reach/draw motion."
+        "vs in front of the counter) and never materialize a hidden prop without a visible reach/draw motion.\n"
+        "8. OPTIONAL CAMERA-BEAT SYNC: When a shot has a dynamic camera_move (not 'static'), you may set "
+        "an optional pure-English camera_beat (<=180 chars) on each window to synchronize camera acceleration, "
+        "push/track/pan, settle/hold, or pull-back with pre_speech / delivery / aftermath windows (e.g. slow "
+        "push-in through pre_speech -> settle and hold steady on eyes during delivery -> gentle breathing hold "
+        "or slow pull-back on aftermath). Leave camera_beat empty on static shots; never mention off-cast tokens."
     )
 
 
@@ -457,6 +463,8 @@ def build_acting_group_payload(
             "shot_id": str(shot.get("id") or "S1"),
             "duration_s": float(shot.get("duration_s") or shot.get("duration_target_s") or 6.0),
             "shot_size": str(camera.get("shot_size") or ""),
+            "camera_move": str(camera.get("move") or "static"),
+            "camera_movement": str(camera.get("movement") or "")[:160],
             "visual_summary": str(shot.get("visual_description") or shot.get("story_beat") or "")[:300],
             "entry_state": str(shot.get("entry_state") or "")[:200],
             "exit_state": str(shot.get("exit_state") or "")[:200],
@@ -541,10 +549,17 @@ def _salvage_one_shot_patch(raw_item: Any, *, idx: int) -> tuple[ActingShotPatch
             continue
         action = str(w.get("action") or "").strip()[:400]
         expression = str(w.get("expression") or "").strip()[:400]
+        camera_beat = str(w.get("camera_beat") or "").strip()[:200]
         if not action or not expression or e <= s:
             notes.append(f"{shot_id}.windows[{w_idx}]:incomplete_window_dropped")
             continue
-        clean_windows.append({"start_s": s, "end_s": e, "action": action, "expression": expression})
+        clean_windows.append({
+            "start_s": s,
+            "end_s": e,
+            "action": action,
+            "expression": expression,
+            **({"camera_beat": camera_beat} if camera_beat else {}),
+        })
 
     if not clean_windows:
         return None, "no_valid_windows", notes
@@ -658,15 +673,37 @@ def _derive_carry_over(patch: ActingShotPatch) -> str:
     return "; ".join(parts)[:200]
 
 
+def _valid_camera_beat(
+    text: str,
+    *,
+    allowed_tokens: set[str],
+    has_token_map: bool,
+) -> bool:
+    cleaned = text.strip()
+    if not cleaned:
+        return False
+    if _CJK_RE.search(cleaned):
+        return False
+    if has_token_map:
+        used = set(_CHAR_TOKEN_RE.findall(cleaned))
+        if used - allowed_tokens:
+            return False
+    return True
+
+
 def apply_shot_patch(
     shot: dict[str, Any],
     patch: ActingShotPatch,
     plan: PreSpeechPlan,
+    *,
+    token_map: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Merge a validated ``ActingShotPatch`` + server ``PreSpeechPlan`` onto one shot."""
     updated = copy.deepcopy(shot)
     existing_timeline = [w for w in (shot.get("timeline") or []) if isinstance(w, dict)]
     default_camera = str((shot.get("camera") or {}).get("movement") or "The camera holds still.").strip()
+    allowed_tokens = set(_allowed_tokens_for_shot(shot, token_map or {}))
+    has_token_map = bool(token_map)
 
     # Bind windows strictly to the server-computed window_slots so LLM timecode drift
     # can never violate ShotSpec's non-overlapping timeline validator.
@@ -674,11 +711,17 @@ def apply_shot_patch(
     slots = plan.window_slots
     for idx, slot in enumerate(slots):
         patch_win = patch.windows[idx] if idx < len(patch.windows) else patch.windows[-1]
-        cam_text = (
+        fallback_cam = (
             str(existing_timeline[idx].get("camera") or "").strip()
             if idx < len(existing_timeline)
             else default_camera
         ) or default_camera
+        candidate_cam = str(patch_win.camera_beat or "").strip()
+        cam_text = (
+            candidate_cam
+            if _valid_camera_beat(candidate_cam, allowed_tokens=allowed_tokens, has_token_map=has_token_map)
+            else fallback_cam
+        )
         merged_timeline.append({
             "start_s": float(slot["start_s"]),
             "end_s": float(slot["end_s"]),
@@ -831,7 +874,7 @@ def polish_scene_board_acting(
                     continue
 
             # Apply patch to a candidate copy and verify zero continuity_engine regressions.
-            candidate_shot = apply_shot_patch(shot, patch, plan)
+            candidate_shot = apply_shot_patch(shot, patch, plan, token_map=token_map)
             prev_shot_backup = polished["shots"][s_idx]
             polished["shots"][s_idx] = candidate_shot
             verdict = engine.review_scene_board(polished, scene, context)
@@ -921,7 +964,7 @@ def polish_single_shot_spec(
         warnings.append({"code": "ACTING_POLISH_FALLBACK", "shot_id": shot_id, "reason": last_issue})
         return working, warnings, {"polished": False, "fallback": True, "reason": last_issue}
 
-    merged = apply_shot_patch(working_with_id, patch, plan)
+    merged = apply_shot_patch(working_with_id, patch, plan, token_map=token_map)
     merged.pop("id", None)
     merged.pop("duration_s", None)
     return merged, warnings, {

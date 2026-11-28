@@ -1308,6 +1308,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
   const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>([]);
   const [stylePreset, setStylePreset] = useState<string | null>(null);
   const [characterSheetMode, setCharacterSheetMode] = useState(false);
+  const [sceneSheetMode, setSceneSheetMode] = useState(false);
   const imageStyle = useMemo(() => imageStyleInput(styleLoras, stylePreset), [styleLoras, stylePreset]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [batchTarget, setBatchTarget] = useState<Decision>('generate');
@@ -1333,6 +1334,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
     setView(body);
     if (body.preferences) {
       setCharacterSheetMode(Boolean(body.preferences.effective_character_sheet_mode));
+      setSceneSheetMode(Boolean(body.preferences.effective_scene_sheet_mode));
     }
     const prevMasters = knownMasters.current;
     const nextMasters: Record<string, string | null> = {};
@@ -1375,16 +1377,28 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
 
   useEffect(() => {
     setCharacterSheetMode(false);
+    setSceneSheetMode(false);
     setSwapTarget(null);
     void load();
   }, [load, projectId]);
 
   const handleCharacterSheetToggle = useCallback((next: boolean) => {
     setCharacterSheetMode(next);
-    void updateMaterialPreferences(projectId, next)
+    void updateMaterialPreferences(projectId, { character_sheet_mode: next })
       .then((prefs) => {
         if (activeProject.current === projectId) {
           setCharacterSheetMode(Boolean(prefs.effective_character_sheet_mode));
+        }
+      })
+      .catch(() => undefined);
+  }, [projectId]);
+
+  const handleSceneSheetToggle = useCallback((next: boolean) => {
+    setSceneSheetMode(next);
+    void updateMaterialPreferences(projectId, { scene_sheet_mode: next })
+      .then((prefs) => {
+        if (activeProject.current === projectId) {
+          setSceneSheetMode(Boolean(prefs.effective_scene_sheet_mode));
         }
       })
       .catch(() => undefined);
@@ -1494,7 +1508,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         expected_snapshot: view.expected_snapshot,
         decisions: rows,
         queue_generation: queueGeneration,
-        ...(queueGeneration ? { ...imageStyle, character_sheet_mode: characterSheetMode } : {}),
+        ...(queueGeneration ? { ...imageStyle, character_sheet_mode: characterSheetMode, scene_sheet_mode: sceneSheetMode } : {}),
       });
       const queued = outcome.batch?.item_count ?? outcome.generate_count;
       const parts = [
@@ -1547,6 +1561,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             requirement_ids: ids,
             ...imageStyle,
             character_sheet_mode: characterSheetMode,
+            scene_sheet_mode: sceneSheetMode,
           }) });
       setResult(`已为 ${outcome.items?.length ?? ids.length} 项重新排队出图；旧候选保留，出图后在上方选定并采用。`);
       await load();
@@ -1574,6 +1589,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             requirement_ids: [row.requirement_id],
             ...imageStyle,
             character_sheet_mode: characterSheetMode,
+            scene_sheet_mode: sceneSheetMode,
           }),
         });
       } else {
@@ -1698,6 +1714,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
             requirement_ids: selectedIds,
             ...imageStyle,
             character_sheet_mode: characterSheetMode,
+            scene_sheet_mode: sceneSheetMode,
           }) });
       setResult(`已为所选 ${outcome.items?.length ?? selectedIds.length} 项重新排队出图；旧候选保留，出图后在同一候选栏选定并采用。`);
       setSelected({});
@@ -1733,7 +1750,7 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
         loading: busy === 'commit', disabled: busy !== '', icon: <RefreshCw size={14} /> }]
     : [];
   useStageRail('shot-materials', { priority: 1, primary, secondary },
-    [view, decisions, busy, assetsDone, onAdvance, generating, characterSheetMode, imageStyle]);
+    [view, decisions, busy, assetsDone, onAdvance, generating, characterSheetMode, sceneSheetMode, imageStyle]);
 
   return <section className="card section-card" id="shot-materials">
     <div className="section-heading">
@@ -1834,6 +1851,8 @@ export function ShotMaterialsPanel({ projectId, onMessage, onGoStage, assetsDone
       <CharacterSheetToggle
         checked={characterSheetMode}
         onChange={handleCharacterSheetToggle}
+        sceneChecked={sceneSheetMode}
+        onSceneChange={handleSceneSheetToggle}
         disabled={busy !== ''}
         onGoSetup={() => {
           if (onGoStage) onGoStage('setup-env');

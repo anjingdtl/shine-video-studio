@@ -60,6 +60,7 @@ class GenerateBody(ImageStyleRequest):
     mode: Literal["real"] = EXECUTION_MODE_REAL
     seeds: dict[str, int] = Field(default_factory=dict)
     character_sheet_mode: bool = False
+    scene_sheet_mode: bool = False
 
 
 class StateVersionBody(APIModel):
@@ -85,6 +86,7 @@ class RegenerateBody(ImageStyleRequest):
     brief: dict
     seed: int = Field(default=0, ge=0)
     character_sheet_mode: bool = False
+    scene_sheet_mode: bool = False
 
 
 class ImageRuntimeBody(APIModel):
@@ -202,6 +204,7 @@ def material_entity_catalog(project_id: str, db: DBSession):
 
 class MaterialPreferencesBody(APIModel):
     character_sheet_mode: bool = False
+    scene_sheet_mode: bool | None = None
 
 
 @router.get("/projects/{project_id}/material-preparation")
@@ -219,10 +222,12 @@ def update_material_preferences(
     db: DBSession,
     settings: SettingsDep,
 ):
+    char_mode = body.character_sheet_mode if "character_sheet_mode" in body.model_fields_set else None
     result = service.set_material_preferences(
         db,
         project_id,
-        character_sheet_mode=body.character_sheet_mode,
+        character_sheet_mode=char_mode,
+        scene_sheet_mode=body.scene_sheet_mode,
         actor=actor,
         settings=settings,
     )
@@ -623,6 +628,7 @@ def generate_material(project_id: str, body: GenerateBody, actor: Operator, db: 
         seeds=body.seeds,
         image_style=resolve_image_style_request(db, settings, body),
         character_sheet_mode=body.character_sheet_mode,
+        scene_sheet_mode=body.scene_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}
@@ -752,6 +758,7 @@ def regenerate_requirement(project_id: str, body: RegenerateBody, actor: Operato
         new_revision=True,
         image_style=image_style,
         character_sheet_mode=body.character_sheet_mode,
+        scene_sheet_mode=body.scene_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}
@@ -761,6 +768,7 @@ class RegenerateAllBody(ImageStyleRequest):
     idempotency_key: str = Field(min_length=1, max_length=128)
     requirement_ids: list[str] = Field(default_factory=list, max_length=200)
     character_sheet_mode: bool = False
+    scene_sheet_mode: bool = False
 
 
 @router.post("/projects/{project_id}/material-preparation/regenerate-all", status_code=202)
@@ -866,6 +874,7 @@ def regenerate_all_requirements(project_id: str, body: RegenerateAllBody, actor:
         new_revision=True,
         image_style=image_style,
         character_sheet_mode=body.character_sheet_mode,
+        scene_sheet_mode=body.scene_sheet_mode,
         settings=settings,
     )
     return {"status": "accepted", **result}

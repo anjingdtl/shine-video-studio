@@ -96,10 +96,12 @@ def get_loras(request: Request, db: DBSession, base_model: StyleLoraBase = H3_LO
         # style, so the card's VRAM advice and character-sheet LoRA projection
         # ride along: one single authoritative fact read for every surface.
         from shine.asset_center.character_sheet import project_character_sheet_lora_from_listed
+        from shine.asset_center.scene_sheet import project_scene_sheet_lora_from_listed
         from shine.comfyops.capability import image_vram_advice_for_host
 
         result["vram_advice"] = image_vram_advice_for_host(settings)
         result["character_sheet"] = project_character_sheet_lora_from_listed(result)
+        result["scene_sheet"] = project_scene_sheet_lora_from_listed(result)
     return result
 
 

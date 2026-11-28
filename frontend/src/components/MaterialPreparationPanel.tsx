@@ -241,6 +241,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   const [styleLoras, setStyleLoras] = useState<StyleLoraConfig[]>([]);
   const [stylePreset, setStylePreset] = useState<string | null>(null);
   const [characterSheetMode, setCharacterSheetMode] = useState(false);
+  const [sceneSheetMode, setSceneSheetMode] = useState(false);
   const imageStyle = useMemo(() => imageStyleInput(styleLoras, stylePreset), [styleLoras, stylePreset]);
   const [promptTarget, setPromptTarget] = useState<MaterialRequirement | null>(null);
   /** The stage the person has open; null means "follow the server". */
@@ -405,6 +406,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     setAssets(masters);
     if (material.preferences) {
       setCharacterSheetMode(Boolean(material.preferences.effective_character_sheet_mode));
+      setSceneSheetMode(Boolean(material.preferences.effective_scene_sheet_mode));
     }
     setDirection((current) => directionDirty.current ? current : material.visual_direction ?? current);
     setDocumentId((current) => current || material.document_id || docs[0]?.id || '');
@@ -412,10 +414,21 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
 
   const handleCharacterSheetToggle = useCallback((next: boolean) => {
     setCharacterSheetMode(next);
-    void updateMaterialPreferences(projectId, next)
+    void updateMaterialPreferences(projectId, { character_sheet_mode: next })
       .then((prefs) => {
         if (activeProject.current === projectId) {
           setCharacterSheetMode(Boolean(prefs.effective_character_sheet_mode));
+        }
+      })
+      .catch(() => undefined);
+  }, [projectId]);
+
+  const handleSceneSheetToggle = useCallback((next: boolean) => {
+    setSceneSheetMode(next);
+    void updateMaterialPreferences(projectId, { scene_sheet_mode: next })
+      .then((prefs) => {
+        if (activeProject.current === projectId) {
+          setSceneSheetMode(Boolean(prefs.effective_scene_sheet_mode));
         }
       })
       .catch(() => undefined);
@@ -641,6 +654,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
       idempotency_key: `material-generate-${confirmed.confirmation_id.slice(0, 12)}`,
       ...imageStyle,
       character_sheet_mode: characterSheetMode,
+      scene_sheet_mode: sceneSheetMode,
       mode: 'real',
     });
     setStepReport((current) => ({
@@ -751,6 +765,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         requirement_ids: requirementIds,
         ...imageStyle,
         character_sheet_mode: characterSheetMode,
+        scene_sheet_mode: sceneSheetMode,
       },
     );
     setOperationReport(`已为 ${row.items?.length ?? 0} 项需求排队重新出图；旧候选保留，可对比后再选用。`);
@@ -773,7 +788,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
     if (action === 'regenerate') {
       if (!state?.confirmation || !item.requirement_id || !item.brief) throw new Error('尚无可修改的外观描述，请先恢复出品人步骤。');
       const appearance = briefEdits[item.item_id] ?? item.brief.appearance;
-      const requestBytes = new TextEncoder().encode(JSON.stringify([item.item_id, item.generation_revision, appearance, imageStyle, characterSheetMode]));
+      const requestBytes = new TextEncoder().encode(JSON.stringify([item.item_id, item.generation_revision, appearance, imageStyle, characterSheetMode, sceneSheetMode]));
       const requestHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', requestBytes)))
         .map((byte) => byte.toString(16).padStart(2, '0')).join('');
       await jsonPost(`/projects/${projectId}/material-preparation/regenerate`, {
@@ -784,6 +799,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
         brief: { ...item.brief, appearance, questions: [] }, seed: item.generation_revision + 1,
         ...imageStyle,
         character_sheet_mode: characterSheetMode,
+        scene_sheet_mode: sceneSheetMode,
       });
       setOperationReport('已创建新的生成版本；你对澄清问题的回答已并入描述，历史图片保留，需要重新选用。');
     } else {
@@ -876,7 +892,7 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
   if (embedded) materialPrimary = null;
   useStageRail('material-prep', { priority: 1, primary: materialPrimary },
     [stage, busy, documentId, requirements.length, promotable, confirmLabel, analysing, scenesRunning, hasContracts, storyboardReady,
-      state, selected, bindings, strategy, embedded, characterSheetMode, imageStyle]);
+      state, selected, bindings, strategy, embedded, characterSheetMode, sceneSheetMode, imageStyle]);
   // One dense grid of every candidate, whatever batch produced it: a person
   // looks at pictures, not at batch folders.  An item without a picture yet
   // (it failed, or the producer asked a question) still gets a tile, so the
@@ -1262,7 +1278,13 @@ function MaterialPreparationContent({ projectId, onMessage, onPromoted, frozenSt
               </label>
             ))}
           </fieldset>
-          <CharacterSheetToggle checked={characterSheetMode} onChange={handleCharacterSheetToggle} disabled={busy} />
+          <CharacterSheetToggle
+            checked={characterSheetMode}
+            onChange={handleCharacterSheetToggle}
+            sceneChecked={sceneSheetMode}
+            onSceneChange={handleSceneSheetToggle}
+            disabled={busy}
+          />
           <details className="advanced-fold">
             <summary>生图风格 LoRA{styleLoras.length ? ` · 已选 ${styleLoras.length} 枚` : ''}</summary>
             <StyleLoraAssemblyPanel baseModel="qwen_image_21" value={styleLoras} onChange={setStyleLoras}

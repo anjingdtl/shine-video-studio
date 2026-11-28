@@ -433,7 +433,7 @@ def test_h3_compiler_v21_resolves_character_tokens_anchors_outfit_and_distinguis
     assert acting_250.compiler_version == LEGACY_ACTING_V25_COMPILER_VERSION == "shine-h3-compiler/2.5.0"
     assert acting_250.prompt == compiled.prompt
     current = compiler.compile(spec=shot, style=STYLE, manifest=manifest, mode_hint=GenerationMode.REF2VA)
-    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.6.0"
+    assert current.compiler_version == COMPILER_VERSION == "shine-h3-compiler/2.7.0"
     assert "{{C2}}" not in current.sections["detailed_description"]
     assert "<Subject 1> steps inside and stops" in current.sections["detailed_description"]
     desc = compiled.sections["detailed_description"]

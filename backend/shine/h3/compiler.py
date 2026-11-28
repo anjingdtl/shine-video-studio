@@ -111,7 +111,14 @@ LEGACY_ACTING_V25_COMPILER_VERSION = "shine-h3-compiler/2.5.0"
 #     actions twice, e.g. placing a second key over the first), and
 # (3) reinforces spatial landmark-side and continuous visible-motion anchoring
 #     on last_frame joins so performers and hidden props never teleport.
-COMPILER_VERSION = "shine-h3-compiler/2.6.0"
+LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION = "shine-h3-compiler/2.6.0"
+# 2.7.0 supports 4-view scene-sheet single/dual camera-angle routing
+# (``scene_angle_opening:*`` + ``scene_angle_ending:*`` architectural/terrain
+# anchors for cross-direction camera moves) and weaves structured cinematic
+# camera height and foreground parallax into natural English prose without
+# leaking internal enum keys. All <=2.6.0 historical versions stay
+# byte-identical for exact provenance replay.
+COMPILER_VERSION = "shine-h3-compiler/2.7.0"
 KNOWN_COMPILER_VERSIONS = (
     LEGACY_AUDIO_COMPILER_VERSION,
     LEGACY_STYLE_COMPILER_VERSION,
@@ -126,6 +133,7 @@ KNOWN_COMPILER_VERSIONS = (
     LEGACY_HANDOFF_V23_COMPILER_VERSION,
     LEGACY_CONTINUITY_COLOR_V24_COMPILER_VERSION,
     LEGACY_ACTING_V25_COMPILER_VERSION,
+    LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION,
     COMPILER_VERSION,
 )
 #: Versions that keep the pre-1.4.0 summary/retention/camera/shot-text behaviour.
@@ -175,6 +183,12 @@ LEGACY_240_VERSIONS = (
 LEGACY_250_VERSIONS = (
     *LEGACY_240_VERSIONS,
     LEGACY_ACTING_V25_COMPILER_VERSION,
+)
+#: Versions that keep the 2.6.0 behaviour (single scene plate wording,
+#: pre-2.7.0 camera height/parallax prose).
+LEGACY_260_VERSIONS = (
+    *LEGACY_250_VERSIONS,
+    LEGACY_CONTINUITY_CLEAN_V26_COMPILER_VERSION,
 )
 RULE_VERSION = "h3-prompt-writing@d21241f0a4b3"
 SKILL_SHA256 = "a7000443588ca3f145e3b3fd8900f14e0325dc460bd811268fac89a9dc8e56d0"
@@ -256,6 +270,9 @@ class _Context:
     #: pre-timeline story_beat spoiler when timeline is populated, and anchor
     #: landmark-side & visible prop motion on last_frame joins.
     continuity_clean_v26: bool = False
+    #: 2.7.0+: support scene_angle_opening:* / scene_angle_ending:* spatial anchors
+    #: and natural English camera_height / foreground_parallax prose.
+    scene_angle_v27: bool = False
     warnings: list[str] = field(default_factory=list)
 
 
@@ -626,13 +643,32 @@ def _camera_sentence(spec: ShotSpec) -> str:
     return "Camera: " + "; ".join(parts) + "." if parts else ""
 
 
-def _camera_narrative(spec: ShotSpec) -> str:
-    """Natural camera prose for 1.4.0 (plan P0-D.4 / R3).
+_CAMERA_INTERNAL_KEYS = frozenset({
+    "move",
+    "motive",
+    "scene_angle",
+    "scene_angle_end",
+    "camera_height",
+    "foreground_parallax",
+})
+_CAMERA_HEIGHT_PROSE: dict[str, tuple[str, tuple[str, ...]]] = {
+    "eye_level": ("The camera sits at eye level", ("eye level", "eye-level")),
+    "low_angle": ("The camera shoots from a low angle looking upward", ("low angle", "low-angle")),
+    "high_angle": ("The camera shoots from an elevated high angle looking down", ("high angle", "high-angle")),
+    "overhead": ("The camera shoots from an overhead bird's-eye angle", ("overhead", "bird's-eye", "top-down")),
+    "ground_level": ("The camera sits close to ground level", ("ground level", "ground-level", "floor level")),
+}
+
+
+def _camera_narrative(spec: ShotSpec, *, scene_angle_v27: bool = False) -> str:
+    """Natural camera prose for 1.4.0+ (plan P0-D.4 / R3; 2.7.0 height & parallax).
 
     The cinematographer's fields are already English prose; the compiler weaves
     them into flowing sentences instead of the mechanical ``Camera: key: value``
     enumeration.  A static camera is stated as holding still rather than left
     ambiguous, and movement is described with its type/amplitude/speed as written.
+    Internal enum keys (``move``, ``scene_angle``, ``scene_angle_end``,
+    ``camera_height``) are never emitted verbatim into the prompt.
     """
     camera = spec.camera or {}
     if not camera:
@@ -643,8 +679,22 @@ def _camera_narrative(spec: ShotSpec) -> str:
         value = str(camera.get(key) or "").strip().rstrip(".")
         if value:
             prose.append(value)
+    if scene_angle_v27:
+        joined_lower = " ".join(prose).lower()
+        raw_height = str(camera.get("camera_height") or "").strip().lower()
+        if raw_height in _CAMERA_HEIGHT_PROSE:
+            height_sentence, hints = _CAMERA_HEIGHT_PROSE[raw_height]
+            if not any(hint in joined_lower for hint in hints):
+                prose.append(height_sentence)
+        fg_parallax = str(camera.get("foreground_parallax") or "").strip().rstrip(".")
+        if fg_parallax:
+            fg_lower = fg_parallax.lower()
+            if fg_lower.startswith(("foreground ", "passing ", "through ", "past ", "with ")):
+                prose.append(fg_parallax[0].upper() + fg_parallax[1:])
+            else:
+                prose.append(f"Foreground parallax moves past {fg_parallax}")
     for key, value in camera.items():
-        if key in order or key == "director_style":
+        if key in order or key == "director_style" or key in _CAMERA_INTERNAL_KEYS:
             continue
         text = str(value or "").strip().rstrip(".")
         if text:
@@ -1244,7 +1294,7 @@ def _shot_text_thin(ctx: _Context) -> str:
         _placement_sentence(ctx),
         f"It opens on {_clause(_resolve_character_tokens(spec.entry_state, ctx))}" if spec.entry_state.strip() else "",
         _resolve_character_tokens(spec.story_beat.strip(), ctx) if include_story_beat else "",
-        _resolve_character_tokens(_camera_narrative(spec), ctx),
+        _resolve_character_tokens(_camera_narrative(spec, scene_angle_v27=ctx.scene_angle_v27), ctx),
     ):
         if sentence:
             blocks[0].append(sentence)
@@ -1560,7 +1610,27 @@ def _subject_definitions(ctx: _Context) -> str:
                     "keep this object's design and details consistent when shown."
                 )
             elif ctx.anchored_v21 and item.asset_role == "scene":
-                if last_frame_cont:
+                role_tag = str(item.role or "")
+                if ctx.scene_angle_v27 and role_tag.startswith("scene_angle_opening:"):
+                    if last_frame_cont:
+                        lines.append(
+                            f"{item.label} is the opening camera-angle architectural and terrain reference "
+                            "for [Shot 1]; establish the opening wall/horizon geometry and materials from it "
+                            "without overriding the lighting, exposure or color temperature of the preceding "
+                            "shot's final frame."
+                        )
+                    else:
+                        lines.append(
+                            f"{item.label} is the opening camera-angle architectural and terrain reference "
+                            "for [Shot 1]; establish the opening wall/horizon geometry and materials from it."
+                        )
+                elif ctx.scene_angle_v27 and role_tag.startswith("scene_angle_ending:"):
+                    lines.append(
+                        f"{item.label} is the destination camera-angle architectural and terrain reference "
+                        "for [Shot 1]; as the camera moves, transition smoothly into this direction's "
+                        "geometry and landmarks without warping or repeating structures."
+                    )
+                elif last_frame_cont:
                     lines.append(
                         f"{item.label} is the architectural and spatial layout reference for [Shot 1]; "
                         "use it for room geometry and materials only, without overriding the lighting, "
@@ -1732,7 +1802,27 @@ def _retention(ctx: _Context) -> str:
                     "the prop keeps its reference appearance whenever visible."
                 )
             elif ctx.anchored_v21 and item.asset_role == "scene":
-                if last_frame_cont:
+                role_tag = str(item.role or "")
+                if ctx.scene_angle_v27 and role_tag.startswith("scene_angle_opening:"):
+                    if last_frame_cont:
+                        lines.append(
+                            f"{item.label} ([Shot 1] opening camera-angle architectural reference): "
+                            "partially_preserved - locks the opening wall/horizon geometry and materials "
+                            "while preserving the current scene's lighting and color grade."
+                        )
+                    else:
+                        lines.append(
+                            f"{item.label} ([Shot 1] opening camera-angle environment reference): "
+                            "partially_preserved - establishes the opening direction's architecture, "
+                            "terrain and lighting at the start of the camera move."
+                        )
+                elif ctx.scene_angle_v27 and role_tag.startswith("scene_angle_ending:"):
+                    lines.append(
+                        f"{item.label} ([Shot 1] destination camera-angle architectural reference): "
+                        "partially_preserved - guides the destination direction's architecture and "
+                        "landmarks as the camera completes its movement without warping or repeating structures."
+                    )
+                elif last_frame_cont:
                     lines.append(
                         f"{item.label} ([Shot 1] architectural reference): partially_preserved - "
                         "guides the setting geometry and materials only while preserving the current scene's "
@@ -1827,6 +1917,7 @@ class H3PromptCompiler:
         continuity_color_v24 = compiler_version not in LEGACY_230_VERSIONS
         acting_v25 = compiler_version not in LEGACY_240_VERSIONS
         continuity_clean_v26 = compiler_version not in LEGACY_250_VERSIONS
+        scene_angle_v27 = compiler_version not in LEGACY_260_VERSIONS
         _validate_manifest(manifest)
         mode = _infer_mode(manifest, mode_hint)
         _check_frame_roles(mode, [item for item in manifest if item.use_as == ReferenceUse.PICTURE])
@@ -1860,6 +1951,7 @@ class H3PromptCompiler:
             continuity_color_v24=continuity_color_v24,
             acting_v25=acting_v25,
             continuity_clean_v26=continuity_clean_v26,
+            scene_angle_v27=scene_angle_v27,
         )
         if language_fallback:
             ctx.warnings.append(

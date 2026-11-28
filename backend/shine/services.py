@@ -3,7 +3,10 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import logging
 import os
+import re
+from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -870,7 +873,165 @@ def order_bindings_for_cast(
     return ordered
 
 
-def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str, Asset]) -> list[ReferenceManifestItem]:
+logger = logging.getLogger(__name__)
+
+SCENE_ANGLE_CANONICAL: tuple[str, ...] = ("front", "left", "right", "reverse")
+CROSS_ANGLE_CAMERA_MOVES: frozenset[str] = frozenset({"pan", "track", "orbit", "whip_pan", "crane"})
+_CROSS_ANGLE_PROSE_RE = re.compile(
+    r"\b(?:pan|track|dolly|trucking|orbit|arc|whip|crane|jib)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def _extract_shot_camera_and_context(
+    shot_spec: ShotSpec | Mapping[str, Any] | None,
+) -> tuple[dict[str, Any], str, list[dict[str, Any]]]:
+    if shot_spec is None:
+        return {}, "", []
+    if isinstance(shot_spec, ShotSpec):
+        camera = dict(shot_spec.camera or {})
+        raw_mot = getattr(shot_spec, "transition_motivation", None)
+        motivation = raw_mot.value if raw_mot is not None else ""
+        placements = (
+            [p.model_dump(mode="json") for p in shot_spec.blocking.placements]
+            if shot_spec.blocking and shot_spec.blocking.placements
+            else []
+        )
+        return camera, motivation, placements
+    if isinstance(shot_spec, Mapping):
+        camera = dict(shot_spec.get("camera") or {}) if isinstance(shot_spec.get("camera"), Mapping) else {}
+        continuity = shot_spec.get("continuity") if isinstance(shot_spec.get("continuity"), Mapping) else {}
+        motivation = str(
+            continuity.get("transition_motivation")
+            or shot_spec.get("transition_motivation")
+            or ""
+        ).strip().lower()
+        blocking = shot_spec.get("blocking") if isinstance(shot_spec.get("blocking"), Mapping) else {}
+        raw_placements = blocking.get("placements") or []
+        placements = [dict(p) for p in raw_placements if isinstance(p, Mapping)]
+        return camera, motivation, placements
+    return {}, "", []
+
+
+def _infer_default_scene_angle(
+    views: Mapping[str, Mapping[str, Any]],
+    *,
+    motivation: str,
+    placements: list[dict[str, Any]],
+) -> str:
+    facings = [str(p.get("facing") or "").strip().lower() for p in placements if str(p.get("facing") or "").strip()]
+    if motivation == "shot_reverse_shot" and "reverse" in views:
+        if len(facings) == 1 and facings[0] in {"facing_left", "three_quarter_left", "back_to_camera"}:
+            return "reverse"
+    if len(facings) == 1 and facings[0] == "back_to_camera" and "reverse" in views:
+        return "reverse"
+    if "front" in views:
+        return "front"
+    return next(iter(views))
+
+
+def _view_file_readable(asset_root: Path | None, storage_path: str) -> bool:
+    if asset_root is None:
+        return True
+    from shine.media.artifacts import safe_asset_path
+
+    try:
+        path = safe_asset_path(asset_root, storage_path)
+        return path.is_file() and path.stat().st_size > 0
+    except Exception:
+        return False
+
+
+def resolve_scene_angle_views(
+    asset: Asset,
+    shot_spec: ShotSpec | Mapping[str, Any] | None = None,
+    *,
+    extra_image_slots: int = 0,
+    extra_total_slots: int = 0,
+    asset_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Deterministically expand a 4-view scene master asset into 1 or 2 full-size angle views.
+
+    Returns an empty list when the asset has no valid ``provenance["scene_sheet"]["views"]``
+    (preserving 100% passthrough compatibility for legacy single-image scenes) or when the
+    opening angle file is missing on disk.
+    """
+    from shine.asset_center.scene_sheet import scene_sheet_views_from_provenance
+
+    views = scene_sheet_views_from_provenance(getattr(asset, "provenance", None))
+    if not views:
+        return []
+
+    camera, motivation, placements = _extract_shot_camera_and_context(shot_spec)
+    raw_angle = str(camera.get("scene_angle") or "").strip().lower()
+    if raw_angle in views:
+        opening_angle = raw_angle
+    else:
+        opening_angle = _infer_default_scene_angle(views, motivation=motivation, placements=placements)
+
+    opening_view = views.get(opening_angle)
+    if not opening_view or not _view_file_readable(asset_root, opening_view["storage_path"]):
+        logger.warning(
+            "Scene sheet opening angle file missing or unreadable; falling back to master asset",
+            extra={"asset_id": getattr(asset, "id", None), "angle": opening_angle},
+        )
+        return []
+
+    raw_end = str(camera.get("scene_angle_end") or "").strip().lower()
+    move = str(camera.get("move") or "").strip().lower()
+    movement_prose = str(camera.get("movement") or "")
+    is_cross_angle_move = (
+        move in CROSS_ANGLE_CAMERA_MOVES
+        if move
+        else bool(_CROSS_ANGLE_PROSE_RE.search(movement_prose))
+    )
+    wants_dual = (
+        bool(raw_end)
+        and raw_end != opening_angle
+        and raw_end in views
+        and is_cross_angle_move
+        and extra_image_slots >= 1
+        and extra_total_slots >= 1
+    )
+    if wants_dual:
+        ending_view = views[raw_end]
+        if _view_file_readable(asset_root, ending_view["storage_path"]):
+            return [
+                {
+                    "role": f"scene_angle_opening:{opening_angle}",
+                    "angle": opening_angle,
+                    "storage_path": opening_view["storage_path"],
+                    "sha256": opening_view["sha256"],
+                },
+                {
+                    "role": f"scene_angle_ending:{raw_end}",
+                    "angle": raw_end,
+                    "storage_path": ending_view["storage_path"],
+                    "sha256": ending_view["sha256"],
+                },
+            ]
+        logger.warning(
+            "Scene sheet ending angle file missing or unreadable; downgrading to opening view only",
+            extra={"asset_id": getattr(asset, "id", None), "angle_end": raw_end},
+        )
+
+    return [
+        {
+            "role": f"scene_angle:{opening_angle}",
+            "angle": opening_angle,
+            "storage_path": opening_view["storage_path"],
+            "sha256": opening_view["sha256"],
+        }
+    ]
+
+
+def build_reference_manifest(
+    bindings: list[ShotBindingInput],
+    assets: dict[str, Asset],
+    *,
+    shot_spec: ShotSpec | Mapping[str, Any] | None = None,
+    asset_root: Path | None = None,
+) -> list[ReferenceManifestItem]:
     """Build the deterministic, request-local H3 label manifest.
 
     Official Ref2VA presentation numbers every reference image as ``<Picture i>``
@@ -883,17 +1044,64 @@ def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str,
     the first image input and ``reference_picture_1`` to a later one, so a
     picture bound before a subject would otherwise make ``<Picture 1>`` point at
     the wrong file - the render would use somebody else's face.
+
+    For 4-view scene masters carrying ``provenance["scene_sheet"]["views"]``,
+    ``resolve_scene_angle_views()`` expands the binding into 1 or 2 full-size
+    single-angle plates while staying strictly within ``MAX_IMAGES`` and
+    ``MAX_TOTAL_REFERENCES``.
     """
     ordered = sorted(
         bindings,
         key=lambda item: (REFERENCE_FAMILY_ORDER.get(item.use_as.value, 9), item.ordinal, item.asset_id),
     )
+    max_images = MAX_REFERENCE_COUNTS["image"]
+    current_images = sum(1 for b in ordered if b.use_as.value in {"subject", "picture"})
+    current_total = len(ordered)
+
     label_counts = {"subject": 0, "video": 0, "audio": 0}
     image_position = 0
     manifest: list[ReferenceManifestItem] = []
     for binding in ordered:
         asset = assets[binding.asset_id]
         use_as = binding.use_as.value
+        if (
+            use_as == "picture"
+            and getattr(asset, "role", None) == "scene"
+            and binding.role != "continuity_derivative"
+            and binding.frame_role is None
+        ):
+            expanded = resolve_scene_angle_views(
+                asset,
+                shot_spec,
+                extra_image_slots=max(0, max_images - current_images),
+                extra_total_slots=max(0, MAX_TOTAL_REFERENCES - current_total),
+                asset_root=asset_root,
+            )
+            if expanded:
+                if len(expanded) > 1:
+                    delta = len(expanded) - 1
+                    current_images += delta
+                    current_total += delta
+                for view_item in expanded:
+                    image_position += 1
+                    manifest.append(
+                        ReferenceManifestItem(
+                            label=f"<Picture {image_position}>",
+                            asset_id=asset.id,
+                            sha256=view_item["sha256"],
+                            storage_key=view_item["storage_path"],
+                            content_type=asset.content_type,
+                            use_as=binding.use_as,
+                            role=view_item["role"],
+                            frame_role=binding.frame_role,
+                            ordinal=binding.ordinal,
+                            duration_s=asset.duration_s,
+                            entity_id=asset.entity_id,
+                            asset_role=getattr(asset, "role", None),
+                        )
+                    )
+                continue
+
         if use_as in {"subject", "picture"}:
             image_position += 1
         if use_as == "picture":
@@ -925,7 +1133,12 @@ def build_reference_manifest(bindings: list[ShotBindingInput], assets: dict[str,
     return manifest
 
 
-def manifest_from_shot_bindings(db: Session, shot: Shot) -> list[ReferenceManifestItem]:
+def manifest_from_shot_bindings(
+    db: Session,
+    shot: Shot,
+    *,
+    asset_root: Path | None = None,
+) -> list[ReferenceManifestItem]:
     """Rebuild the manifest from the shot's saved, authoritative bindings."""
     rows = _binding_rows(db, shot)
     if not rows:
@@ -943,7 +1156,13 @@ def manifest_from_shot_bindings(db: Session, shot: Shot) -> list[ReferenceManife
         )
         for row in rows
     ]
-    return build_reference_manifest(bindings, assets)
+    shot_spec: ShotSpec | Mapping[str, Any] | None = None
+    if isinstance(shot.spec, Mapping):
+        try:
+            shot_spec = ShotSpec.model_validate(shot.spec)
+        except Exception:
+            shot_spec = shot.spec
+    return build_reference_manifest(bindings, assets, shot_spec=shot_spec, asset_root=asset_root)
 
 
 def make_render_request(
@@ -1099,7 +1318,12 @@ def make_render_request(
             ordinal=len(bindings),
         ))
     ordered = sorted(bindings, key=lambda item: (item.ordinal, item.asset_id))
-    manifest = build_reference_manifest(ordered, assets)
+    asset_root = None
+    if settings is not None:
+        from shine.media.output_layout import output_root
+
+        asset_root = output_root(db, settings)
+    manifest = build_reference_manifest(ordered, assets, shot_spec=spec, asset_root=asset_root)
     profile = None
     compiled_strategy_graph = None
     if body.workflow_profile_id:

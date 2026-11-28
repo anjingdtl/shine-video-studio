@@ -386,6 +386,26 @@ def _asset_path_candidates(data_dir, storage_path: str):
     return [safe_asset_path(root, storage_path) for root in roots]
 
 
+def _scene_angle_reference_file(asset: Asset, ref) -> tuple[str, str] | None:
+    """Return ``(storage_path, sha256)`` when ``ref`` is a provenance-pinned angle view of a 4-view scene master."""
+    from shine.asset_center.scene_sheet import find_scene_sheet_view_by_sha
+
+    role = str(getattr(ref, "role", None) or "")
+    use_as = getattr(ref, "use_as", None)
+    use_as_val = use_as.value if hasattr(use_as, "value") else str(use_as or "")
+    if (
+        use_as_val != "picture"
+        or getattr(asset, "role", None) != "scene"
+        or not role.startswith(("scene_angle:", "scene_angle_opening:", "scene_angle_ending:"))
+    ):
+        return None
+    matched = find_scene_sheet_view_by_sha(getattr(asset, "provenance", None), ref.sha256)
+    if matched is None:
+        return None
+    _angle_key, view_meta = matched
+    return view_meta["storage_path"], view_meta["sha256"]
+
+
 def enforce_live_references(db, project_id, render_request, *, data_dir=None, offline=False):
     """Re-check the *current* rights and identity of every reference.
 
@@ -411,7 +431,10 @@ def enforce_live_references(db, project_id, render_request, *, data_dir=None, of
         asset = db.get(Asset, ref.asset_id)
         if not asset or asset.project_id != project_id:
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_MISSING")
-        if asset.sha256 != ref.sha256:
+        angle_file = _scene_angle_reference_file(asset, ref)
+        expected_sha = angle_file[1] if angle_file is not None else asset.sha256
+        resolved_storage_path = angle_file[0] if angle_file is not None else asset.storage_path
+        if expected_sha != ref.sha256:
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_CHANGED")
         if not offline and (not asset.approved or not asset.locked):
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_NOT_MASTER")
@@ -423,13 +446,13 @@ def enforce_live_references(db, project_id, render_request, *, data_dir=None, of
             # current rights; a revocation anywhere in that chain refuses here.
             require_rights(db, project_id, rights_id)
         if data_dir:
-            candidates = _asset_path_candidates(data_dir, asset.storage_path)
+            candidates = _asset_path_candidates(data_dir, resolved_storage_path)
             if not any(path.is_file() and hashlib.sha256(path.read_bytes()).hexdigest() == ref.sha256
                        for path in candidates):
                 raise HTTPException(409, {
                     "code": "PREPRODUCTION_REFERENCE_BYTES_MISSING",
                     "asset_id": asset.id,
-                    "storage_path": asset.storage_path,
+                    "storage_path": resolved_storage_path,
                 })
 
 
@@ -589,7 +612,10 @@ def enforce_references(db, project_id, render_request, *, data_dir=None, expecte
         raise HTTPException(409, "PREPRODUCTION_SHOT_OUTDATED")
 
     def binding_key(row):
-        return (row.asset_id, str(row.use_as), row.role, str(row.frame_role) if row.frame_role else None, row.ordinal)
+        role = row.role
+        if isinstance(role, str) and role.startswith(("scene_angle:", "scene_angle_opening:", "scene_angle_ending:")):
+            role = None
+        return (row.asset_id, str(row.use_as), role, str(row.frame_role) if row.frame_role else None, row.ordinal)
 
     # A continuity derivative is a technical, provenance-bound artifact of a
     # source job.  It is not a user-approved master: it is not a shot binding
@@ -607,14 +633,18 @@ def enforce_references(db, project_id, render_request, *, data_dir=None, expecte
         _enforce_continuity_reference(db, project_id, request, ref, data_dir=data_dir)
     for ref in masters:
         asset = db.get(Asset, ref.asset_id)
-        if ref.asset_id not in allowed or allowed[ref.asset_id] != ref.sha256:
+        angle_file = _scene_angle_reference_file(asset, ref) if asset is not None else None
+        expected_master_sha = asset.sha256 if asset is not None else None
+        expected_ref_sha = angle_file[1] if angle_file is not None else expected_master_sha
+        resolved_storage_path = angle_file[0] if angle_file is not None else (asset.storage_path if asset else "")
+        if ref.asset_id not in allowed or allowed[ref.asset_id] != expected_master_sha:
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_NOT_FROZEN")
         if (
             not asset
             or asset.project_id != project_id
             or not asset.approved
             or not asset.locked
-            or asset.sha256 != ref.sha256
+            or expected_ref_sha != ref.sha256
         ):
             raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")
         rights_id = (asset.provenance or {}).get("rights_id")
@@ -623,7 +653,7 @@ def enforce_references(db, project_id, render_request, *, data_dir=None, expecte
         if data_dir:
             from shine.media.artifacts import safe_asset_path
 
-            path = safe_asset_path(data_dir, asset.storage_path)
+            path = safe_asset_path(data_dir, resolved_storage_path)
             if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != ref.sha256:
                 raise HTTPException(409, "PREPRODUCTION_REFERENCE_OUTDATED")
 

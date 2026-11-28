@@ -67,6 +67,20 @@ class DirectedCamera(APIModel):
         description="English prose the renderer reads. It must name the move: 'The camera holds still.' for "
                     "static, otherwise the move with its amplitude and speed.")
     lighting: str = Field(default="", max_length=600)
+    scene_angle: Literal["front", "left", "right", "reverse"] | None = Field(
+        default=None,
+        description="Opening camera direction against the 4-view scene sheet (front/left/right/reverse).")
+    scene_angle_end: Literal["front", "left", "right", "reverse"] | None = Field(
+        default=None,
+        description="Destination camera direction when a cross-direction move (pan/track/orbit/whip_pan/crane) "
+                    "sweeps to a different angle than scene_angle.")
+    camera_height: Literal["eye_level", "low_angle", "high_angle", "overhead", "ground_level"] | None = Field(
+        default=None,
+        description="Camera elevation height matching dramatic power balance.")
+    foreground_parallax: str = Field(
+        default="", max_length=160,
+        description="Optional natural English foreground element creating depth parallax during movement "
+                    "(e.g. 'passing wooden pillar', 'billowing war banner edge', 'foreground spear tips').")
 
 
 class DirectedCut(APIModel):
@@ -310,15 +324,35 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         "constant identifier (such as 'group_1', never a per-shot angle description): reuse the exact same string "
         "across every shot of that arrangement, and change it only at a cut whose motivation is "
         "time_or_space_jump, establishing_reset or match_on_action. "
-        "Camera: camera.move is what the camera does, static by default. Move only when the action, a gaze or "
-        "a reveal requires it, and then camera.motive says why in one clause; camera.movement MUST include the "
+        "Camera & Beat-Energy Motion Grammar: drive camera.move, camera_height, foreground_parallax, and "
+        "scene_angle/scene_angle_end from each beat's dramatic energy (never lock an entire scene to static "
+        "tripod shots; build move-hold-move contrast and avoid 4+ consecutive static shots or 3+ consecutive "
+        "crane/orbit/whip_pan moves): "
+        "(1) calm / establishing / formation: crane, wide pan, track, or slow push_in at high_angle or "
+        "eye_level, using cross-angle scene_angle -> scene_angle_end (e.g. front -> left or left -> right) "
+        "to reveal spatial scale, terrain depth, and landmarks; "
+        "(2) probe / standoff / reconnaissance: subtle handheld, slow track, or OTS eye_level alternating "
+        "scene_angle front and reverse in shot-reverse-shot while preserving the 180-degree axis and adding "
+        "foreground_parallax for immersion; "
+        "(3) pressure / confrontation / advancing force: sustained slow push_in or flanking track from "
+        "low_angle (front, left, or right) progressively tightening framing; "
+        "(4) turn_pause (1s pre-speech beat): slow push_in settling into stillness on the spoken line or "
+        "subtle tilt, locking scene_angle (front or reverse) on the close-up; "
+        "(5) erupt / charge / clash / climax: dynamic track following motion, urgent handheld, motivated "
+        "whip_pan, or 3/4 orbit at low_angle or ground_level with cross-direction scene_angle -> "
+        "scene_angle_end and concrete foreground_parallax (e.g. passing banners, spear tips, dust/pillars); "
+        "(6) aftermath / withdrawal: slow pull_back or rising crane shifting from eye_level to high_angle "
+        "(front or reverse) to restore scale. "
+        "Use static intentionally for stark emotional stillness or reaction punctuation. For every non-static "
+        "camera.move, camera.motive MUST state why in one English clause and camera.movement MUST include the "
         "exact move verb matching camera.move ('holds still'/'static' for static, 'push' for push_in, 'pull' "
         "for pull_back, 'pan'/'tilt'/'track'/'handheld'/'crane'/'orbit'/'zoom'/'whip' for those moves), with "
-        "its amplitude and speed ('The camera holds still.' for "
-        "static). A segment with an internal cut keeps the camera static or small: no crane, orbit, zoom or "
-        "whip pan in it. camera.composition gives the starting framing, each subject's position, the "
-        "camera's distance and eye level, and the framing the shot settles into; camera.lighting the practical "
-        "sources and what they do to faces. "
+        "amplitude and speed ('The camera holds still.' for static). A segment with an internal cut keeps the "
+        "camera static or small: no crane, orbit, zoom or whip pan in it. Set camera.scene_angle on every shot "
+        "(front/left/right/reverse) and set camera.scene_angle_end ONLY when camera.move is pan, track, orbit, "
+        "whip_pan, or crane and sweeps to a different direction than scene_angle. camera.composition gives the "
+        "starting framing, each subject's position, the camera's distance and height, and the framing the shot "
+        "settles into; camera.lighting the practical sources and what they do to faces. "
         "Set and performance: environment.depth is the foreground, midground and background and their "
         "materials; environment.light the practical sources, their colour and where the shadows fall — keep the "
         "same key-light direction, color temperature, and monotonic lighting progression across consecutive "
@@ -368,7 +402,8 @@ def scene_director_prompt(*, max_shot_seconds: float | None, continuity_predeces
         f"{tail_grouping}"
         "so ALL shots covering EVERY beat B1..Bn fit comfortably in one response. "
         "Inside each shots entry, camera contains ONLY {composition, shot_size, angle, lens, move, motive, "
-        "movement, lighting}; always close camera's } before writing blocking/environment/timeline/"
+        "movement, lighting, scene_angle, scene_angle_end, camera_height, foreground_parallax}; always close "
+        "camera's } before writing blocking/environment/timeline/"
         "entry_state/exit_state/transition_motivation/handoff_cue/ambience/music, close each shot's } cleanly "
         "before starting the next element in shots[] (never nest s5/s6 inside an earlier shot), and always close "
         "shots' ] before writing top-level prompt_style/prompt_story_facts (never nest prompt_style inside a shot). "
@@ -403,7 +438,10 @@ def landing_rows(board: dict[str, Any], scene: dict[str, Any],
                          "visual_description": ". ".join(parts)[:1000] + "."})
         camera_fields = {"composition": str(camera.get("composition") or ""),
                          "movement": str(camera.get("movement") or ""), "axis_rule": AXIS_SENTENCE}
-        for key in ("shot_size", "angle", "lens", "lighting"):
+        for key in (
+            "shot_size", "angle", "lens", "lighting",
+            "move", "scene_angle", "scene_angle_end", "camera_height", "foreground_parallax",
+        ):
             if str(camera.get(key) or "").strip():
                 camera_fields[key] = str(camera[key]).strip()
         rows.append({

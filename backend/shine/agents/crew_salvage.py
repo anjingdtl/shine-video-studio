@@ -245,6 +245,10 @@ _FIELD_ALIASES: dict[str, dict[str, str]] = {
     "CameraShot": {"intent": "intent_id", "shot_id": "intent_id",
                    "frame": "composition", "camera": "composition",
                    "camera_movement": "movement"},
+    "DirectedCamera": {"angle_start": "scene_angle", "start_angle": "scene_angle",
+                       "angle_end": "scene_angle_end", "end_angle": "scene_angle_end",
+                       "height": "camera_height", "elevation": "camera_height",
+                       "parallax": "foreground_parallax"},
 }
 
 
@@ -357,6 +361,149 @@ def _normalize_drama_beat(working: dict[str, Any], notes: list[str], *, path: st
             notes.append(f"{path}.beat_type:folded_{raw_type}_to_{mapped}")
 
 
+_SCENE_ANGLES = frozenset({"front", "left", "right", "reverse"})
+_SCENE_ANGLE_SYNONYMS: dict[str, str] = {
+    "front_wide": "front",
+    "front_view": "front",
+    "straight": "front",
+    "center": "front",
+    "centre": "front",
+    "establishing": "front",
+    "main": "front",
+    "primary": "front",
+    "forward": "front",
+    "0": "front",
+    "0deg": "front",
+    "default": "front",
+    "left_quarter": "left",
+    "front_left": "left",
+    "left_45": "left",
+    "45_left": "left",
+    "left_side": "left",
+    "left_wide": "left",
+    "three_quarter_left": "left",
+    "flank_left": "left",
+    "west": "left",
+    "right_quarter": "right",
+    "front_right": "right",
+    "right_45": "right",
+    "45_right": "right",
+    "right_side": "right",
+    "right_wide": "right",
+    "three_quarter_right": "right",
+    "flank_right": "right",
+    "east": "right",
+    "reverse_wide": "reverse",
+    "back": "reverse",
+    "rear": "reverse",
+    "back_view": "reverse",
+    "rear_view": "reverse",
+    "opposite": "reverse",
+    "180": "reverse",
+    "180deg": "reverse",
+    "reverse_angle": "reverse",
+    "over_shoulder_reverse": "reverse",
+    "ots_reverse": "reverse",
+    "counter": "reverse",
+}
+_CAMERA_HEIGHTS = frozenset({"eye_level", "low_angle", "high_angle", "overhead", "ground_level"})
+_CAMERA_HEIGHT_SYNONYMS: dict[str, str] = {
+    "eye": "eye_level",
+    "normal": "eye_level",
+    "neutral": "eye_level",
+    "standard": "eye_level",
+    "level": "eye_level",
+    "chest_level": "eye_level",
+    "shoulder_level": "eye_level",
+    "medium_height": "eye_level",
+    "mid_level": "eye_level",
+    "low": "low_angle",
+    "worm_eye": "low_angle",
+    "worms_eye": "low_angle",
+    "hero_angle": "low_angle",
+    "hero_low": "low_angle",
+    "looking_up": "low_angle",
+    "upward": "low_angle",
+    "low_shot": "low_angle",
+    "knee_level": "low_angle",
+    "waist_level": "low_angle",
+    "high": "high_angle",
+    "elevated": "high_angle",
+    "looking_down": "high_angle",
+    "downward": "high_angle",
+    "high_shot": "high_angle",
+    "crane_high": "high_angle",
+    "balcony": "high_angle",
+    "slightly_high": "high_angle",
+    "top_down": "overhead",
+    "birds_eye": "overhead",
+    "bird_eye": "overhead",
+    "bird_s_eye": "overhead",
+    "aerial": "overhead",
+    "god_s_eye": "overhead",
+    "gods_eye": "overhead",
+    "zenith": "overhead",
+    "top_shot": "overhead",
+    "directly_above": "overhead",
+    "ground": "ground_level",
+    "floor": "ground_level",
+    "floor_level": "ground_level",
+    "dirt_level": "ground_level",
+    "earth_level": "ground_level",
+    "low_ground": "ground_level",
+    "surface_level": "ground_level",
+    "boot_level": "ground_level",
+}
+
+
+def _normalize_directed_camera(working: dict[str, Any], notes: list[str], *, path: str) -> None:
+    """Losslessly normalize DirectedCamera optional enum typos (scene_angle / camera_height)."""
+    for alias_key, canonical_key in _FIELD_ALIASES.get("DirectedCamera", {}).items():
+        if alias_key in working and canonical_key not in working:
+            working[canonical_key] = working.pop(alias_key)
+            notes.append(f"{path}.{alias_key}:aliased_to_{canonical_key}")
+
+    for field_name in ("scene_angle", "scene_angle_end"):
+        raw_val = working.get(field_name)
+        if raw_val is None or str(raw_val).strip() == "":
+            if field_name in working and raw_val is not None:
+                working[field_name] = None
+            continue
+        tok = _slug_token(raw_val)
+        if tok in _SCENE_ANGLES:
+            if raw_val != tok:
+                working[field_name] = tok
+                notes.append(f"{path}.{field_name}:normalized_to_{tok}")
+        elif tok in _SCENE_ANGLE_SYNONYMS:
+            mapped = _SCENE_ANGLE_SYNONYMS[tok]
+            working[field_name] = mapped
+            notes.append(f"{path}.{field_name}:synonym_folded_{tok}_to_{mapped}")
+        else:
+            working[field_name] = None
+            notes.append(f"{path}.{field_name}:unknown_value_dropped({raw_val})")
+
+    raw_height = working.get("camera_height")
+    if raw_height is not None:
+        if str(raw_height).strip() == "":
+            working["camera_height"] = None
+        else:
+            tok_h = _slug_token(raw_height)
+            if tok_h in _CAMERA_HEIGHTS:
+                if raw_height != tok_h:
+                    working["camera_height"] = tok_h
+                    notes.append(f"{path}.camera_height:normalized_to_{tok_h}")
+            elif tok_h in _CAMERA_HEIGHT_SYNONYMS:
+                mapped_h = _CAMERA_HEIGHT_SYNONYMS[tok_h]
+                working["camera_height"] = mapped_h
+                notes.append(f"{path}.camera_height:synonym_folded_{tok_h}_to_{mapped_h}")
+            else:
+                working["camera_height"] = None
+                notes.append(f"{path}.camera_height:unknown_value_dropped({raw_height})")
+
+    if "foreground_parallax" in working and working["foreground_parallax"] is None:
+        working["foreground_parallax"] = ""
+
+
 def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
                *, path: str = "$", counter: dict[str, int]) -> Any:
     if model is None:
@@ -375,6 +522,8 @@ def _normalize(data: Any, model: type[BaseModel] | None, notes: list[str],
     working = dict(data)
     if model.__name__ == "DramaBeat":
         _normalize_drama_beat(working, notes, path=path)
+    elif model.__name__ == "DirectedCamera":
+        _normalize_directed_camera(working, notes, path=path)
     if model.__name__ == "DirectedShot":
         beat_ids = working.get("beat_ids")
         cuts = working.get("internal_cuts")
